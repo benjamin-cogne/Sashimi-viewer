@@ -99,9 +99,7 @@ export class LocalDataSource implements SashimiDataSource {
     if (!this.opened.has(id)) {
       this.opened.set(id, (async (): Promise<Opened> => {
         if (s.kind === 'bam') {
-          const bam = new BamFile(/\.csi$/i.test(s.index.name)
-            ? { bamFilehandle: new BlobFile(s.file), csiFilehandle: new BlobFile(s.index) }
-            : { bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index) });
+          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index) });
           await bam.getHeader();
           const refNames = (bam.indexToChr || []).map(r => r.refName);
           return { kind: 'bam', bam, refNames };
