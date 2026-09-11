@@ -3,6 +3,17 @@
   <img src="docs/logo/logo-lockup.svg" alt="Sashimi viewer" height="64">
 </picture>
 
+> [!WARNING]
+> **A word from the author.** Artificial intelligence is changing the practice of genetics in many
+> ways, including how visualization tools like this one get built. This viewer was designed by a
+> molecular geneticist with some coding skills, but it was written with Anthropic's Claude models
+> (Opus 5 and Fable 5.1). Treat what it shows as a visual aid, not as a validated result: check the
+> HGVS nomenclature, the predicted transcript and amino-acid changes, the NMD verdict and the read
+> counts yourself before anything from it goes into a clinical report. Feedback and bug reports are
+> welcome and appreciated.
+>
+> — Benjamin Cogné, Nantes University Hospital (CHU de Nantes), France
+
 **Sashimi plots from your own RNA-seq BAM/CRAM files, in one HTML file, entirely in the browser.**
 No server, no Python, no installation, no upload: reads are decoded on your machine, so the viewer
 can be used on a hospital PC with patient data.
