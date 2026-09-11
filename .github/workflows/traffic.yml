@@ -1,0 +1,41 @@
+# Archives the repository traffic (views, clones, referrers, popular pages) and adoption figures
+# (stars, forks, release downloads) into docs/stats/*.csv every Monday, because GitHub only keeps
+# 14 days of traffic. Run it by hand from the Actions tab (workflow_dispatch) at any time.
+# The traffic endpoints need push access: the workflow token has it. If GitHub ever refuses it,
+# add a fine-grained token with "Administration: read" on this repository as the TRAFFIC_TOKEN secret.
+name: traffic
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: traffic
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Fetch and merge the statistics
+        env:
+          GH_TOKEN: ${{ secrets.TRAFFIC_TOKEN || github.token }}
+        run: node scripts/archive-traffic.mjs
+      - name: Commit the CSV files when they changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/stats
+          if git diff --cached --quiet; then echo 'no change'; exit 0; fi
+          git commit -m "stats: traffic archive $(date -u +%Y-%m-%d) [skip ci]"
+          git push origin HEAD:main

@@ -193,6 +193,9 @@ Continuous integration:
 
 - `.github/workflows/build.yml`: type-checks and builds on every push and pull request, uploads the
   viewer as a workflow artifact, and on a tag `v*` attaches it to a GitHub release.
+- `.github/workflows/traffic.yml`: every Monday (or on demand), archives the repository traffic that
+  GitHub keeps for only 14 days (views, clones, referrers, popular pages) and the adoption figures
+  (stars, forks, release downloads) into `docs/stats/*.csv`, so usage can be reported over time.
 - `.github/workflows/pages.yml`: builds and publishes the viewer on GitHub Pages from `main` when
   Pages is set to *Source: GitHub Actions*. It also publishes the `dev` branch, when it exists, as
   an unlisted preview under `/dev/` with a red **DEV MODE** banner, the branch and commit in the
