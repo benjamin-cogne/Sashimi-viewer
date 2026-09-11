@@ -194,7 +194,11 @@ Continuous integration:
 - `.github/workflows/build.yml`: type-checks and builds on every push and pull request, uploads the
   viewer as a workflow artifact, and on a tag `v*` attaches it to a GitHub release.
 - `.github/workflows/pages.yml`: builds and publishes the viewer on GitHub Pages from `main` when
-  Pages is set to *Source: GitHub Actions*. With *Deploy from a branch* the repository root is served
+  Pages is set to *Source: GitHub Actions*. It also publishes the `dev` branch, when it exists, as
+  an unlisted preview under `/dev/` with a red **DEV MODE** banner, the branch and commit in the
+  page, a `[DEV]` tab title and a red icon (`VITE_DEV_MODE=1` at build time). A push to either
+  branch republishes both. Work on `dev`, check the preview, merge into `main`; commit the rebuilt
+  `sashimi-viewer.html` on `main` only, so merges never conflict on it. With *Deploy from a branch* the repository root is served
   as is and `index.html` forwards to the tracked `sashimi-viewer.html`, so either setting works.
   Delete the file if you do not want a public URL.
 

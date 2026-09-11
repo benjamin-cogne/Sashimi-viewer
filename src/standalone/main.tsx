@@ -13,6 +13,16 @@ import { parseLocus } from '../components/sashimi/geometry';
 import { describeLink, parseLink } from './link';
 import '../index.css';
 
+/** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
+const DEV = import.meta.env.VITE_DEV_MODE === '1'
+  ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
+  : null;
+if (DEV) {
+  document.title = `[DEV] ${document.title}`;
+  const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (icon) icon.href = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#dc2626"/><path d="M11 44 Q32 -22 53 44" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round"/><rect x="2" y="44" width="16" height="14" rx="2" fill="#fff"/><rect x="24" y="44" width="16" height="14" rx="2" fill="#fff"/><rect x="46" y="44" width="16" height="14" rx="2" fill="#fff"/></svg>');
+}
+
 /** Request carried by the URL (deep link from another tool), read once at start-up. */
 const LINK = parseLink(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
@@ -165,6 +175,14 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-100 text-gray-900">
+      {DEV && (
+        <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
+          style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
+          <span className="px-1.5 py-0.5 rounded bg-white text-red-700 tracking-wider">DEV MODE</span>
+          <span>Unreleased build from branch <code>{DEV.branch}</code>{DEV.sha ? <> · commit <code>{DEV.sha}</code></> : null}{DEV.date ? ` · built ${DEV.date}` : ''} · not for clinical use.</span>
+          <a href={DEV.stable} className="underline ml-auto">Go to the stable version →</a>
+        </div>
+      )}
       <header className="bg-white border-b border-gray-200 px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
         <div className="flex items-center gap-2.5">
           <Logo size={34} />
@@ -245,6 +263,7 @@ function App() {
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>
         <span>CC BY-NC 4.0</span>
+        {DEV && <span className="text-red-700 font-semibold">DEV build {DEV.branch}{DEV.sha ? ` @ ${DEV.sha}` : ''}</span>}
       </footer>
     </div>
   );
