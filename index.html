@@ -22,6 +22,15 @@
         window.addEventListener('error', function (e) { show('Error: ' + (e.message || e.type) + (e.filename ? '\n' + e.filename + ':' + e.lineno : ''), true); });
         window.addEventListener('unhandledrejection', function (e) { show('Error: ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)), true); });
         window.addEventListener('DOMContentLoaded', function () {
+          // Served unbuilt from a web server (GitHub Pages 'Deploy from a branch' publishes the repository
+          // root as is): forward to the built viewer that sits next to this file. Not on the Vite dev
+          // server, where main.tsx is served and mounts the app.
+          var unbuilt = !!document.querySelector('script[src*="main.tsx"]');
+          var local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+          if (unbuilt && /^https?:$/.test(location.protocol) && !local) {
+            location.replace('sashimi-viewer.html' + location.search + location.hash);
+            return;
+          }
           setTimeout(function () {
             var root = document.getElementById('root');
             if (root && root.children.length === 0) {

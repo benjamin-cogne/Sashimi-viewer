@@ -70,7 +70,7 @@ The viewer is a static file: deploy it the way you deploy a PDF.
 | Option | How | When |
 |---|---|---|
 | **Shared drive / intranet** | Copy `sashimi-viewer.html` from a release to a network folder or any intranet web server. | Validated, versioned copy for the whole lab; no dependence on github.com. |
-| **GitHub Pages** | Enable once in *Settings → Pages → Source: GitHub Actions*; `.github/workflows/pages.yml` publishes on every push to `main`. | Always-current URL to share with colleagues. |
+| **GitHub Pages** | *Settings → Pages*, then either *Source: Deploy from a branch* (the root page forwards to `sashimi-viewer.html`, no Actions needed) or *Source: GitHub Actions* (`.github/workflows/pages.yml` builds and publishes on every push to `main`). | Always-current URL to share with colleagues. |
 | **Release asset** | `git tag v1.1.0 && git push --tags`: the build workflow attaches the viewer to a GitHub release. | Traceable versions for your quality system. |
 
 **Network.** The reads never leave the machine. The browser only queries public annotation APIs
@@ -112,7 +112,7 @@ storage.
 | "Gene lookup failed" | Check the symbol and the build; check that `api.genome.ucsc.edu` or `rest.ensembl.org` is reachable from the browser. |
 | CRAM is slow or fails | Add the reference FASTA (+ `.fai`, + `.gzi` if bgzipped) used for alignment. |
 | Coverage but no arcs | The BAM comes from an unspliced aligner, or *Min reads* is above the junction's support. |
-| Empty page on double-click | You opened `index.html` (development entry). Use `sashimi-viewer.html`. |
+| "This file is the development entry" | You opened `index.html` from disk. Use `sashimi-viewer.html`. On a web server the page forwards to it by itself. |
 | Exon usage panel is grey | Fewer than the required reads, or a single file open: usage is compared across the open files. |
 
 ## Build from source
@@ -136,8 +136,10 @@ Continuous integration:
 
 - `.github/workflows/build.yml`: type-checks and builds on every push and pull request, uploads the
   viewer as a workflow artifact, and on a tag `v*` attaches it to a GitHub release.
-- `.github/workflows/pages.yml`: publishes the viewer on GitHub Pages from `main` (enable Pages once
-  with *Source: GitHub Actions*, or delete the file if you do not want a public URL).
+- `.github/workflows/pages.yml`: builds and publishes the viewer on GitHub Pages from `main` when
+  Pages is set to *Source: GitHub Actions*. With *Deploy from a branch* the repository root is served
+  as is and `index.html` forwards to the tracked `sashimi-viewer.html`, so either setting works.
+  Delete the file if you do not want a public URL.
 
 <details>
 <summary><strong>Repository layout</strong></summary>
