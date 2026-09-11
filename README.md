@@ -27,6 +27,7 @@ without deploying a genome browser.
 2. **Open it** in Edge, Chrome or Firefox (double-click; no server needed).
 3. **Add files**: drag one or several BAM (+ `.bai`) or CRAM (+ `.crai`) files onto the page.
    The first file is the *primary sample*, the others are *comparison samples* (controls, parents, other patients).
+   Double-click a sample chip (or its ✎) to rename it, for instance `proband`, `mother`, `control`; the track labels follow.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
@@ -38,6 +39,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse** into consensus groups (local haplotype × splicing pattern): the alternate allele seen only in exon-skipping reads is explicit. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
+| Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
 | Is this an exon-level deletion or duplication? | Exon usage panel: median depth of each coding MANE exon relative to the other exons of the gene, per sample. |
 | Is this junction normal in some tissues? | **GTEx tissue tracks** (v10, v8 fallback, hg38) as reference splicing profiles. |

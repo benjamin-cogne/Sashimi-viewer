@@ -61,6 +61,7 @@ export class LocalDataSource implements SashimiDataSource {
   async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
   addSample(s: LocalSample) { this.samples.set(s.id, s); }
+  renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
   removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }
 

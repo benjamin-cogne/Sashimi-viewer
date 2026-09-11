@@ -65,6 +65,7 @@ function Logo({ size = 28 }: { size?: number }) {
 function App() {
   const [build, setBuild] = useState<GenomeBuild>(LINK?.build ?? 'GRCh38');
   const [samples, setSamples] = useState<LocalSample[]>([]);
+  const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
   const [gene, setGene] = useState(LINK_TEXT);
@@ -89,6 +90,15 @@ function App() {
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
     setNotes(msgs);
   }, [ds, build]);
+
+  const renameSample = useCallback((id: number, raw: string) => {
+    const name = raw.trim();
+    setRenaming(null);
+    if (!name) return;
+    ds.renameSample(id, name);
+    setSamples(prev => prev.map(s => (s.id === id ? { ...s, name } : s)));
+  }, [ds]);
+  const sampleNames = useMemo(() => Object.fromEntries(samples.map(s => [s.id, s.name])) as Record<number, string>, [samples]);
 
   const removeSample = useCallback((id: number) => { ds.removeSample(id); setSamples(prev => prev.filter(s => s.id !== id)); }, [ds]);
 
@@ -176,9 +186,18 @@ function App() {
         <div className="flex flex-wrap items-center gap-1.5">
           {samples.map((s, i) => (
             <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
-              title={`${s.file.name} · ${(s.file.size / 1e9).toFixed(2)} GB · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'}`}
-              onClick={() => { if (i !== 0) makePrimary(s.id); }}>
-              {i === 0 && <span title="primary sample">★</span>}{s.name}<button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-gray-400 hover:text-red-500" title="Remove">×</button>
+              title={`${s.file.name} · ${(s.file.size / 1e9).toFixed(2)} GB · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+              onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
+              onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
+              {i === 0 && <span title="primary sample">★</span>}
+              {renaming?.id === s.id ? (
+                <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
+                  onBlur={() => renameSample(s.id, renaming.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
+                  onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
+              ) : s.name}
+              <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-gray-400 hover:text-indigo-600" title="Rename">✎</button>
+              <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-gray-400 hover:text-red-500" title="Remove">×</button>
             </span>
           ))}
           {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
@@ -215,7 +234,7 @@ function App() {
       ) : (
         <div className="p-3" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
           <SashimiViewer key={viewerKey} geneName={opened.geneName} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} />
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} />
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">

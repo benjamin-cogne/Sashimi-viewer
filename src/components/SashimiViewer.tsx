@@ -47,6 +47,8 @@ interface SashimiViewerProps {
   initialMark?: { start: number; end: number };
   /** Open with the reads track on (deep links at base resolution). */
   initialReads?: boolean;
+  /** Display names chosen by the host (renamed samples), by sample id; tracks follow without remounting. */
+  sampleNames?: Record<number, string>;
 }
 
 /** What a basket screenshot documents: the region, the samples and every option in effect. */
@@ -121,6 +123,7 @@ const PLOT_LEFT = 64;       // room for the depth axis
 const PLOT_RIGHT_PAD = 36;  // room for the per-track remove button
 const RULER_H = 42;
 const COVERAGE_H = 130;
+const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
 const JUNC_BASE_H = 30;     // junction area: base + one step per nesting level
 const JUNC_LEVEL_STEP = 17;
 const LABEL_H = 15;         // read-count pill height
@@ -260,7 +263,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames,
 }: SashimiViewerProps) {
   const ds = dataSource;
   const [snapshotState, setSnapshotState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
@@ -733,6 +736,14 @@ export default function SashimiViewer({
     }
     ds.getRunSamples(runId).then(setRunSamples).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Renamed samples: relabel the tracks in place
+  useEffect(() => {
+    if (!sampleNames) return;
+    setTracks(prev => prev.some(t => sampleNames[t.sampleId] && sampleNames[t.sampleId] !== t.sampleName)
+      ? prev.map(t => (sampleNames[t.sampleId] && sampleNames[t.sampleId] !== t.sampleName ? { ...t, sampleName: sampleNames[t.sampleId] } : t))
+      : prev);
+  }, [sampleNames]);
 
   /** Make a sample the primary track (first, reference of the comparisons); loads it first when not yet a track. */
   const primaryRef = useRef(sampleId);
@@ -1441,7 +1452,7 @@ export default function SashimiViewer({
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
       const strip = readsBelow && readsBelow.sites.length ? SITES_STRIP_H : 0;
-      const juncH = JUNC_BASE_H + maxLevel * JUNC_LEVEL_STEP + strip;
+      const juncH = JUNC_BASE_H + maxLevel * JUNC_LEVEL_STEP + strip + TRACK_LABEL_H;
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1
       const yMax = track.gtex ? 1 : niceMax(sharedY ? globalMaxDepth : maxDepthIn(track.coverage, viewStart, viewEnd));
       const baseline = y + juncH + COVERAGE_H;
@@ -1743,7 +1754,7 @@ export default function SashimiViewer({
         </defs>
         {/* Track frame + subtle junction/coverage separator */}
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
-        {L.strip > 0 && <line x1={PLOT_LEFT} y1={yOff + L.strip} x2={plotRight} y2={yOff + L.strip} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />}
+        {L.strip > 0 && <line x1={PLOT_LEFT} y1={yOff + TRACK_LABEL_H + L.strip} x2={plotRight} y2={yOff + TRACK_LABEL_H + L.strip} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />}
         <line x1={PLOT_LEFT} y1={baseline} x2={plotRight} y2={baseline} stroke={INK.gridStrong} strokeWidth={1} />
 
         {/* Depth axis */}
@@ -1836,9 +1847,9 @@ export default function SashimiViewer({
           );
         })}
 
-        {/* Sample label */}
-        <g transform={`translate(${PLOT_LEFT + 8}, ${baseline - COVERAGE_H + 6})`}>
-          <rect x={-4} y={-2} width={labelW} height={18} rx={4} fill={INK.bg} opacity={0.88} />
+        {/* Sample label, in the band reserved above the junctions so it never sits on arcs or coverage */}
+        <g transform={`translate(${PLOT_LEFT + 8}, ${yOff + 2})`}>
+          <rect x={-4} y={-2} width={labelW} height={18} rx={4} fill={INK.bg} opacity={0.96} />
           <rect x={0} y={2} width={10} height={10} rx={2} fill={color} />
           <text x={15} y={11.5} fontSize={10.5}>
             <tspan fill={INK.text} fontWeight={600}>{track.sampleName}</tspan>
@@ -1870,7 +1881,7 @@ export default function SashimiViewer({
           })()}
         </g>
         {status && !gtexWarn && (
-          <text x={plotRight - 6} y={baseline - COVERAGE_H + 16} textAnchor="end" fill={status.color} fontSize={9.5}>{status.text}</text>
+          <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={status.color} fontSize={9.5}>{status.text}</text>
         )}
         {gtexWarn && (
           <g transform={`translate(${PLOT_LEFT + 8}, ${baseline - COVERAGE_H + 30})`}>
@@ -1939,7 +1950,13 @@ export default function SashimiViewer({
           <tspan fill={INK.text} fontWeight={700}>{tx.geneName}</tspan>
           <tspan fill={INK.muted}>{'  '}{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons{tx.cdsStart == null ? ' · non-coding' : ''}</tspan>
         </text>
-        {neighbourError && <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
+        {tx.strand < 0 && (
+          <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9.5} fontWeight={700}>
+            <title>{`${tx.geneName} is transcribed from the minus strand. The axis is reversed so that the transcript reads 5′→3′ from left to right: genomic positions decrease towards the right, which is the opposite of IGV and of the UCSC browser. Reference bases in the reads track are shown on both strands.`}</title>
+            ⚠ antisense gene (− strand): axis reversed, 5′→3′ left to right, genomic positions decrease to the right
+          </text>
+        )}
+        {neighbourError && <text x={plotRight - 6} y={yOff + (tx.strand < 0 ? 26 : 14)} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
         <defs><clipPath id="sashimi-clip-tx"><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} /></clipPath></defs>
         <g clipPath="url(#sashimi-clip-tx)">
         {gRight > gLeft && <line x1={gLeft} y1={midY} x2={gRight} y2={midY} stroke={INK.intron} strokeWidth={1.5} />}
@@ -2589,7 +2606,7 @@ export default function SashimiViewer({
           {readsPlacements.map(p => {
             const L = layouts.find(l => l.strip > 0 && l.track.sampleId === p.sid);
             if (!L) return null;
-            const cy = L.yOff + L.strip / 2;
+            const cy = L.yOff + TRACK_LABEL_H + L.strip / 2;
             const bottom = p.y + p.rt.height;
             return (
               <g key={`sites-${p.sid}`} fontFamily={FONT}>
