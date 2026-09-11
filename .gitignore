@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output (the tracked copy is ./sashimi-viewer.html, written by scripts/finish.mjs)
+dist/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and caches
+*.log
+npm-debug.log*
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+.env.*.local

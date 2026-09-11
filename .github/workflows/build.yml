@@ -1,0 +1,56 @@
+# Type-check and build the single-file viewer on every push and pull request.
+# On a tag v* (e.g. `git tag v1.0.0 && git push --tags`) the built file is attached to a GitHub release.
+name: build
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check that the tracked sashimi-viewer.html is up to date
+        # Fails when someone changed src/ without re-running `npm run build` (the file at the root
+        # is what users download). Compare on size + a content hash to keep the message short.
+        run: |
+          if ! git diff --quiet -- sashimi-viewer.html; then
+            echo '::warning::sashimi-viewer.html differs from the build output; run `npm run build` and commit the result.'
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sashimi-viewer
+          path: dist/sashimi-viewer.html
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sashimi-viewer
+          path: dist
+      - name: Create the release and attach the viewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/sashimi-viewer.html \
+            --title "Sashimi viewer $GITHUB_REF_NAME" \
+            --generate-notes

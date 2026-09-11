@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this viewer in your work, please cite it as below."
+title: "Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files"
+type: software
+authors:
+  - family-names: Cogné
+    given-names: Benjamin
+    affiliation: "CHU Nantes"
+repository-code: "https://github.com/benjamin-cogne/Sashimi-viewer"
+license: CC-BY-NC-4.0
+keywords:
+  - RNA-seq
+  - splicing
+  - sashimi plot
+  - BAM
+  - CRAM
+  - visualization
+references:
+  - type: software
+    title: "RNA-Seq Outlier Explorer"
+    authors:
+      - family-names: Cogné
+        given-names: Benjamin
+    repository-code: "https://github.com/benjamin-cogne/rnaseq-outlier-explorer"
+    notes: "Parent project from which the viewer was extracted."
+  - type: article
+    title: "MISO: Analysis and design of RNA sequencing experiments for identifying isoform regulation"
+    authors:
+      - family-names: Katz
+        given-names: Yarden
+      - family-names: Wang
+        given-names: Eric T.
+      - family-names: Airoldi
+        given-names: Edoardo M.
+      - family-names: Burge
+        given-names: Christopher B.
+    journal: "Nature Methods"
+    volume: 7
+    year: 2010
+    doi: 10.1038/nmeth.1528
+    notes: "Origin of the Sashimi plot representation."

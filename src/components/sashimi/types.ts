@@ -1,0 +1,149 @@
+/**
+ * Shared Sashimi data types (transcripts, coverage, junctions, reads, variant sites, consensus groups).
+ * Used by the web application, its API client and the standalone browser viewer.
+ */
+/** Displayed transcript model (RefSeq NM_/NR_ from UCSC, or Ensembl ENST as fallback). Coordinates are 1-based inclusive. */
+export interface TranscriptData {
+  gene_name: string; transcript_id: string; translation_id?: string | null; is_mane_select?: boolean;
+  /** how the displayed model was chosen: MANE Select, RefSeq Select / Ensembl canonical, or the longest CDS / transcript */
+  model_kind?: 'mane' | 'canonical' | 'longest'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
+  start: number; end: number; exons: { start: number; end: number; rank: number }[];
+  /** Genomic CDS bounds (1-based inclusive); null/undefined for non-coding transcripts. */
+  cds_start?: number | null; cds_end?: number | null;
+}
+/** One transcript model of a gene (RefSeq or Ensembl), 1-based inclusive coordinates. */
+export interface TranscriptModel {
+  id: string; name: string; source: 'refseq' | 'ensembl'; biotype: string;
+  start: number; end: number; strand: number; exons: { start: number; end: number }[];
+  cds_start?: number | null; cds_end?: number | null; is_mane: boolean; is_canonical: boolean;
+}
+export interface AllTranscripts { gene_name: string; chrom: string; strand: number; source: 'refseq' | 'ensembl'; transcripts: TranscriptModel[] }
+
+/** Run-length encoded coverage: 0-based half-open [start, end) at constant depth. */
+export interface CoverageRun { start: number; end: number; depth: number; }
+/** Splice junction = intron interval, 0-based half-open [start, end). */
+export interface JunctionArc { start: number; end: number; count: number; }
+export interface SampleCoverage {
+  sample_id: number; sample_name: string;
+  coverage: CoverageRun[]; junctions: JunctionArc[];
+  error?: string;
+}
+
+/** One alignment for the reads track (compact keys, all coordinates 0-based half-open).
+ *  n name · s/e reference span · r reverse (1/0) · q MAPQ · f SAM flag · nh NH tag ·
+ *  b aligned blocks · d deletions · i insertions [pos, len] · m mismatches [pos, base, qual] ·
+ *  c soft clips [left, right]. */
+export interface AlignedRead {
+  n: string; s: number; e: number; r: 0 | 1; q: number; f: number; nh: number | null;
+  b: [number, number][]; d: [number, number][]; i: [number, number][]; m: [number, string, number][]; c: [number, number];
+}
+/** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
+export interface VariantSite {
+  pos: number; kind: 'snv' | 'ins' | 'del'; ref: string; alt: string; length: number;
+  alt_count: number; depth: number; vaf: number;
+}
+/** One consensus group: a local haplotype × splice pattern with its supporting read count. */
+export interface ReadGroup {
+  id: string; kind: 'consensus' | 'ambiguous' | 'minor'; n: number; frac: number;
+  chain: [number, number][]; alleles: string[]; blocks: [number, number][]; dense: [number, number][];
+  absorbed: number; compatible?: string[]; patterns?: number;
+}
+export interface ReadsResponse {
+  sample_id: number; sample_name: string;
+  reads: AlignedRead[]; total: number; shown: number;
+  sites: VariantSite[]; groups: ReadGroup[];
+  /** Reference sequence covering the window (plus margin), or null when no source is available. */
+  reference: { start: number; seq: string } | null;
+  reference_source: 'fasta' | 'ensembl' | 'browser' | null;
+}
+
+/** A neighbouring gene with its canonical transcript model (1-based inclusive coordinates). */
+export interface GeneModel {
+  gene_id: string; gene_name: string; biotype: string; strand: number; start: number; end: number;
+  transcript_id: string; is_canonical: boolean; exons: { start: number; end: number }[];
+  cds_start?: number | null; cds_end?: number | null;
+}
+
+/** Depth statistics of one exon in one sample (aligned bases only; reads with a block on the exon). */
+export interface ExonDepth { median: number; mean: number; reads: number }
+
+export type Strandness = 'firststrand' | 'secondstrand' | 'unstranded' | 'unknown';
+
+export interface SampleExonDepths {
+  sample_id: number;
+  sample_name: string;
+  strandness: Strandness;
+  strand_fraction: number | null;
+  /** Same order as the request; empty when `error` is set. */
+  exons: ExonDepth[];
+  error?: string;
+}
+
+export interface ExonUsageResponse {
+  run_id: number;
+  chrom: string;
+  /** 0-based half-open exon intervals as evaluated */
+  exons: [number, number][];
+  samples: SampleExonDepths[];
+}
+
+/** Protein feature (UniProt / Pfam domain via UCSC, or Ensembl protein_feature), 1-based inclusive amino-acid coordinates. */
+export interface ProteinDomain { type: string; id: string; description: string; interpro?: string | null; start: number; end: number }
+
+/** A gene span (1-based inclusive) already known to the caller, e.g. from the outlier tables: saves the symbol lookup. */
+export interface RegionHint { chrom: string; start: number; end: number }
+
+/** The coding model whose protein domains are wanted: exons and CDS bounds 0-based half-open. */
+export interface ProteinModelRef {
+  transcriptId: string; translationId?: string | null; chrom: string; strand: number;
+  exons: { start: number; end: number }[]; cdsStart: number; cdsEnd: number;
+}
+
+/** A variant previously identified in a sample (clinical indication, diagnostic conclusion or chromosome map). */
+export type KnownVariantKind = 'snv' | 'indel' | 'del' | 'dup' | 'inv' | 'ins' | 'cnv' | 'bnd' | 'other';
+export interface KnownVariant {
+  id: string; kind: KnownVariantKind;
+  /** `chr`-prefixed; empty when the notation carried no chromosome (a bare `g.` with the gene name only) */
+  chrom: string;
+  /** 0-based half-open; an SNV spans one base */
+  start: number; end: number;
+  /** short text drawn next to the marker (c. notation, else the genomic notation) */
+  label: string;
+  gene?: string; cdna?: string; protein?: string;
+  /** the notation as typed */
+  text: string;
+  source: 'indication' | 'diagnostic' | 'chromosome_map';
+  /** build inferred from the notation (NC_ accession version, ISCN bracket); null when unknown */
+  build: 'GRCh38' | 'GRCh37' | null;
+}
+
+/** A common variant of the SNP track (0-based half-open), with one allele frequency per frequency project. */
+export interface CommonSnp {
+  id: string; start: number; end: number; ref: string; alts: string[];
+  cls: 'snv' | 'ins' | 'del' | 'delins' | 'mnv' | 'other';
+  /** highest minor-allele frequency over the projects */
+  maxAf: number;
+  afs: { source: string; af: number }[];
+  source: 'dbSNP155' | 'ensembl';
+  impact?: string;
+}
+
+/** A GTEx tissue (tissueSiteDetail) with its portal colour and RNA-seq sample count. */
+export interface GtexTissue { id: string; name: string; site: string; color: string; samples: number }
+/** Median junction and exon read counts of a gene in one tissue, with the reads-per-base profile derived from the exons. */
+export interface GtexProfile {
+  dataset: 'gtex_v10' | 'gtex_v8';
+  gencodeId: string;
+  tissue: GtexTissue;
+  /** 0-based half-open introns, count = median read count over the tissue's samples */
+  junctions: JunctionArc[];
+  /** collapsed gene-model exons, 0-based half-open, median read count */
+  exons: { start: number; end: number; median: number }[];
+  /** median reads per base over the exons (0 in introns) */
+  coverage: CoverageRun[];
+  unit: string;
+  /** set when one of the two expression calls failed (the profile is partial) */
+  warning?: string;
+  /** median gene expression in the tissue (TPM), null when unavailable */
+  tpm: number | null;
+}
