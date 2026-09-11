@@ -25,8 +25,10 @@ without deploying a genome browser.
    - open it online at **https://benjamin-cogne.github.io/Sashimi-viewer/** (GitHub Pages, same file), or
    - take [`sashimi-viewer.html`](sashimi-viewer.html) from this repository (*Download raw file*, keep the `.html` extension).
 2. **Open it** in Edge, Chrome or Firefox (double-click; no server needed).
-3. **Add files**: drag one or several BAM (+ `.bai`) or CRAM (+ `.crai`) files onto the page.
-   The first file is the *primary sample*, the others are *comparison samples* (controls, parents, other patients).
+3. **Add files**: drag BAM or CRAM files, or the folder that contains them, onto the page, or use
+   *Open folder…*. Indexes are matched by name (`sample.bam.bai` or `sample.bai`, `sample.cram.crai`
+   or `sample.crai`), in any order. The first file is the *primary sample*, the others are
+   *comparison samples* (controls, parents, other patients).
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
@@ -51,8 +53,12 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 - **Alignments from a spliced aligner** (STAR, HISAT2, `minimap2 -ax splice`, Dragen RNA…).
   Junctions are counted from CIGAR `N` gaps, so a DNA aligner run on RNA-seq (BWA, Bowtie2) shows
   coverage but no arcs.
-- **Coordinate-sorted and indexed**: `sample.bam` + `sample.bam.bai` (or `sample.bai`),
-  `sample.cram` + `sample.cram.crai`. Add the index in the same drop; files are paired by name.
+- **Coordinate-sorted and indexed**: `sample.bam` + `sample.bam.bai` (or `sample.bai`, or a
+  `.csi` index), `sample.cram` + `sample.cram.crai` (or `sample.crai`). Files are paired by name in
+  any order: a BAM added alone shows an amber chip with an *add sample.bam.bai* link until its index
+  arrives. Give the page the folder (drop it, or *Open folder…*) and it finds the indexes itself.
+  A browser can only read files it was handed, so it cannot open the index from the BAM's path by
+  itself; the folder is the equivalent.
 - **Genome build** selected in the header (GRCh38/hg38 default, GRCh37/hg19) must match the alignment.
 - **CRAM needs its reference.** Drop the indexed FASTA used at alignment time (`.fa` + `.fai`, or
   bgzipped `.fa.gz` + `.gzi`) with the CRAM files. Without it the viewer fetches the needed sequence
@@ -108,7 +114,8 @@ storage.
 
 | Symptom | Cause and fix |
 |---|---|
-| "No index found for X" | Drop the `.bai` / `.crai` in the same selection; names must match (`x.bam` + `x.bam.bai` or `x.bai`). |
+| Amber chip "x.bam · add x.bam.bai" | The index was not among the files given. Click the link to pick it, or drop the folder; names must match (`x.bam` + `x.bam.bai` or `x.bai`). |
+| *Open folder…* asks to "upload" | Wording of the browser's folder dialog (Firefox, older Chrome). Nothing is uploaded: the page only reads the listing and the files you open. |
 | "Gene lookup failed" | Check the symbol and the build; check that `api.genome.ucsc.edu` or `rest.ensembl.org` is reachable from the browser. |
 | CRAM is slow or fails | Add the reference FASTA (+ `.fai`, + `.gzi` if bgzipped) used for alignment. |
 | Coverage but no arcs | The BAM comes from an unspliced aligner, or *Min reads* is above the junction's support. |
@@ -151,6 +158,7 @@ scripts/finish.mjs               copies the build output to dist/ and to the rep
 docs/logo/                       logo (SVG, PNG, favicon.ico, social preview) and the script that regenerates it
 src/standalone/
   main.tsx                       page shell: file picker, gene box, build selector, mounts the viewer
+  files.ts                       file intake: index pairing by name, folder picker and folder drop
   localSource.ts                 SashimiDataSource over local files (@gmod/bam, @gmod/cram, @gmod/indexedfasta)
   alignments.ts                  coverage runs, junction counts, CIGAR/mismatch decoding, strandness
   collapse.ts                    variant-site calling and consensus-group collapsing of reads
