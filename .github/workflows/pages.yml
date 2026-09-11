@@ -1,13 +1,14 @@
 # Publishes the viewer on GitHub Pages (Settings → Pages → Source: "GitHub Actions"):
 #   https://<owner>.github.io/Sashimi-viewer/       stable build of `main`
 #   https://<owner>.github.io/Sashimi-viewer/dev/   unreleased build of `dev`, with a DEV MODE banner (unlisted)
-# A push to either branch republishes both, so the stable URL never carries dev code. The dev part is
+# A push to main republishes both; a push to dev asks this workflow to run on main (see
+# dev-preview.yml), because the github-pages environment only lets `main` deploy. The dev part is
 # skipped when the `dev` branch does not exist. The page itself never uploads any data.
 name: pages
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

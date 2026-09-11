@@ -1,0 +1,20 @@
+# A push to `dev` cannot deploy to GitHub Pages itself (the github-pages environment only accepts
+# deployments from `main`), so it asks pages.yml to run on main, which builds both branches.
+name: dev preview
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the pages workflow (on main) to rebuild the site, dev included
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main --repo "$GITHUB_REPOSITORY"
