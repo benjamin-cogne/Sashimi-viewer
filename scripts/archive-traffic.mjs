@@ -65,6 +65,12 @@ mkdirSync(OUT, { recursive: true });
 const day = ts => String(ts).slice(0, 10);
 
 const views = await get(`/repos/${REPO}/traffic/views`);
+if (!views) {
+  // GitHub serves the traffic endpoints to a user token only (fine-grained: repository "Administration: read"),
+  // not to the workflow token. Fail so the weekly run keeps reminding until the secret exists.
+  console.error('::error::Traffic endpoints refused. Add a repository secret TRAFFIC_TOKEN: a fine-grained personal access token limited to this repository with "Administration: Read-only", then re-run the workflow.');
+  process.exitCode = 1;
+}
 if (views) console.log(`views: ${mergeDaily(join(OUT, 'views.csv'), ['date', 'views', 'unique_visitors'], views.views.map(v => [day(v.timestamp), v.count, v.uniques]))} days archived`);
 const clones = await get(`/repos/${REPO}/traffic/clones`);
 if (clones) console.log(`clones: ${mergeDaily(join(OUT, 'clones.csv'), ['date', 'clones', 'unique_cloners'], clones.clones.map(v => [day(v.timestamp), v.count, v.uniques]))} days archived`);
