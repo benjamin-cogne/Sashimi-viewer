@@ -1,4 +1,7 @@
-# Sashimi viewer
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/logo-lockup-dark.svg">
+  <img src="docs/logo/logo-lockup.svg" alt="Sashimi viewer" height="64">
+</picture>
 
 **Sashimi plots from your own RNA-seq BAM/CRAM files, in one HTML file, entirely in the browser.**
 No server, no Python, no installation, no upload: reads are decoded on your machine, so the viewer
@@ -143,6 +146,7 @@ Continuous integration:
 index.html                       development entry (Vite input); shows a notice if opened directly
 sashimi-viewer.html              built single-file viewer (tracked, what users download)
 scripts/finish.mjs               copies the build output to dist/ and to the repository root
+docs/logo/                       logo (SVG, PNG, favicon.ico, social preview) and the script that regenerates it
 src/standalone/
   main.tsx                       page shell: file picker, gene box, build selector, mounts the viewer
   localSource.ts                 SashimiDataSource over local files (@gmod/bam, @gmod/cram, @gmod/indexedfasta)

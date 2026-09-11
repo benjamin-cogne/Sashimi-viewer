@@ -43,6 +43,20 @@ function pairFiles(files: File[]): { samples: { name: string; kind: 'bam' | 'cra
   return { samples, unmatched, fasta, fastaMissing };
 }
 
+/** The project mark (docs/logo): three exons, canonical arcs, and a dashed red arc skipping the middle exon. */
+function Logo({ size = 28 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden="true" className="shrink-0">
+      <path d="M11 46 Q21.5 14 32 46 M32 46 Q42.5 14 53 46" fill="none" stroke="#3730a3" strokeWidth="3.5" strokeLinecap="round" />
+      <path d="M11 46 Q32 -26 53 46" fill="none" stroke="#dc2626" strokeWidth="3.5" strokeLinecap="round" strokeDasharray="5 4" />
+      <path d="M18 51 H25 M39 51 H46" stroke="#3730a3" strokeWidth="2.5" strokeLinecap="round" />
+      <rect x="4" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
+      <rect x="25" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
+      <rect x="46" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
+    </svg>
+  );
+}
+
 function App() {
   const [build, setBuild] = useState<GenomeBuild>('GRCh38');
   const [samples, setSamples] = useState<LocalSample[]>([]);
@@ -109,9 +123,12 @@ function App() {
   return (
     <div className="min-h-screen bg-gray-100 text-gray-900">
       <header className="bg-white border-b border-gray-200 px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div>
-          <h1 className="text-lg font-bold leading-tight">Sashimi viewer <span className="text-sm font-normal text-gray-500">standalone</span></h1>
-          <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
+        <div className="flex items-center gap-2.5">
+          <Logo size={34} />
+          <div>
+            <h1 className="text-lg font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></h1>
+            <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
+          </div>
         </div>
         <label className="flex items-center gap-1 text-xs text-gray-600">Build
           <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} className="border border-gray-300 rounded px-1 py-0.5 text-xs bg-white">
