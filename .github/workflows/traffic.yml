@@ -9,6 +9,9 @@ on:
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/traffic.yml', 'scripts/archive-traffic.mjs']
 
 permissions:
   contents: write
