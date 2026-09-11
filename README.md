@@ -11,9 +11,7 @@ can be used on a hospital PC with patient data.
 [![release](https://img.shields.io/github/v/release/benjamin-cogne/Sashimi-viewer?label=release)](https://github.com/benjamin-cogne/Sashimi-viewer/releases/latest)
 [![license: CC BY-NC 4.0](https://img.shields.io/badge/license-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
 
-Built for clinical geneticists who need to look at a splice variant *now*, and for bioinformaticians
-who want a reviewable, reference-anchored view (MANE Select, HGVS c./r. notation, NMD prediction)
-without deploying a genome browser.
+Built for clinical geneticists and for bioinformaticians who need to look at a splice variant, who want a reviewable, reference-anchored view (MANE Select, HGVS c./r. notation, NMD prediction).
 
 ---
 
@@ -21,7 +19,7 @@ without deploying a genome browser.
 
 1. **Get the viewer** (one file, about 1 MB):
    - [Download the latest release](https://github.com/benjamin-cogne/Sashimi-viewer/releases/latest/download/sashimi-viewer.html)
-     (recommended: a versioned file you can validate and keep), or
+     (a versioned file you can validate and keep), or
    - open it online at **https://benjamin-cogne.github.io/Sashimi-viewer/** (GitHub Pages, same file), or
    - take [`sashimi-viewer.html`](sashimi-viewer.html) from this repository (*Download raw file*, keep the `.html` extension).
 2. **Open it** in Edge, Chrome or Firefox (double-click; no server needed).
@@ -218,27 +216,9 @@ src/components/
 
 </details>
 
-<details>
-<summary><strong>Relation to the RNA-Seq Outlier Explorer</strong></summary>
-
-The viewer is the Sashimi tab of the
-[RNA-Seq Outlier Explorer](https://github.com/benjamin-cogne/rnaseq-outlier-explorer), extracted so
-that it can run without that application's server and database. `src/components/SashimiViewer.tsx`
-and `src/components/sashimi/` are kept as close as possible to the parent repository so that fixes
-can be ported in either direction (this repository adds the *All samples* reads mode); everything
-specific to the standalone page lives in `src/standalone/`.
-
-To resync from a checkout of the parent repository:
-`node scripts/extract-standalone.mjs ../Sashimi-viewer` re-copies the source files (it overwrites
-`src/`, the Tailwind/TypeScript configs and the dev entry, which is then named
-`sashimi-viewer.html`: rename it back to `index.html` or discard it, since this repository's
-`index.html` carries the adapted fallback notice). Review the diff, run `npm run build`, commit.
-
-</details>
-
 ## Citation
 
-If the viewer contributes to a publication or a diagnostic report, please cite it
+If the viewer contributes to a publication, please cite it
 (see [`CITATION.cff`](CITATION.cff); GitHub's *Cite this repository* button formats it):
 
 > Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* CHU Nantes, 2026.
