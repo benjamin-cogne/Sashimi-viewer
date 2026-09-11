@@ -287,6 +287,7 @@ export default function SashimiViewer({
   const [minJunctionCount, setMinJunctionCount] = useState(3);
   const [showReads, setShowReads] = useState(false);
   const [readsSampleId, setReadsSampleId] = useState<number | null>(null);
+  const [readsAll, setReadsAll] = useState(false); // one reads track under every sample (primary only by default)
   const [collapseReads, setCollapseReads] = useState(false);
   const [minVafPct, setMinVafPct] = useState(10); // variant sites need at least this alternate-allele fraction
   const [showAllTx, setShowAllTx] = useState(false);
@@ -303,10 +304,12 @@ export default function SashimiViewer({
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  const [readsData, setReadsData] = useState<{ sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; minSupport: number; minVaf: number; data: ReadsResponse } | null>(null);
-  const [readsLoading, setReadsLoading] = useState(false);
-  const [readsError, setReadsError] = useState<string | undefined>();
-  const readsSeq = useRef(0);
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; minSupport: number; minVaf: number; data: ReadsResponse };
+  // Per sample, so that "all samples" keeps one reads track under each coverage track
+  const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
+  const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
+  const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
+  const readsSeq = useRef(new Map<number, number>());
 
   // ---- UI state ----
   const [geneSearch, setGeneSearch] = useState('');
@@ -754,38 +757,40 @@ export default function SashimiViewer({
     return () => clearTimeout(timer);
   }, [viewStart, viewEnd, currentChrom, uniqueOnly, reloadTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ---- Reads track loading (primary sample by default, only below the visibility window) ----
+  // ---- Reads track loading (primary sample by default, or every sample; only below the visibility window) ----
   const effectiveReadsSampleId = tracks.some(t => t.sampleId === readsSampleId) ? readsSampleId : (tracks[0]?.sampleId ?? null);
+  /** Samples whose reads are shown, in track order. */
+  const readsSampleIds = useMemo(() => !showReads ? [] : readsAll ? tracks.map(t => t.sampleId) : effectiveReadsSampleId == null ? [] : [effectiveReadsSampleId],
+    [showReads, readsAll, tracks, effectiveReadsSampleId]);
   useEffect(() => {
-    if (!showReads || effectiveReadsSampleId == null) return;
+    if (!readsSampleIds.length) return;
     const v = viewRef.current;
     const span = v.end - v.start;
     if (span > READS_MAX_VIEW_BP) return;
     const mode = collapseReads ? 'collapsed' : 'reads';
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    if (readsData && readsData.sampleId === effectiveReadsSampleId && readsData.mode === mode && readsData.minVaf === minVaf
-      && (mode === 'reads' || readsData.minSupport === minJunctionCount) && covers(readsData.fetched, v)) return;
+    const stale = readsSampleIds.filter(sid => {
+      const cur = readsData[sid];
+      return !(cur && cur.mode === mode && cur.minVaf === minVaf && (mode === 'reads' || cur.minSupport === minJunctionCount) && covers(cur.fetched, v));
+    });
+    if (!stale.length) return;
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
     const margin = collapseReads ? 0 : Math.floor(span * 0.25);
     const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
-    const sid = effectiveReadsSampleId;
-    const timer = setTimeout(async () => {
-      const seq = ++readsSeq.current;
-      setReadsLoading(true);
-      setReadsError(undefined);
-      try {
-        const data = await ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf);
-        if (seq !== readsSeq.current) return;
-        setReadsData({ sampleId: sid, fetched: want, mode, minSupport: minJunctionCount, minVaf, data });
-      } catch (err: any) {
-        if (seq !== readsSeq.current) return;
-        setReadsError(err.message);
-      } finally {
-        if (seq === readsSeq.current) setReadsLoading(false);
+    const timer = setTimeout(() => {
+      for (const sid of stale) {
+        const seq = (readsSeq.current.get(sid) ?? 0) + 1;
+        readsSeq.current.set(sid, seq);
+        setReadsLoading(p => ({ ...p, [sid]: true }));
+        setReadsError(p => ({ ...p, [sid]: undefined }));
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf)
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, minSupport: minJunctionCount, minVaf, data } })); })
+          .catch((err: any) => { if (readsSeq.current.get(sid) === seq) setReadsError(p => ({ ...p, [sid]: err.message })); })
+          .finally(() => { if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false })); });
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [showReads, effectiveReadsSampleId, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Mouse interaction ----
   const svgPoint = (e: { clientX: number; clientY: number }) => {
@@ -1072,12 +1077,16 @@ export default function SashimiViewer({
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
-  const readsTrack = useMemo((): { height: number; el: JSX.Element; sites: VariantSite[] } | null => {
-    if (!showReads) return null;
+  type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[] };
+  /** One reads track per shown sample (Map in track order); each is drawn under its sample's coverage track. */
+  const readsTracks = useMemo((): Map<number, ReadsTrack> => {
+    const out = new Map<number, ReadsTrack>();
+    if (!showReads) return out;
     const yOff = 0; // drawn in local coordinates; placed under its sample's coverage track with a translate
     const span = viewEnd - viewStart;
-    const name = tracks.find(t => t.sampleId === effectiveReadsSampleId)?.sampleName ?? '';
-    const clipId = 'sashimi-clip-reads';
+    const build = (sid: number): ReadsTrack => {
+    const name = tracks.find(t => t.sampleId === sid)?.sampleName ?? '';
+    const clipId = `sashimi-clip-reads-${sid}`;
     const frame = (h: number) => <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />;
     const header = (text: string, color = INK.muted) => (
       <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
@@ -1085,12 +1094,13 @@ export default function SashimiViewer({
         <tspan fill={color}>{'  '}{name}{name ? ' · ' : ''}{text}</tspan>
       </text>
     );
-    const message = (text: string, color?: string) => ({ height: 36, el: <g key="reads" fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[] });
+    const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[] });
 
     if (span > READS_MAX_VIEW_BP) return message(`zoom in below ${formatBp(READS_MAX_VIEW_BP)} to load reads (window is ${formatBp(span)})`);
     const mode = collapseReads ? 'collapsed' : 'reads';
-    const current = readsData && readsData.sampleId === effectiveReadsSampleId && readsData.fetched.chrom === currentChrom && readsData.mode === mode ? readsData.data : null;
-    if (readsError && !current) return message(readsError, UNIQUE_COLOR);
+    const entry = readsData[sid];
+    const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
+    if (readsError[sid] && !current) return message(readsError[sid]!, UNIQUE_COLOR);
     if (!current) return message(collapseReads ? 'collapsing reads…' : 'loading reads…');
 
     const ref = current.reference;
@@ -1173,13 +1183,13 @@ export default function SashimiViewer({
 
     const refSourceLabel: Record<string, string> = { fasta: 'REFERENCE_FASTA', ensembl: 'Ensembl (server)', browser: 'UCSC API (browser)' };
     const commonInfo = (ref ? ` · reference: ${refSourceLabel[current.reference_source ?? ''] ?? current.reference_source}` : ' · no reference genome (no REFERENCE_FASTA on the server, and the browser could not fetch bases from the UCSC / Ensembl APIs); mismatches only from MD tags') +
-      (sites.length ? ` · ${sites.length} variant site${sites.length > 1 ? 's' : ''} ★` : '') + (readsLoading ? ' · updating…' : '');
+      (sites.length ? ` · ${sites.length} variant site${sites.length > 1 ? 's' : ''} ★` : '') + (readsLoading[sid] ? ' · updating…' : '');
 
     const wrap = (height: number, info: string, body: JSX.Element[], _bodyHeight: number) => ({
       height,
       sites,
       el: (
-        <g key="reads" fontFamily={FONT}>
+        <g key={`reads${sid}`} fontFamily={FONT}>
           <defs><clipPath id={clipId}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} /></clipPath></defs>
           {frame(height)}
           {header(info)}
@@ -1350,7 +1360,10 @@ export default function SashimiViewer({
       (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
-  }, [showReads, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, effectiveReadsSampleId, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse]);
+    };
+    for (const sid of readsSampleIds) out.set(sid, build(sid));
+    return out;
+  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse]);
 
   // ---- Screenshot to the basket (PNG + the viewer state and effect it documents) ----
   const takeSnapshot = useCallback(async () => {
@@ -1358,7 +1371,7 @@ export default function SashimiViewer({
     setSnapshotState('busy');
     try {
       const png = await svgToPng(svgRef.current, 2);
-      const readsName = tracks.find(t => t.sampleId === effectiveReadsSampleId)?.sampleName;
+      const readsName = readsAll ? 'all samples' : tracks.find(t => t.sampleId === effectiveReadsSampleId)?.sampleName;
       const context: SashimiSnapshotContext = {
         viewer: 'sashimi',
         gene: currentGeneName,
@@ -1371,7 +1384,7 @@ export default function SashimiViewer({
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
         },
-        variantSites: readsTrack?.sites.map(st => ({ pos: st.pos + 1, ref: st.ref, alt: st.alt, vaf: st.vaf, depth: st.depth })),
+        variantSites: readsTracks.get(readsSampleIds[0])?.sites.map(st => ({ pos: st.pos + 1, ref: st.ref, alt: st.alt, vaf: st.vaf, depth: st.depth })),
         knownVariants: showKnown ? primaryKnownHere.filter(v => v.end > viewStart && v.start < viewEnd).map(v => ({ kind: v.kind, chrom: v.chrom || currentChrom, start: v.start + 1, end: v.end, label: v.label, text: v.text })) : undefined,
         timestamp: new Date().toISOString(),
       };
@@ -1382,8 +1395,8 @@ export default function SashimiViewer({
       setSnapshotState('error');
     }
     setTimeout(() => setSnapshotState('idle'), 2500);
-  }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
-    equalIntrons, showAllTx, sharedY, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTrack, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere]);
+  }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, readsAll, readsSampleIds, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
+    equalIntrons, showAllTx, sharedY, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere]);
 
   interface ArcRender {
     j: JunctionArc; key: string; dragKey: string; level: number; color: string; dashed: boolean; unique: boolean;
@@ -1417,7 +1430,8 @@ export default function SashimiViewer({
       const visible = track.junctions.filter(j => (track.gtex ? j.count >= 1 : j.count >= minJunctionCount) && j.end > viewStart && j.start < viewEnd);
       const levels = layerJunctions(visible);
       const maxLevel = Math.max(1, ...levels.values());
-      const strip = readsTrack && track.sampleId === effectiveReadsSampleId && readsTrack.sites.length ? SITES_STRIP_H : 0;
+      const readsBelow = readsTracks.get(track.sampleId);
+      const strip = readsBelow && readsBelow.sites.length ? SITES_STRIP_H : 0;
       const juncH = JUNC_BASE_H + maxLevel * JUNC_LEVEL_STEP + strip;
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1
       const yMax = track.gtex ? 1 : niceMax(sharedY ? globalMaxDepth : maxDepthIn(track.coverage, viewStart, viewEnd));
@@ -1479,19 +1493,19 @@ export default function SashimiViewer({
       const height = juncH + COVERAGE_H;
       out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip });
       y += height + TRACK_GAP;
-      if (readsTrack && track.sampleId === effectiveReadsSampleId) y += readsTrack.height + TRACK_GAP;
+      if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [tracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, sharedY, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTrack, effectiveReadsSampleId, tracksTop, altJunctionIndex, junctionContext]);
+  }, [tracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, sharedY, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
-  /** Vertical position of the reads track: right under the coverage track of its sample. */
-  const readsY = (() => {
-    const L = layouts.find(l => l.track.sampleId === effectiveReadsSampleId);
-    return L ? L.yOff + L.height + TRACK_GAP : lastTrackBottom;
-  })();
-  // The reads track may sit under the last coverage track, so it can extend the stack
-  const tracksBottom = readsTrack ? Math.max(lastTrackBottom, readsY + readsTrack.height + TRACK_GAP) : lastTrackBottom;
+  /** Each reads track sits right under the coverage track of its sample. */
+  const readsPlacements = [...readsTracks].map(([sid, rt]) => {
+    const L = layouts.find(l => l.track.sampleId === sid);
+    return { sid, rt, y: L ? L.yOff + L.height + TRACK_GAP : lastTrackBottom };
+  });
+  // A reads track may sit under the last coverage track, so it can extend the stack
+  const tracksBottom = readsPlacements.reduce((m, p) => Math.max(m, p.y + p.rt.height + TRACK_GAP), lastTrackBottom);
 
 
   /** Legend items (local y), laid out left to right and wrapped into rows that fit the plot width. */
@@ -1764,7 +1778,7 @@ export default function SashimiViewer({
             </g>
           ))}
           {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.strip > 0 && readsTrack && track.sampleId === effectiveReadsSampleId && readsTrack.sites.map(st => {
+          {L.strip > 0 && readsTracks.get(track.sampleId)?.sites.map(st => {
             const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
             let left = Math.min(xa, xb), w = Math.abs(xb - xa);
             if (w < 3) { left += w / 2 - 1.5; w = 3; }
@@ -1834,12 +1848,12 @@ export default function SashimiViewer({
           )}
           {/* Reads chip: show this sample's alignments right under its coverage */}
           {!track.gtex && (() => {
-            const active = showReads && effectiveReadsSampleId === track.sampleId;
+            const active = readsSampleIds.includes(track.sampleId);
             return (
               <g data-export="skip" transform={`translate(${labelW + 4}, 0)`} style={{ cursor: 'pointer' }}
-                onClick={e => { e.stopPropagation(); if (active) setShowReads(false); else { setReadsSampleId(track.sampleId); setShowReads(true); } }}
+                onClick={e => { e.stopPropagation(); if (active && !readsAll) setShowReads(false); else { setReadsAll(false); setReadsSampleId(track.sampleId); setShowReads(true); } }}
                 onMouseDown={e => e.stopPropagation()}>
-                <title>{active ? 'Hide the reads track' : `Show ${track.sampleName} reads under this track`}</title>
+                <title>{active ? (readsAll ? `Show only ${track.sampleName} reads` : 'Hide the reads track') : `Show ${track.sampleName} reads under this track`}</title>
                 <rect x={0} y={0} width={44} height={14} rx={7} fill={active ? color : INK.bg} stroke={active ? color : INK.faint} strokeWidth={0.8} />
                 <text x={22} y={10} textAnchor="middle" fill={active ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{active ? 'reads ✓' : 'reads'}</text>
               </g>
@@ -2416,11 +2430,13 @@ export default function SashimiViewer({
               title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
             <span className="flex items-center gap-1">
               <Toggle checked={showReads} onChange={setShowReads} label="Reads"
-                title={`Show the alignments of one sample in a track below, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
+                title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
               {showReads && tracks.length > 1 && (
-                <select value={effectiveReadsSampleId ?? ''} onChange={e => setReadsSampleId(parseInt(e.target.value))}
-                  className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Sample shown in the reads track">
+                <select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')}
+                  onChange={e => { if (e.target.value === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(e.target.value)); } }}
+                  className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Sample shown in the reads track, or all samples (one reads track under each coverage track; each sample is decoded separately, so it takes longer)">
                   {tracks.map(tr => <option key={tr.sampleId} value={tr.sampleId}>{tr.sampleName}</option>)}
+                  <option value="all">All samples</option>
                 </select>
               )}
               {showReads && (
@@ -2558,18 +2574,18 @@ export default function SashimiViewer({
           {showSnps && renderSnps(snpY)}
           {showAllTx && renderAltTranscripts(altY)}
           {layouts.map(renderTrack)}
-          {readsTrack && <g transform={`translate(0, ${readsY})`}>{readsTrack.el}</g>}
+          {readsPlacements.map(p => <g key={`reads-${p.sid}`} transform={`translate(0, ${p.y})`}>{p.rt.el}</g>)}
 
-          {/* Variant sites: stars in the strip above the sample's sashimi, guide lines through coverage and reads */}
-          {readsTrack && (() => {
-            const L = layouts.find(l => l.strip > 0 && l.track.sampleId === effectiveReadsSampleId);
+          {/* Variant sites: stars in the strip above each sample's sashimi, guide lines through coverage and reads */}
+          {readsPlacements.map(p => {
+            const L = layouts.find(l => l.strip > 0 && l.track.sampleId === p.sid);
             if (!L) return null;
             const cy = L.yOff + L.strip / 2;
-            const bottom = readsY + readsTrack.height;
+            const bottom = p.y + p.rt.height;
             return (
-              <g fontFamily={FONT}>
+              <g key={`sites-${p.sid}`} fontFamily={FONT}>
                 <text x={PLOT_LEFT + 8} y={cy + 3.5} fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>VARIANT SITES</text>
-                {readsTrack.sites.map(st => {
+                {p.rt.sites.map(st => {
                   const cx = scale.x(st.pos + 0.5);
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (
@@ -2583,7 +2599,7 @@ export default function SashimiViewer({
                 })}
               </g>
             );
-          })()}
+          })}
           {renderKnownOverlay()}
           {renderLegend(legendY)}
 
