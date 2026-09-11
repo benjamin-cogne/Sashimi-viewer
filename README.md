@@ -41,7 +41,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
 | Is this an exon-level deletion or duplication? | Exon usage panel: median depth of each coding MANE exon relative to the other exons of the gene, per sample. |
 | Is this junction normal in some tissues? | **GTEx tissue tracks** (v10, v8 fallback, hg38) as reference splicing profiles. |
-| Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100&reads=1`) open the viewer on the variant ±100 bp with the variant marked, as soon as the BAM is dropped. See *Open on a variant from another tool*. |
+| Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100&reads=1`) open the browser on the variant ±100 bp with the variant marked; the BAM/CRAM files added afterwards appear as tracks. See *Open on a variant from another tool*. |
 | Is this "mismatch" a known polymorphism? | **Common SNPs** track (dbSNP 155, MAF ≥ 1 %) and **Variant sites (★)** called from the reads of the window. |
 | What does the protein look like afterwards? | **Splicing cartoon** (experimental): animated pre-mRNA, spliced mRNA, translation with UniProt/Pfam domains, NMD verdict, exportable as SVG/PNG. |
 
@@ -107,11 +107,14 @@ never reaches a server log; the query string (`?…`) is accepted too.
 https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100&reads=1
 ```
 
-The page opens with the build selected and a notice "Opened from a link". The alignments still come
-from the user (a web page cannot fetch a BAM by itself): as soon as the first BAM or CRAM is added,
-the view opens on the variant ±100 bp, with the variant drawn as a labelled marker, a guide line
-through every track and the position pinned above the ruler. Pressing *Open* again reproduces the
-same window.
+The browser opens at once on the variant ±100 bp: gene model, reference bases, the variant drawn as
+a labelled marker with a guide line through every track, the position pinned above the ruler, and
+the reads track armed. The alignments still come from the user (a web page cannot fetch a BAM by
+itself): the BAM or CRAM files added afterwards, with the button or by dropping them on the page,
+appear as tracks in the same window. Pressing *Open* again reproduces the linked window.
+
+The same works without a link: typing a gene or a locus and pressing *Open* before adding any
+file shows the annotation alone (gene model, all transcripts, common SNPs, GTEx tissue tracks).
 
 | Parameter | Meaning | Default |
 |---|---|---|

@@ -24,6 +24,7 @@ interface SashimiViewerProps {
   /** 1-based inclusive gene bounds, as shown in the OUTRIDER / FRASER tables. */
   geneStart: number;
   geneEnd: number;
+  /** Primary sample; 0 (or negative) means no alignment yet: the annotation, reference, known variants and GTEx still show, coverage waits for samples. */
   sampleId: number;
   sampleName: string;
   runId: number;
@@ -498,14 +499,16 @@ export default function SashimiViewer({
   const knownRequested = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (!ds.getKnownVariants) return;
-    for (const t of tracks) {
-      if (t.sampleId < 0 || knownRequested.current.has(t.sampleId)) continue;
-      knownRequested.current.add(t.sampleId);
-      ds.getKnownVariants(t.sampleId)
-        .then(list => setKnownVariants(prev => new Map(prev).set(t.sampleId, list)))
-        .catch(e => { knownRequested.current.delete(t.sampleId); console.warn('[sashimi] known variants unavailable:', e?.message || e); });
+    // Without any alignment (sampleId 0) the host may still hand over variants, e.g. from a deep link
+    const ids = tracks.length ? tracks.map(t => t.sampleId) : [sampleId];
+    for (const sid of ids) {
+      if (sid < 0 || knownRequested.current.has(sid)) continue;
+      knownRequested.current.add(sid);
+      ds.getKnownVariants(sid)
+        .then(list => setKnownVariants(prev => new Map(prev).set(sid, list)))
+        .catch(e => { knownRequested.current.delete(sid); console.warn('[sashimi] known variants unavailable:', e?.message || e); });
     }
-  }, [tracks, ds]);
+  }, [tracks, ds, sampleId]);
   const chromKey = (c: string) => (c.startsWith('chr') ? c : `chr${c}`).replace(/^chrMT$/, 'chrM');
   /** Variants of a sample placed on the current chromosome (a bare g. notation of the queried gene counts as here). */
   const knownOnChrom = useCallback((sid: number): KnownVariant[] => {
@@ -722,10 +725,12 @@ export default function SashimiViewer({
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    loadCoverage(sampleId, sampleName);
-    ds.getRandomSample(runId, sampleId)
-      .then(s => loadCoverage(s.id, s.name))
-      .catch(() => {}); // no other samples is fine
+    if (sampleId > 0) {
+      loadCoverage(sampleId, sampleName);
+      ds.getRandomSample(runId, sampleId)
+        .then(s => loadCoverage(s.id, s.name))
+        .catch(() => {}); // no other samples is fine
+    }
     ds.getRunSamples(runId).then(setRunSamples).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -745,7 +750,7 @@ export default function SashimiViewer({
   useEffect(() => {
     if (primaryRef.current === sampleId) return;
     primaryRef.current = sampleId;
-    setPrimary(sampleId, sampleName);
+    if (sampleId > 0) setPrimary(sampleId, sampleName);
   }, [sampleId, sampleName, setPrimary]);
 
   // ---- Reload tracks whose fetched window no longer covers the view (debounced) ----
@@ -2608,7 +2613,7 @@ export default function SashimiViewer({
           {renderLegend(legendY)}
 
           {tracks.length === 0 && (
-            <text x={PLOT_LEFT + 8} y={RULER_H + 24} fill={INK.muted} fontSize={11}>Loading coverage…</text>
+            <text x={PLOT_LEFT + 8} y={RULER_H + 24} fill={INK.muted} fontSize={11}>{sampleId > 0 ? 'Loading coverage…' : 'No alignment yet: add BAM or CRAM files (with their index) to see coverage, junctions and reads here.'}</text>
           )}
 
           {/* Hover crosshair */}

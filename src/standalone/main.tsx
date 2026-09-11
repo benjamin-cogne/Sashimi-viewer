@@ -96,7 +96,7 @@ function App() {
 
   /** Open the window a deep link asked for: the gene at the locus (coding first), else the `gene` parameter, with the variant pinned. */
   const openLink = useCallback(async () => {
-    if (!LINK || !samples.length) return;
+    if (!LINK) return;
     setBusy(true); setError(null);
     try {
       const { view, mark } = LINK;
@@ -113,17 +113,17 @@ function App() {
       setError(`Could not open the linked locus: ${e.message}. Check the genome build (${LINK.build}) and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     }
     setBusy(false);
-  }, [samples.length, ds]);
+  }, [ds]);
 
-  // The link opens by itself once the first file is there (once: closing the viewer afterwards is the user's choice)
+  // A link opens the browser right away; files added afterwards become tracks
   const autoOpened = useRef(false);
   useEffect(() => {
-    if (LINK && samples.length && !opened && !autoOpened.current) { autoOpened.current = true; openLink(); }
-  }, [samples.length, opened, openLink]);
+    if (LINK && !autoOpened.current) { autoOpened.current = true; openLink(); }
+  }, [openLink]);
 
   const open = useCallback(async () => {
     const q = gene.trim();
-    if (!q || !samples.length) return;
+    if (!q) return;
     if (LINK && q === LINK_TEXT) return openLink();
     setBusy(true); setError(null);
     try {
@@ -144,7 +144,7 @@ function App() {
       setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     }
     setBusy(false);
-  }, [gene, samples.length, ds, openLink]);
+  }, [gene, ds, openLink]);
 
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
   const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}`, [opened, samples, build, fasta]);
@@ -185,11 +185,16 @@ function App() {
         </div>
         <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1 ml-auto">
           <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
-          <button type="submit" disabled={busy || !samples.length || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+          <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
         </form>
       </header>
-      {(notes.length > 0 || error) && (
+      {(notes.length > 0 || error || (opened && !samples.length)) && (
         <div className="px-5 py-2 text-xs space-y-0.5">
+          {opened && !samples.length && (
+            <div className="text-indigo-800">
+              {LINK ? `${describeLink(LINK)} · ` : ''}No alignment yet: add the BAM or CRAM files (with their index) with the button above, or drop them on the page. They stay on this computer.
+            </div>
+          )}
           {notes.map((n, i) => <div key={i} className="text-gray-600">{n}</div>)}
           {error && <div className="text-red-600">{error}</div>}
         </div>
@@ -197,13 +202,6 @@ function App() {
       {!opened ? (
         <div ref={dropRef} onDragOver={e => e.preventDefault()} onDrop={onDrop}
           className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
-          {LINK && (
-            <div className="mb-5 mx-auto max-w-2xl text-left rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
-              <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Opened from a link</div>
-              <div className="text-sm text-gray-800 mt-1 break-words">{describeLink(LINK)}{LINK.reads ? ' · reads track on' : ''}</div>
-              <div className="text-xs text-gray-600 mt-1">Add the patient's BAM or CRAM (with its index) and the view opens there. The files stay on this computer; the link only carries the position.</div>
-            </div>
-          )}
           <div className="text-xl font-semibold text-indigo-700">Drop BAM or CRAM files here</div>
           <div className="text-sm text-gray-600 mt-2 max-w-2xl mx-auto">
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
@@ -215,9 +213,9 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="p-3">
+        <div className="p-3" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
           <SashimiViewer key={viewerKey} geneName={opened.geneName} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0].id} sampleName={samples[0].name} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} />
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} />
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
