@@ -8,7 +8,7 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
-import type { AlignedRead, AllTranscripts, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
 import type { SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
 import { coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, isUnique, junctionCounts, keepRead, strandKeeper, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
@@ -55,6 +55,10 @@ export class LocalDataSource implements SashimiDataSource {
     // CRAM decoding depends on the reference: reopen files
     for (const [id, s] of this.samples) if (s.kind === 'cram') this.opened.delete(id);
   }
+
+  /** Variants handed over by the page URL (deep link), drawn on every sample. */
+  knownVariants: KnownVariant[] = [];
+  async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
   addSample(s: LocalSample) { this.samples.set(s.id, s); }
   removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); }

@@ -42,6 +42,10 @@ interface SashimiViewerProps {
   onPrimaryChange?: (sampleId: number) => void;
   /** Window to show at first instead of the whole gene (1-based inclusive), e.g. the locus the host was asked for. */
   initialView?: { start: number; end: number };
+  /** Locus label to pin (1-based inclusive) when it is narrower than the initial window, e.g. the variant a deep link asked for. */
+  initialMark?: { start: number; end: number };
+  /** Open with the reads track on (deep links at base resolution). */
+  initialReads?: boolean;
 }
 
 /** What a basket screenshot documents: the region, the samples and every option in effect. */
@@ -255,7 +259,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads,
 }: SashimiViewerProps) {
   const ds = dataSource;
   const [snapshotState, setSnapshotState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
@@ -276,7 +280,7 @@ export default function SashimiViewer({
   const [viewStart, setViewStart] = useState(() => (initialView ? Math.max(0, initialView.start - 1) : linearDefault(geneStart - 1, geneEnd)[0]));
   const [viewEnd, setViewEnd] = useState(() => (initialView ? Math.max(initialView.end, initialView.start) : linearDefault(geneStart - 1, geneEnd)[1]));
   /** Locus the user asked for by coordinates, drawn as a band / line across the plot until the next gene search. */
-  const [locusMark, setLocusMark] = useState<{ chrom: string; start: number; end: number } | null>(() => (initialView ? { chrom, start: initialView.start - 1, end: initialView.end } : null));
+  const [locusMark, setLocusMark] = useState<{ chrom: string; start: number; end: number } | null>(() => (initialMark ? { chrom, start: initialMark.start - 1, end: initialMark.end } : initialView ? { chrom, start: initialView.start - 1, end: initialView.end } : null));
   const [searchError, setSearchError] = useState<string | null>(null);
   const [svgWidth, setSvgWidth] = useState(1200);
 
@@ -285,7 +289,7 @@ export default function SashimiViewer({
   const [sharedY, setSharedY] = useState(true);
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [minJunctionCount, setMinJunctionCount] = useState(3);
-  const [showReads, setShowReads] = useState(false);
+  const [showReads, setShowReads] = useState(!!initialReads);
   const [readsSampleId, setReadsSampleId] = useState<number | null>(null);
   const [readsAll, setReadsAll] = useState(false); // one reads track under every sample (primary only by default)
   const [collapseReads, setCollapseReads] = useState(false);

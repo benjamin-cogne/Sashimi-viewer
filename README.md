@@ -41,6 +41,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
 | Is this an exon-level deletion or duplication? | Exon usage panel: median depth of each coding MANE exon relative to the other exons of the gene, per sample. |
 | Is this junction normal in some tissues? | **GTEx tissue tracks** (v10, v8 fallback, hg38) as reference splicing profiles. |
+| Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100&reads=1`) open the viewer on the variant ±100 bp with the variant marked, as soon as the BAM is dropped. See *Open on a variant from another tool*. |
 | Is this "mismatch" a known polymorphism? | **Common SNPs** track (dbSNP 155, MAF ≥ 1 %) and **Variant sites (★)** called from the reads of the window. |
 | What does the protein look like afterwards? | **Splicing cartoon** (experimental): animated pre-mRNA, spliced mRNA, translation with UniProt/Pfam domains, NMD verdict, exportable as SVG/PNG. |
 
@@ -94,6 +95,48 @@ Files can be tens of gigabytes: only the indexed slices of the window are read.
 **Scope.** This is a visualisation and review tool for trained users. Splice, ψ, exon usage and NMD
 calls are computed from the reads and the MANE model in view; confirm findings with your
 validated pipeline before reporting.
+
+## Open on a variant from another tool (deep links)
+
+Any tool that knows a genomic HGVS notation (a variant interpretation site such as
+[MobiDetails](https://mobidetails.chu-montpellier.fr/), a report generator, a database export) can
+open the viewer on that variant with a link. The parameters go in the URL fragment (`#…`), which
+never reaches a server log; the query string (`?…`) is accepted too.
+
+```
+https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100&reads=1
+```
+
+The page opens with the build selected and a notice "Opened from a link". The alignments still come
+from the user (a web page cannot fetch a BAM by itself): as soon as the first BAM or CRAM is added,
+the view opens on the variant ±100 bp, with the variant drawn as a labelled marker, a guide line
+through every track and the position pinned above the ruler. Pressing *Open* again reproduces the
+same window.
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `variant` | HGVS g. with an `NC_` accession (`NC_000017.11:g.43094464G>A`; the accession version sets the build), `chr17:g.43094464G>A`, a pseudo-VCF `17-43094464-G-A` or `chr17:43094464:G:A`, or a bare `chr17:43094464`. Several separated by commas. Deletions and duplications of 50 bp or more draw as bands. | one of `variant` / `locus` |
+| `locus` | Position or interval to show instead of a window derived from the variants (`chr17:43094464`, `chr17:43000000-43100000`). | |
+| `pad` | Flank in bp shown on each side of the variant, locus or band. | 100 |
+| `label` | Text drawn next to the marker, typically the c. or p. notation; one per variant, comma-separated. | the g. notation |
+| `gene` | Symbol used only when no RefSeq gene covers the window (deep intergenic positions). | inferred from the position |
+| `build` | `GRCh38` or `GRCh37` (`hg38` / `hg19` accepted). Only needed when no variant carries an accession; a notation that disagrees with it is flagged in the marker tooltip. | GRCh38 |
+| `reads` | `1` opens with the reads track on, which is what a ±100 bp window is for. | off |
+
+Example link for a MobiDetails variant page (Jinja-style template; MobiDetails holds the hg38 and
+hg19 genomic HGVS with the `NC_` accession, the gene and the c./p. notations):
+
+```html
+<a target="_blank" rel="noopener"
+   href="https://benjamin-cogne.github.io/Sashimi-viewer/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100&reads=1">
+  Open in Sashimi viewer (RNA-seq)
+</a>
+```
+
+Passing the hg38 notation is enough; a laboratory whose alignments are on GRCh37 can send the hg19
+accession instead, or add `build=GRCh37`. For deep-intronic variants send a larger `pad`, or the exon
+window as `locus`. The link works the same with the viewer opened from a file share: the parameters
+are read by the page, not by a server.
 
 ## Privacy
 
@@ -151,6 +194,7 @@ scripts/finish.mjs               copies the build output to dist/ and to the rep
 docs/logo/                       logo (SVG, PNG, favicon.ico, social preview) and the script that regenerates it
 src/standalone/
   main.tsx                       page shell: file picker, gene box, build selector, mounts the viewer
+  link.ts                        deep links: variant / locus / pad / label / build / reads from the URL
   localSource.ts                 SashimiDataSource over local files (@gmod/bam, @gmod/cram, @gmod/indexedfasta)
   alignments.ts                  coverage runs, junction counts, CIGAR/mismatch decoding, strandness
   collapse.ts                    variant-site calling and consensus-group collapsing of reads

@@ -4,13 +4,18 @@
  * decoded in the browser; only gene lookups (RefSeq models from the UCSC API, Ensembl REST as
  * fallback) and reference sequence (when no FASTA is given) are fetched from the network.
  */
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SashimiViewer from '../components/SashimiViewer';
 import { LocalDataSource, type LocalSample } from './localSource';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus } from '../components/sashimi/geometry';
+import { describeLink, parseLink } from './link';
 import '../index.css';
+
+/** Request carried by the URL (deep link from another tool), read once at start-up. */
+const LINK = parseLink(window.location.hash, window.location.search);
+const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 interface Pending { file: File }
 
@@ -58,17 +63,17 @@ function Logo({ size = 28 }: { size?: number }) {
 }
 
 function App() {
-  const [build, setBuild] = useState<GenomeBuild>('GRCh38');
+  const [build, setBuild] = useState<GenomeBuild>(LINK?.build ?? 'GRCh38');
   const [samples, setSamples] = useState<LocalSample[]>([]);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
-  const [gene, setGene] = useState('');
-  const [opened, setOpened] = useState<{ geneName: string; chrom: string; start: number; end: number; view?: { start: number; end: number } } | null>(null);
+  const [gene, setGene] = useState(LINK_TEXT);
+  const [opened, setOpened] = useState<{ geneName: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; mark?: { start: number; end: number }; reads?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const nextId = useRef(1);
   const dsRef = useRef<LocalDataSource>();
-  if (!dsRef.current) dsRef.current = new LocalDataSource({ build });
+  if (!dsRef.current) { dsRef.current = new LocalDataSource({ build }); if (LINK) dsRef.current.knownVariants = LINK.variants; }
   const ds = dsRef.current;
   (window as any).__sashimiDs = ds; // for debugging from the console
 
@@ -89,9 +94,37 @@ function App() {
 
   const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); };
 
+  /** Open the window a deep link asked for: the gene at the locus (coding first), else the `gene` parameter, with the variant pinned. */
+  const openLink = useCallback(async () => {
+    if (!LINK || !samples.length) return;
+    setBusy(true); setError(null);
+    try {
+      const { view, mark } = LINK;
+      const genes = await ds.getRegionGenes(view.chrom, view.start, view.end);
+      const ov = (g: { start: number; end: number }) => Math.min(g.end, view.end) - Math.max(g.start, view.start);
+      let best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
+      if (!best && LINK.gene) {
+        const t = await ds.getTranscript(LINK.gene, LINK.gene.toUpperCase().startsWith('ENSG') ? LINK.gene : undefined);
+        best = { gene_name: t.gene_name, start: t.start, end: t.end } as any;
+      }
+      if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString()}-${view.end.toLocaleString()} (add gene=SYMBOL to the link)`);
+      setOpened({ geneName: best.gene_name, chrom: view.chrom, start: best.start, end: best.end, view: { start: view.start, end: view.end }, mark: { start: mark.start, end: mark.end }, reads: LINK.reads });
+    } catch (e: any) {
+      setError(`Could not open the linked locus: ${e.message}. Check the genome build (${LINK.build}) and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+    }
+    setBusy(false);
+  }, [samples.length, ds]);
+
+  // The link opens by itself once the first file is there (once: closing the viewer afterwards is the user's choice)
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (LINK && samples.length && !opened && !autoOpened.current) { autoOpened.current = true; openLink(); }
+  }, [samples.length, opened, openLink]);
+
   const open = useCallback(async () => {
     const q = gene.trim();
     if (!q || !samples.length) return;
+    if (LINK && q === LINK_TEXT) return openLink();
     setBusy(true); setError(null);
     try {
       const locus = parseLocus(q);
@@ -111,10 +144,10 @@ function App() {
       setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     }
     setBusy(false);
-  }, [gene, samples.length, ds]);
+  }, [gene, samples.length, ds, openLink]);
 
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
-  const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}`, [opened, samples, build, fasta]);
+  const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}`, [opened, samples, build, fasta]);
   const makePrimary = useCallback((id: number) => setSamples(prev => [...prev.filter(s => s.id === id), ...prev.filter(s => s.id !== id)]), []);
 
   const dropRef = useRef<HTMLDivElement>(null);
@@ -164,6 +197,13 @@ function App() {
       {!opened ? (
         <div ref={dropRef} onDragOver={e => e.preventDefault()} onDrop={onDrop}
           className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
+          {LINK && (
+            <div className="mb-5 mx-auto max-w-2xl text-left rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-indigo-700">Opened from a link</div>
+              <div className="text-sm text-gray-800 mt-1 break-words">{describeLink(LINK)}{LINK.reads ? ' · reads track on' : ''}</div>
+              <div className="text-xs text-gray-600 mt-1">Add the patient's BAM or CRAM (with its index) and the view opens there. The files stay on this computer; the link only carries the position.</div>
+            </div>
+          )}
           <div className="text-xl font-semibold text-indigo-700">Drop BAM or CRAM files here</div>
           <div className="text-sm text-gray-600 mt-2 max-w-2xl mx-auto">
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
@@ -177,7 +217,7 @@ function App() {
       ) : (
         <div className="p-3">
           <SashimiViewer key={viewerKey} geneName={opened.geneName} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0].id} sampleName={samples[0].name} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} />
+            sampleId={samples[0].id} sampleName={samples[0].name} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} />
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
