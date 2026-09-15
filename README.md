@@ -74,6 +74,10 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   ignored. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or MAPQ ≥ 30 when no `NH` tag is present.
 - **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
   usage statistics.
+- **Depth axis**: *shared* (one axis for every sample, heights comparable), *per sample* (each
+  sample scaled to its own maximum) or *relative* (each sample drawn as a percentage of its own
+  maximum in the current window, axis 0–100 %, the maximum shown next to the sample name), so
+  profiles of a shallow and a deep library can be compared by shape.
 
 ## Deploying in a clinical laboratory
 

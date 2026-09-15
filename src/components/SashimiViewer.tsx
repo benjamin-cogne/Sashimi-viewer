@@ -52,6 +52,8 @@ interface SashimiViewerProps {
 }
 
 /** What a basket screenshot documents: the region, the samples and every option in effect. */
+export type DepthAxis = 'shared' | 'own' | 'relative';
+
 export interface SashimiSnapshotContext {
   viewer: 'sashimi';
   gene: string;
@@ -60,7 +62,11 @@ export interface SashimiSnapshotContext {
   samples: string[];
   primarySample: string;
   options: {
-    equalIntrons: boolean; allTranscripts: boolean; sharedY: boolean; uniqueOnly: boolean;
+    equalIntrons: boolean; allTranscripts: boolean;
+    /** shared: one depth axis for every sample; own: each sample scaled to its own maximum; relative: each sample as % of its own maximum */
+    depthAxis: DepthAxis;
+    /** kept for consumers of older snapshots: depthAxis === 'shared' */
+    sharedY: boolean; uniqueOnly: boolean;
     reads: boolean; readsSample?: string; collapsed: boolean; minJunctionReads: number; minVafPct: number;
     /** minimum allele frequency of the common-SNP track, null when the track is off */
     commonSnpsMinAf?: number | null;
@@ -124,10 +130,12 @@ const PLOT_RIGHT_PAD = 36;  // room for the per-track remove button
 const RULER_H = 42;
 const COVERAGE_H = 130;
 const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
-const JUNC_BASE_H = 30;     // junction area: base + one step per nesting level
-const JUNC_LEVEL_STEP = 17;
+const JUNC_LEVEL_STEP = 17; // extra apex height per arc nesting level
+const JUNC_MIN_H = 6;       // smallest junction area; it otherwise grows to what the arcs and pills really occupy
+const JUNC_PAD = 5;         // clearance between the highest arc or pill and the sample-label band
 const LABEL_H = 15;         // read-count pill height
-const TRACK_GAP = 10;
+const TRACK_GAP = 10;       // gap between panels (transcript, variants, reads)
+const SASHIMI_GAP = 4;      // gap between consecutive sample tracks, kept small so the samples read as one group
 const TRANSCRIPT_H = 78;
 const NEIGHBOUR_ROW_H = 22;    // one row per neighbouring gene drawn under the queried gene
 const ALT_TX_ROW_H = 18;       // one row per transcript model in the "All transcripts" panel
@@ -290,7 +298,7 @@ export default function SashimiViewer({
 
   // ---- Options ----
   const [equalIntrons, setEqualIntrons] = useState(false);
-  const [sharedY, setSharedY] = useState(true);
+  const [depthAxis, setDepthAxis] = useState<DepthAxis>('shared');
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [minJunctionCount, setMinJunctionCount] = useState(3);
   const [showReads, setShowReads] = useState(!!initialReads);
@@ -1400,7 +1408,7 @@ export default function SashimiViewer({
         samples: displayTracks.map(t => t.sampleName),
         primarySample: tracks[0]?.sampleName ?? sampleName,
         options: {
-          equalIntrons, allTranscripts: showAllTx, sharedY, uniqueOnly,
+          equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', uniqueOnly,
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
         },
@@ -1416,7 +1424,7 @@ export default function SashimiViewer({
     }
     setTimeout(() => setSnapshotState('idle'), 2500);
   }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, readsAll, readsSampleIds, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
-    equalIntrons, showAllTx, sharedY, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere]);
+    equalIntrons, showAllTx, depthAxis, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere]);
 
   interface ArcRender {
     j: JunctionArc; key: string; dragKey: string; level: number; color: string; dashed: boolean; unique: boolean;
@@ -1424,6 +1432,8 @@ export default function SashimiViewer({
     label: { x: number; y: number } | null;
     edge: { side: 'left' | 'right'; y: number; title: string } | null;
     offset: number;
+    /** apex height above the higher of the two arc ends, in px */
+    apexH: number;
     /** Reading-frame consequence, for non-canonical junctions of a coding model. */
     frame: FrameInfo | null;
   }
@@ -1452,12 +1462,16 @@ export default function SashimiViewer({
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
       const strip = readsBelow && readsBelow.sites.length ? SITES_STRIP_H : 0;
-      const juncH = JUNC_BASE_H + maxLevel * JUNC_LEVEL_STEP + strip + TRACK_LABEL_H;
-      // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1
-      const yMax = track.gtex ? 1 : niceMax(sharedY ? globalMaxDepth : maxDepthIn(track.coverage, viewStart, viewEnd));
-      const baseline = y + juncH + COVERAGE_H;
-      const depthToY = (d: number) => baseline - (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
-      const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, depthToY);
+      void maxLevel;
+      // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1.
+      // Relative mode draws each sample as a fraction of its own maximum in view (the axis reads 0–100 %).
+      const ownMax = maxDepthIn(track.coverage, viewStart, viewEnd);
+      const yMax = track.gtex ? 1 : depthAxis === 'relative' ? Math.max(1, ownMax) : niceMax(depthAxis === 'shared' ? globalMaxDepth : ownMax);
+      // Arcs are first laid out against a baseline at y = 0 and measured; the junction area is then sized to
+      // what they and their pills really occupy (rather than a fixed height per nesting level), and everything
+      // is shifted down once the real baseline is known. This keeps the samples close together without any
+      // arc ever reaching the sample-label band.
+      const depthToY = (d: number) => -(Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
 
       const arcs: ArcRender[] = visible.map(j => {
         const key = junctionKey(j);
@@ -1469,7 +1483,8 @@ export default function SashimiViewer({
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
         const y2 = depthToY(depthAt(track.coverage, j.end));
         const level = levels.get(key) || 1;
-        const geom = arcGeom(x1, y1, x2, y2, 18 + (level - 1) * JUNC_LEVEL_STEP);
+        const apexH = 18 + (level - 1) * JUNC_LEVEL_STEP;
+        const geom = arcGeom(x1, y1, x2, y2, apexH);
         const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
         const visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
         const offset = junctionOffsets[dragKey] || 0;
@@ -1494,7 +1509,7 @@ export default function SashimiViewer({
           (unique ? `\nnot seen in the comparison sample${tracks.length > 2 ? 's' : ''}` : '');
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame,
+          strokeW: Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH,
         };
       });
       // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
@@ -1510,13 +1525,29 @@ export default function SashimiViewer({
         }
         placed.push({ x: a.label.x, y: a.label.y, w });
       }
+      // Highest point of the track content relative to the baseline (negative): the coverage area itself,
+      // every arc apex, read-count pill and edge chevron, including the offset of arcs the user dragged.
+      let top = -COVERAGE_H;
+      for (const a of arcs) {
+        top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH + a.offset);
+        if (a.label) top = Math.min(top, a.label.y + a.offset - LABEL_H / 2);
+        if (a.edge) top = Math.min(top, a.edge.y + a.offset - 4);
+      }
+      const juncH = TRACK_LABEL_H + strip + Math.max(JUNC_MIN_H, -top - COVERAGE_H + JUNC_PAD);
+      const baseline = y + juncH + COVERAGE_H;
+      for (const a of arcs) {
+        a.geom = arcGeom(a.geom.x1, a.geom.y1 + baseline, a.geom.x2, a.geom.y2 + baseline, a.apexH);
+        if (a.label) a.label.y += baseline;
+        if (a.edge) a.edge.y += baseline;
+      }
+      const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
       const height = juncH + COVERAGE_H;
       out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip });
-      y += height + TRACK_GAP;
+      y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [tracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, sharedY, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
+  }, [tracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -1742,7 +1773,9 @@ export default function SashimiViewer({
     const isPrimary = idx === 0 && tracks.length > 1;
     const gtexNote = track.gtex ? `  GTEx ${track.gtex.dataset.replace('gtex_', '')} · n=${track.gtex.tissue.samples}${track.gtex.tpm != null ? ` · median ${track.gtex.tpm < 10 ? track.gtex.tpm.toFixed(2) : track.gtex.tpm.toFixed(0)} TPM` : ''}${track.gtex.lowCoverage ? ' · LOW COVERAGE (TPM < 1)' : ' · exon usage from junction medians'}` : '';
     const gtexWarn = track.gtex ? (track.error || track.gtex.warning || '') : '';
-    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2;
+    const relative = depthAxis === 'relative' && !track.gtex;
+    const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
+    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + axisNote.length * 5.2;
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
       : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
@@ -1764,11 +1797,11 @@ export default function SashimiViewer({
             <g key={v}>
               <line x1={PLOT_LEFT - 4} y1={y} x2={PLOT_LEFT} y2={y} stroke={INK.gridStrong} strokeWidth={1} />
               {v > 0 && <line x1={PLOT_LEFT} y1={y} x2={plotRight} y2={y} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="2 4" />}
-              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString()}</text>
+              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{relative ? `${Math.round((v / yMax) * 100)} %` : v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString()}</text>
             </g>
           );
         })}
-        <text transform={`translate(${12}, ${baseline - (COVERAGE_H - 12) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>{track.gtex ? 'exon usage' : 'depth'}</text>
+        <text transform={`translate(${12}, ${baseline - (COVERAGE_H - 12) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>{track.gtex ? 'exon usage' : relative ? 'depth · % of max' : 'depth'}</text>
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
@@ -1855,6 +1888,7 @@ export default function SashimiViewer({
             <tspan fill={INK.text} fontWeight={600}>{track.sampleName}</tspan>
             {isPrimary && <tspan fill={INK.faint} fontSize={9}>{'  primary'}</tspan>}
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
+            {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
 
           </text>
           {/* Make primary chip (standalone): promote this sample to the first track */}
@@ -2450,8 +2484,15 @@ export default function SashimiViewer({
                 )}
               </span>
             )}
-            <Toggle checked={sharedY} onChange={setSharedY} label="Shared Y"
-              title="Use one depth axis for all samples (comparable heights). Off: each sample scales to its own maximum." />
+            <label className={`flex items-center gap-1 text-xs ${t.muted} select-none`}
+              title="Depth axis. Shared: one axis for all samples (heights comparable). Per sample: each sample scales to its own maximum, rounded to a round number. Relative: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
+              Depth axis
+              <select value={depthAxis} onChange={e => setDepthAxis(e.target.value as DepthAxis)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
+                <option value="shared">shared</option>
+                <option value="own">per sample</option>
+                <option value="relative">relative (% of max)</option>
+              </select>
+            </label>
             <Toggle checked={uniqueOnly} onChange={setUniqueOnly} label="Unique reads"
               title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
             <span className="flex items-center gap-1">
