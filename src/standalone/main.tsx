@@ -183,21 +183,31 @@ function App() {
           <a href={DEV.stable} className="underline ml-auto">Go to the stable version →</a>
         </div>
       )}
-      <header className="bg-white border-b border-gray-200 px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div className="flex items-center gap-2.5">
+      <header className="bg-white border-b border-gray-200 px-5 py-3 space-y-2">
+        {/* Row 1: title, build, gene search. Row 2: files and sample chips, which may wrap over several lines without moving the search. */}
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <div className="flex items-center gap-2.5 flex-1 min-w-[320px]">
           <Logo size={34} />
-          <div>
+          <div className="min-w-0">
             <h1 className="text-lg font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></h1>
             <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
             <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
         </div>
+        <div className="flex items-center gap-4 shrink-0 ml-auto">
         <label className="flex items-center gap-1 text-xs text-gray-600">Build
           <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} className="border border-gray-300 rounded px-1 py-0.5 text-xs bg-white">
             <option value="GRCh38">GRCh38 / hg38</option>
             <option value="GRCh37">GRCh37 / hg19</option>
           </select>
         </label>
+        <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1">
+          <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
+          <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+        </form>
+        </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <label className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 cursor-pointer font-medium">
           + Add BAM / CRAM (+ index) · FASTA
           <input type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
@@ -221,10 +231,7 @@ function App() {
           ))}
           {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
         </div>
-        <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1 ml-auto">
-          <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
-          <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
-        </form>
+        </div>
       </header>
       {(notes.length > 0 || error || (opened && !samples.length)) && (
         <div className="px-5 py-2 text-xs space-y-0.5">
