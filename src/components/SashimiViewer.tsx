@@ -73,6 +73,8 @@ export interface SashimiSnapshotContext {
     commonSnpsMinAf?: number | null;
     /** aggregate view: one pooled track per sample group instead of one track per sample */
     aggregate?: boolean;
+    /** arc labels of the sample tracks: spliced reads or % usage */
+    arcLabels?: 'reads' | 'usage';
   };
   /** sample groups defined for the aggregate view */
   groups?: { name: string; samples: string[] }[];
@@ -316,6 +318,9 @@ export default function SashimiViewer({
   const groupIdSeq = useRef(1);
   const [viewMode, setViewMode] = useState<'samples' | 'groups'>('samples');
   const [showGroupsDialog, setShowGroupsDialog] = useState(false);
+  /** Arc labels of the sample tracks: spliced reads, or the usage of each event against its canonical junction (the Groups view always shows usage). */
+  const [arcLabel, setArcLabel] = useState<'reads' | 'usage'>('reads');
+  const showUsage = viewMode === 'groups' || arcLabel === 'usage';
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [minJunctionCount, setMinJunctionCount] = useState(3);
   const [showReads, setShowReads] = useState(!!initialReads);
@@ -1467,7 +1472,7 @@ export default function SashimiViewer({
           equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', uniqueOnly,
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
-          aggregate: viewMode === 'groups',
+          aggregate: viewMode === 'groups', arcLabels: showUsage ? 'usage' : 'reads',
         },
         groups: groups.length ? groups.map(g => ({ name: g.name, samples: g.sampleIds.map(id => runSamples.find(x => x.id === id)?.name ?? String(id)) })) : undefined,
         variantSites: readsTracks.get(readsSampleIds[0])?.sites.map(st => ({ pos: st.pos + 1, ref: st.ref, alt: st.alt, vaf: st.vaf, depth: st.depth })),
@@ -1513,6 +1518,13 @@ export default function SashimiViewer({
   const altY = snpY + (snpPanelH ? snpPanelH + TRACK_GAP : 0);
   const tracksTop = altY + (altPanelH ? altPanelH + TRACK_GAP : 0);
 
+  /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
+  const usageEvents = useMemo(() => {
+    const m = new Map<number, Map<string, AggEvent>>();
+    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx));
+    return m;
+  }, [arcLabel, tracks, tx]);
+
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
     const out: TrackLayout[] = [];
@@ -1541,7 +1553,7 @@ export default function SashimiViewer({
         const { model, info, foreign } = junctionContext(j);
         const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
         const unique = idx === 0 && comparedTracks.length > 1 && !otherTrackJunctionKeys.has(key);
-        const agg = track.group?.events.get(key);
+        const agg = (track.group ? track.group.events : !track.gtex ? usageEvents.get(track.sampleId) : undefined)?.get(key);
         const share = agg?.shares[0];
         const text = agg ? (share ? pctLabel(share.pct) : `n=${j.count.toLocaleString()}`) : j.count.toLocaleString();
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
@@ -1566,11 +1578,11 @@ export default function SashimiViewer({
         if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: partner('left') };
         else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: partner('right') };
         const inAlt = altJunctionIndex.get(key);
-        const aggText = agg && track.group
+        const aggText = agg
           ? (agg.shares.length
             ? agg.shares.map(sh => `${pctLabel(sh.pct)} ${sh.note}`).join('\n')
             : 'touches no annotated splice site: no share') +
-            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired, mean of both)' : ''} · ${j.count.toLocaleString()} pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples\n`
+            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString()} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
           : null;
         const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
           `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · intron ${formatBp(j.end - j.start)}\n` +
@@ -1580,7 +1592,7 @@ export default function SashimiViewer({
           (unique ? `\nnot seen in the comparison ${track.group ? 'group' : 'sample'}${comparedTracks.length > 2 ? 's' : ''}` : '');
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: track.group ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, agg,
+          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, agg,
         };
       });
       // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
@@ -1618,7 +1630,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -1646,7 +1658,7 @@ export default function SashimiViewer({
     });
     line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
-    if (viewMode === 'groups') line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
+    if (showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     items.push({
       w: 150, el: (
         <g key="lf">
@@ -1762,7 +1774,7 @@ export default function SashimiViewer({
       });
     }
     items.push({
-      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ share · label = % of the reads competing at the intron (reads pooled over the group)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
+      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ usage · label = % usage of the event against its canonical junction (reads pooled over the group)' : showUsage ? 'arc width ∝ usage · label = % usage of the event against its canonical junction (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
     });
     return items;
   })();
@@ -2595,6 +2607,14 @@ export default function SashimiViewer({
                   title={`Collapse the reads into consensus groups: one row per local haplotype × splice pattern with its number of supporting reads. Variable sites (★) need at least 3 alternate reads and the Min VAF fraction of the depth; groups below "Min reads" fold into a minor bucket. Sites never co-covered by a read stay in separate groups (no invented phase).`} />
               )}
             </span>
+            <label className={`flex items-center gap-1 text-xs ${viewMode === 'groups' ? 'text-gray-300' : t.muted}`}
+              title="What the arc pills show. Reads: spliced reads of the junction. % usage: the event against its canonical junction (alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S)). The Groups view always shows % usage.">
+              Arc labels
+              <select value={showUsage ? 'usage' : 'reads'} disabled={viewMode === 'groups'} onChange={e => setArcLabel(e.target.value as 'reads' | 'usage')} className={`${t.inp} px-1 py-0.5 text-xs rounded border disabled:opacity-60`}>
+                <option value="reads">reads</option>
+                <option value="usage">% usage</option>
+              </select>
+            </label>
             <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
               Min reads
               <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}

@@ -90,7 +90,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). The canonical arc of an
   intron shows its share among every competitor at that intron. Tooltips spell each formula out
   with the pooled read counts. Junctions touching no annotated splice site show their pooled read
-  count (`n=…`). Red arcs are events seen in the first group only.
+  count (`n=…`). Red arcs are events seen in the first group only. The same percentages are
+  available per sample in the Samples view through *Arc labels: % usage* (computed on each
+  sample's own reads); the Groups view always shows percentages.
 
 ## Deploying in a clinical laboratory
 
