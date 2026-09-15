@@ -242,24 +242,29 @@ export function buildCoveragePaths(
 ): CoveragePaths {
   if (runs.length === 0) return { fill: '', stroke: '' };
   // Traversal is in genomic order; on the reverse strand that is right→left in pixels.
-  const segs: { a: number; b: number; d: number }[] = [];
-  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0;
+  // A run that does not start where the previous one ended (a source that omits zero-depth
+  // stretches) is a gap: the profile drops to the baseline there instead of ramping across.
+  const segs: { a: number; b: number; d: number; gap: boolean }[] = [];
+  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0, bucketGap = false;
   const flush = () => {
-    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax }); bucketCol = null; }
+    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax, gap: bucketGap }); bucketCol = null; }
   };
+  let prevEnd: number | null = null;
   for (let i = firstRunFrom(runs, viewStart); i < runs.length && runs[i].start < viewEnd; i++) {
     const r = runs[i];
     const gs = Math.max(r.start, viewStart), ge = Math.min(r.end, viewEnd);
+    const gap = prevEnd !== null && r.start > prevEnd;
+    prevEnd = r.end;
     const pa = scale.x(gs), pb = scale.x(ge);
     const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
     if (hi - lo >= 1) {
       flush();
-      segs.push({ a: pa, b: pb, d: r.depth });
+      segs.push({ a: pa, b: pb, d: r.depth, gap });
     } else {
       const col = Math.floor((lo + hi) / 2);
       if (col !== bucketCol) {
         flush();
-        bucketCol = col; bucketMax = r.depth;
+        bucketCol = col; bucketMax = r.depth; bucketGap = gap;
         bucketA = scale.reverse ? col + 1 : col;
         bucketB = scale.reverse ? col : col + 1;
       } else if (r.depth > bucketMax) bucketMax = r.depth;
@@ -270,12 +275,17 @@ export function buildCoveragePaths(
   const f = (n: number) => n.toFixed(1);
   let fill = `M${f(segs[0].a)},${f(baseline)}`;
   let stroke = `M${f(segs[0].a)},${f(depthToY(segs[0].d))}`;
-  let lastY = NaN;
+  let lastY = NaN, lastB = segs[0].a;
   for (const s of segs) {
     const y = depthToY(s.d);
+    if (s.gap && lastY !== baseline) {
+      fill += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
+      stroke += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
+      lastY = baseline;
+    }
     if (y !== lastY) { fill += `L${f(s.a)},${f(y)}`; stroke += `L${f(s.a)},${f(y)}`; }
     fill += `L${f(s.b)},${f(y)}`; stroke += `L${f(s.b)},${f(y)}`;
-    lastY = y;
+    lastY = y; lastB = s.b;
   }
   fill += `L${f(segs[segs.length - 1].b)},${f(baseline)}Z`;
   return { fill, stroke };
