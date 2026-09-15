@@ -81,16 +81,16 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 - **Groups (aggregate view)**: *Groups…* creates named sample groups (patients, controls, a
   tissue…); the *Samples | Groups* switch then draws one pooled track per group. Coverage and
   junction reads are summed over the group's samples, the coverage is drawn relative to its own
-  maximum, and each arc is labelled with a **percentage** instead of a read count: the share of its
-  splicing event among all the reads competing at that annotated intron, i.e. every junction using
-  the intron's donor or its acceptor (canonical, alternative 5′ or 3′ site, exon skipping,
-  pseudo-exon). An alternative-3′ arc into a cryptic exon of at most 500 bp followed by an
-  alternative-5′ arc out of it is paired into one *pseudo-exon* event (purple, one share, the mean
-  of the two arcs' reads). Exon skipping is measured rMATS-style against its two inclusion
-  junctions pooled: the skip arc shows 2·S / (I₁ + I₂ + 2·S) and both inclusion arcs show the same
-  inclusion level (I₁ + I₂) / (I₁ + I₂ + 2·S), where I₁ and I₂ are the canonical junctions flanking
-  the skipped exon(s) and S the skipping reads. Junctions touching no annotated splice site show
-  their pooled read count (`n=…`). Red arcs are events seen in the first group only.
+  maximum, and each arc is labelled with a **percentage** instead of a read count. Every splicing
+  defect is measured against the canonical junction it competes with, rMATS-style, so an event made
+  of two junctions counts the single alternative twice: an alternative 5′ or 3′ site shows
+  n / (n + C); a pseudo-exon (an alternative-3′ arc A into a cryptic exon of at most 500 bp and an
+  alternative-5′ arc B out of it, drawn in purple) shows (A + B) / (A + B + 2·C) on both arcs; exon
+  skipping shows 2·S / (I₁ + I₂ + 2·S), with I₁ and I₂ the canonical junctions flanking the skipped
+  exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). The canonical arc of an
+  intron shows its share among every competitor at that intron. Tooltips spell each formula out
+  with the pooled read counts. Junctions touching no annotated splice site show their pooled read
+  count (`n=…`). Red arcs are events seen in the first group only.
 
 ## Deploying in a clinical laboratory
 
