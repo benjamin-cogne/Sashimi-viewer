@@ -10,8 +10,10 @@
  *   percentage shown on the arc instead of a read count.
  * - Exon skipping is measured rMATS-style against its two inclusion junctions pooled:
  *   2·S / (I₁ + I₂ + 2·S), one value for the skip and one for both inclusion arcs.
+ * - Intron retention is measured the same way from the unspliced reads through the two
+ *   boundaries of the intron: (R5 + R3) / (R5 + R3 + 2·C).
  */
-import type { CoverageRun, JunctionArc } from './types';
+import type { BoundarySpanning, CoverageRun, JunctionArc } from './types';
 import { classifyJunction, junctionKey, type TxModel } from './geometry';
 
 /** Longest cryptic exon that two facing alternative-site arcs are paired into a pseudo-exon event. */
@@ -63,6 +65,18 @@ export function poolJunctions(samples: { junctions: JunctionArc[] }[]): { juncti
   return { junctions: [...pooled.values()].sort((a, b) => a.start - b.start || a.end - b.end), samplesWith };
 }
 
+/** Unspliced reads through the exon–intron boundaries, summed over samples (positions counted by any member are kept). */
+export function poolSpanning(samples: { spanning?: BoundarySpanning }[]): BoundarySpanning | undefined {
+  const withData = samples.filter(s => s.spanning);
+  if (!withData.length) return undefined;
+  const out: BoundarySpanning = { intronStart: {}, intronEnd: {} };
+  for (const s of withData) {
+    for (const [k, v] of Object.entries(s.spanning!.intronStart)) out.intronStart[+k] = (out.intronStart[+k] ?? 0) + v;
+    for (const [k, v] of Object.entries(s.spanning!.intronEnd)) out.intronEnd[+k] = (out.intronEnd[+k] ?? 0) + v;
+  }
+  return out;
+}
+
 export type AggClass = 'canonical' | 'exon_skipping' | 'alt5' | 'alt3' | 'pseudo_exon' | 'novel';
 
 export const AGG_CLASS_LABEL: Record<AggClass, string> = {
@@ -97,6 +111,25 @@ export interface AggEvent {
   shares: AggShare[];
 }
 
+/** Intron retention of one annotated intron: unspliced reads through both boundaries against the canonical junction. */
+export interface AggRetention {
+  /** intron index and genomic bounds (0-based half-open) */
+  intron: number; start: number; end: number;
+  fromExon: number; toExon: number;
+  /** unspliced reads through the donor-side and the acceptor-side boundary */
+  r5: number; r3: number;
+  canonical: number;
+  /** (r5 + r3) / (r5 + r3 + 2·canonical) */
+  pct: number;
+  note: string;
+}
+
+export interface AggResult {
+  events: Map<string, AggEvent>;
+  /** one entry per annotated intron with spanning data (introns without any unspliced read are listed with pct 0) */
+  retention: AggRetention[];
+}
+
 /** Percent text for an arc label: "90 %", "0.4 %". */
 export function pctLabel(p: number): string {
   const v = p * 100;
@@ -120,15 +153,16 @@ export function pctLabel(p: number): string {
  *   arcs, alternative sites, skips using one of its sites), so it reflects all of them at once.
  * - Junctions touching no annotated splice site get no share (drawn with their pooled reads).
  */
-export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null, maxPseudoExon = PSEUDO_EXON_MAX_BP): Map<string, AggEvent> {
+export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null, spanning?: BoundarySpanning, maxPseudoExon = PSEUDO_EXON_MAX_BP): AggResult {
   const out = new Map<string, AggEvent>();
+  const retention: AggRetention[] = [];
   for (const j of junctions) {
     const info = classifyJunction(j, tx);
     const cls: AggClass = info.cls === 'canonical' ? 'canonical' : info.cls === 'exon_skipping' ? 'exon_skipping'
       : info.cls === 'novel_donor' ? 'alt5' : info.cls === 'novel_acceptor' ? 'alt3' : 'novel';
     out.set(junctionKey(j), { key: junctionKey(j), count: j.count, cls, eventCount: j.count, shares: [] });
   }
-  if (!tx || tx.exons.length < 2) return out;
+  if (!tx || tx.exons.length < 2) return { events: out, retention };
   const nIntrons = tx.exons.length - 1;
   const intronStart = (k: number) => tx.exons[k].end, intronEnd = (k: number) => tx.exons[k + 1].start;
   const exonLabel = (k: number, k2: number) => { const a = tx.exons[k].rank, b = tx.exons[k2].rank; return `${Math.min(a, b)}→${Math.max(a, b)}`; };
@@ -157,6 +191,18 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     const iStart = intronStart(k), iEnd = intronEnd(k);
     if (iEnd <= iStart) continue;
     const label = exonLabel(k, k + 1);
+    // intron retention: unspliced reads through the two boundaries (only when the source counted both)
+    const r5 = spanning?.intronStart[iStart], r3 = spanning?.intronEnd[iEnd];
+    const hasSpan = r5 != null && r3 != null;
+    const R = hasSpan ? r5 + r3 : 0;
+    if (hasSpan) {
+      const denom = R + 2 * canonical[k];
+      retention.push({
+        intron: k, start: iStart, end: iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, r5, r3, canonical: canonical[k],
+        pct: denom > 0 ? R / denom : 0,
+        note: `intron retention ${label} = (${r5.toLocaleString()} + ${r3.toLocaleString()} unspliced reads through the donor and the acceptor boundaries) / (${R.toLocaleString()} + 2 × ${canonical[k].toLocaleString()} canonical reads)`,
+      });
+    }
     const competing = junctions.filter(j => j.start === iStart || j.end === iEnd);
     if (!competing.length) continue;
     const touching = skips.filter(sk => sk.k1 === k || sk.k2 === k);
@@ -181,8 +227,8 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     const isSkip = (j: JunctionArc) => skips.some(sk => sk.j === j);
     const isCanonical = (j: JunctionArc) => j.start === iStart && j.end === iEnd;
     const singles = competing.filter(j => !paired.has(junctionKey(j)));
-    // multi-way total at the intron: canonical (weighted), pseudo-exons (mean of both arcs), alternative sites, skips
-    const total = pairs.reduce((a, p) => a + p.n, 0) + singles.reduce((a, j) => a + (isCanonical(j) ? canonicalWeight : j.count), 0);
+    // multi-way total at the intron: canonical (weighted), pseudo-exons (mean of both arcs), alternative sites, skips, retention (mean of both boundaries)
+    const total = pairs.reduce((a, p) => a + p.n, 0) + singles.reduce((a, j) => a + (isCanonical(j) ? canonicalWeight : j.count), 0) + R / 2;
     if (!total) continue;
     const C = canonical[k];
     const cTxt = `${C.toLocaleString()} canonical reads at intron ${label}`;
@@ -202,6 +248,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
         ev.eventCount = Math.round(canonicalWeight);
         // the competitors, so a canonical arc below 100 % is explained even when they are hidden (below the threshold) or off-screen
         const others = [
+          ...(R > 0 ? [`intron retention (${r5!.toLocaleString()} + ${r3!.toLocaleString()} unspliced reads through the boundaries)`] : []),
           ...pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads)`),
           ...singles.filter(x => x !== j).map(x => {
             const cls = out.get(junctionKey(x))!.cls;
@@ -220,5 +267,5 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
       }
     }
   }
-  return out;
+  return { events: out, retention };
 }

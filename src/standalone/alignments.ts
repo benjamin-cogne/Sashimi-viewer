@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { AlignedRead, CoverageRun, JunctionArc } from '../components/sashimi/types';
+import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc } from '../components/sashimi/types';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -111,6 +111,27 @@ export function coverageRuns(reads: AlignedRead[], start: number, end: number): 
   }
   runs.push({ start: start + runStart, end, depth });
   return runs;
+}
+
+/** Anchors of a boundary-spanning read: aligned bases required on the exon side and on the intron side of the boundary. */
+export const SPAN_EXON_ANCHOR = 6, SPAN_INTRON_ANCHOR = 10;
+
+/**
+ * Unspliced reads through exon–intron boundaries: one aligned block covering SPAN_EXON_ANCHOR bases
+ * on the exon side and SPAN_INTRON_ANCHOR on the intron side. `intronStarts` are boundaries with the
+ * intron to the right (exon ends), `intronEnds` with the intron to the left (exon starts).
+ */
+export function boundarySpanning(reads: AlignedRead[], intronStarts: Iterable<number>, intronEnds: Iterable<number>): BoundarySpanning {
+  const starts = [...new Set(intronStarts)].sort((a, b) => a - b), ends = [...new Set(intronEnds)].sort((a, b) => a - b);
+  const startCount = new Map<number, number>(starts.map(p => [p, 0])), endCount = new Map<number, number>(ends.map(p => [p, 0]));
+  const lowerBound = (arr: number[], v: number) => { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid + 1; else hi = mid; } return lo; };
+  for (const r of reads) for (const [bs, be] of r.b) {
+    // intron start p: block must cover [p - exonAnchor, p + intronAnchor)
+    for (let i = lowerBound(starts, bs + SPAN_EXON_ANCHOR); i < starts.length && starts[i] + SPAN_INTRON_ANCHOR <= be; i++) startCount.set(starts[i], (startCount.get(starts[i]) || 0) + 1);
+    // intron end q: block must cover [q - intronAnchor, q + exonAnchor)
+    for (let i = lowerBound(ends, bs + SPAN_INTRON_ANCHOR); i < ends.length && ends[i] + SPAN_EXON_ANCHOR <= be; i++) endCount.set(ends[i], (endCount.get(ends[i]) || 0) + 1);
+  }
+  return { intronStart: Object.fromEntries(startCount), intronEnd: Object.fromEntries(endCount) };
 }
 
 /** Junctions (CIGAR N gaps) overlapping [start, end). */

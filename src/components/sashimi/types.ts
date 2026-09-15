@@ -23,9 +23,20 @@ export interface AllTranscripts { gene_name: string; chrom: string; strand: numb
 export interface CoverageRun { start: number; end: number; depth: number; }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
 export interface JunctionArc { start: number; end: number; count: number; }
+/**
+ * Reads that continue through an exon–intron boundary unspliced (intron retention / pre-mRNA):
+ * one aligned block covering at least 6 bases on the exon side and 10 on the intron side.
+ * Keyed by the boundary position: an intron start is the first intronic base (= exon end,
+ * 0-based half-open), an intron end the first exonic base after the intron.
+ */
+export interface BoundarySpanning { intronStart: Record<number, number>; intronEnd: Record<number, number> }
+/** Boundaries a coverage request wants spanning counts for (the displayed model's exons); junction ends are always included. */
+export interface BoundaryHint { intronStarts: number[]; intronEnds: number[] }
 export interface SampleCoverage {
   sample_id: number; sample_name: string;
   coverage: CoverageRun[]; junctions: JunctionArc[];
+  /** unspliced reads through the exon–intron boundaries (absent from sources that do not compute it) */
+  spanning?: BoundarySpanning;
   error?: string;
 }
 

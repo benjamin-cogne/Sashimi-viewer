@@ -87,8 +87,11 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   n / (n + C); a pseudo-exon (an alternative-3′ arc A into a cryptic exon of at most 500 bp and an
   alternative-5′ arc B out of it, drawn in purple) shows (A + B) / (A + B + 2·C) on both arcs; exon
   skipping shows 2·S / (I₁ + I₂ + 2·S), with I₁ and I₂ the canonical junctions flanking the skipped
-  exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). The canonical arc of an
-  intron shows its share among every competitor at that intron. Tooltips spell each formula out
+  exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). Intron retention follows
+  the same rule from the reads that run unspliced through the two boundaries of the intron (one
+  aligned block with at least 6 bases on the exon side and 10 on the intron side): a teal *IR*
+  pill on the intron baseline shows (R5 + R3) / (R5 + R3 + 2·C). The canonical arc of an intron
+  shows its share among every competitor at that intron, retention included. Tooltips spell each formula out
   with the pooled read counts. Junctions touching no annotated splice site show their pooled read
   count (`n=…`). Red arcs are events seen in the first group only. The same percentages are
   available per sample in the Samples view through *Arc labels: % usage* (computed on each

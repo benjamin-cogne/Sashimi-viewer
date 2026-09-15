@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, CoverageRun, JunctionArc, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
+import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
 import {
   LINEAR_AXIS, equalIntronAxis, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
@@ -14,7 +14,7 @@ import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sash
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
-import { sumCoverage, poolJunctions, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent } from './sashimi/aggregate';
+import { sumCoverage, poolJunctions, poolSpanning, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
 
@@ -119,16 +119,22 @@ interface TrackData {
   error?: string;
   /** Window the current coverage/junctions were fetched for (with margin). */
   fetched?: FetchWindow;
+  /** Unspliced reads through the exon–intron boundaries (intron retention), when the source counts them. */
+  spanning?: BoundarySpanning;
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
-  group?: { id: number; n: number; loaded: number; events: Map<string, AggEvent>; samplesWith: Map<string, number> };
+  group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number> };
 }
 
 /** A named set of samples pooled into one track in the aggregate ("Groups") view. */
 interface SampleGroup { id: number; name: string; sampleIds: number[] }
 const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
 const PSEUDO_EXON_COLOR = '#7c3aed';
+const RETENTION_COLOR = '#0d9488';
+/** Exon–intron boundaries of a model, for the unspliced-read counts of the coverage request. */
+const boundariesOf = (t: TxModel | null): BoundaryHint | undefined =>
+  t && t.exons.length > 1 ? { intronStarts: t.exons.slice(0, -1).map(e => e.end), intronEnds: t.exons.slice(1).map(e => e.start) } : undefined;
 
 const GTEX_FAV_KEY = 'sashimi.gtex.favourites';
 function loadGtexFavourites(): string[] {
@@ -403,6 +409,8 @@ export default function SashimiViewer({
 
   // ---- Transcript model, axis and scale ----
   const tx: TxModel | null = useMemo(() => (transcript ? toTxModel(transcript) : null), [transcript]);
+  const txRef = useRef(tx);
+  txRef.current = tx;
   const reverse = tx?.strand === -1;
   const axis: VirtualAxis = useMemo(() => (equalIntrons && tx ? equalIntronAxis(tx) : LINEAR_AXIS), [equalIntrons, tx]);
   const plotWidth = svgWidth - PLOT_LEFT - PLOT_RIGHT_PAD;
@@ -750,10 +758,10 @@ export default function SashimiViewer({
       return [...prev, { sampleId: sid, sampleName: sname, coverage: [], junctions: [], loading: true }];
     });
     try {
-      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly);
+      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current));
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, loading: false, error: data.error, fetched: win,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, loading: false, error: data.error, fetched: win,
       } : t));
     } catch (err: any) {
       if (reqSeq.current.get(sid) !== seq) return;
@@ -839,6 +847,19 @@ export default function SashimiViewer({
       if (s) loadCoverage(s.id, s.name);
     }
   }, [viewMode, groups, runSamples, loadCoverage]);
+
+  // A new gene model: tracks whose unspliced-read counts miss one of its boundaries reload (sources that never count them are left alone)
+  useEffect(() => {
+    const b = boundariesOf(tx);
+    if (!b) return;
+    for (const t of tracksRef.current) {
+      if (t.gtex || t.loading || !t.fetched || !t.spanning) continue;
+      const f = t.fetched;
+      const missing = b.intronStarts.some(p => p >= f.start && p < f.end && t.spanning!.intronStart[p] == null)
+        || b.intronEnds.some(p => p > f.start && p <= f.end && t.spanning!.intronEnd[p] == null);
+      if (missing) loadCoverage(t.sampleId, t.sampleName);
+    }
+  }, [tx, loadCoverage]);
 
   /** Samples whose reads are shown, in track order. */
   const readsSampleIds = useMemo(() => !showReads ? [] : readsAll ? tracks.map(t => t.sampleId) : effectiveReadsSampleId == null ? [] : [effectiveReadsSampleId],
@@ -1024,14 +1045,15 @@ export default function SashimiViewer({
   const groupTracks = useMemo((): TrackData[] => groups.map(g => {
     const members = g.sampleIds.map(sid => tracks.find(t => t.sampleId === sid)).filter((t): t is TrackData => !!t);
     const { junctions, samplesWith } = poolJunctions(members);
+    const spanning = poolSpanning(members);
     const failed = members.filter(m => m.error && !m.coverage.length);
     const pending = g.sampleIds.filter(sid => !members.some(m => m.sampleId === sid) && runSamples.some(x => x.id === sid));
     return {
       sampleId: GROUP_ID_BASE - g.id, sampleName: g.name || `Group ${g.id}`,
-      coverage: sumCoverage(members.map(m => m.coverage)), junctions,
+      coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning,
       loading: members.some(m => m.loading) || pending.length > 0,
       error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
-      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, events: aggregateJunctions(junctions, tx), samplesWith },
+      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, spanning), samplesWith },
     };
   }), [groups, tracks, tx, runSamples]);
 
@@ -1511,6 +1533,8 @@ export default function SashimiViewer({
     paths: { fill: string; stroke: string }; arcs: ArcRender[]; height: number;
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
+    /** Intron-retention pills on the baseline (usage mode). */
+    retention: { x: number; y: number; text: string; title: string }[];
   }
 
   const transcriptY = RULER_H;
@@ -1522,8 +1546,8 @@ export default function SashimiViewer({
 
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
-    const m = new Map<number, Map<string, AggEvent>>();
-    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx));
+    const m = new Map<number, AggResult>();
+    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx, t.spanning));
     return m;
   }, [arcLabel, tracks, tx]);
 
@@ -1533,7 +1557,8 @@ export default function SashimiViewer({
     const plotRight = PLOT_LEFT + plotWidth;
     displayTracks.forEach((track, idx) => {
       const color = track.gtex ? track.gtex.tissue.color : TRACK_COLORS[idx % TRACK_COLORS.length];
-      const trackEvents = track.group ? track.group.events : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
+      const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
+      const trackEvents = trackAgg?.events;
       const passes = (j: JunctionArc) => {
         if (track.gtex) return j.count >= 1;
         const ev = trackEvents?.get(junctionKey(j));
@@ -1633,8 +1658,18 @@ export default function SashimiViewer({
         if (a.edge) a.edge.y += baseline;
       }
       const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
+      // intron retention pills: on the baseline at the middle of the visible part of each intron, above the Min % threshold
+      const retention = (trackAgg?.retention ?? [])
+        .filter(r => r.pct * 100 >= minUsagePct && r.pct > 0 && r.end > viewStart && r.start < viewEnd)
+        .map(r => {
+          const xa = scale.x(Math.max(r.start, viewStart)), xb = scale.x(Math.min(r.end, viewEnd));
+          return {
+            x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`,
+            title: `${pctLabel(r.pct)} ${r.note}\n${track.group ? 'reads pooled over the group' : track.sampleName} · unspliced through both boundaries, ≥ 6 aligned bases on the exon side and ≥ 10 on the intron side`,
+          };
+        });
       const height = juncH + COVERAGE_H;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip });
+      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
@@ -1668,6 +1703,15 @@ export default function SashimiViewer({
     line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
     if (showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
+    if (showUsage) items.push({
+      w: 300, el: (
+        <g key="lir">
+          <rect x={0} y={y - 6.5} width={32} height={13} rx={6.5} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
+          <text x={16} y={y + 3} textAnchor="middle" fill={RETENTION_COLOR} fontSize={8.5} fontWeight={700}>IR %</text>
+          <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>intron retention: unspliced reads through both boundaries vs canonical</text>
+        </g>
+      ),
+    });
     items.push({
       w: 150, el: (
         <g key="lf">
@@ -1954,6 +1998,17 @@ export default function SashimiViewer({
                 <rect x={lx - w / 2} y={ly - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={a.color} strokeWidth={1} />
                 <text x={lx} y={ly + 3.5} textAnchor="middle" fill={INK.text} fontSize={9.5} fontWeight={700}>{txt}</text>
                 {glyph && renderFrameGlyph(lx + w / 2 + FRAME_GLYPH_R + 3, ly, glyph, `fg-${a.key}`)}
+              </g>
+            );
+          })}
+          {/* Intron-retention pills on the baseline (usage mode) */}
+          {L.retention.map((r, i) => {
+            const w = r.text.length * 6 + 10;
+            return (
+              <g key={`ir-${i}`}>
+                <title>{r.title}</title>
+                <rect x={r.x - w / 2} y={r.y - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
+                <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={RETENTION_COLOR} fontSize={9.5} fontWeight={700}>{r.text}</text>
               </g>
             );
           })}
@@ -2643,7 +2698,7 @@ export default function SashimiViewer({
               title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
               options={[
                 { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
-                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each event against its canonical junction: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S)' },
+                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each event against its canonical junction: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S), intron retention (R5 + R3) / (R5 + R3 + 2·C) shown as IR pills on the baseline' },
               ]} />
             {showUsage ? (
               <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
@@ -2950,7 +3005,7 @@ export default function SashimiViewer({
             <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
               <div>
                 <div className="font-bold text-sm">Sample groups</div>
-                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with a percentage instead of a read count. Each splicing defect is measured against the canonical junction it competes with, rMATS-style: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C) on both arcs, exon skipping 2·S / (I₁ + I₂ + 2·S) with both inclusion arcs at (I₁ + I₂) / (I₁ + I₂ + 2·S). The canonical arc shows its share among every competitor at its intron.</div>
+                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with a percentage instead of a read count. Each splicing defect is measured against the canonical junction it competes with, rMATS-style: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C) on both arcs, exon skipping 2·S / (I₁ + I₂ + 2·S) with both inclusion arcs at (I₁ + I₂) / (I₁ + I₂ + 2·S), intron retention (R5 + R3) / (R5 + R3 + 2·C) from the unspliced reads through both boundaries. The canonical arc shows its share among every competitor at its intron.</div>
               </div>
               <button onClick={() => setShowGroupsDialog(false)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
             </div>

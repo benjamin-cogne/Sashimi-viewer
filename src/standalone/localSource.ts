@@ -8,9 +8,9 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
-import type { AlignedRead, AllTranscripts, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
 import type { SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
-import { coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, isUnique, junctionCounts, keepRead, strandKeeper, type RawRead, type StrandnessCall } from './alignments';
+import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, isUnique, junctionCounts, keepRead, strandKeeper, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
@@ -203,13 +203,18 @@ export class LocalDataSource implements SashimiDataSource {
     return { run_id: 0, chrom, exons, samples };
   }
 
-  async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean): Promise<SampleCoverage> {
+  async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint): Promise<SampleCoverage> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
     const raw = this.filtered(await this.records(sampleId, chrom, start, end), uniqueOnly);
     const reads = raw.map(r => encodeRead(r, null, 0));
-    return { sample_id: sampleId, sample_name: s.name, coverage: coverageRuns(reads, start, end), junctions: junctionCounts(reads, start, end) };
+    const junctions = junctionCounts(reads, start, end);
+    // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)
+    const spanning = boundarySpanning(reads,
+      [...junctions.map(j => j.start), ...(boundaries?.intronStarts ?? [])].filter(p => p >= start && p < end),
+      [...junctions.map(j => j.end), ...(boundaries?.intronEnds ?? [])].filter(p => p > start && p <= end));
+    return { sample_id: sampleId, sample_name: s.name, coverage: coverageRuns(reads, start, end), junctions, spanning };
   }
 
   async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,

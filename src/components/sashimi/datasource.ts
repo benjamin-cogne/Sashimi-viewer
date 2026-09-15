@@ -3,7 +3,7 @@
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
  * browser on top of local BAM/CRAM files and the UCSC / Ensembl REST APIs (src/standalone).
  */
-import type { TranscriptData, SampleCoverage, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant } from './types';
+import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant } from './types';
 
 export interface SampleRef { id: number; name: string }
 
@@ -11,8 +11,8 @@ export interface SashimiDataSource {
   /** Displayed model of a gene (MANE Select / RefSeq Select). `hint` is the gene span when already known (skips the symbol lookup). */
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData>;
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts>;
-  /** Coverage runs and junctions for a 0-based half-open window. */
-  getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean): Promise<SampleCoverage>;
+  /** Coverage runs and junctions for a 0-based half-open window; `boundaries` asks for unspliced reads through those exon–intron boundaries too (junction ends are always counted). */
+  getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint): Promise<SampleCoverage>;
   getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse>;
   /** All samples that can be added as tracks. */
