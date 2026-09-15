@@ -90,8 +90,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). Intron retention follows
   the same rule from the reads that run unspliced through the two boundaries of the intron (one
   aligned block with at least 6 bases on the exon side and 10 on the intron side): a teal *IR*
-  pill on the intron baseline shows (R5 + R3) / (R5 + R3 + 2·C). The canonical arc of an intron
-  shows its share among every competitor at that intron, retention included. Tooltips spell each formula out
+  pill on the intron baseline shows (R5 + R3) / (R5 + R3 + 2·C); the *Intron retention* box next to
+  *Min %* switches this off for junction-only percentages. The canonical arc of an intron shows its
+  share among every competitor at that intron, retention included when the box is ticked. Tooltips spell each formula out
   with the pooled read counts. Junctions touching no annotated splice site show their pooled read
   count (`n=…`). Red arcs are events seen in the first group only. The same percentages are
   available per sample in the Samples view through *Arc labels: % usage* (computed on each
