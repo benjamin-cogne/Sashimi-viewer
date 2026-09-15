@@ -76,6 +76,8 @@ export interface SashimiSnapshotContext {
     aggregate?: boolean;
     /** arc labels of the sample tracks: spliced reads or % usage */
     arcLabels?: 'reads' | 'usage';
+    /** intron retention counted in the usage percentages */
+    intronRetention?: boolean;
   };
   /** sample groups defined for the aggregate view */
   groups?: { name: string; samples: string[] }[];
@@ -337,6 +339,8 @@ export default function SashimiViewer({
   const [minJunctionCount, setMinJunctionCount] = useState(3);
   /** In % usage mode, events below this usage are hidden (junctions without a share fall back to Min reads). */
   const [minUsagePct, setMinUsagePct] = useState(1);
+  /** Count intron retention in the usage percentages (IR pills, and retention in the canonical arc's denominator). */
+  const [includeRetention, setIncludeRetention] = useState(true);
   const [showReads, setShowReads] = useState(!!initialReads);
   const [readsSampleId, setReadsSampleId] = useState<number | null>(null);
   const [readsAll, setReadsAll] = useState(false); // one reads track under every sample (primary only by default)
@@ -1059,9 +1063,9 @@ export default function SashimiViewer({
       coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning,
       loading: members.some(m => m.loading) || pending.length > 0,
       error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
-      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, spanning), samplesWith },
+      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, includeRetention ? spanning : undefined), samplesWith },
     };
-  }), [groups, tracks, tx, runSamples]);
+  }), [groups, tracks, tx, runSamples, includeRetention]);
 
   const displayTracks = useMemo(() => {
     const withProfile = gtexTracks.map(t => {
@@ -1508,7 +1512,7 @@ export default function SashimiViewer({
           equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', uniqueOnly,
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
-          aggregate: viewMode === 'groups', arcLabels: showUsage ? 'usage' : 'reads',
+          aggregate: viewMode === 'groups', arcLabels: showUsage ? 'usage' : 'reads', intronRetention: showUsage ? includeRetention : undefined,
         },
         groups: groups.length ? groups.map(g => ({ name: g.name, samples: g.sampleIds.map(id => runSamples.find(x => x.id === id)?.name ?? String(id)) })) : undefined,
         variantSites: readsTracks.get(readsSampleIds[0])?.sites.map(st => ({ pos: st.pos + 1, ref: st.ref, alt: st.alt, vaf: st.vaf, depth: st.depth })),
@@ -1559,9 +1563,9 @@ export default function SashimiViewer({
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
     const m = new Map<number, AggResult>();
-    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx, t.spanning));
+    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx, includeRetention ? t.spanning : undefined));
     return m;
-  }, [arcLabel, tracks, tx]);
+  }, [arcLabel, tracks, tx, includeRetention]);
 
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
@@ -1715,7 +1719,7 @@ export default function SashimiViewer({
     line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
     if (showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
-    if (showUsage) items.push({
+    if (showUsage && includeRetention) items.push({
       w: 300, el: (
         <g key="lir">
           <rect x={0} y={y - 6.5} width={32} height={13} rx={6.5} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
@@ -2713,11 +2717,15 @@ export default function SashimiViewer({
                 { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each event against its canonical junction: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S), intron retention (R5 + R3) / (R5 + R3 + 2·C) shown as IR pills on the baseline' },
               ]} />
             {showUsage ? (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
-                Min %
-                <input type="number" min={0} max={100} step={0.5} value={minUsagePct} onChange={e => setMinUsagePct(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
-                  className={`${t.inp} w-16 px-1.5 py-0.5 text-xs rounded border`} />
-              </label>
+              <>
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
+                  Min %
+                  <input type="number" min={0} max={100} step={0.5} value={minUsagePct} onChange={e => setMinUsagePct(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
+                    className={`${t.inp} w-16 px-1.5 py-0.5 text-xs rounded border`} />
+                </label>
+                <Toggle checked={includeRetention} onChange={setIncludeRetention} label="Intron retention"
+                  title="Count intron retention in the usage percentages: IR pills on the intron baselines, (R5 + R3) / (R5 + R3 + 2·C) from the reads running unspliced through both boundaries, and retention in the canonical arc's denominator. Off: junction-only percentages, no IR pill." />
+              </>
             ) : (
               <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
                 Min reads
