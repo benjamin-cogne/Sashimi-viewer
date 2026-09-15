@@ -143,8 +143,8 @@ const ALT_TX_HEADER_H = 22;
 const ALT_TX_MAX_ROWS = 40;
 const GTEX_MIN_TPM = 1;      // below this median TPM a GTEx tissue track only says "low coverage"
 const SNP_PANEL_H = 46;        // common-SNP track: header + lollipops
-const KNOWN_HEADER_H = 20;     // known-variant panel: header, then one row per stacked variant
-const KNOWN_ROW_H = 17;
+const KNOWN_ROW_H = 15;        // known-variant panel: one row per stacked variant; the first row shares the line with the panel title
+const KNOWN_PAD = 3;           // padding above the first and below the last row of the known-variant panel
 const SNP_MAX_MARKS = 4000;    // beyond this many variants in view, ticks only
 const LEGEND_ROW_H = 22;
 const MIN_V_SPAN = 40;            // smallest zoom window, in virtual (bp-equivalent) units
@@ -530,10 +530,14 @@ export default function SashimiViewer({
   const primaryKnown = knownVariants.get(primaryId) ?? [];
   const primaryKnownHere = useMemo(() => knownOnChrom(primaryId), [knownOnChrom, primaryId]);
   const primaryKnownElsewhere = primaryKnown.length - primaryKnownHere.length;
-  /** Rows of the known-variant panel: variants stacked so their marks and labels do not overlap on screen. */
+  /** Title line of the known-variant panel: the sample and how many of its variants fall on this chromosome. */
+  const knownStatus = `${tracks[0]?.sampleName ?? sampleName} · ${primaryKnownHere.length} on ${currentChrom}${primaryKnownElsewhere ? ` · ${primaryKnownElsewhere} elsewhere (${[...new Set(primaryKnown.filter(v => !primaryKnownHere.includes(v)).map(v => v.chrom || '?'))].join(', ')})` : ''}`;
+  /** Rows of the known-variant panel: variants stacked so their marks and labels do not overlap on screen.
+   *  The first row is the title line: variants that would sit under the title text move to the next row. */
   const knownRows = useMemo((): KnownVariant[][] => {
     if (!showKnown || !primaryKnown.length) return [];
-    const rows: { items: KnownVariant[]; spans: [number, number][] }[] = [];
+    const titleW = 8 + 14 * 6.2 + knownStatus.length * 5.3 + 8;
+    const rows: { items: KnownVariant[]; spans: [number, number][] }[] = [{ items: [], spans: [[PLOT_LEFT, PLOT_LEFT + titleW]] }];
     const sorted = [...primaryKnownHere].sort((a, b) => a.start - b.start);
     for (const v of sorted) {
       const xa = scale.x(v.start), xb = scale.x(v.end);
@@ -543,9 +547,11 @@ export default function SashimiViewer({
       if (!row) { row = { items: [], spans: [] }; rows.push(row); }
       row.items.push(v); row.spans.push([lo, hi]);
     }
-    return rows.length ? rows.map(r => r.items) : [[]];
-  }, [showKnown, primaryKnown.length, primaryKnownHere, scale, plotWidth]);
-  const knownPanelH = knownRows.length ? KNOWN_HEADER_H + knownRows.length * KNOWN_ROW_H + 6 : 0;
+    return rows.map(r => r.items);
+  }, [showKnown, primaryKnown.length, primaryKnownHere, scale, plotWidth, knownStatus]);
+  const knownPanelH = knownRows.length ? KNOWN_PAD * 2 + knownRows.length * KNOWN_ROW_H : 0;
+  /** Vertical centre of row `i` of the known-variant panel, relative to the panel top. */
+  const knownRowMid = (i: number) => KNOWN_PAD + i * KNOWN_ROW_H + KNOWN_ROW_H / 2;
   /** Centre the window on a known variant (bands get a 10 % margin, points a 1 kb window at most). */
   const jumpToVariant = useCallback((v: KnownVariant) => {
     const span = v.end - v.start;
@@ -1680,7 +1686,7 @@ export default function SashimiViewer({
     }
     if (knownPanelH > 0) {
       items.push({
-        w: 236, el: (
+        w: 'known variant of the sample: SNV / indel, CNV / SV band'.length * 5.6 + 48, el: (
           <g key="l13">
             <path d={`M6,${y - 5} L11,${y} L6,${y + 5} L1,${y} Z`} fill={KNOWN_VARIANT_COLORS.snv} />
             <rect x={17} y={y - 4} width={16} height={8} rx={1.5} fill={KNOWN_VARIANT_COLORS.del} opacity={0.55} stroke={KNOWN_VARIANT_COLORS.del} strokeWidth={0.8} />
@@ -2161,16 +2167,14 @@ export default function SashimiViewer({
 
   /** Known-variant panel: the primary sample's identified variants stacked in rows, with the ones off-screen as edge arrows. */
   const renderKnown = (yOff: number) => {
-    const name = tracks[0]?.sampleName ?? sampleName;
-    const status = `${name} · ${primaryKnownHere.length} on ${currentChrom}${primaryKnownElsewhere ? ` · ${primaryKnownElsewhere} elsewhere (${[...new Set(primaryKnown.filter(v => !primaryKnownHere.includes(v)).map(v => v.chrom || '?'))].join(', ')})` : ''}`;
     return (
       <g fontFamily={FONT}>
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={knownPanelH} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
-        <text x={PLOT_LEFT + 8} y={yOff + 13} fontSize={10}>
+        <text x={PLOT_LEFT + 8} y={yOff + knownRowMid(0) + 3.5} fontSize={10}>
           <tspan fill={INK.text} fontWeight={700}>Known variants</tspan>
-          <tspan fill={INK.muted}>{'  '}{status}</tspan>
+          <tspan fill={INK.muted}>{'  '}{knownStatus}</tspan>
         </text>
-        {knownRows.map((row, i) => row.map(v => knownMark(v, yOff + KNOWN_HEADER_H + i * KNOWN_ROW_H + KNOWN_ROW_H / 2, false, true)))}
+        {knownRows.map((row, i) => row.map(v => knownMark(v, yOff + knownRowMid(i), false, true)))}
       </g>
     );
   };
@@ -2285,7 +2289,7 @@ export default function SashimiViewer({
       for (const v of primaryKnownHere) if (hit(v)) known.push({ v, sample: null, off: false });
       // edge arrows of the off-screen variants, in their panel row
       knownRows.forEach((row, i) => {
-        const y0 = knownY + KNOWN_HEADER_H + i * KNOWN_ROW_H;
+        const y0 = knownY + knownRowMid(i) - KNOWN_ROW_H / 2;
         if (hover.py < y0 || hover.py > y0 + KNOWN_ROW_H) return;
         for (const v of row) {
           const { l, r } = extent(v); const cx = (l + r) / 2;
