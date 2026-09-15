@@ -15,7 +15,11 @@ import { classifyJunction, junctionKey, type TxModel } from './geometry';
 /** Longest cryptic exon that two facing alternative-site arcs are paired into a pseudo-exon event. */
 export const PSEUDO_EXON_MAX_BP = 500;
 
-/** Sum of several run-length coverage profiles (0-based half-open runs, each sorted). Runs at depth 0 are dropped. */
+/**
+ * Sum of several run-length coverage profiles (0-based half-open runs, each sorted). The result is
+ * contiguous from the first to the last covered base, zero-depth runs included: the coverage path
+ * joins consecutive runs with a straight line, so a gap would draw as a ramp across the intron.
+ */
 export function sumCoverage(profiles: CoverageRun[][]): CoverageRun[] {
   const events: { pos: number; delta: number }[] = [];
   for (const runs of profiles) {
@@ -32,10 +36,8 @@ export function sumCoverage(profiles: CoverageRun[][]): CoverageRun[] {
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     if (e.pos !== from) {
-      if (depth > 0) {
-        const last = out[out.length - 1];
-        if (last && last.end === from && last.depth === depth) last.end = e.pos; else out.push({ start: from, end: e.pos, depth });
-      }
+      const last = out[out.length - 1];
+      if (last && last.end === from && last.depth === depth) last.end = e.pos; else out.push({ start: from, end: e.pos, depth });
       from = e.pos;
     }
     depth += e.delta;
