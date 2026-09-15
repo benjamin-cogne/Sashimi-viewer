@@ -2526,6 +2526,29 @@ export default function SashimiViewer({
     inp: 'bg-white text-gray-800 border-gray-300',
     btn: 'px-2 py-0.5 text-xs rounded border border-gray-200 hover:bg-indigo-50 hover:border-indigo-300 transition-colors',
   };
+  /** Pill-style segmented switch: the active option is a raised white chip with an indigo label. */
+  const Segmented = <T extends string>({ value, onChange, options, disabled, title }: {
+    value: T; onChange: (v: T) => void; disabled?: boolean; title: string;
+    options: { value: T; label: string; icon: JSX.Element; hint?: string }[];
+  }) => (
+    <span title={title} className={`inline-flex items-center rounded-full bg-gray-100 border border-gray-200 p-0.5 text-xs select-none ${disabled ? 'opacity-60' : ''}`}>
+      {options.map(o => {
+        const active = o.value === value;
+        return (
+          <button key={o.value} type="button" disabled={disabled} onClick={() => onChange(o.value)} title={o.hint}
+            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full transition-all ${active ? 'bg-white text-indigo-700 font-semibold shadow-sm ring-1 ring-indigo-200' : 'text-gray-500 hover:text-gray-800'} disabled:cursor-not-allowed`}>
+            <span className={active ? 'text-indigo-600' : 'text-gray-400'}>{o.icon}</span>{o.label}
+          </button>
+        );
+      })}
+    </span>
+  );
+  const ICON = {
+    reads: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M1.5 9.5c0-4 2-7 4.5-7s4.5 3 4.5 7" /><path d="M1 9.5h10" /></svg>,
+    usage: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="3.2" cy="3.2" r="1.7" /><circle cx="8.8" cy="8.8" r="1.7" /><path d="M10 2 2 10" /></svg>,
+    samples: <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1.5" width="10" height="2" rx="1" /><rect x="1" y="5" width="10" height="2" rx="1" /><rect x="1" y="8.5" width="10" height="2" rx="1" /></svg>,
+    groups: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="1" y="1" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="1" width="4.2" height="4.2" rx="1" /><rect x="1" y="6.8" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="6.8" width="4.2" height="4.2" rx="1" /></svg>,
+  };
   const Toggle = ({ checked, onChange, label, title, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; title: string; disabled?: boolean }) => (
     <label className={`flex items-center gap-1 text-xs ${disabled ? 'text-gray-300' : t.muted} select-none`} title={title}>
       <input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} className="accent-indigo-600" />
@@ -2616,14 +2639,12 @@ export default function SashimiViewer({
                   title={`Collapse the reads into consensus groups: one row per local haplotype × splice pattern with its number of supporting reads. Variable sites (★) need at least 3 alternate reads and the Min VAF fraction of the depth; groups below "Min reads" fold into a minor bucket. Sites never co-covered by a read stay in separate groups (no invented phase).`} />
               )}
             </span>
-            <label className={`flex items-center gap-1 text-xs ${viewMode === 'groups' ? 'text-gray-300' : t.muted}`}
-              title="What the arc pills show. Reads: spliced reads of the junction. % usage: the event against its canonical junction (alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S)). The Groups view always shows % usage.">
-              Arc labels
-              <select value={showUsage ? 'usage' : 'reads'} disabled={viewMode === 'groups'} onChange={e => setArcLabel(e.target.value as 'reads' | 'usage')} className={`${t.inp} px-1 py-0.5 text-xs rounded border disabled:opacity-60`}>
-                <option value="reads">reads</option>
-                <option value="usage">% usage</option>
-              </select>
-            </label>
+            <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}
+              title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
+              options={[
+                { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
+                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each event against its canonical junction: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S)' },
+              ]} />
             {showUsage ? (
               <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
                 Min %
@@ -2641,12 +2662,12 @@ export default function SashimiViewer({
         </div>
         <div className="flex items-center gap-2">
           {!hideSamplePicker && (
-            <span className="flex items-center rounded border border-gray-200 overflow-hidden text-xs"
-              title="Samples: one track per sample with read counts. Groups: one pooled track per sample group, each arc labelled with the share of its splicing event among the reads competing at the intron.">
-              <button onClick={() => setViewMode('samples')} className={`px-2.5 py-1 ${viewMode === 'samples' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-indigo-50'}`}>Samples</button>
-              <button onClick={() => { if (groups.some(g => g.sampleIds.length)) setViewMode('groups'); else setShowGroupsDialog(true); }}
-                className={`px-2.5 py-1 border-l border-gray-200 ${viewMode === 'groups' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-indigo-50'}`}>Groups{groups.length ? ` (${groups.length})` : ''}</button>
-            </span>
+            <Segmented value={viewMode} title="One track per sample, or one pooled track per sample group"
+              onChange={v => { if (v === 'groups' && !groups.some(g => g.sampleIds.length)) setShowGroupsDialog(true); else setViewMode(v); }}
+              options={[
+                { value: 'samples', label: 'Samples', icon: ICON.samples, hint: 'One track per sample' },
+                { value: 'groups', label: groups.length ? `Groups · ${groups.length}` : 'Groups', icon: ICON.groups, hint: 'One pooled track per sample group, arcs labelled with % usage' },
+              ]} />
           )}
           {!hideSamplePicker && (
             <button onClick={() => setShowGroupsDialog(true)} className={`${t.btn} px-3 py-1 font-medium`} title="Create and edit the sample groups of the aggregate view">Groups…</button>
