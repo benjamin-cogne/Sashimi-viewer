@@ -189,7 +189,7 @@ function App() {
           <div>
             <h1 className="text-lg font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></h1>
             <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
-            <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript and amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
+            <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
         </div>
         <label className="flex items-center gap-1 text-xs text-gray-600">Build
