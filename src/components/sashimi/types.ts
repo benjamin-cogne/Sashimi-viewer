@@ -6,7 +6,7 @@
 export interface TranscriptData {
   gene_name: string; transcript_id: string; translation_id?: string | null; is_mane_select?: boolean;
   /** how the displayed model was chosen: MANE Select, RefSeq Select / Ensembl canonical, or the longest CDS / transcript */
-  model_kind?: 'mane' | 'canonical' | 'longest'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
+  model_kind?: 'mane' | 'canonical' | 'longest' | 'chosen'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
   start: number; end: number; exons: { start: number; end: number; rank: number }[];
   /** Genomic CDS bounds (1-based inclusive); null/undefined for non-coding transcripts. */
   cds_start?: number | null; cds_end?: number | null;

@@ -248,6 +248,7 @@ const isEnsemblId = (id: string) => /^ENST/i.test(id);
 /** How the displayed model was chosen, worded for its source (RefSeq via UCSC, or Ensembl as fallback). */
 function modelKindLabel(m: { transcriptId: string; modelKind: string }): string {
   if (m.modelKind === 'mane') return 'MANE Select';
+  if (m.modelKind === 'chosen') return 'chosen in the transcript list';
   if (m.modelKind === 'canonical') return isEnsemblId(m.transcriptId) ? 'Ensembl canonical (no MANE Select)' : 'RefSeq Select (no MANE Select)';
   return isEnsemblId(m.transcriptId) ? 'longest CDS (no MANE Select, no canonical flag)' : 'longest CDS (no MANE Select, no RefSeq Select)';
 }
@@ -493,6 +494,19 @@ export default function SashimiViewer({
       cdsEnd: m.cds_start != null && m.cds_end != null ? m.cds_end : null,
     }));
   }, [showAllTx, altTx, currentGeneName]);
+  /** Make one of the listed transcripts the displayed reference model (exon numbering, junction classes, HGVS, usage percentages). */
+  const chooseModel = useCallback((id: string) => {
+    const t = altTx?.data.transcripts.find(x => x.id === id);
+    if (!t) return;
+    const sorted = [...t.exons].sort((a, b) => a.start - b.start);
+    setTranscript(prev => ({
+      gene_name: prev?.gene_name ?? currentGeneName, transcript_id: t.id, translation_id: null, is_mane_select: t.is_mane,
+      model_kind: t.is_mane ? 'mane' : 'chosen', biotype: t.biotype, source: t.source, chrom: currentChrom, strand: t.strand,
+      start: t.start, end: t.end,
+      exons: sorted.map((e, i) => ({ start: e.start, end: e.end, rank: t.strand > 0 ? i + 1 : sorted.length - i })),
+      cds_start: t.cds_start ?? null, cds_end: t.cds_end ?? null,
+    }));
+  }, [altTx, currentGeneName, currentChrom]);
   /** junction key → transcript ids whose consecutive exons form that intron (for arc tooltips). */
   const altJunctionIndex = useMemo(() => {
     const idx = new Map<string, string[]>();
@@ -2394,17 +2408,21 @@ export default function SashimiViewer({
         if (ex.start < Math.min(ex.end, m.cdsStart)) box(ex.start, Math.min(ex.end, m.cdsStart), 6, `u5${k}`);
         if (Math.max(ex.start, m.cdsEnd) < ex.end) box(Math.max(ex.start, m.cdsEnd), ex.end, 6, `u3${k}`);
       });
-      const label = `${m.id}${m.is_mane ? ' · MANE' : tx && m.id === tx.transcriptId ? (tx.modelKind === 'canonical' ? ' · canonical (shown)' : ' · shown') : ''}`;
+      const shown = !!tx && m.id === tx.transcriptId;
+      const label = `${m.id}${m.is_mane ? ' · MANE' : ''}${shown ? ' · shown' : ''}`;
       const lw = label.length * 5.4 + 8;
       const nNovel = m.exons.filter(ex => !manes.has(`s${ex.start}`) && !manes.has(`e${ex.end}`)).length;
       const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.exons.length} exons` +
-        (m.cdsStart == null ? ' · non-coding' : '') + (m.is_mane ? '\nsame exon structure as the MANE Select transcript' : tx && m.id === tx.transcriptId ? '\nthe model displayed on the top track' : nNovel ? `\n${nNovel} exon${nNovel > 1 ? 's' : ''} absent from the displayed model (amber)` : '');
+        (m.cdsStart == null ? ' · non-coding' : '') + (m.is_mane ? '\nsame exon structure as the MANE Select transcript' : shown ? '\nthe model displayed on the top track' : nNovel ? `\n${nNovel} exon${nNovel > 1 ? 's' : ''} absent from the displayed model (amber)` : '') +
+        (shown ? '' : '\nclick to display this model as the reference (exon numbering, junction classes, HGVS, usage)');
       return (
-        <g key={m.id}>
+        <g key={m.id} style={{ cursor: shown ? 'default' : 'pointer' }} onMouseDown={e => e.stopPropagation()}
+          onClick={e => { e.stopPropagation(); if (!shown) chooseModel(m.id); }}>
           <title>{title}</title>
+          <rect x={PLOT_LEFT} y={top} width={plotWidth} height={ALT_TX_ROW_H} fill={shown ? '#4f46e5' : 'transparent'} opacity={shown ? 0.08 : 0} />
           {parts}
-          <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
-          <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={m.is_mane ? INK.text : INK.muted} fontSize={9} fontWeight={m.is_mane ? 700 : 500}>{label}</text>
+          <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} stroke={shown ? '#4f46e5' : 'none'} strokeWidth={0.8} />
+          <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={shown ? '#4338ca' : m.is_mane ? INK.text : INK.muted} fontSize={9} fontWeight={m.is_mane || shown ? 700 : 500}>{label}</text>
         </g>
       );
     });
@@ -2415,7 +2433,7 @@ export default function SashimiViewer({
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
         <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
           <tspan fill={INK.text} fontWeight={700}>All transcripts</tspan>
-          <tspan fill={altTxError ? UNIQUE_COLOR : INK.muted}>{'  '}{altModels ? `${src} · ${altTx?.data.transcripts.length ?? 0} model${(altTx?.data.transcripts.length ?? 0) === 1 ? '' : 's'}${(altTx?.data.transcripts.length ?? 0) > ALT_TX_MAX_ROWS ? ` (first ${ALT_TX_MAX_ROWS})` : ''} · amber exon = absent from ${tx?.modelKind === 'mane' ? 'MANE Select' : 'the displayed model'}` : status}</tspan>
+          <tspan fill={altTxError ? UNIQUE_COLOR : INK.muted}>{'  '}{altModels ? `${src} · ${altTx?.data.transcripts.length ?? 0} model${(altTx?.data.transcripts.length ?? 0) === 1 ? '' : 's'}${(altTx?.data.transcripts.length ?? 0) > ALT_TX_MAX_ROWS ? ` (first ${ALT_TX_MAX_ROWS})` : ''} · amber exon = absent from ${tx?.modelKind === 'mane' ? 'MANE Select' : 'the displayed model'} · click a model to make it the reference` : status}</tspan>
         </text>
         <g clipPath="url(#sashimi-clip-alt)">{rows}</g>
       </g>

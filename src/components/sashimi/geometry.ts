@@ -24,7 +24,7 @@ export interface TxModel {
   transcriptId: string;
   translationId?: string | null;
   isMane: boolean;
-  modelKind: 'mane' | 'canonical' | 'longest';
+  modelKind: 'mane' | 'canonical' | 'longest' | 'chosen';
   biotype?: string;
   chrom: string;
   strand: 1 | -1;
