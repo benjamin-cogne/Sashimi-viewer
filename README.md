@@ -92,7 +92,10 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   with the pooled read counts. Junctions touching no annotated splice site show their pooled read
   count (`n=…`). Red arcs are events seen in the first group only. The same percentages are
   available per sample in the Samples view through *Arc labels: % usage* (computed on each
-  sample's own reads); the Groups view always shows percentages.
+  sample's own reads); the Groups view always shows percentages. In that mode *Min reads* becomes
+  *Min %*, hiding events below that usage; hidden and off-screen junctions still count in the
+  denominators, so a canonical arc below 100 % lists in its tooltip the other events at its intron,
+  shown or not. Intron retention produces no junction and is never counted.
 
 ## Deploying in a clinical laboratory
 

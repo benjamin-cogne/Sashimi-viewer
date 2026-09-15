@@ -323,6 +323,8 @@ export default function SashimiViewer({
   const showUsage = viewMode === 'groups' || arcLabel === 'usage';
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [minJunctionCount, setMinJunctionCount] = useState(3);
+  /** In % usage mode, events below this usage are hidden (junctions without a share fall back to Min reads). */
+  const [minUsagePct, setMinUsagePct] = useState(1);
   const [showReads, setShowReads] = useState(!!initialReads);
   const [readsSampleId, setReadsSampleId] = useState<number | null>(null);
   const [readsAll, setReadsAll] = useState(false); // one reads track under every sample (primary only by default)
@@ -1531,7 +1533,14 @@ export default function SashimiViewer({
     const plotRight = PLOT_LEFT + plotWidth;
     displayTracks.forEach((track, idx) => {
       const color = track.gtex ? track.gtex.tissue.color : TRACK_COLORS[idx % TRACK_COLORS.length];
-      const visible = track.junctions.filter(j => (track.gtex ? j.count >= 1 : j.count >= minJunctionCount) && j.end > viewStart && j.start < viewEnd);
+      const trackEvents = track.group ? track.group.events : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
+      const passes = (j: JunctionArc) => {
+        if (track.gtex) return j.count >= 1;
+        const ev = trackEvents?.get(junctionKey(j));
+        if (ev && ev.shares.length) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
+        return j.count >= minJunctionCount;
+      };
+      const visible = track.junctions.filter(j => passes(j) && j.end > viewStart && j.start < viewEnd);
       const levels = layerJunctions(visible);
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
@@ -1553,7 +1562,7 @@ export default function SashimiViewer({
         const { model, info, foreign } = junctionContext(j);
         const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
         const unique = idx === 0 && comparedTracks.length > 1 && !otherTrackJunctionKeys.has(key);
-        const agg = (track.group ? track.group.events : !track.gtex ? usageEvents.get(track.sampleId) : undefined)?.get(key);
+        const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
         const text = agg ? (share ? pctLabel(share.pct) : `n=${j.count.toLocaleString()}`) : j.count.toLocaleString();
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
@@ -1630,7 +1639,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2615,11 +2624,19 @@ export default function SashimiViewer({
                 <option value="usage">% usage</option>
               </select>
             </label>
-            <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
-              Min reads
-              <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
-                className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-            </label>
+            {showUsage ? (
+              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
+                Min %
+                <input type="number" min={0} max={100} step={0.5} value={minUsagePct} onChange={e => setMinUsagePct(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
+                  className={`${t.inp} w-16 px-1.5 py-0.5 text-xs rounded border`} />
+              </label>
+            ) : (
+              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
+                Min reads
+                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
+                  className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
+              </label>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">

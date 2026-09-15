@@ -200,7 +200,19 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
       const ev = out.get(junctionKey(j))!;
       if (isCanonical(j)) {
         ev.eventCount = Math.round(canonicalWeight);
-        ev.shares.push({ pct: canonicalWeight / total, total: Math.round(total), note: `of the ${Math.round(total).toLocaleString()} reads competing at intron ${label}${touching.length ? ' (canonical weighted by the mean of the two inclusion junctions of the skip)' : ''}` });
+        // the competitors, so a canonical arc below 100 % is explained even when they are hidden (below the threshold) or off-screen
+        const others = [
+          ...pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads)`),
+          ...singles.filter(x => x !== j).map(x => {
+            const cls = out.get(junctionKey(x))!.cls;
+            return `${AGG_CLASS_LABEL[cls]} ${(x.start + 1).toLocaleString()}-${x.end.toLocaleString()} (${x.count.toLocaleString()} reads)`;
+          }),
+        ];
+        ev.shares.push({
+          pct: canonicalWeight / total, total: Math.round(total),
+          note: `of the ${Math.round(total).toLocaleString()} reads competing at intron ${label}${touching.length ? ' (canonical weighted by the mean of the two inclusion junctions of the skip)' : ''}` +
+            (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : ''),
+        });
       } else {
         // alternative 5′ / 3′ site (or another single junction using one site of the intron) against the canonical junction
         const denom = j.count + C;
