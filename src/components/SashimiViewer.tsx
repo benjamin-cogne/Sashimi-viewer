@@ -990,13 +990,6 @@ export default function SashimiViewer({
     return [...tracks, ...withProfile];
   }, [tracks, gtexTracks, tx]);
 
-  const addSample = useCallback((s: { id: number; name: string }) => {
-    if (tracksRef.current.some(t => t.sampleId === s.id)) return;
-    loadCoverage(s.id, s.name);
-    setShowPicker(false);
-    setPickerSearch('');
-  }, [loadCoverage]);
-
   // ---- Gene navigation ----
   const navigateToGene = useCallback(async () => {
     const query = geneSearch.trim();
@@ -2418,12 +2411,15 @@ export default function SashimiViewer({
     return () => window.removeEventListener('keydown', onKey);
   }, [popover]);
 
-  // ---- Filtered picker samples ----
+  // ---- Picker samples: every sample loaded in the page, the ones shown as a track highlighted ----
   const filteredSamples = useMemo(() => {
-    const existing = new Set(tracks.map(t => t.sampleId));
     const q = pickerSearch.toLowerCase();
-    return runSamples.filter(s => !existing.has(s.id) && (!q || s.name.toLowerCase().includes(q)));
-  }, [runSamples, tracks, pickerSearch]);
+    return runSamples.filter(s => !q || s.name.toLowerCase().includes(q));
+  }, [runSamples, pickerSearch]);
+  /** Picker row click: show the sample as a track, or remove its track when it is already shown. */
+  const toggleSample = useCallback((s: { id: number; name: string }) => {
+    if (tracksRef.current.some(t => t.sampleId === s.id)) removeTrack(s.id); else loadCoverage(s.id, s.name);
+  }, [removeTrack, loadCoverage]);
 
   // ======================== Main render (always light theme for readability) ========================
 
@@ -2531,18 +2527,31 @@ export default function SashimiViewer({
         </div>
         <div className="flex items-center gap-2">
           {!hideSamplePicker && <div className="relative">
-            <button onClick={e => openDropdown(e, 256, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium`}>+ Add sample</button>
+            <button onClick={e => openDropdown(e, 256, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
+              title="Samples loaded in the page: click one to show it as a track, click it again to remove the track">
+              {runSamples.length ? `Samples · ${tracks.length}/${runSamples.length} shown` : '+ Add sample'}
+            </button>
             {showPicker && (
-              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-64 max-h-60 overflow-hidden`}>
+              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-64 overflow-hidden`}>
                 <input type="text" value={pickerSearch} onChange={e => setPickerSearch(e.target.value)}
                   placeholder="Search samples…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
+                <div className={`px-3 py-1 text-[10px] ${t.muted} border-b border-gray-100`}>click to show as a track · click again to remove</div>
                 <div className="max-h-48 overflow-y-auto">
                   {filteredSamples.length === 0 ? (
-                    <div className={`px-3 py-2 text-xs ${t.muted}`}>No samples available</div>
-                  ) : filteredSamples.slice(0, 50).map(s => (
-                    <button key={s.id} onClick={() => addSample(s)}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 ${t.text}`}>{s.name}</button>
-                  ))}
+                    <div className={`px-3 py-2 text-xs ${t.muted}`}>{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>
+                  ) : filteredSamples.slice(0, 50).map(s => {
+                    const idx = tracks.findIndex(x => x.sampleId === s.id);
+                    const shown = idx >= 0;
+                    return (
+                      <button key={s.id} onClick={() => toggleSample(s)}
+                        title={shown ? `Shown as track ${idx + 1}${idx === 0 ? ' (primary)' : ''} · click to remove it from the plot` : 'Click to show this sample as a track'}
+                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : `${t.text} hover:bg-gray-50`}`}>
+                        <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
+                        <span className="flex-1 truncate">{s.name}</span>
+                        {shown && <span className="text-indigo-600 text-[10px] font-medium">✓ shown</span>}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             )}
