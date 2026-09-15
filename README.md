@@ -105,6 +105,19 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   denominators, so a canonical arc below 100 % lists in its tooltip the other events at its intron,
   shown or not. Intron retention produces no junction and is never counted.
 
+## Sessions
+
+*Save session* in the header downloads a JSON file (the name is editable, default
+`sashimi-session-GENE-DATE.json`) that records the genome build, the alignment files by name (with
+their index names and sizes), the sample names and order (first = primary), the FASTA, the gene and
+the window shown, and every option of the viewer: depth axis, arc labels, thresholds, reads track,
+groups (by sample name), the chosen reference transcript, and so on. A browser cannot read file
+paths, so the files themselves are not stored: *Load session* reads the JSON, switches the build,
+then waits for the named files to be added (drop them on the page); as soon as they are all
+present the samples are renamed and reordered, the gene opens at the saved window and the options
+apply. *Open with the files present* starts with a subset. Options also carry over from one gene
+search to the next within a page.
+
 ## Deploying in a clinical laboratory
 
 The viewer is a static file: deploy it the way you deploy a PDF.

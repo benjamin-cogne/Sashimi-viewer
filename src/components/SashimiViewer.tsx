@@ -51,6 +51,28 @@ interface SashimiViewerProps {
   initialReads?: boolean;
   /** Display names chosen by the host (renamed samples), by sample id; tracks follow without remounting. */
   sampleNames?: Record<number, string>;
+  /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
+  initialSettings?: Partial<ViewerSettings>;
+  /** Called whenever an option or the navigation changes, with everything a session file needs. */
+  onStateChange?: (state: ViewerState) => void;
+}
+
+/** Every user option of the viewer, as stored in a session file. Samples are referred to by id (the host maps names ↔ ids). */
+export interface ViewerSettings {
+  equalIntrons: boolean; allTranscripts: boolean; commonSnps: boolean; snpMinAf: number;
+  depthAxis: DepthAxis; uniqueOnly: boolean;
+  reads: boolean; readsAll: boolean; readsSample: number | null; collapseReads: boolean; minVafPct: number;
+  minJunctionReads: number; minUsagePct: number; arcLabels: 'reads' | 'usage'; intronRetention: boolean;
+  viewMode: 'samples' | 'groups'; groups: { name: string; sampleIds: number[] }[];
+  knownVariants: boolean;
+  /** reference transcript chosen in the transcript list; absent = the default model of the gene */
+  transcriptId?: string;
+}
+/** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
+export interface ViewerState extends ViewerSettings {
+  gene: { name: string; id?: string; chrom: string; start: number; end: number };
+  view: { chrom: string; start: number; end: number };
+  mark: { start: number; end: number } | null;
 }
 
 /** What a basket screenshot documents: the region, the samples and every option in effect. */
@@ -300,8 +322,9 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, initialSettings, onStateChange,
 }: SashimiViewerProps) {
+  const init = initialSettings ?? {};
   const ds = dataSource;
   const [snapshotState, setSnapshotState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
   const svgRef = useRef<SVGSVGElement>(null);
@@ -326,30 +349,30 @@ export default function SashimiViewer({
   const [svgWidth, setSvgWidth] = useState(1200);
 
   // ---- Options ----
-  const [equalIntrons, setEqualIntrons] = useState(false);
-  const [depthAxis, setDepthAxis] = useState<DepthAxis>('shared');
+  const [equalIntrons, setEqualIntrons] = useState(init.equalIntrons ?? false);
+  const [depthAxis, setDepthAxis] = useState<DepthAxis>(init.depthAxis ?? 'shared');
   // ---- Sample groups (aggregate view): one pooled track per group ----
-  const [groups, setGroups] = useState<SampleGroup[]>([]);
-  const groupIdSeq = useRef(1);
-  const [viewMode, setViewMode] = useState<'samples' | 'groups'>('samples');
+  const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds] })));
+  const groupIdSeq = useRef((init.groups?.length ?? 0) + 1);
+  const [viewMode, setViewMode] = useState<'samples' | 'groups'>(init.viewMode === 'groups' && (init.groups ?? []).some(g => g.sampleIds.length) ? 'groups' : 'samples');
   const [showGroupsDialog, setShowGroupsDialog] = useState(false);
   /** Arc labels of the sample tracks: spliced reads, or the usage of each event against its canonical junction (the Groups view always shows usage). */
-  const [arcLabel, setArcLabel] = useState<'reads' | 'usage'>('reads');
+  const [arcLabel, setArcLabel] = useState<'reads' | 'usage'>(init.arcLabels ?? 'reads');
   const showUsage = viewMode === 'groups' || arcLabel === 'usage';
-  const [uniqueOnly, setUniqueOnly] = useState(false);
-  const [minJunctionCount, setMinJunctionCount] = useState(3);
+  const [uniqueOnly, setUniqueOnly] = useState(init.uniqueOnly ?? false);
+  const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? 3);
   /** In % usage mode, events below this usage are hidden (junctions without a share fall back to Min reads). */
-  const [minUsagePct, setMinUsagePct] = useState(1);
+  const [minUsagePct, setMinUsagePct] = useState(init.minUsagePct ?? 1);
   /** Count intron retention in the usage percentages (IR pills, and retention in the canonical arc's denominator). */
-  const [includeRetention, setIncludeRetention] = useState(true);
-  const [showReads, setShowReads] = useState(!!initialReads);
-  const [readsSampleId, setReadsSampleId] = useState<number | null>(null);
-  const [readsAll, setReadsAll] = useState(false); // one reads track under every sample (primary only by default)
-  const [collapseReads, setCollapseReads] = useState(false);
-  const [minVafPct, setMinVafPct] = useState(10); // variant sites need at least this alternate-allele fraction
-  const [showAllTx, setShowAllTx] = useState(false);
-  const [showSnps, setShowSnps] = useState(false);
-  const [snpMinAf, setSnpMinAf] = useState(0.01);
+  const [includeRetention, setIncludeRetention] = useState(init.intronRetention ?? true);
+  const [showReads, setShowReads] = useState(init.reads ?? !!initialReads);
+  const [readsSampleId, setReadsSampleId] = useState<number | null>(init.readsSample ?? null);
+  const [readsAll, setReadsAll] = useState(init.readsAll ?? false); // one reads track under every sample (primary only by default)
+  const [collapseReads, setCollapseReads] = useState(init.collapseReads ?? false);
+  const [minVafPct, setMinVafPct] = useState(init.minVafPct ?? 10); // variant sites need at least this alternate-allele fraction
+  const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
+  const [showSnps, setShowSnps] = useState(init.commonSnps ?? false);
+  const [snpMinAf, setSnpMinAf] = useState(init.snpMinAf ?? 0.01);
   const [snps, setSnps] = useState<{ chrom: string; start: number; end: number; list: CommonSnp[] } | null>(null);
   const [snpStatus, setSnpStatus] = useState<{ loading: boolean; error?: string }>({ loading: false });
   const snpSeq = useRef(0);
@@ -495,9 +518,7 @@ export default function SashimiViewer({
     }));
   }, [showAllTx, altTx, currentGeneName]);
   /** Make one of the listed transcripts the displayed reference model (exon numbering, junction classes, HGVS, usage percentages). */
-  const chooseModel = useCallback((id: string) => {
-    const t = altTx?.data.transcripts.find(x => x.id === id);
-    if (!t) return;
+  const applyModel = useCallback((t: TranscriptModel) => {
     const sorted = [...t.exons].sort((a, b) => a.start - b.start);
     setTranscript(prev => ({
       gene_name: prev?.gene_name ?? currentGeneName, transcript_id: t.id, translation_id: null, is_mane_select: t.is_mane,
@@ -506,7 +527,26 @@ export default function SashimiViewer({
       exons: sorted.map((e, i) => ({ start: e.start, end: e.end, rank: t.strand > 0 ? i + 1 : sorted.length - i })),
       cds_start: t.cds_start ?? null, cds_end: t.cds_end ?? null,
     }));
-  }, [altTx, currentGeneName, currentChrom]);
+  }, [currentGeneName, currentChrom]);
+  const chooseModel = useCallback((id: string) => {
+    const t = altTx?.data.transcripts.find(x => x.id === id);
+    if (t) applyModel(t);
+  }, [altTx, applyModel]);
+  // A session that chose a reference transcript: look it up in the gene's transcript list once the default model is in
+  const wantedTxRef = useRef(init.transcriptId);
+  useEffect(() => {
+    const want = wantedTxRef.current;
+    if (!want || !tx || tx.transcriptId === want) return;
+    let cancelled = false;
+    const list = altTx && altTx.geneName === currentGeneName ? Promise.resolve(altTx.data) : ds.getAllTranscripts(currentGeneName, currentGeneId, hintRef.current);
+    list.then(d => {
+      if (cancelled) return;
+      wantedTxRef.current = undefined;
+      const t = d.transcripts.find(x => x.id === want);
+      if (t) applyModel(t);
+    }).catch(() => { wantedTxRef.current = undefined; });
+    return () => { cancelled = true; };
+  }, [tx, altTx, currentGeneName, currentGeneId, applyModel]);
   /** junction key → transcript ids whose consecutive exons form that intron (for arc tooltips). */
   const altJunctionIndex = useMemo(() => {
     const idx = new Map<string, string[]>();
@@ -562,7 +602,7 @@ export default function SashimiViewer({
 
   // ---- Known variants of the loaded samples (clinical indication, diagnostic, chromosome map) ----
   const [knownVariants, setKnownVariants] = useState<Map<number, KnownVariant[]>>(() => new Map());
-  const [showKnown, setShowKnown] = useState(true);
+  const [showKnown, setShowKnown] = useState(init.knownVariants ?? true);
   const knownRequested = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (!ds.getKnownVariants) return;
@@ -2609,6 +2649,22 @@ export default function SashimiViewer({
   }, [removeTrack, loadCoverage]);
 
   // ======================== Main render (always light theme for readability) ========================
+
+  // Report every option and the navigation to the host (session files, options kept across remounts)
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+  useEffect(() => {
+    onStateChangeRef.current?.({
+      equalIntrons, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
+      reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
+      minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds] })), knownVariants: showKnown,
+      transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
+      gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
+      view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
+      mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
+    });
+  }, [equalIntrons, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',

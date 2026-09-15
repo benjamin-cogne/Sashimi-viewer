@@ -6,7 +6,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import SashimiViewer from '../components/SashimiViewer';
+import SashimiViewer, { type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
+import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { LocalDataSource, type LocalSample } from './localSource';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus } from '../components/sashimi/geometry';
@@ -82,6 +83,13 @@ function App() {
   const [opened, setOpened] = useState<{ geneName: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; mark?: { start: number; end: number }; reads?: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ---- Sessions: the viewer's latest state (options + navigation), a loaded session waiting for its files ----
+  const viewerStateRef = useRef<ViewerState | null>(null);
+  const [sessionName, setSessionName] = useState(() => defaultSessionName());
+  const [sessionNameEdited, setSessionNameEdited] = useState(false);
+  const [pendingSession, setPendingSession] = useState<{ file: SessionFile; name: string } | null>(null);
+  const [viewerSettings, setViewerSettings] = useState<Partial<ViewerSettings> | undefined>();
+  const [sessionSeq, setSessionSeq] = useState(0);   // bumps the viewer key so a loaded session always remounts the viewer
   const nextId = useRef(1);
   const dsRef = useRef<LocalDataSource>();
   if (!dsRef.current) { dsRef.current = new LocalDataSource({ build }); if (LINK) dsRef.current.knownVariants = LINK.variants; }
@@ -166,9 +174,66 @@ function App() {
     setBusy(false);
   }, [gene, ds, openLink]);
 
+  // Options the viewer starts with: a loaded session, else the previous viewer's options (kept across gene searches;
+  // a chosen reference transcript only when it is the same gene)
+  const viewerInit: Partial<ViewerSettings> | undefined = (() => {
+    if (viewerSettings) return viewerSettings;
+    const prev = viewerStateRef.current;
+    if (!prev) return undefined;
+    return { ...prev, transcriptId: prev.gene.name === opened?.geneName ? prev.transcriptId : undefined };
+  })();
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
-  const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}`, [opened, samples, build, fasta]);
+  const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [opened, samples, build, fasta, sessionSeq]);
   const makePrimary = useCallback((id: number) => setSamples(prev => [...prev.filter(s => s.id === id), ...prev.filter(s => s.id !== id)]), []);
+
+  // ---- Save / load a session (JSON) ----
+  const saveSession = useCallback(() => {
+    const session = buildSession({ build, samples, fasta, state: opened ? viewerStateRef.current : null });
+    const name = (sessionName.trim() || defaultSessionName(session.gene?.name)).replace(/\.json$/i, '') + '.json';
+    const url = URL.createObjectURL(new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' }));
+    const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotes([`Session saved as ${name} (${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}). Files are recorded by name: add them again when loading.`]);
+  }, [build, samples, fasta, opened, sessionName]);
+
+  /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
+  const applySession = useCallback((session: SessionFile) => {
+    const { matched } = matchSession(session, samples);
+    for (const { entry, sample } of matched) if (sample.name !== entry.name) ds.renameSample(sample.id, entry.name);
+    const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name } : s; });
+    const ordered = [...matched.map(m => renamed.find(s => s.id === m.sample.id)!), ...renamed.filter(s => !matched.some(m => m.sample.id === s.id))];
+    setSamples(ordered);
+    setViewerSettings(viewerSettingsOf(session, ordered));
+    setSessionSeq(n => n + 1);
+    setPendingSession(null);
+    if (session.gene) {
+      setGene(session.gene.name);
+      setOpened({ geneName: session.gene.name, chrom: session.gene.chrom, start: session.gene.start, end: session.gene.end, view: session.gene.view, mark: session.gene.mark ?? undefined });
+    }
+    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}.`]);
+  }, [samples, ds]);
+
+  const loadSession = useCallback(async (file: File) => {
+    setError(null);
+    try {
+      const session = parseSession(await file.text());
+      setSessionName(file.name); setSessionNameEdited(true);
+      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); }
+      setPendingSession({ file: session, name: file.name });
+    } catch (e: any) {
+      setError(`Could not load the session ${file.name}: ${e.message}`);
+    }
+  }, [build, ds, fasta]);
+
+  // A pending session applies itself as soon as every one of its files is present (or right away when it needs none)
+  useEffect(() => {
+    if (!pendingSession) return;
+    const { missing } = matchSession(pendingSession.file, samples);
+    if (!missing.length) applySession(pendingSession.file);
+  }, [pendingSession, samples, applySession]);
+
+  // Default file name follows the gene until the user types one
+  useEffect(() => { if (!sessionNameEdited) setSessionName(defaultSessionName(opened?.geneName)); }, [opened?.geneName, sessionNameEdited]);
 
   const dropRef = useRef<HTMLDivElement>(null);
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); addFiles(e.dataTransfer.files); };
@@ -231,8 +296,29 @@ function App() {
           ))}
           {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
         </div>
+        <div className="flex items-center gap-1.5 ml-auto" title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again.">
+          <span className="text-xs text-gray-600">Session</span>
+          <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false}
+            className="border border-gray-300 rounded px-2 py-0.5 text-xs w-64 bg-white font-mono" title="File name of the session to save (.json)" />
+          <button onClick={saveSession} disabled={!samples.length && !opened} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40" title="Download the session as a JSON file">Save session</button>
+          <label className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 cursor-pointer font-medium" title="Load a session JSON file, then add the alignment files it names">
+            Load session
+            <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
+          </label>
+        </div>
         </div>
       </header>
+      {pendingSession && (() => {
+        const { matched, missing } = matchSession(pendingSession.file, samples);
+        return (
+          <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="font-semibold">Session {pendingSession.name}</span>
+            <span>{matched.length}/{pendingSession.file.samples.length} files present · add (or drop on the page): {missing.map(m => m.file).join(', ')}</span>
+            <button onClick={() => applySession(pendingSession.file)} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Open with the files present</button>
+            <button onClick={() => setPendingSession(null)} className="text-indigo-500 hover:text-indigo-800" title="Forget this session">×</button>
+          </div>
+        );
+      })()}
       {(notes.length > 0 || error || (opened && !samples.length)) && (
         <div className="px-5 py-2 text-xs space-y-0.5">
           {opened && !samples.length && (
@@ -260,7 +346,8 @@ function App() {
       ) : (
         <div className="p-3" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
           <SashimiViewer key={viewerKey} geneName={opened.geneName} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} />
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
+            initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; if (viewerSettings) setViewerSettings(undefined); }} />
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
