@@ -241,7 +241,8 @@ function toTranscriptData(g: GeneModels): TranscriptData {
   const exons = m.exons.map((e, i) => ({ start: e.start + 1, end: e.end, rank: m.strand > 0 ? i + 1 : m.exons.length - i }));
   return {
     gene_name: g.symbol, transcript_id: m.name, translation_id: null, is_mane_select: kind === 'mane', model_kind: kind, biotype: biotypeOf(m),
-    source: 'refseq', chrom: g.chrom, strand: m.strand, start: g.start + 1, end: g.end, exons,
+    // the model's own span, not the gene's: another isoform starting upstream must not draw as an intron before exon 1
+    source: 'refseq', chrom: g.chrom, strand: m.strand, start: m.txStart + 1, end: m.txEnd, exons,
     cds_start: isCoding(m) ? m.cdsStart + 1 : null, cds_end: isCoding(m) ? m.cdsEnd : null,
   };
 }

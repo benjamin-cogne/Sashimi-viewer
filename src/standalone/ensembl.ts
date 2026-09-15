@@ -48,7 +48,8 @@ function buildTranscript(data: any, label: string): TranscriptData {
   return {
     gene_name: data.display_name || label, transcript_id: tx.id || '', translation_id: tr.id ?? null, is_mane_select: !!tx.is_mane_select,
     model_kind: tx.is_mane_select ? 'mane' : tx.is_canonical ? 'canonical' : 'longest', biotype: tx.biotype || '', source: 'ensembl',
-    chrom: seq.startsWith('chr') ? seq : `chr${seq}`, strand, start: data.start ?? 0, end: data.end ?? 0,
+    // the transcript's own span (data.start/end is the gene's, which may extend beyond this model)
+    chrom: seq.startsWith('chr') ? seq : `chr${seq}`, strand, start: tx.start ?? exons[0]?.start ?? data.start ?? 0, end: tx.end ?? exons[exons.length - 1]?.end ?? data.end ?? 0,
     exons, cds_start: cs, cds_end: ce,
   };
 }
