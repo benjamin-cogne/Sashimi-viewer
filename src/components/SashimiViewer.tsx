@@ -1568,7 +1568,7 @@ export default function SashimiViewer({
         const inAlt = altJunctionIndex.get(key);
         const aggText = agg && track.group
           ? (agg.shares.length
-            ? agg.shares.map(sh => `${pctLabel(sh.pct)} of the ${sh.total.toLocaleString()} reads competing at intron ${sh.fromExon}→${sh.toExon}`).join('\n')
+            ? agg.shares.map(sh => `${pctLabel(sh.pct)} ${sh.note}`).join('\n')
             : 'touches no annotated splice site: no share') +
             `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired, mean of both)' : ''} · ${j.count.toLocaleString()} pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples\n`
           : null;
@@ -2892,7 +2892,7 @@ export default function SashimiViewer({
             <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
               <div>
                 <div className="font-bold text-sm">Sample groups</div>
-                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with the share of its splicing event (canonical, alternative 5′ / 3′ site, exon skipping, pseudo-exon) among the reads competing at the intron.</div>
+                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with the share of its splicing event (canonical, alternative 5′ / 3′ site, pseudo-exon) among the reads competing at the intron; exon skipping is measured against its two inclusion junctions pooled, 2·S / (I₁ + I₂ + 2·S), one value for the skip and one for both inclusion arcs.</div>
               </div>
               <button onClick={() => setShowGroupsDialog(false)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
             </div>
