@@ -14,6 +14,7 @@ import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sash
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
+import { sumCoverage, poolJunctions, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent } from './sashimi/aggregate';
 
 // ======================== Types ========================
 
@@ -70,7 +71,11 @@ export interface SashimiSnapshotContext {
     reads: boolean; readsSample?: string; collapsed: boolean; minJunctionReads: number; minVafPct: number;
     /** minimum allele frequency of the common-SNP track, null when the track is off */
     commonSnpsMinAf?: number | null;
+    /** aggregate view: one pooled track per sample group instead of one track per sample */
+    aggregate?: boolean;
   };
+  /** sample groups defined for the aggregate view */
+  groups?: { name: string; samples: string[] }[];
   variantSites?: { pos: number; ref: string; alt: string; vaf: number; depth: number }[];
   /** variants previously identified in the primary sample that lie in the region (1-based start) */
   knownVariants?: { kind: string; chrom: string; start: number; end: number; label: string; text: string }[];
@@ -114,7 +119,14 @@ interface TrackData {
   fetched?: FetchWindow;
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
+  /** Pooled track of a sample group (aggregate view); sampleId is negative */
+  group?: { id: number; n: number; loaded: number; events: Map<string, AggEvent>; samplesWith: Map<string, number> };
 }
+
+/** A named set of samples pooled into one track in the aggregate ("Groups") view. */
+interface SampleGroup { id: number; name: string; sampleIds: number[] }
+const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
+const PSEUDO_EXON_COLOR = '#7c3aed';
 
 const GTEX_FAV_KEY = 'sashimi.gtex.favourites';
 function loadGtexFavourites(): string[] {
@@ -299,6 +311,11 @@ export default function SashimiViewer({
   // ---- Options ----
   const [equalIntrons, setEqualIntrons] = useState(false);
   const [depthAxis, setDepthAxis] = useState<DepthAxis>('shared');
+  // ---- Sample groups (aggregate view): one pooled track per group ----
+  const [groups, setGroups] = useState<SampleGroup[]>([]);
+  const groupIdSeq = useRef(1);
+  const [viewMode, setViewMode] = useState<'samples' | 'groups'>('samples');
+  const [showGroupsDialog, setShowGroupsDialog] = useState(false);
   const [uniqueOnly, setUniqueOnly] = useState(false);
   const [minJunctionCount, setMinJunctionCount] = useState(3);
   const [showReads, setShowReads] = useState(!!initialReads);
@@ -793,6 +810,29 @@ export default function SashimiViewer({
 
   // ---- Reads track loading (primary sample by default, or every sample; only below the visibility window) ----
   const effectiveReadsSampleId = tracks.some(t => t.sampleId === readsSampleId) ? readsSampleId : (tracks[0]?.sampleId ?? null);
+  // ---- Sample groups ----
+  const addGroup = useCallback(() => setGroups(prev => [...prev, { id: groupIdSeq.current++, name: `Group ${prev.length + 1}`, sampleIds: [] }]), []);
+  const renameGroup = useCallback((id: number, name: string) => setGroups(prev => prev.map(g => g.id === id ? { ...g, name } : g)), []);
+  const deleteGroup = useCallback((id: number) => setGroups(prev => prev.filter(g => g.id !== id)), []);
+  const removeFromGroup = useCallback((id: number, sid: number) => setGroups(prev => prev.map(g => g.id === id ? { ...g, sampleIds: g.sampleIds.filter(x => x !== sid) } : g)), []);
+  /** A sample belongs to one group: adding it moves it out of any other. Its coverage loads at once so the group track can be drawn. */
+  const addToGroup = useCallback((id: number, sid: number) => {
+    setGroups(prev => prev.map(g => g.id === id
+      ? { ...g, sampleIds: g.sampleIds.includes(sid) ? g.sampleIds : [...g.sampleIds, sid] }
+      : { ...g, sampleIds: g.sampleIds.filter(x => x !== sid) }));
+    if (!tracksRef.current.some(t => t.sampleId === sid)) { const s = runSamples.find(x => x.id === sid); if (s) loadCoverage(s.id, s.name); }
+  }, [runSamples, loadCoverage]);
+  // Aggregate view: every member needs its coverage (loaded as a sample track, hidden while the groups are shown)
+  useEffect(() => {
+    if (viewMode !== 'groups') return;
+    if (!groups.length) { setViewMode('samples'); return; }
+    for (const g of groups) for (const sid of g.sampleIds) {
+      if (tracksRef.current.some(t => t.sampleId === sid)) continue;
+      const s = runSamples.find(x => x.id === sid);
+      if (s) loadCoverage(s.id, s.name);
+    }
+  }, [viewMode, groups, runSamples, loadCoverage]);
+
   /** Samples whose reads are shown, in track order. */
   const readsSampleIds = useMemo(() => !showReads ? [] : readsAll ? tracks.map(t => t.sampleId) : effectiveReadsSampleId == null ? [] : [effectiveReadsSampleId],
     [showReads, readsAll, tracks, effectiveReadsSampleId]);
@@ -973,6 +1013,21 @@ export default function SashimiViewer({
    * each MANE exon (0–1) computed from the tissue's junction medians at both exon boundaries; tissues
    * where the gene's median TPM is below GTEX_MIN_TPM show nothing but "low coverage".
    */
+  /** One pooled track per sample group: summed coverage, summed junction reads, per-intron shares of every splicing event. */
+  const groupTracks = useMemo((): TrackData[] => groups.map(g => {
+    const members = g.sampleIds.map(sid => tracks.find(t => t.sampleId === sid)).filter((t): t is TrackData => !!t);
+    const { junctions, samplesWith } = poolJunctions(members);
+    const failed = members.filter(m => m.error && !m.coverage.length);
+    const pending = g.sampleIds.filter(sid => !members.some(m => m.sampleId === sid) && runSamples.some(x => x.id === sid));
+    return {
+      sampleId: GROUP_ID_BASE - g.id, sampleName: g.name || `Group ${g.id}`,
+      coverage: sumCoverage(members.map(m => m.coverage)), junctions,
+      loading: members.some(m => m.loading) || pending.length > 0,
+      error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
+      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, events: aggregateJunctions(junctions, tx), samplesWith },
+    };
+  }), [groups, tracks, tx, runSamples]);
+
   const displayTracks = useMemo(() => {
     const withProfile = gtexTracks.map(t => {
       if (!t.gtex || t.gtex.lowCoverage) return { ...t, coverage: [], junctions: t.gtex?.lowCoverage ? [] : t.junctions };
@@ -987,8 +1042,8 @@ export default function SashimiViewer({
       }
       return { ...t, coverage };
     });
-    return [...tracks, ...withProfile];
-  }, [tracks, gtexTracks, tx]);
+    return [...(viewMode === 'groups' ? groupTracks : tracks), ...withProfile];
+  }, [tracks, gtexTracks, tx, viewMode, groupTracks]);
 
   // ---- Gene navigation ----
   const navigateToGene = useCallback(async () => {
@@ -1085,13 +1140,15 @@ export default function SashimiViewer({
   );
 
   /** Junction keys seen (above threshold) in the comparison tracks, for "unique to primary" highlighting. */
+  /** Tracks compared for the "unique to the first track" highlight: the samples, or the groups in aggregate view. */
+  const comparedTracks = viewMode === 'groups' ? groupTracks : tracks;
   const otherTrackJunctionKeys = useMemo(() => {
     const keys = new Set<string>();
-    for (let i = 1; i < tracks.length; i++) {
-      for (const j of tracks[i].junctions) if (j.count >= minJunctionCount) keys.add(junctionKey(j));
+    for (let i = 1; i < comparedTracks.length; i++) {
+      for (const j of comparedTracks[i].junctions) if (j.count >= minJunctionCount) keys.add(junctionKey(j));
     }
     return keys;
-  }, [tracks, minJunctionCount]);
+  }, [comparedTracks, minJunctionCount]);
 
   const plotRight = PLOT_LEFT + plotWidth;
 
@@ -1410,7 +1467,9 @@ export default function SashimiViewer({
           equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', uniqueOnly,
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
+          aggregate: viewMode === 'groups',
         },
+        groups: groups.length ? groups.map(g => ({ name: g.name, samples: g.sampleIds.map(id => runSamples.find(x => x.id === id)?.name ?? String(id)) })) : undefined,
         variantSites: readsTracks.get(readsSampleIds[0])?.sites.map(st => ({ pos: st.pos + 1, ref: st.ref, alt: st.alt, vaf: st.vaf, depth: st.depth })),
         knownVariants: showKnown ? primaryKnownHere.filter(v => v.end > viewStart && v.start < viewEnd).map(v => ({ kind: v.kind, chrom: v.chrom || currentChrom, start: v.start + 1, end: v.end, label: v.label, text: v.text })) : undefined,
         timestamp: new Date().toISOString(),
@@ -1423,7 +1482,7 @@ export default function SashimiViewer({
     }
     setTimeout(() => setSnapshotState('idle'), 2500);
   }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, readsAll, readsSampleIds, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
-    equalIntrons, showAllTx, depthAxis, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere]);
+    equalIntrons, showAllTx, depthAxis, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere, viewMode, groups, runSamples]);
 
   interface ArcRender {
     j: JunctionArc; key: string; dragKey: string; level: number; color: string; dashed: boolean; unique: boolean;
@@ -1433,6 +1492,10 @@ export default function SashimiViewer({
     offset: number;
     /** apex height above the higher of the two arc ends, in px */
     apexH: number;
+    /** pill text: spliced reads, or the share at the intron for a group track */
+    text: string;
+    /** aggregate-view event of this junction (group tracks only) */
+    agg?: AggEvent;
     /** Reading-frame consequence, for non-canonical junctions of a coding model. */
     frame: FrameInfo | null;
   }
@@ -1465,7 +1528,7 @@ export default function SashimiViewer({
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1.
       // Relative mode draws each sample as a fraction of its own maximum in view (the axis reads 0–100 %).
       const ownMax = maxDepthIn(track.coverage, viewStart, viewEnd);
-      const yMax = track.gtex ? 1 : depthAxis === 'relative' ? Math.max(1, ownMax) : niceMax(depthAxis === 'shared' ? globalMaxDepth : ownMax);
+      const yMax = track.gtex ? 1 : (depthAxis === 'relative' || track.group) ? Math.max(1, ownMax) : niceMax(depthAxis === 'shared' ? globalMaxDepth : ownMax);
       // Arcs are first laid out against a baseline at y = 0 and measured; the junction area is then sized to
       // what they and their pills really occupy (rather than a fixed height per nesting level), and everything
       // is shifted down once the real baseline is known. This keeps the samples close together without any
@@ -1477,7 +1540,10 @@ export default function SashimiViewer({
         const dragKey = `${track.sampleId}:${key}`;
         const { model, info, foreign } = junctionContext(j);
         const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
-        const unique = idx === 0 && tracks.length > 1 && !otherTrackJunctionKeys.has(key);
+        const unique = idx === 0 && comparedTracks.length > 1 && !otherTrackJunctionKeys.has(key);
+        const agg = track.group?.events.get(key);
+        const share = agg?.shares[0];
+        const text = agg ? (share ? pctLabel(share.pct) : `n=${j.count.toLocaleString()}`) : j.count.toLocaleString();
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
         const y2 = depthToY(depthAt(track.coverage, j.end));
@@ -1500,15 +1566,21 @@ export default function SashimiViewer({
         if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: partner('left') };
         else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: partner('right') };
         const inAlt = altJunctionIndex.get(key);
-        const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
+        const aggText = agg && track.group
+          ? (agg.shares.length
+            ? agg.shares.map(sh => `${pctLabel(sh.pct)} of the ${sh.total.toLocaleString()} reads competing at intron ${sh.fromExon}→${sh.toExon}`).join('\n')
+            : 'touches no annotated splice site: no share') +
+            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired, mean of both)' : ''} · ${j.count.toLocaleString()} pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples\n`
+          : null;
+        const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
           `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · intron ${formatBp(j.end - j.start)}\n` +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +
-          (unique ? `\nnot seen in the comparison sample${tracks.length > 2 ? 's' : ''}` : '');
+          (unique ? `\nnot seen in the comparison ${track.group ? 'group' : 'sample'}${comparedTracks.length > 2 ? 's' : ''}` : '');
         return {
-          j, key, dragKey, level, color: unique ? UNIQUE_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH,
+          j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
+          strokeW: track.group ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, agg,
         };
       });
       // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
@@ -1516,7 +1588,7 @@ export default function SashimiViewer({
       const placed: { x: number; y: number; w: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
-        const w = String(a.j.count).length * 6 + 10 + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
+        const w = a.text.length * 6 + 10 + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
         for (let iter = 0; iter < 24; iter++) {
           const hit = placed.some(p => Math.abs(p.x - a.label!.x) < (p.w + w) / 2 + 4 && Math.abs(p.y - a.label!.y) < LABEL_H + 2);
           if (!hit) break;
@@ -1546,7 +1618,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [tracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -1574,6 +1646,7 @@ export default function SashimiViewer({
     });
     line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
+    if (viewMode === 'groups') line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     items.push({
       w: 150, el: (
         <g key="lf">
@@ -1599,7 +1672,7 @@ export default function SashimiViewer({
       g(SAME_SENSE_COLOR, 'neighbouring gene, same strand', 'ln1');
       g(ANTISENSE_COLOR, 'neighbouring gene, antisense', 'ln2');
     }
-    if (tracks.length > 1) line(UNIQUE_COLOR, false, `only in ${tracks[0].sampleName}`, 'l3');
+    if (comparedTracks.length > 1) line(UNIQUE_COLOR, false, `only in ${comparedTracks[0].sampleName}`, 'l3');
     items.push({
       w: 60, el: (
         <g key="l4">
@@ -1689,7 +1762,7 @@ export default function SashimiViewer({
       });
     }
     items.push({
-      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>arc width ∝ log₂ reads · label = spliced reads</text>,
+      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ share · label = % of the reads competing at the intron (reads pooled over the group)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
     });
     return items;
   })();
@@ -1772,9 +1845,10 @@ export default function SashimiViewer({
     const isPrimary = idx === 0 && tracks.length > 1;
     const gtexNote = track.gtex ? `  GTEx ${track.gtex.dataset.replace('gtex_', '')} · n=${track.gtex.tissue.samples}${track.gtex.tpm != null ? ` · median ${track.gtex.tpm < 10 ? track.gtex.tpm.toFixed(2) : track.gtex.tpm.toFixed(0)} TPM` : ''}${track.gtex.lowCoverage ? ' · LOW COVERAGE (TPM < 1)' : ' · exon usage from junction medians'}` : '';
     const gtexWarn = track.gtex ? (track.error || track.gtex.warning || '') : '';
-    const relative = depthAxis === 'relative' && !track.gtex;
+    const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
+    const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
     const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
-    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + axisNote.length * 5.2;
+    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2;
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
       : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
@@ -1850,7 +1924,7 @@ export default function SashimiViewer({
           })}
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
-            const txt = a.j.count.toLocaleString();
+            const txt = a.text;
             const w = txt.length * 6 + 10;
             const lx = a.label!.x, ly = a.label!.y + a.offset;
             const glyph = a.frame && a.frame.frame !== 'unknown' ? a.frame : null;
@@ -1887,11 +1961,12 @@ export default function SashimiViewer({
             <tspan fill={INK.text} fontWeight={600}>{track.sampleName}</tspan>
             {isPrimary && <tspan fill={INK.faint} fontSize={9}>{'  primary'}</tspan>}
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
+            {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
 
           </text>
           {/* Make primary chip (standalone): promote this sample to the first track */}
-          {allowPrimarySwitch && !track.gtex && idx > 0 && (
+          {allowPrimarySwitch && !track.gtex && !track.group && idx > 0 && (
             <g data-export="skip" transform={`translate(${labelW + 52}, 0)`} style={{ cursor: 'pointer' }}
               onClick={e => { e.stopPropagation(); setPrimary(track.sampleId); onPrimaryChange?.(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
               <title>{`Make ${track.sampleName} the primary sample (first track; "unique" junctions are judged against the others)`}</title>
@@ -1900,7 +1975,7 @@ export default function SashimiViewer({
             </g>
           )}
           {/* Reads chip: show this sample's alignments right under its coverage */}
-          {!track.gtex && (() => {
+          {!track.gtex && !track.group && (() => {
             const active = readsSampleIds.includes(track.sampleId);
             return (
               <g data-export="skip" transform={`translate(${labelW + 4}, 0)`} style={{ cursor: 'pointer' }}
@@ -1924,12 +1999,14 @@ export default function SashimiViewer({
           </g>
         )}
 
-        {/* Remove */}
-        <g data-export="skip" style={{ cursor: 'pointer' }} onClick={() => removeTrack(track.sampleId)}>
-          <title>Remove {track.sampleName}</title>
-          <circle cx={plotRight + 16} cy={yOff + 12} r={8} fill={INK.bg} stroke={INK.grid} />
-          <text x={plotRight + 16} y={yOff + 15.5} textAnchor="middle" fill={INK.muted} fontSize={12}>×</text>
-        </g>
+        {/* Remove (group tracks are managed in the groups dialog) */}
+        {!track.group && (
+          <g data-export="skip" style={{ cursor: 'pointer' }} onClick={() => removeTrack(track.sampleId)}>
+            <title>Remove {track.sampleName}</title>
+            <circle cx={plotRight + 16} cy={yOff + 12} r={8} fill={INK.bg} stroke={INK.grid} />
+            <text x={plotRight + 16} y={yOff + 15.5} textAnchor="middle" fill={INK.muted} fontSize={12}>×</text>
+          </g>
+        )}
       </g>
     );
   };
@@ -2526,6 +2603,17 @@ export default function SashimiViewer({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {!hideSamplePicker && (
+            <span className="flex items-center rounded border border-gray-200 overflow-hidden text-xs"
+              title="Samples: one track per sample with read counts. Groups: one pooled track per sample group, each arc labelled with the share of its splicing event among the reads competing at the intron.">
+              <button onClick={() => setViewMode('samples')} className={`px-2.5 py-1 ${viewMode === 'samples' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-indigo-50'}`}>Samples</button>
+              <button onClick={() => { if (groups.some(g => g.sampleIds.length)) setViewMode('groups'); else setShowGroupsDialog(true); }}
+                className={`px-2.5 py-1 border-l border-gray-200 ${viewMode === 'groups' ? 'bg-indigo-600 text-white' : 'bg-white text-gray-600 hover:bg-indigo-50'}`}>Groups{groups.length ? ` (${groups.length})` : ''}</button>
+            </span>
+          )}
+          {!hideSamplePicker && (
+            <button onClick={() => setShowGroupsDialog(true)} className={`${t.btn} px-3 py-1 font-medium`} title="Create and edit the sample groups of the aggregate view">Groups…</button>
+          )}
           {!hideSamplePicker && <div className="relative">
             <button onClick={e => openDropdown(e, 256, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
               title="Samples loaded in the page: click one to show it as a track, click it again to remove the track">
@@ -2798,6 +2886,60 @@ export default function SashimiViewer({
           </div>
         )}
       </div>
+      {showGroupsDialog && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setShowGroupsDialog(false)}>
+          <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-2xl text-gray-900" onMouseDown={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
+              <div>
+                <div className="font-bold text-sm">Sample groups</div>
+                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with the share of its splicing event (canonical, alternative 5′ / 3′ site, exon skipping, pseudo-exon) among the reads competing at the intron.</div>
+              </div>
+              <button onClick={() => setShowGroupsDialog(false)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
+            </div>
+            <div className="px-4 py-3 space-y-3 max-h-[60vh] overflow-y-auto">
+              {groups.length === 0 && <div className="text-xs text-gray-500">No group yet. Create one and add samples to it; a sample belongs to one group at a time.</div>}
+              {groups.map((g, gi) => {
+                const color = TRACK_COLORS[gi % TRACK_COLORS.length];
+                const nameOf = (sid: number) => runSamples.find(x => x.id === sid)?.name ?? tracks.find(x => x.sampleId === sid)?.sampleName ?? `#${sid}`;
+                const free = runSamples.filter(x => !g.sampleIds.includes(x.id));
+                return (
+                  <div key={g.id} className="border border-gray-200 rounded-lg p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded-sm shrink-0" style={{ background: color }} />
+                      <input value={g.name} onChange={e => renameGroup(g.id, e.target.value)} placeholder="Group name"
+                        className={`${t.inp} border rounded px-2 py-1 text-sm font-semibold flex-1 min-w-0`} />
+                      <span className="text-[11px] text-gray-500 whitespace-nowrap">{g.sampleIds.length} sample{g.sampleIds.length === 1 ? '' : 's'}</span>
+                      <button onClick={() => deleteGroup(g.id)} className="text-xs text-red-600 hover:underline">delete</button>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                      {g.sampleIds.map(sid => (
+                        <span key={sid} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border bg-gray-50 border-gray-300">
+                          {nameOf(sid)}
+                          <button onClick={() => removeFromGroup(g.id, sid)} className="text-gray-400 hover:text-red-500" title="Remove from the group">×</button>
+                        </span>
+                      ))}
+                      <select value="" onChange={e => { const id = parseInt(e.target.value); if (id) addToGroup(g.id, id); }}
+                        className={`${t.inp} border rounded px-1 py-0.5 text-xs`} title="Add a sample loaded in the page to this group">
+                        <option value="">+ add sample…</option>
+                        {free.map(x => { const other = groups.find(o => o.id !== g.id && o.sampleIds.includes(x.id)); return <option key={x.id} value={x.id}>{x.name}{other ? ` (moves from ${other.name})` : ''}</option>; })}
+                      </select>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-gray-200">
+              <button onClick={addGroup} className={`${t.btn} px-3 py-1 font-medium`}>+ New group</button>
+              <span className="text-[11px] text-gray-500">{runSamples.length} sample{runSamples.length === 1 ? '' : 's'} loaded in the page</span>
+              <span className="ml-auto flex gap-2">
+                <button onClick={() => setShowGroupsDialog(false)} className={`${t.btn} px-3 py-1`}>Close</button>
+                <button onClick={() => { setShowGroupsDialog(false); setViewMode('groups'); }} disabled={!groups.some(g => g.sampleIds.length)}
+                  className="px-3 py-1 text-xs rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700 font-medium">Show groups</button>
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
         Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · drag an arc vertically to untangle it · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>

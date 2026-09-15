@@ -78,6 +78,17 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   sample scaled to its own maximum) or *relative* (each sample drawn as a percentage of its own
   maximum in the current window, axis 0–100 %, the maximum shown next to the sample name), so
   profiles of a shallow and a deep library can be compared by shape.
+- **Groups (aggregate view)**: *Groups…* creates named sample groups (patients, controls, a
+  tissue…); the *Samples | Groups* switch then draws one pooled track per group. Coverage and
+  junction reads are summed over the group's samples, the coverage is drawn relative to its own
+  maximum, and each arc is labelled with a **percentage** instead of a read count: the share of its
+  splicing event among all the reads competing at that annotated intron, i.e. every junction using
+  the intron's donor or its acceptor (canonical, alternative 5′ or 3′ site, exon skipping,
+  pseudo-exon). An alternative-3′ arc into a cryptic exon of at most 500 bp followed by an
+  alternative-5′ arc out of it is paired into one *pseudo-exon* event (purple, one share, the mean
+  of the two arcs' reads); an exon-skipping arc competes at both introns it spans and the tooltip
+  gives both shares. Junctions touching no annotated splice site show their pooled read count
+  (`n=…`). Red arcs are events seen in the first group only.
 
 ## Deploying in a clinical laboratory
 
