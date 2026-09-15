@@ -12,6 +12,7 @@ import {
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR } from '../standalone/alignments';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { sumCoverage, poolJunctions, poolSpanning, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
@@ -135,6 +136,11 @@ const RETENTION_COLOR = '#0d9488';
 /** Exon–intron boundaries of a model, for the unspliced-read counts of the coverage request. */
 const boundariesOf = (t: TxModel | null): BoundaryHint | undefined =>
   t && t.exons.length > 1 ? { intronStarts: t.exons.slice(0, -1).map(e => e.end), intronEnds: t.exons.slice(1).map(e => e.start) } : undefined;
+/** Same rule as the decoder's boundary counts: one aligned block through an annotated boundary with the exon and intron anchors. */
+const readSpansBoundary = (r: AlignedRead, b: BoundaryHint | undefined): boolean =>
+  !!b && r.b.some(([bs, be]) =>
+    b.intronStarts.some(p => bs <= p - SPAN_EXON_ANCHOR && be >= p + SPAN_INTRON_ANCHOR) ||
+    b.intronEnds.some(q => bs <= q - SPAN_INTRON_ANCHOR && be >= q + SPAN_EXON_ANCHOR));
 
 const GTEX_FAV_KEY = 'sashimi.gtex.favourites';
 function loadGtexFavourites(): string[] {
@@ -1416,6 +1422,8 @@ export default function SashimiViewer({
     const showLetters = rowH >= 9;
     const readsTop = bodyTop + 2;
 
+    const modelBoundaries = boundariesOf(tx);
+    const nSpan = visible.filter((r, i) => rows[i] >= 0 && readSpansBoundary(r, modelBoundaries)).length;
     const readEls = visible.map((r: AlignedRead, idx: number) => {
       const row = rows[idx];
       if (row < 0) return null;
@@ -1425,6 +1433,7 @@ export default function SashimiViewer({
       const tipX = scale.x(forward ? r.e : r.s);
       const parts: JSX.Element[] = [];
       const lowMapq = r.q === 0;
+      const spans = readSpansBoundary(r, modelBoundaries);
       r.b.forEach(([bs, be], k) => {
         const xa = scale.x(bs), xb = scale.x(be);
         const left = Math.min(xa, xb), right = Math.max(xa, xb), w = Math.max(1, right - left);
@@ -1438,6 +1447,7 @@ export default function SashimiViewer({
         } else {
           parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} fill={READ_FILL} opacity={lowMapq ? 0.35 : 1} />);
         }
+        if (spans) parts.push(<rect key={`s${k}`} x={left} y={top} width={w} height={rowH} fill="none" stroke={RETENTION_COLOR} strokeWidth={1.2} />);
         if (k + 1 < r.b.length) {
           const gs = be, ge = r.b[k + 1][0];
           const isDel = r.d.some(dd => dd[0] === gs);
@@ -1465,13 +1475,15 @@ export default function SashimiViewer({
       }
       const title = `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
-        `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}`;
+        `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
+        (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '');
       return <g key={r.n + r.s + r.f}><title>{title}</title>{parts}</g>;
     });
 
     const info = `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads` +
       (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
-      (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') + commonInfo;
+      (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
+      (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
