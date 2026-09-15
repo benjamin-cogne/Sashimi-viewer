@@ -52,7 +52,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
 | Is this an exon-level deletion or duplication? | Exon usage panel: median depth of each coding MANE exon relative to the other exons of the gene, per sample. |
 | Is this junction normal in some tissues? | **GTEx tissue tracks** (v10, v8 fallback, hg38) as reference splicing profiles. |
-| Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100&reads=1`) open the browser on the variant ±100 bp with the variant marked; the BAM/CRAM files added afterwards appear as tracks. See *Open on a variant from another tool*. |
+| Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100`) open the browser on the variant ±100 bp with the variant marked; the BAM/CRAM files added afterwards appear as tracks. See *Open on a variant from another tool*. |
 | Is this "mismatch" a known polymorphism? | **Common SNPs** track (dbSNP 155, MAF ≥ 1 %) and **Variant sites (★)** called from the reads of the window. |
 | What does the protein look like afterwards? | **Splicing cartoon** (experimental): animated pre-mRNA, spliced mRNA, translation with UniProt/Pfam domains, NMD verdict, exportable as SVG/PNG. |
 
@@ -119,7 +119,7 @@ open the viewer on that variant with a link. The parameters go in the URL fragme
 never reaches a server log; the query string (`?…`) is accepted too.
 
 ```
-https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100&reads=1
+https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100
 ```
 
 The browser opens at once on the variant ±100 bp: gene model, reference bases, the variant drawn as
@@ -139,14 +139,14 @@ file shows the annotation alone (gene model, all transcripts, common SNPs, GTEx 
 | `label` | Text drawn next to the marker, typically the c. or p. notation; one per variant, comma-separated. | the g. notation |
 | `gene` | Symbol used only when no RefSeq gene covers the window (deep intergenic positions). | inferred from the position |
 | `build` | `GRCh38` or `GRCh37` (`hg38` / `hg19` accepted). Only needed when no variant carries an accession; a notation that disagrees with it is flagged in the marker tooltip. | GRCh38 |
-| `reads` | `1` opens with the reads track on, which is what a ±100 bp window is for. | off |
+| `reads` | `1` opens with the reads track already on (add it when the link targets a ±100 bp window and the alignments are wanted at once). By default the reads track stays off until *Reads* is ticked in the toolbar or the *reads* chip of a sample is clicked. | off |
 
 Example link for a MobiDetails variant page (Jinja-style template; MobiDetails holds the hg38 and
 hg19 genomic HGVS with the `NC_` accession, the gene and the c./p. notations):
 
 ```html
 <a target="_blank" rel="noopener"
-   href="https://benjamin-cogne.github.io/Sashimi-viewer/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100&reads=1">
+   href="https://benjamin-cogne.github.io/Sashimi-viewer/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100">
   Open in Sashimi viewer (RNA-seq)
 </a>
 ```

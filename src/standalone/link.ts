@@ -3,7 +3,7 @@
  * a database export) can open the viewer on a variant or a locus. The parameters travel in the URL
  * fragment (`#variant=…`), which never reaches a server log, or in the query string.
  *
- *   #variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100&reads=1
+ *   #variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100
  *
  *   variant   HGVS g. with an NC_ accession (its version gives the build), `chr17:g.43094464G>A`,
  *             a pseudo-VCF `17-43094464-G-A` / `chr17:43094464:G:A`, or a bare `chr17:43094464`.
@@ -14,7 +14,7 @@
  *   label     Text drawn next to the marker (c. / p. notation); one per variant, separated by commas.
  *   gene      Symbol used when no RefSeq gene covers the locus (fallback lookup).
  *   build     GRCh38 (default) or GRCh37; only needed when no variant carries an accession.
- *   reads     `1` opens with the reads track on.
+ *   reads     `1` opens with the reads track on (off by default).
  *
  * The alignments still come from the user's files: a browser page cannot fetch a BAM by itself, so
  * the page waits for the first file and then opens the view on the requested window.
