@@ -116,10 +116,10 @@ export interface AggRetention {
   /** intron index and genomic bounds (0-based half-open) */
   intron: number; start: number; end: number;
   fromExon: number; toExon: number;
-  /** unspliced reads through the donor-side and the acceptor-side boundary */
-  r5: number; r3: number;
+  /** unspliced reads through the genomic-left boundary (intron start) and the genomic-right one (intron end); which is the donor depends on the strand */
+  rStart: number; rEnd: number;
   canonical: number;
-  /** (r5 + r3) / (r5 + r3 + 2·canonical) */
+  /** (rStart + rEnd) / (rStart + rEnd + 2·canonical) */
   pct: number;
   note: string;
 }
@@ -192,15 +192,22 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     if (iEnd <= iStart) continue;
     const label = exonLabel(k, k + 1);
     // intron retention: unspliced reads through the two boundaries (only when the source counted both)
-    const r5 = spanning?.intronStart[iStart], r3 = spanning?.intronEnd[iEnd];
-    const hasSpan = r5 != null && r3 != null;
-    const R = hasSpan ? r5 + r3 : 0;
+    const rStart = spanning?.intronStart[iStart], rEnd = spanning?.intronEnd[iEnd];
+    const hasSpan = rStart != null && rEnd != null;
+    const R = hasSpan ? rStart + rEnd : 0;
+    // the donor is the genomic-left boundary on the + strand and the genomic-right one on the − strand
+    const plus = tx.strand > 0;
+    // last exonic base of each site, 1-based: intron start → iStart, intron end → iEnd + 1
+    const donorPos = plus ? iStart : iEnd + 1, acceptorPos = plus ? iEnd + 1 : iStart;
+    const sideNote = hasSpan
+      ? `${(plus ? rStart : rEnd).toLocaleString()} unspliced reads through the donor at ${donorPos.toLocaleString()} + ${(plus ? rEnd : rStart).toLocaleString()} through the acceptor at ${acceptorPos.toLocaleString()}`
+      : '';
     if (hasSpan) {
       const denom = R + 2 * canonical[k];
       retention.push({
-        intron: k, start: iStart, end: iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, r5, r3, canonical: canonical[k],
+        intron: k, start: iStart, end: iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, rStart, rEnd, canonical: canonical[k],
         pct: denom > 0 ? R / denom : 0,
-        note: `intron retention ${label} = (${r5.toLocaleString()} + ${r3.toLocaleString()} unspliced reads through the donor and the acceptor boundaries) / (${R.toLocaleString()} + 2 × ${canonical[k].toLocaleString()} canonical reads)`,
+        note: `intron retention ${label} = (${sideNote}; positions = last exonic base, 1-based) / (${R.toLocaleString()} + 2 × ${canonical[k].toLocaleString()} canonical reads)`,
       });
     }
     const competing = junctions.filter(j => j.start === iStart || j.end === iEnd);
@@ -248,7 +255,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
         ev.eventCount = Math.round(canonicalWeight);
         // the competitors, so a canonical arc below 100 % is explained even when they are hidden (below the threshold) or off-screen
         const others = [
-          ...(R > 0 ? [`intron retention (${r5!.toLocaleString()} + ${r3!.toLocaleString()} unspliced reads through the boundaries)`] : []),
+          ...(R > 0 ? [`intron retention (${sideNote})`] : []),
           ...pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads)`),
           ...singles.filter(x => x !== j).map(x => {
             const cls = out.get(junctionKey(x))!.cls;
