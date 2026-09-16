@@ -108,15 +108,27 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 ## Sessions
 
 *Save session* in the header downloads a JSON file (the name is editable, default
-`sashimi-session-GENE-DATE.json`) that records the genome build, the alignment files by name (with
-their index names and sizes), the sample names and order (first = primary), the FASTA, the gene and
-the window shown, and every option of the viewer: depth axis, arc labels, thresholds, reads track,
-groups (by sample name), the chosen reference transcript, and so on. A browser cannot read file
-paths, so the files themselves are not stored: *Load session* reads the JSON, switches the build,
-then waits for the named files to be added (drop them on the page); as soon as they are all
-present the samples are renamed and reordered, the gene opens at the saved window and the options
-apply. *Open with the files present* starts with a subset. Options also carry over from one gene
-search to the next within a page.
+`sashimi-session-GENE-DATE.json`) recording the genome build, the run folder and every alignment
+by its path inside that folder (with index name and size), the sample names and order (first =
+primary), the FASTA, the gene and the window shown, and every option of the viewer: depth axis,
+arc labels, thresholds, reads track, groups (by sample name), the chosen reference transcript…
+
+Give the files through **+ Run folder…** (or drop the folder on the page): the page lists the
+BAM/CRAM files with their index and the FASTA found inside, without reading them, and remembers
+their relative paths. **+ Files…** adds individual files as before.
+
+*Load session* reads the JSON, switches the build and gets the files back:
+
+- **Chrome, Edge, Opera**: the browser keeps a bookmark of the run folder (and of individually
+  added files) in its own storage, not a copy of the data. Loading a session reopens the files
+  from it after a single permission click (remembered by the browser until revoked). Then the
+  samples, gene, window and options come back at once.
+- **Firefox, Safari** (no bookmarks): the page asks for the run folder; drop it on the page or
+  pick it with *Choose the folder*, and the same happens.
+
+A browser never reveals or stores file paths as text, which is why the folder is asked for once
+rather than typed. *Open with the files present* starts with a subset. Options also carry over
+from one gene search to the next within a page.
 
 ## Deploying in a clinical laboratory
 

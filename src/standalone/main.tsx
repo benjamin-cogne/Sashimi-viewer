@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client';
 import SashimiViewer, { type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
+import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus } from '../components/sashimi/geometry';
@@ -35,17 +36,25 @@ const INDEX_EXT = /\.(bai|crai)$/i;
 const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
-function pairFiles(files: File[]): { samples: { name: string; kind: 'bam' | 'cram'; file: File; index: File }[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
-  const byName = new Map(files.map(f => [f.name.toLowerCase(), f]));
-  const lookup = (n: string) => byName.get(n.toLowerCase());
-  const samples: { name: string; kind: 'bam' | 'cram'; file: File; index: File }[] = [];
+type PairedSample = { name: string; kind: 'bam' | 'cram'; file: File; index: File; path?: string; indexPath?: string };
+/** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
+function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
+  const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
+  const files = items.map(x => x.file);
+  const dirOf = (x: PathedFile) => (x.path ? x.path.slice(0, x.path.lastIndexOf('/') + 1) : '');
+  const byKey = new Map(items.map(x => [`${dirOf(x)}|${x.file.name.toLowerCase()}`, x]));
+  const lookupIn = (dir: string, n: string) => byKey.get(`${dir}|${n.toLowerCase()}`);
+  const lookup = (n: string) => lookupIn('', n)?.file;
+  const samples: PairedSample[] = [];
   const unmatched: string[] = [];
-  for (const f of files) {
+  for (const x of items) {
+    const f = x.file;
     if (!ALIGN_EXT.test(f.name)) continue;
     const kind = f.name.toLowerCase().endsWith('.cram') ? 'cram' : 'bam';
     const stem = f.name.replace(ALIGN_EXT, '');
-    const idx = lookup(`${f.name}.${kind === 'bam' ? 'bai' : 'crai'}`) || lookup(`${stem}.${kind === 'bam' ? 'bai' : 'crai'}`);
-    if (idx) samples.push({ name: stem, kind, file: f, index: idx });
+    const dir = dirOf(x);
+    const idx = lookupIn(dir, `${f.name}.${kind === 'bam' ? 'bai' : 'crai'}`) || lookupIn(dir, `${stem}.${kind === 'bam' ? 'bai' : 'crai'}`);
+    if (idx) samples.push({ name: stem, kind, file: f, index: idx.file, path: x.path, indexPath: idx.path });
     else unmatched.push(f.name);
   }
   let fasta: { fa: File; fai: File; gzi?: File } | undefined, fastaMissing: string | undefined;
@@ -90,14 +99,18 @@ function App() {
   const [pendingSession, setPendingSession] = useState<{ file: SessionFile; name: string } | null>(null);
   const [viewerSettings, setViewerSettings] = useState<Partial<ViewerSettings> | undefined>();
   const [sessionSeq, setSessionSeq] = useState(0);   // bumps the viewer key so a loaded session always remounts the viewer
+  /** The run folder the sample paths are relative to; the handle (Chromium) lets a session reopen it later. */
+  const [runFolder, setRunFolder] = useState<{ name: string; handle: FSDirHandle | null } | null>(null);
+  const fileHandlesRef = useRef(new Map<string, FSHandle>());   // Chromium bookmarks of individually added files, by name
+  const [reopenState, setReopenState] = useState<{ folder: string; ready: boolean; note?: string } | null>(null);
   const nextId = useRef(1);
   const dsRef = useRef<LocalDataSource>();
   if (!dsRef.current) { dsRef.current = new LocalDataSource({ build }); if (LINK) dsRef.current.knownVariants = LINK.variants; }
   const ds = dsRef.current;
   (window as any).__sashimiDs = ds; // for debugging from the console
 
-  const addFiles = useCallback((list: FileList | File[]) => {
-    const files = Array.from(list);
+  const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
+    const files = Array.from(list as ArrayLike<File | PathedFile>);
     const { samples: found, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
     const msgs: string[] = [];
     const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s }));
@@ -108,6 +121,36 @@ function App() {
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
     setNotes(msgs);
   }, [ds, build]);
+
+  /** A folder given through the Chromium picker or the folder input, or dropped: its files carry relative paths. */
+  const addFolder = useCallback((name: string | null, handle: FSDirHandle | null, files: PathedFile[]) => {
+    if (name) { setRunFolder({ name, handle }); if (handle) rememberFolder(name, handle); }
+    addFiles(files);
+  }, [addFiles]);
+  const chooseFolder = useCallback(async () => {
+    if (!hasFileSystemAccess()) { folderInputRef.current?.click(); return; }
+    try {
+      const h = await pickFolder();
+      setNotes([`Reading ${h.name}…`]);
+      addFolder(h.name, h, await filesInFolder(h));
+    } catch (e: any) { if (e?.name !== 'AbortError') setError(`Could not read the folder: ${e.message}`); }
+  }, [addFolder]);
+  const chooseFiles = useCallback(async () => {
+    if (typeof (window as any).showOpenFilePicker !== 'function') { fileInputRef.current?.click(); return; }
+    try {
+      const picked = await pickFiles();
+      for (const p of picked) fileHandlesRef.current.set(p.file.name, p.handle);
+      addFiles(picked.map(p => p.file));
+    } catch (e: any) { if (e?.name !== 'AbortError') setError(`Could not open the files: ${e.message}`); }
+  }, [addFiles]);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const onFolderInput = useCallback((list: FileList) => { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); }, [addFolder]);
+  const onDropFiles = useCallback(async (dt: DataTransfer) => {
+    const { folder, folderHandle, files, fileHandles } = await filesFromDrop(dt);
+    for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
+    if (folder) addFolder(folder, folderHandle, files); else addFiles(files);
+  }, [addFolder, addFiles]);
 
   const renameSample = useCallback((id: number, raw: string) => {
     const name = raw.trim();
@@ -188,13 +231,18 @@ function App() {
 
   // ---- Save / load a session (JSON) ----
   const saveSession = useCallback(() => {
-    const session = buildSession({ build, samples, fasta, state: opened ? viewerStateRef.current : null });
+    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null });
+    if (hasFileSystemAccess()) {
+      const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : [])]
+        .map(f => ({ name: f.name, size: f.size, handle: fileHandlesRef.current.get(f.name)! })).filter(e => e.handle);
+      rememberFiles(entries);
+    }
     const name = (sessionName.trim() || defaultSessionName(session.gene?.name)).replace(/\.json$/i, '') + '.json';
     const url = URL.createObjectURL(new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setNotes([`Session saved as ${name} (${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}). Files are recorded by name: add them again when loading.`]);
-  }, [build, samples, fasta, opened, sessionName]);
+  }, [build, samples, fasta, opened, sessionName, runFolder]);
 
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
@@ -206,12 +254,55 @@ function App() {
     setViewerSettings(viewerSettingsOf(session, ordered));
     setSessionSeq(n => n + 1);
     setPendingSession(null);
+    setReopenState(null);
     if (session.gene) {
       setGene(session.gene.name);
       setOpened({ geneName: session.gene.name, chrom: session.gene.chrom, start: session.gene.start, end: session.gene.end, view: session.gene.view, mark: session.gene.mark ?? undefined });
     }
     setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}.`]);
   }, [samples, ds]);
+
+  /**
+   * Gets a session's files back by itself (Chromium): from the remembered run folder by relative path, else from
+   * remembered file bookmarks. `ask` lets the browser show its permission prompt (needs a user gesture).
+   */
+  const reopenSession = useCallback(async (session: SessionFile, ask: boolean) => {
+    if (!hasFileSystemAccess()) { setReopenState(session.folder ? { folder: session.folder, ready: false } : null); return; }
+    const { missing } = matchSession(session, samples);
+    if (!missing.length) return;
+    const out: PathedFile[] = [];
+    let dir: FSDirHandle | null = null, needPermission = false;
+    if (session.folder) {
+      dir = await recallFolder(session.folder);
+      if (dir) {
+        if (await permitted(dir, ask)) {
+          setRunFolder({ name: session.folder, handle: dir });
+          for (const m of missing) {
+            if (!m.path || !m.indexPath) continue;
+            const [f, i] = await Promise.all([fileInFolder(dir, m.path), fileInFolder(dir, m.indexPath)]);
+            if (f && i) out.push({ file: f, path: m.path }, { file: i, path: m.indexPath });
+          }
+        } else needPermission = true;
+      }
+    }
+    // individual bookmarks for what the folder did not give
+    const got = new Set(out.map(x => x.file.name));
+    for (const m of missing) {
+      if (got.has(m.file)) continue;
+      const [fh, ih] = await Promise.all([recallFile(m.file), recallFile(m.index)]);
+      if (!fh || !ih) continue;
+      if (await permitted(fh, ask) && await permitted(ih, ask)) {
+        out.push({ file: await fh.getFile() }, { file: await ih.getFile() });
+        fileHandlesRef.current.set(m.file, fh); fileHandlesRef.current.set(m.index, ih);
+      } else needPermission = true;
+    }
+    if (out.length) addFiles(out);
+    const stillMissing = missing.filter(m => !out.some(x => x.file.name === m.file));
+    setReopenState(stillMissing.length ? {
+      folder: session.folder ?? '', ready: needPermission,
+      note: needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : undefined,
+    } : null);
+  }, [samples, addFiles]);
 
   const loadSession = useCallback(async (file: File) => {
     setError(null);
@@ -220,6 +311,7 @@ function App() {
       setSessionName(file.name); setSessionNameEdited(true);
       if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); }
       setPendingSession({ file: session, name: file.name });
+      void reopenSession(session, true);
     } catch (e: any) {
       setError(`Could not load the session ${file.name}: ${e.message}`);
     }
@@ -236,7 +328,7 @@ function App() {
   useEffect(() => { if (!sessionNameEdited) setSessionName(defaultSessionName(opened?.geneName)); }, [opened?.geneName, sessionNameEdited]);
 
   const dropRef = useRef<HTMLDivElement>(null);
-  const onDrop = (e: React.DragEvent) => { e.preventDefault(); addFiles(e.dataTransfer.files); };
+  const onDrop = (e: React.DragEvent) => { e.preventDefault(); void onDropFiles(e.dataTransfer); };
 
   return (
     <div className="min-h-screen bg-gray-100 text-gray-900">
@@ -273,10 +365,15 @@ function App() {
         </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <label className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 cursor-pointer font-medium">
-          + Add BAM / CRAM (+ index) · FASTA
-          <input type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-        </label>
+        <button onClick={chooseFolder} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium"
+          title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click.">
+          {runFolder ? `Run folder · ${runFolder.name}` : '+ Run folder…'}
+        </button>
+        <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
+        <button onClick={chooseFiles} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium" title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)">
+          + Files…
+        </button>
+        <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
         <div className="flex flex-wrap items-center gap-1.5">
           {samples.map((s, i) => (
             <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
@@ -313,8 +410,19 @@ function App() {
         return (
           <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="font-semibold">Session {pendingSession.name}</span>
-            <span>{matched.length}/{pendingSession.file.samples.length} files present · add (or drop on the page): {missing.map(m => m.file).join(', ')}</span>
-            <button onClick={() => applySession(pendingSession.file)} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Open with the files present</button>
+            <span>{matched.length}/{pendingSession.file.samples.length} files present{missing.length ? ` · missing: ${missing.map(m => m.file).join(', ')}` : ''}</span>
+            {missing.length > 0 && reopenState?.ready && (
+              <button onClick={() => reopenSession(pendingSession.file, true)} className="px-2 py-0.5 rounded bg-indigo-600 text-white hover:bg-indigo-700 font-medium">Reopen the files</button>
+            )}
+            {missing.length > 0 && !reopenState?.ready && (
+              <span className="flex items-center gap-1.5">
+                {pendingSession.file.folder ? <>drop the folder <b>{pendingSession.file.folder}</b> on the page, or</> : 'drop the files on the page, or'}
+                <button onClick={chooseFolder} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">{pendingSession.file.folder ? 'Choose the folder' : 'Choose a folder'}</button>
+                <button onClick={chooseFiles} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Choose files</button>
+              </span>
+            )}
+            {reopenState?.note && <span className="text-indigo-600">{reopenState.note}</span>}
+            {matched.length > 0 && missing.length > 0 && <button onClick={() => applySession(pendingSession.file)} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Open with the files present</button>}
             <button onClick={() => setPendingSession(null)} className="text-indigo-500 hover:text-indigo-800" title="Forget this session">×</button>
           </div>
         );
@@ -333,7 +441,7 @@ function App() {
       {!opened ? (
         <div ref={dropRef} onDragOver={e => e.preventDefault()} onDrop={onDrop}
           className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
-          <div className="text-xl font-semibold text-indigo-700">Drop BAM or CRAM files here</div>
+          <div className="text-xl font-semibold text-indigo-700">Drop a run folder, or BAM / CRAM files, here</div>
           <div className="text-sm text-gray-600 mt-2 max-w-2xl mx-auto">
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
             CRAM needs the reference: add an indexed FASTA (<code>.fa</code> + <code>.fai</code>, bgzipped with <code>.gzi</code>) or let the page fetch it from the UCSC API.
