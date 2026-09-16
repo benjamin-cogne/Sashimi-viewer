@@ -1633,6 +1633,7 @@ export default function SashimiViewer({
     title: string; strokeW: number; geom: ReturnType<typeof arcGeom>;
     label: { x: number; y: number } | null;
     edge: { side: 'left' | 'right'; y: number; title: string } | null;
+    /** the user's drag of this arc in px (negative = dragged up), already applied to apexH; kept for the next drag */
     offset: number;
     /** apex height above the higher of the two arc ends, in px */
     apexH: number;
@@ -1642,6 +1643,8 @@ export default function SashimiViewer({
     deltas: { text: string; color: string; name: string }[];
     /** size factor of the pill (user setting for this junction) */
     labelScale: number;
+    /** visible horizontal extent of the arc, where its pill may slide to avoid another one */
+    labelRange: [number, number];
     /** aggregate-view event of this junction (group tracks only) */
     agg?: AggEvent;
     /** Reading-frame consequence, for non-canonical junctions of a coding model. */
@@ -1721,13 +1724,15 @@ export default function SashimiViewer({
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
         const y2 = depthToY(depthAt(track.coverage, j.end));
         const level = levels.get(key) || 1;
-        const apexH = 18 + (level - 1) * JUNC_LEVEL_STEP;
+        // dragging an arc changes its apex height only (offset < 0 = dragged up = higher arc): both ends stay on the coverage
+        const offset = junctionOffsets[dragKey] || 0;
+        const apexH = Math.max(6, 18 + (level - 1) * JUNC_LEVEL_STEP - offset);
         const geom = arcGeom(x1, y1, x2, y2, apexH);
         const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
         const visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
-        const offset = junctionOffsets[dragKey] || 0;
         const labelX = (visLo + visHi) / 2;
         const label = !track.gtex && visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;   // GTEx arcs carry no number
+        const labelRange: [number, number] = [visLo, visHi];
         // Which genomic end is off-screen? Pixel-left is the genomic start unless the axis is flipped.
         let edge: ArcRender['edge'] = null;
         const partner = (side: 'left' | 'right') => {
@@ -1756,30 +1761,42 @@ export default function SashimiViewer({
           '\nclick the × on the pill to hide this arc (it still counts in the percentages)';
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, labelScale, agg,
+          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, labelScale, labelRange, agg,
         };
       });
-      // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
-      // notably when several arcs leave the window and share the same visible midpoint.
+      // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
+      // right of the midpoint, to the nearest free spot, so it stays on the arc even when enlarged; only when the
+      // whole visible arc is taken is it pushed upward.
       const placed: { x: number; y: number; w: number; h: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
         const w = pillWidth(a) * a.labelScale + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
         const h = LABEL_H * a.labelScale;
-        for (let iter = 0; iter < 24; iter++) {
-          const hit = placed.some(p => Math.abs(p.x - a.label!.x) < (p.w + w) / 2 + 4 && Math.abs(p.y - a.label!.y) < (p.h + h) / 2 + 2);
-          if (!hit) break;
-          a.label.y -= h + 3;
+        const hits = (x: number, y: number) => placed.some(p => Math.abs(p.x - x) < (p.w + w) / 2 + 4 && Math.abs(p.y - y) < (p.h + h) / 2 + 2);
+        if (hits(a.label.x, a.label.y)) {
+          const [lo, hi] = a.labelRange, mid = (lo + hi) / 2, step = Math.max(12, w / 2);
+          let found = false;
+          for (let k = 1; !found && k * step <= (hi - lo) / 2; k++) {
+            for (const x of [mid - k * step, mid + k * step]) {
+              if (x - w / 2 < lo || x + w / 2 > hi) continue;
+              const y = arcYAtX(a.geom, x);
+              if (!hits(x, y)) { a.label = { x, y }; found = true; break; }
+            }
+          }
+          for (let iter = 0; !found && iter < 24; iter++) {
+            if (!hits(a.label.x, a.label.y)) break;
+            a.label.y -= h + 3;
+          }
         }
         placed.push({ x: a.label.x, y: a.label.y, w, h });
       }
       // Highest point of the track content relative to the baseline (negative): the coverage area itself,
-      // every arc apex, read-count pill and edge chevron, including the offset of arcs the user dragged.
+      // every arc apex (dragged arcs included, their apex height carries the drag), read-count pill and edge chevron.
       let top = -COVERAGE_H;
       for (const a of arcs) {
-        top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH + a.offset);
-        if (a.label) top = Math.min(top, a.label.y + a.offset - (LABEL_H * a.labelScale) / 2);
-        if (a.edge) top = Math.min(top, a.edge.y + a.offset - 4);
+        top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH);
+        if (a.label) top = Math.min(top, a.label.y - (LABEL_H * a.labelScale) / 2);
+        if (a.edge) top = Math.min(top, a.edge.y - 4);
       }
       const juncH = TRACK_LABEL_H + strip + Math.max(JUNC_MIN_H, -top - COVERAGE_H + JUNC_PAD);
       const baseline = y + juncH + COVERAGE_H;
@@ -2085,7 +2102,7 @@ export default function SashimiViewer({
 
           {/* Junction arcs */}
           {arcs.map(a => (
-            <g key={a.key} transform={a.offset ? `translate(0, ${a.offset})` : undefined}
+            <g key={a.key}
               style={{ cursor: junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
               onMouseEnter={() => setHoverArc(a.dragKey)} onMouseLeave={() => setHoverArc(h => (h === a.dragKey ? null : h))}
               onMouseDown={e => {
@@ -2128,7 +2145,7 @@ export default function SashimiViewer({
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
             const sc = a.labelScale, w = pillWidth(a) * sc, h = LABEL_H * sc;
-            const lx = a.label!.x, ly = a.label!.y + a.offset;
+            const lx = a.label!.x, ly = a.label!.y;
             const glyph = a.frame && a.frame.frame !== 'unknown' ? a.frame : null;
             const hideX = lx + w / 2 + (glyph ? FRAME_GLYPH_R * 2 + 6 : 0) + 9;
             return (
@@ -2170,7 +2187,7 @@ export default function SashimiViewer({
         {/* Edge chevrons for arcs continuing beyond the window (drawn outside the clip) */}
         {arcs.filter(a => a.edge).map(a => {
           const e = a.edge!;
-          const y = e.y + a.offset;
+          const y = e.y;
           const d = e.side === 'left'
             ? `M${PLOT_LEFT - 1},${y} l-6,-4 v8 z`
             : `M${plotRight + 1},${y} l6,-4 v8 z`;
@@ -3299,7 +3316,7 @@ export default function SashimiViewer({
         </div>
       )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
-        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc vertically to untangle it · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
+        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>
     </div>
   );
