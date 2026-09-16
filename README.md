@@ -95,10 +95,10 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   the next gene search. The × at the end of a model's label removes it from the list (a model that
   clutters the panel, a predicted XM_ model…); the panel header then offers *undo*, which brings
   back the last one removed, and *show all*. Removed models are saved with the session.
-- **Depth axis**: *shared* (one axis for every sample, heights comparable), *per sample* (each
-  sample scaled to its own maximum) or *relative* (each sample drawn as a percentage of its own
-  maximum in the current window, axis 0–100 %, the maximum shown next to the sample name), so
-  profiles of a shallow and a deep library can be compared by shape.
+- **Depth axis**: *relative* (the default: each sample drawn as a percentage of its own maximum in
+  the current window, axis 0–100 %, the maximum shown next to the sample name, so profiles of a
+  shallow and a deep library can be compared by shape), *shared* (one axis for every sample,
+  heights comparable) or *per sample* (each sample scaled to its own maximum, in reads).
 - **Groups (aggregate view)**: *Groups…* creates named sample groups (patients, controls, a
   tissue…); the *Samples | Groups* switch then draws one pooled track per group. Coverage and
   junction reads are summed over the group's samples, the coverage is drawn relative to its own

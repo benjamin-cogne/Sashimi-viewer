@@ -80,7 +80,7 @@ export interface ViewerSettings {
 /** The options a fresh viewer starts with (the same defaults as its state initialisers), for hosts that need a full state before the viewer has reported one. */
 export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   equalIntrons: false, intronWidth: null, allTranscripts: false, commonSnps: false, snpMinAf: 0.01,
-  depthAxis: 'shared', uniqueOnly: false,
+  depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
   viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [],
@@ -371,7 +371,7 @@ export default function SashimiViewer({
   // ---- Options ----
   const [equalIntrons, setEqualIntrons] = useState(init.equalIntrons ?? false);
   const [intronWidth, setIntronWidth] = useState<number | null>(init.intronWidth ?? null);
-  const [depthAxis, setDepthAxis] = useState<DepthAxis>(init.depthAxis ?? 'shared');
+  const [depthAxis, setDepthAxis] = useState<DepthAxis>(init.depthAxis ?? 'relative');
   // ---- Sample groups (aggregate view): one pooled track per group ----
   const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds], color: g.color })));
   /** Arcs hidden by a click on them ("chrom:start-end"); they still count in the percentages, like arcs under the thresholds. */
