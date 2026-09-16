@@ -128,7 +128,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   junction's detail panel) to remove it from every track, for instance the `n=…` junctions of
   another transcript that clutter a group view. Hidden arcs still count in the percentages, like
   arcs under the thresholds; the *hidden arcs · show* chip in the toolbar brings them back, and the
-  list is saved with the session.
+  list is saved with the session. The same panel has **A− / A+** buttons that shrink or enlarge that
+  junction's label on every track (70–250 %), for the arcs a figure should emphasise; also saved
+  with the session.
 
 ## Sessions
 

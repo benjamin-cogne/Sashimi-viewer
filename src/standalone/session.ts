@@ -63,7 +63,7 @@ export function buildSession(args: {
     minJunctionReads: state.minJunctionReads, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
-    knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], transcriptId: state.transcriptId,
+    knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, transcriptId: state.transcriptId,
   } : null;
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
@@ -98,6 +98,7 @@ export function parseSession(text: string): SessionFile {
     groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [], color: typeof x.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : undefined })) : [],
     readsSample: typeof v.readsSample === 'string' ? v.readsSample : null,
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
+    labelScales: v.labelScales && typeof v.labelScales === 'object' ? Object.fromEntries(Object.entries(v.labelScales).filter(([, n]) => typeof n === 'number' && Number.isFinite(n) && n > 0)) as Record<string, number> : undefined,
   } : null;
   return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null, gene, viewer };
 }

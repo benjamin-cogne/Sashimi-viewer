@@ -69,6 +69,8 @@ export interface ViewerSettings {
   knownVariants: boolean;
   /** arcs the user hid by clicking them, as "chrom:start-end" (0-based half-open); they still count in the percentages */
   hiddenJunctions: string[];
+  /** label size factor of individual junctions ("chrom:start-end" → 0.7–2.5), set from the junction panel; absent = 1 */
+  labelScales?: Record<string, number>;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -363,6 +365,15 @@ export default function SashimiViewer({
   const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds], color: g.color })));
   /** Arcs hidden by a click on them ("chrom:start-end"); they still count in the percentages, like arcs under the thresholds. */
   const [hiddenArcs, setHiddenArcs] = useState<string[]>(() => init.hiddenJunctions ?? []);
+  /** Label size factor per junction ("chrom:start-end"), for pills the user enlarged or shrank from the junction panel. */
+  const [labelScales, setLabelScales] = useState<Record<string, number>>(() => ({ ...(init.labelScales ?? {}) }));
+  const LABEL_SCALE_MIN = 0.7, LABEL_SCALE_MAX = 2.5, LABEL_SCALE_STEP = 1.2;
+  const setLabelScale = useCallback((k: string, v: number) => setLabelScales(prev => {
+    const sc = Math.round(Math.min(LABEL_SCALE_MAX, Math.max(LABEL_SCALE_MIN, v)) * 100) / 100;
+    const next = { ...prev };
+    if (Math.abs(sc - 1) < 0.01) delete next[k]; else next[k] = sc;
+    return next;
+  }), []);
   /** Arc under the pointer (track:junction), which shows the hide button on its pill. */
   const [hoverArc, setHoverArc] = useState<string | null>(null);
   const groupIdSeq = useRef((init.groups?.length ?? 0) + 1);
@@ -1621,6 +1632,8 @@ export default function SashimiViewer({
     text: string;
     /** group tracks with several groups: this share minus the other group's, in points, in that group's colour */
     deltas: { text: string; color: string; name: string }[];
+    /** size factor of the pill (user setting for this junction) */
+    labelScale: number;
     /** aggregate-view event of this junction (group tracks only) */
     agg?: AggEvent;
     /** Reading-frame consequence, for non-canonical junctions of a coding model. */
@@ -1694,6 +1707,7 @@ export default function SashimiViewer({
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
         const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString()}`) : approx + j.count.toLocaleString();
+        const labelScale = labelScales[`${currentChrom}:${key}`] ?? 1;
         const deltas = share ? otherGroups.map(o => ({ text: deltaText(share.pct - (o.group!.agg.events.get(key)?.shares[0]?.pct ?? 0)), color: o.group!.color, name: o.sampleName })) : [];
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
@@ -1734,28 +1748,29 @@ export default function SashimiViewer({
           '\nclick the × on the pill to hide this arc (it still counts in the percentages)';
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, agg,
+          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, labelScale, agg,
         };
       });
       // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
       // notably when several arcs leave the window and share the same visible midpoint.
-      const placed: { x: number; y: number; w: number }[] = [];
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
-        const w = pillWidth(a) + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
+        const w = pillWidth(a) * a.labelScale + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
+        const h = LABEL_H * a.labelScale;
         for (let iter = 0; iter < 24; iter++) {
-          const hit = placed.some(p => Math.abs(p.x - a.label!.x) < (p.w + w) / 2 + 4 && Math.abs(p.y - a.label!.y) < LABEL_H + 2);
+          const hit = placed.some(p => Math.abs(p.x - a.label!.x) < (p.w + w) / 2 + 4 && Math.abs(p.y - a.label!.y) < (p.h + h) / 2 + 2);
           if (!hit) break;
-          a.label.y -= LABEL_H + 3;
+          a.label.y -= h + 3;
         }
-        placed.push({ x: a.label.x, y: a.label.y, w });
+        placed.push({ x: a.label.x, y: a.label.y, w, h });
       }
       // Highest point of the track content relative to the baseline (negative): the coverage area itself,
       // every arc apex, read-count pill and edge chevron, including the offset of arcs the user dragged.
       let top = -COVERAGE_H;
       for (const a of arcs) {
         top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH + a.offset);
-        if (a.label) top = Math.min(top, a.label.y + a.offset - LABEL_H / 2);
+        if (a.label) top = Math.min(top, a.label.y + a.offset - (LABEL_H * a.labelScale) / 2);
         if (a.edge) top = Math.min(top, a.edge.y + a.offset - 4);
       }
       const juncH = TRACK_LABEL_H + strip + Math.max(JUNC_MIN_H, -top - COVERAGE_H + JUNC_PAD);
@@ -1784,7 +1799,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2104,14 +2119,14 @@ export default function SashimiViewer({
           })}
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
-            const w = pillWidth(a);
+            const sc = a.labelScale, w = pillWidth(a) * sc, h = LABEL_H * sc;
             const lx = a.label!.x, ly = a.label!.y + a.offset;
             const glyph = a.frame && a.frame.frame !== 'unknown' ? a.frame : null;
             const hideX = lx + w / 2 + (glyph ? FRAME_GLYPH_R * 2 + 6 : 0) + 9;
             return (
               <g key={`l-${a.key}`} pointerEvents="none">
-                <rect x={lx - w / 2} y={ly - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={a.color} strokeWidth={1} />
-                <text x={lx} y={ly + 3.5} textAnchor="middle" fill={INK.text} fontSize={9.5} fontWeight={700}>
+                <rect x={lx - w / 2} y={ly - h / 2} width={w} height={h} rx={h / 2} fill={INK.bg} stroke={a.color} strokeWidth={1} />
+                <text x={lx} y={ly + 3.5 * sc} textAnchor="middle" fill={INK.text} fontSize={9.5 * sc} fontWeight={700}>
                   {a.text}
                   {a.deltas.map((d, i) => <tspan key={i} fill={d.color}>{` ${d.text}`}</tspan>)}
                 </text>
@@ -2719,13 +2734,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3130,6 +3145,17 @@ export default function SashimiViewer({
                   <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
                 )}
+                {popover.kind === 'junction' && (() => {
+                  const k = hideKey(popover.j), sc = labelScales[k] ?? 1;
+                  return (
+                    <span className="flex items-center gap-1" title="Size of this junction's label, on every track (saved with the session)">
+                      <button onClick={() => setLabelScale(k, sc / LABEL_SCALE_STEP)} disabled={sc <= LABEL_SCALE_MIN + 0.01} className={`${t.btn} px-1.5 py-0.5 text-[11px] disabled:opacity-40`} title="Smaller label">A−</button>
+                      <span className="text-[10px] text-gray-500 w-9 text-center tabular-nums">{Math.round(sc * 100)} %</span>
+                      <button onClick={() => setLabelScale(k, sc * LABEL_SCALE_STEP)} disabled={sc >= LABEL_SCALE_MAX - 0.01} className={`${t.btn} px-1.5 py-0.5 text-[11px] disabled:opacity-40`} title="Larger label">A+</button>
+                      {Math.abs(sc - 1) >= 0.01 && <button onClick={() => setLabelScale(k, 1)} className="text-[10px] text-gray-400 hover:text-gray-700" title="Back to the normal size">reset</button>}
+                    </span>
+                  );
+                })()}
                 {popover.kind === 'junction' && (
                   <button onClick={() => { hideArc(popover.j); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
                     title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
