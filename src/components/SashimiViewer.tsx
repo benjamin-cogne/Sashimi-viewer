@@ -509,7 +509,9 @@ export default function SashimiViewer({
   const tx: TxModel | null = useMemo(() => (transcript ? toTxModel(transcript) : null), [transcript]);
   const txRef = useRef(tx);
   txRef.current = tx;
-  const reverse = tx?.strand === -1;
+  // a minus-strand gene is drawn 5′→3′ (coordinates decreasing) for RNA; a page of DNA samples only keeps the genomic orientation
+  const dnaOnly = tracks.length > 0 && tracks.every(t => sampleTypes?.[t.sampleId] === 'dna');
+  const reverse = tx?.strand === -1 && !dnaOnly;
   const axis: VirtualAxis = useMemo(() => (equalIntrons && tx ? equalIntronAxis(tx, intronWidth) : LINEAR_AXIS), [equalIntrons, tx, intronWidth]);
   const plotWidth = svgWidth - PLOT_LEFT - PLOT_RIGHT_PAD;
   const scale: Scale = useMemo(
@@ -1799,7 +1801,8 @@ export default function SashimiViewer({
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
       const trackSites: VariantSite[] = readsBelow?.sites ?? (dnaTrack ? dnaSites[track.sampleId]?.sites : undefined) ?? [];
-      const strip = trackSites.length ? SITES_STRIP_H : 0;
+      // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
+      const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
       let balance: TrackLayout['balance'];
       if (dnaTrack && trackSites.length) {
@@ -2325,7 +2328,7 @@ export default function SashimiViewer({
             </g>
           ))}
           {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.strip > 0 && L.sites.map(st => {
+          {L.sites.length > 0 && L.sites.map(st => {
             const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
             let left = Math.min(xa, xb), w = Math.abs(xb - xa);
             if (w < 3) { left += w / 2 - 1.5; w = 3; }
