@@ -2513,10 +2513,16 @@ export default function SashimiViewer({
           <tspan fill={INK.text} fontWeight={700}>{tx.geneName}</tspan>
           <tspan fill={INK.muted}>{'  '}{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons{tx.cdsStart == null ? ' · non-coding' : ''}</tspan>
         </text>
-        {tx.strand < 0 && (
+        {reverse && (
           <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9.5} fontWeight={700}>
             <title>{`${tx.geneName} is transcribed from the minus strand. The axis is reversed so that the transcript reads 5′→3′ from left to right: genomic positions decrease towards the right, which is the opposite of IGV and of the UCSC browser. Reference bases in the reads track are shown on both strands.`}</title>
             ⚠ antisense gene (− strand): axis reversed, 5′→3′ left to right, genomic positions decrease to the right
+          </text>
+        )}
+        {!reverse && tx.strand < 0 && (
+          <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={INK.muted} fontSize={9.5}>
+            <title>{`${tx.geneName} is transcribed from the minus strand. Every shown sample is genomic DNA, so the axis keeps the genomic orientation (positions increase to the right, as in IGV): the transcript reads 3′→5′ from left to right.`}</title>
+            − strand gene · genomic orientation, positions increase to the right
           </text>
         )}
         {neighbourError && <text x={plotRight - 6} y={yOff + (tx.strand < 0 ? 26 : 14)} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
