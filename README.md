@@ -115,7 +115,10 @@ arc labels, thresholds, reads track, groups (by sample name), the chosen referen
 
 Give the files through **+ Run folder…** (or drop the folder on the page): the page lists the
 BAM/CRAM files with their index and the FASTA found inside, without reading them, and remembers
-their relative paths. **+ Files…** adds individual files as before.
+their relative paths. **+ Files…** adds individual files as before. Some browsers word their folder
+dialog as an *upload* ("this will upload all files from…"): that is the browser's generic
+wording for letting a page read a folder. Nothing is sent anywhere; the viewer has no server and
+reads the files on the computer, as for individually added files.
 
 *Load session* reads the JSON, switches the build and gets the files back:
 

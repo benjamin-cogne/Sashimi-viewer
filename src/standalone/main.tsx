@@ -127,14 +127,21 @@ function App() {
     if (name) { setRunFolder({ name, handle }); if (handle) rememberFolder(name, handle); }
     addFiles(files);
   }, [addFiles]);
+  /** The browser's folder dialog speaks of "uploading": say what really happens, at the moment the dialog opens. */
+  const UPLOAD_NOTE = 'If the browser asks to "upload" the folder, that is the browser\'s own wording: nothing is sent anywhere. The page only lists the files and reads them on this computer.';
+  const openFolderInput = useCallback(() => { setNotes([UPLOAD_NOTE]); folderInputRef.current?.click(); }, []);
   const chooseFolder = useCallback(async () => {
-    if (!hasFileSystemAccess()) { folderInputRef.current?.click(); return; }
+    if (!hasFileSystemAccess()) { openFolderInput(); return; }
     try {
       const h = await pickFolder();
       setNotes([`Reading ${h.name}…`]);
       addFolder(h.name, h, await filesInFolder(h));
-    } catch (e: any) { if (e?.name !== 'AbortError') setError(`Could not read the folder: ${e.message}`); }
-  }, [addFolder]);
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return;
+      // the picker is refused in some contexts (a page opened from disk, an iframe): the plain folder input still works
+      openFolderInput();
+    }
+  }, [addFolder, openFolderInput]);
   const chooseFiles = useCallback(async () => {
     if (typeof (window as any).showOpenFilePicker !== 'function') { fileInputRef.current?.click(); return; }
     try {
@@ -366,7 +373,7 @@ function App() {
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <button onClick={chooseFolder} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium"
-          title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click.">
+          title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files.">
           {runFolder ? `Run folder · ${runFolder.name}` : '+ Run folder…'}
         </button>
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
@@ -419,6 +426,7 @@ function App() {
                 {pendingSession.file.folder ? <>drop the folder <b>{pendingSession.file.folder}</b> on the page, or</> : 'drop the files on the page, or'}
                 <button onClick={chooseFolder} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">{pendingSession.file.folder ? 'Choose the folder' : 'Choose a folder'}</button>
                 <button onClick={chooseFiles} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Choose files</button>
+                <span className="text-indigo-500">(the files stay on this computer; a browser dialog mentioning an upload only grants this page read access)</span>
               </span>
             )}
             {reopenState?.note && <span className="text-indigo-600">{reopenState.note}</span>}
@@ -446,6 +454,9 @@ function App() {
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
             CRAM needs the reference: add an indexed FASTA (<code>.fa</code> + <code>.fai</code>, bgzipped with <code>.gzi</code>) or let the page fetch it from the UCSC API.
             Then type a gene and press Open.
+          </div>
+          <div className="text-xs text-gray-500 mt-3 max-w-2xl mx-auto">
+            Everything stays on this computer: the page lists the files and reads the parts it draws. A browser dialog that speaks of "uploading" a folder is only asking whether this page may read it.
           </div>
           <div className="text-xs text-gray-500 mt-4">
             {samples.length ? `${samples.length} sample${samples.length > 1 ? 's' : ''} ready` : 'No files yet'} · reads are decoded locally with the GMOD BAM/CRAM libraries
