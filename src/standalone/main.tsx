@@ -34,13 +34,13 @@ const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('e
 const EMBEDDED = readEmbedded();
 
 /** A region open in the viewer: the gene (1-based inclusive bounds) and, optionally, the window, the pinned locus and the reads track. */
-type Opened = { geneName: string; geneId?: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; mark?: { start: number; end: number }; reads?: boolean };
+type Opened = { geneName: string; geneId?: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; /** undefined: the window itself is pinned when there is one; null: nothing pinned */ mark?: { start: number; end: number } | null; reads?: boolean };
 /** A registered view (tab): its region, the last state the viewer reported for it, and the options it must start with when reopened. */
 interface ViewTab { id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings> }
 const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
 /** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
 const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
-const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? undefined });
+const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? null });
 /** Largest window fetched around a view (the viewer's own rule), for the export. */
 const MAX_FETCH_BP = 2_000_000;
 
@@ -377,7 +377,7 @@ function App() {
     const list = session.views ?? (session.gene ? [{ label: session.gene.name, gene: session.gene, viewer: session.viewer }] : []);
     const tabs: ViewTab[] = list.map(v => ({
       id: tabSeq.current++, label: v.label, state: null,
-      opened: { geneName: v.gene.name, geneId: v.gene.id, chrom: v.gene.chrom, start: v.gene.start, end: v.gene.end, view: v.gene.view, mark: v.gene.mark ?? undefined },
+      opened: { geneName: v.gene.name, geneId: v.gene.id, chrom: v.gene.chrom, start: v.gene.start, end: v.gene.end, view: v.gene.view, mark: v.gene.mark ?? null },
       settings: viewerSettingsOf({ viewer: v.viewer }, ordered),
     }));
     const act = tabs[Math.min(session.activeView ?? 0, Math.max(0, tabs.length - 1))] ?? null;

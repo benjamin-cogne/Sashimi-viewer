@@ -45,8 +45,8 @@ interface SashimiViewerProps {
   onPrimaryChange?: (sampleId: number) => void;
   /** Window to show at first instead of the whole gene (1-based inclusive), e.g. the locus the host was asked for. */
   initialView?: { start: number; end: number };
-  /** Locus label to pin (1-based inclusive) when it is narrower than the initial window, e.g. the variant a deep link asked for. */
-  initialMark?: { start: number; end: number };
+  /** Locus label to pin (1-based inclusive) when it is narrower than the initial window, e.g. the variant a deep link asked for. Undefined pins the initial window itself; null pins nothing (a reopened view). */
+  initialMark?: { start: number; end: number } | null;
   /** Open with the reads track on (deep links at base resolution). */
   initialReads?: boolean;
   /** Display names chosen by the host (renamed samples), by sample id; tracks follow without remounting. */
@@ -353,7 +353,7 @@ export default function SashimiViewer({
   const [viewStart, setViewStart] = useState(() => (initialView ? Math.max(0, initialView.start - 1) : linearDefault(geneStart - 1, geneEnd)[0]));
   const [viewEnd, setViewEnd] = useState(() => (initialView ? Math.max(initialView.end, initialView.start) : linearDefault(geneStart - 1, geneEnd)[1]));
   /** Locus the user asked for by coordinates, drawn as a band / line across the plot until the next gene search. */
-  const [locusMark, setLocusMark] = useState<{ chrom: string; start: number; end: number } | null>(() => (initialMark ? { chrom, start: initialMark.start - 1, end: initialMark.end } : initialView ? { chrom, start: initialView.start - 1, end: initialView.end } : null));
+  const [locusMark, setLocusMark] = useState<{ chrom: string; start: number; end: number } | null>(() => (initialMark ? { chrom, start: initialMark.start - 1, end: initialMark.end } : initialMark === null ? null : initialView ? { chrom, start: initialView.start - 1, end: initialView.end } : null));
   const [searchError, setSearchError] = useState<string | null>(null);
   const [svgWidth, setSvgWidth] = useState(1200);
 
