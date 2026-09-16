@@ -13,6 +13,8 @@ export interface CoverageOptions {
   core?: { start: number; end: number };
   /** reads decoded at most; a deeper window is sampled systematically (1 read in 2, 4, 8…) and its counts scaled back */
   maxReads?: number;
+  /** also collect the structural evidence of a genomic library (deletions, split reads, soft clips, discordant pairs) */
+  structural?: boolean;
 }
 
 export interface SashimiDataSource {

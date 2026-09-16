@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc } from '../components/sashimi/types';
+import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -17,6 +17,12 @@ export interface RawRead {
   nh: number | null;
   /** Mismatches already known from the record (CRAM substitution features); used when `seq` is empty. */
   mismatches?: [number, string, number][];
+  /** pair and split-read fields, filled when structural evidence is wanted */
+  tlen?: number;
+  /** mate chromosome name ('' when unmapped or unknown) and 0-based mate start */
+  mateChrom?: string; matePos?: number;
+  /** SA tag: supplementary alignments "rname,pos,strand,CIGAR,mapQ,NM;" */
+  sa?: string | null;
 }
 
 const FLAG_PAIRED = 1, FLAG_UNMAPPED = 4, FLAG_REVERSE = 16, FLAG_READ2 = 128, FLAG_SECONDARY = 256, FLAG_QCFAIL = 512, FLAG_DUP = 1024;
@@ -243,4 +249,75 @@ export function exonDepth(reads: AlignedRead[], start: number, end: number): { m
   const med = sorted.length ? (sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2) : 0;
   const mean = sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : 0;
   return { median: med, mean, reads: n };
+}
+
+// ======================== Structural evidence (genomic libraries) ========================
+
+export const SV_MIN_DELETION = 50, SV_MIN_CLIP = 20, SV_MIN_SUPPORT = 3;
+const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32;
+
+const cigarRefLen = (cigar: string) => parseCigar(cigar).reduce((n, [len, op]) => n + ('MDN=X'.includes(op) ? len : 0), 0);
+const sameChrom = (a: string, b: string) => a.replace(/^chr/i, '').toUpperCase() === b.replace(/^chr/i, '').toUpperCase();
+
+/**
+ * Deletions inside reads, split reads, soft-clip clusters and discordant pairs of a window (0-based half-open),
+ * from the light records of the scan. `rate` scales every count back when the window was sampled; support
+ * thresholds apply to the scaled counts. `chrom` is the window's chromosome as named in the file.
+ */
+export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number): StructuralEvidence {
+  const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
+  const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
+  const add = (m: Map<string, JunctionArc>, s: number, e: number) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count++; else m.set(k, { start: s, end: e, count: 1 }); };
+  const inserts: number[] = [];
+  for (const r of reads) {
+    if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
+  }
+  const median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
+  const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
+  for (const r of reads) {
+    const ops = parseCigar(r.cigar);
+    let pos = r.start, leftClip = 0, rightClip = 0;
+    ops.forEach(([len, op], i) => {
+      if (op === 'S') { if (i === 0 || (i === 1 && ops[0][1] === 'H')) leftClip = len; else rightClip = len; }
+      if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len);
+      if ('MDN=X'.includes(op)) pos += len;
+    });
+    const alnEnd = pos;
+    // clip clusters: reads whose clipped part is placed elsewhere (SA tag) are split reads, drawn as arcs instead
+    if (!r.sa && leftClip >= SV_MIN_CLIP && r.start >= start && r.start < end) { const k = `L${r.start}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: r.start, side: 'left', count: 1 }); }
+    if (!r.sa && rightClip >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) { const k = `R${alnEnd}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: alnEnd, side: 'right', count: 1 }); }
+    // split reads: the clipped side of the primary continues at the supplementary alignment
+    if (r.sa) {
+      const here = rightClip >= leftClip ? alnEnd : r.start;
+      for (const part of r.sa.split(';')) {
+        const f = part.split(',');
+        if (f.length < 4) continue;
+        const saChrom = f[0], saStart = parseInt(f[1]) - 1, saCigar = f[3];
+        if (!Number.isFinite(saStart)) continue;
+        if (!sameChrom(saChrom, chrom)) { const k = `S${saChrom}@${here}`; const x = elsewhere.get(k); if (x) x.count++; else elsewhere.set(k, { kind: 'split', pos: here, chrom: saChrom, count: 1 }); continue; }
+        const there = rightClip >= leftClip ? saStart : saStart + cigarRefLen(saCigar);
+        const a = Math.round(Math.min(here, there) / 5) * 5, b = Math.round(Math.max(here, there) / 5) * 5;
+        if (b - a >= SV_MIN_DELETION && b > start && a < end) add(splits, a, b);
+      }
+    }
+    // discordant pairs, counted once from the leftmost mate
+    if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
+      if (!sameChrom(r.mateChrom, chrom)) { const k = `P${r.mateChrom}@${r.start}`; const x = elsewhere.get(k); if (x) x.count++; else elsewhere.set(k, { kind: 'pair', pos: r.start, chrom: r.mateChrom, count: 1 }); }
+      else if (r.start <= r.matePos) {
+        const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
+        const span = Math.abs(r.tlen ?? (r.matePos + (alnEnd - r.start) - r.start));
+        if (sameStrand || span > farInsert) {
+          const a = Math.floor(r.start / 500) * 500, b = Math.ceil((r.matePos + (alnEnd - r.start)) / 500) * 500;
+          if (b > a) add(disc, a, b);
+        }
+      }
+    }
+  }
+  const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
+  return {
+    deletions: scaled(dels), splits: scaled(splits), discordant: scaled(disc),
+    elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    insertMedian: median, reads: reads.length,
+  };
 }

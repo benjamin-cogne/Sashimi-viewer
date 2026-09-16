@@ -37,6 +37,31 @@ export type LibraryType = 'rna' | 'dna' | 'unknown';
 /** How a sample's library type was decided. */
 export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
 
+/** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
+export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number }
+/** Mates or split alignments on another chromosome, by position in the window and target chromosome. */
+export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
+/**
+ * Structural evidence of a genomic window (DNA libraries), 0-based half-open positions, counts scaled like
+ * the junctions when the window was sampled.
+ */
+export interface StructuralEvidence {
+  /** deletions of at least 50 bp inside reads (CIGAR D), by span */
+  deletions: JunctionArc[];
+  /** split reads: the clipped end of the primary alignment joined to its supplementary alignment (SA tag) on the same chromosome, breakpoints rounded to 5 bp */
+  splits: JunctionArc[];
+  /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
+  discordant: JunctionArc[];
+  /** split alignments and mates on other chromosomes */
+  elsewhere: ElsewhereLink[];
+  /** soft-clip clusters of at least 3 reads clipped by 20 bases or more */
+  clips: ClipCluster[];
+  /** median insert size of the proper pairs of the window (paired libraries) */
+  insertMedian: number | null;
+  /** reads scanned for this evidence (after sampling) */
+  reads: number;
+}
+
 export interface SampleCoverage {
   sample_id: number; sample_name: string;
   coverage: CoverageRun[]; junctions: JunctionArc[];
@@ -48,6 +73,8 @@ export interface SampleCoverage {
   sampled?: { rate: number; total: number; decoded: number };
   /** reads decoded and the fraction of them carrying a splice gap (CIGAR N): the library-type evidence of this window */
   spliced?: { reads: number; fraction: number };
+  /** structural evidence, when the caller asked for it (DNA samples) */
+  structural?: StructuralEvidence;
   error?: string;
 }
 

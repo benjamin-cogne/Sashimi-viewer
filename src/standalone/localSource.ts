@@ -10,7 +10,7 @@ import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
-import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
@@ -75,21 +75,26 @@ interface RecordView<R> {
   flags(r: R): number;
   mapq(r: R): number;
   nh(r: R): number | null;
-  /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks). */
-  raw(r: R, light: boolean): RawRead;
+  /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
+  raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
+const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
+  tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
+});
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
-  raw: (r, light) => ({ name: light ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')) }),
+  raw: (r, light, structural, refNames) => ({ name: light ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
+    ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, r.getTag('SA')) : {}) }),
 };
 const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
-  raw: (r, light) => {
+  raw: (r, light, structural, refNames) => {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     return { name: light ? '' : (r.readName ?? ''), start: r.start, cigar, seq: light ? '' : (r.readBases ?? ''), qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
-      mismatches: light ? undefined : cramMismatches(feats, qual) };
+      mismatches: light ? undefined : cramMismatches(feats, qual),
+      ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, (r.nextStart ?? 0) - 1, r.templateLength ?? r.templateSize ?? 0, r.getTag('SA')) : {}) };
   },
 };
 
@@ -230,7 +235,7 @@ export class LocalDataSource implements SashimiDataSource {
    * systematic sample that is exact (rate 1) whenever the region holds no more than `cap` reads. A read spanning
    * two tiles is counted in the tile holding its start (or the first tile when it starts before the window).
    */
-  private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean): Promise<Scan> {
+  private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean, structural = false): Promise<Scan> {
     const loc = await this.locate(id, chrom);
     if (!loc) return { total: 0, rate: 1, kept: [] };
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
@@ -245,7 +250,7 @@ export class LocalDataSource implements SashimiDataSource {
         if (!keepFlags(view.flags(r))) continue;
         if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
         if (total % rate === 0) {
-          kept.push(view.raw(r, light));
+          kept.push(view.raw(r, light, structural, loc.o.refNames));
           if (kept.length > cap) { kept = kept.filter((_, i) => i % 2 === 0); rate *= 2; }
         }
         total++;
@@ -336,8 +341,10 @@ export class LocalDataSource implements SashimiDataSource {
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
     const cap = Math.max(1000, opts?.maxReads ?? DEFAULT_MAX_READS);
     const win = await this.budgetWindow(sampleId, chrom, start, end, opts?.core ?? { start, end }, cap);
-    const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true);
+    const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true, !!opts?.structural);
     const reads = kept.map(r => encodeRead(r, null, 0));
+    const loc = await this.locate(sampleId, chrom);
+    const structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate) : undefined;
     const splicedReads = kept.reduce((n, r) => n + (/\d+N/.test(r.cigar) ? 1 : 0), 0);
     const junctions = junctionCounts(reads, win.start, win.end);
     // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)
@@ -349,6 +356,7 @@ export class LocalDataSource implements SashimiDataSource {
       coverage: scaleRuns(coverageRuns(reads, win.start, win.end), rate), junctions: scaleCounts(junctions, rate), spanning: scaleSpanning(spanning, rate),
       window: win, sampled: rate > 1 ? { rate, total, decoded: kept.length } : undefined,
       spliced: { reads: kept.length, fraction: kept.length ? splicedReads / kept.length : 0 },
+      structural,
     };
   }
 

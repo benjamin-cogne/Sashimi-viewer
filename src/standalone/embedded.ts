@@ -10,7 +10,7 @@
  * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
-import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, SampleRef } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
@@ -33,6 +33,7 @@ export interface EncodedCoverage {
   window: { start: number; end: number };
   sampled?: { rate: number; total: number; decoded: number };
   spliced?: { reads: number; fraction: number };
+  structural?: StructuralEvidence;
   error?: string;
 }
 /** Reads of one sample over one window (names replaced by numbers; mismatches and reference bases kept). */
@@ -77,7 +78,7 @@ export function encodeCoverage(c: SampleCoverage, window: { start: number; end: 
     start: runs.length ? runs[0].start : window.start,
     len: runs.map(r => r.end - r.start), depth: runs.map(r => r.depth),
     junctions: c.junctions.map(j => [j.start, j.end, j.count]),
-    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, error: c.error,
+    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, structural: c.structural, error: c.error,
   };
 }
 export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName: string): SampleCoverage {
@@ -87,7 +88,7 @@ export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName:
   return {
     sample_id: sampleId, sample_name: sampleName, coverage,
     junctions: e.junctions.map(([start, end, count]) => ({ start, end, count })),
-    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, error: e.error,
+    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, structural: e.structural, error: e.error,
   };
 }
 

@@ -150,8 +150,22 @@ arcs, pills, usage percentages or retention. Its label says *DNA*, and the track
 no arc space is needed. Options that only concern splicing (*Reads | Usage*, *Min reads*, *Min %*,
 *Intron retention*, the splicing legend) stay while at least one RNA track is shown, and are put
 away when every shown sample is DNA. RNA and DNA samples can share a page and a view (a proband's
-RNA next to the parents' genomes), but not a group. Structural evidence (deletions, split reads,
-soft-clip clusters, discordant pairs) and a variant strip for DNA tracks are the next steps.
+RNA next to the parents' genomes), but not a group.
+
+**Structural hints.** Where an RNA track shows junction arcs, a DNA track shows the structural
+evidence of its reads, drawn as evidence and never as calls: **deletions inside reads** (a CIGAR `D`
+run of 50 bp or more) as solid red arcs; **split reads** (the clipped end of a read whose other part
+maps elsewhere, from the SA tag) as dashed purple arcs between the two breakpoints, rounded to
+5 bp; **discordant pairs** (insert size above five times the window's median, at least 1 kb, or
+both mates on the same strand) as dashed amber arcs between 500 bp bins; **soft-clip clusters**
+(at least 3 reads clipped by 20 bases or more at one position, split reads excluded) as teal pills
+on the baseline (⇤ clipped before, ⇥ clipped after); and mates or split alignments on **another
+chromosome** as purple `→ chr` pills. *Min supporting reads* sets the support needed to draw a
+hint. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
+the count in every DNA sample shown, the median insert size, and a g. notation for a deletion.
+Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool the evidence of
+their members. Long reads carry deletions, split reads and clips; short-read pairs add the
+discordant pairs (CRAM mate fields are read when the file records them).
 
 ## Views
 
