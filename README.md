@@ -142,7 +142,10 @@ on); opening a third keeps the two. Click a tab to reopen that view exactly as y
 gene, the window, the highlight, and every option of the viewer (depth axis, filters, groups,
 reads track, chosen transcript, hidden arcs, label sizes), since each view keeps its own full
 snapshot. × forgets a view. A new view starts with the options of the view you came from. Views
-are saved with the session and are what the HTML export carries.
+are saved with the session and are what the HTML export carries. **SVG · N views** (header) saves
+every view on one SVG page, stacked vertically under their titles (gene, locus and window), each
+drawn with its own options: each tab is shown in turn while its plot is captured, then the current
+view comes back. The *SVG* button inside the plot still saves the current view alone.
 
 ## Sharing a view without the alignments
 

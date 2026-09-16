@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { serializePlotSvg } from './sashimi/svgExport';
 import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
 import {
@@ -1253,11 +1254,7 @@ export default function SashimiViewer({
   // ---- SVG export (white background, full plot) ----
   const exportSvg = useCallback(() => {
     if (!svgRef.current) return;
-    const svgEl = svgRef.current.cloneNode(true) as SVGSVGElement;
-    svgEl.querySelectorAll('[data-export="skip"]').forEach(n => n.remove());
-    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    const svgStr = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svgEl);
-    const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' });
+    const blob = new Blob([serializePlotSvg(svgRef.current)], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -3041,6 +3038,8 @@ export default function SashimiViewer({
         onMouseUp={handleMouseUp} onMouseLeave={handleMouseLeave}>
         <svg
           ref={svgRef}
+          data-sashimi-plot=""
+          data-loading={!tx || tracks.some(t => t.loading) || Object.values(readsLoading).some(Boolean) ? '1' : '0'}
           width={svgWidth}
           height={totalHeight}
           viewBox={`0 0 ${svgWidth} ${totalHeight}`}

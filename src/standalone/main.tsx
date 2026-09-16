@@ -13,6 +13,7 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedReads } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
+import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink } from './link';
 import '../index.css';
 
@@ -400,6 +401,54 @@ function App() {
   }, [build, samples, fasta, sessionName, ds, currentViews]);
   const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : v.state?.reads)).length;
 
+  // ---- Every view on one SVG page: each tab is shown in turn, its plot serialised once loaded, then the current view comes back ----
+  const exportAllSvg = useCallback(async () => {
+    if (!views.length) return;
+    setBusy(true); setError(null);
+    const original = activeIdRef.current;
+    const plotEl = () => document.querySelector<SVGSVGElement>('svg[data-sashimi-plot]');
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    /** waits for a plot element other than `prev` that has finished loading, coverage and reads alike, in two consecutive polls (or gives up after 30 s) */
+    const quiet = (el: SVGSVGElement) => el.dataset.loading === '0' && !/loading…|updating…|loading reads/.test(el.textContent || '');
+    const settled = async (prev: SVGSVGElement | null) => {
+      const t0 = Date.now();
+      let calm = 0;
+      for (;;) {
+        const el = plotEl();
+        if (el && el !== prev && quiet(el)) { if (++calm >= 2) return el; } else calm = 0;
+        if (Date.now() - t0 > 30000) return el;
+        await sleep(200);
+      }
+    };
+    const plots: { title: string; svg: string }[] = [];
+    try {
+      let prev: SVGSVGElement | null = null;
+      for (let i = 0; i < views.length; i++) {
+        const v = views[i];
+        setNotes([`SVG of ${v.label} (${i + 1}/${views.length})…`]);
+        if (v.id !== activeIdRef.current) { activateTab(v.id); await sleep(50); }
+        const el = await settled(v.id === original && i === 0 ? null : prev);
+        if (!el) { setError(`No plot for ${v.label}`); continue; }
+        prev = el;
+        const st = v.id === activeIdRef.current ? viewerStateRef.current : v.state;
+        const where = st ? fmtLocus(st.view.chrom, st.view.start, st.view.end) : '';
+        plots.push({ title: where && !v.label.includes(where) ? `${v.label} · ${where}` : v.label, svg: serializePlotSvg(el) });
+      }
+      if (original != null && original !== activeIdRef.current) activateTab(original);
+      const stem = (sessionName.trim() || defaultSessionName(opened?.geneName)).replace(/\.(json|html)$/i, '');
+      if (!plots.length) throw new Error('no plot captured');
+      const blob = new Blob([stackSvgs(plots)], { type: 'image/svg+xml;charset=utf-8' });
+      const name = `${safeFileName(stem)}-views.svg`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotes([`${name} saved: ${plots.length} view${plots.length === 1 ? '' : 's'} on one SVG page, each as drawn with its own options, under its title.`]);
+    } catch (e: any) {
+      setError(`SVG export failed: ${e?.message || String(e)}`);
+    }
+    setBusy(false);
+  }, [views, activateTab, sessionName, opened]);
+
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
     const { matched } = matchSession(session, samples);
@@ -577,6 +626,10 @@ function App() {
           <button onClick={() => setExportDialog({ window: 'margin', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
             title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'}>
             {busy ? '…' : 'Export HTML'}
+          </button>
+          <button onClick={exportAllSvg} disabled={busy || !views.length} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40"
+            title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The SVG button inside the plot saves the current view alone.">
+            {views.length > 1 ? `SVG · ${views.length} views` : 'SVG'}
           </button>
         </div>
         </div>
