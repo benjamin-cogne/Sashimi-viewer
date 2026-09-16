@@ -8,11 +8,12 @@
  */
 import type { ViewerSettings, ViewerState } from '../components/SashimiViewer';
 import type { GenomeBuild } from './ensembl';
+import type { LibraryEvidence } from '../components/sashimi/types';
 
 export const SESSION_APP = 'sashimi-viewer';
 export const SESSION_VERSION = 1;
 
-export interface SessionSample { name: string; file: string; index: string; size: number; kind: 'bam' | 'cram'; /** paths relative to the run folder, when known */ path?: string; indexPath?: string }
+export interface SessionSample { name: string; file: string; index: string; size: number; kind: 'bam' | 'cram'; /** paths relative to the run folder, when known */ path?: string; indexPath?: string; /** RNA-seq or DNA, as decided or chosen in the saving page */ library?: LibraryEvidence }
 export interface SessionGene {
   name: string; id?: string; chrom: string;
   /** gene bounds, 1-based inclusive */
@@ -43,7 +44,7 @@ export interface SessionFile {
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
 
 /** The minimum a loaded sample must expose (LocalSample without the File objects' behaviour). */
-export interface SampleLike { id: number; name: string; kind: 'bam' | 'cram'; file: { name: string; size: number }; index: { name: string }; path?: string; indexPath?: string }
+export interface SampleLike { id: number; name: string; kind: 'bam' | 'cram'; file: { name: string; size: number }; index: { name: string }; path?: string; indexPath?: string; lib?: LibraryEvidence }
 
 export function defaultSessionName(geneName?: string | null): string {
   const day = new Date().toISOString().slice(0, 10);
@@ -77,7 +78,7 @@ export function buildSession(args: {
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
-    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath })),
+    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && s.lib.type !== 'unknown' ? s.lib : undefined })),
     fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name } : null,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
@@ -97,7 +98,8 @@ export function parseSession(text: string): SessionFile {
   const samples: SessionSample[] = raw.samples
     .filter((s: any) => s && typeof s.file === 'string')
     .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: s.kind === 'cram' ? 'cram' : 'bam',
-      path: typeof s.path === 'string' ? s.path : undefined, indexPath: typeof s.indexPath === 'string' ? s.indexPath : undefined }));
+      path: typeof s.path === 'string' ? s.path : undefined, indexPath: typeof s.indexPath === 'string' ? s.indexPath : undefined,
+      library: s.library && (s.library.type === 'rna' || s.library.type === 'dna') ? { type: s.library.type, source: ['header', 'reads', 'user'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? '') } : undefined }));
   const parseGene = (g: any): SessionGene | null => g && typeof g.name === 'string' && typeof g.chrom === 'string' && Number.isFinite(g.start) && Number.isFinite(g.end)
     ? { name: g.name, id: typeof g.id === 'string' ? g.id : undefined, chrom: g.chrom, start: g.start, end: g.end,
         view: g.view && Number.isFinite(g.view.start) && Number.isFinite(g.view.end) ? { start: g.view.start, end: g.view.end } : { start: g.start, end: g.end },

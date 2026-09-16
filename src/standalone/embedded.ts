@@ -10,7 +10,7 @@
  * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
-import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, ReadsResponse, RegionHint, SampleCoverage, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, SampleRef } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
@@ -32,6 +32,7 @@ export interface EncodedCoverage {
   spanning?: BoundarySpanning;
   window: { start: number; end: number };
   sampled?: { rate: number; total: number; decoded: number };
+  spliced?: { reads: number; fraction: number };
   error?: string;
 }
 /** Reads of one sample over one window (names replaced by numbers; mismatches and reference bases kept). */
@@ -63,7 +64,7 @@ export interface EmbeddedExport {
   version: number;
   saved: string;
   build: GenomeBuild;
-  samples: { id: number; name: string; kind: 'bam' | 'cram'; file: string; index: string }[];
+  samples: { id: number; name: string; kind: 'bam' | 'cram'; file: string; index: string; library?: LibraryEvidence }[];
   /** the session (views, options, groups) to restore; its sample names match `samples` */
   session: SessionFile;
   views: EmbeddedView[];
@@ -76,7 +77,7 @@ export function encodeCoverage(c: SampleCoverage, window: { start: number; end: 
     start: runs.length ? runs[0].start : window.start,
     len: runs.map(r => r.end - r.start), depth: runs.map(r => r.depth),
     junctions: c.junctions.map(j => [j.start, j.end, j.count]),
-    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, error: c.error,
+    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, error: c.error,
   };
 }
 export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName: string): SampleCoverage {
@@ -86,7 +87,7 @@ export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName:
   return {
     sample_id: sampleId, sample_name: sampleName, coverage,
     junctions: e.junctions.map(([start, end, count]) => ({ start, end, count })),
-    spanning: e.spanning, window: e.window, sampled: e.sampled, error: e.error,
+    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, error: e.error,
   };
 }
 
@@ -135,7 +136,7 @@ export async function buildExportHtml(payload: EmbeddedExport): Promise<string> 
 
 /** Placeholder sample records of an export: the page shows them as chips, the data source serves them from the payload. */
 export function embeddedSamples(p: EmbeddedExport): LocalSample[] {
-  return p.samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: new File([], s.file), index: new File([], s.index), embedded: true }));
+  return p.samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: new File([], s.file), index: new File([], s.index), embedded: true, lib: s.library }));
 }
 
 /**
@@ -152,6 +153,10 @@ export class EmbeddedDataSource extends LocalDataSource {
     this.knownVariants = payload.knownVariants ?? [];
   }
   isEmbedded(id: number) { return this.names.has(id); }
+  override async getLibraryType(id: number): Promise<LibraryEvidence> {
+    if (!this.names.has(id)) return super.getLibraryType(id);
+    return this.payload.samples.find(s => s.id === id)?.library ?? { type: 'unknown', source: 'none', note: 'not recorded in the exported file' };
+  }
   override renameSample(id: number, name: string) { if (this.names.has(id)) this.names.set(id, name); else super.renameSample(id, name); }
   override removeSample(id: number) { this.names.delete(id); super.removeSample(id); }
   override list(): SampleRef[] {

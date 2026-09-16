@@ -134,6 +134,25 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   junction's label on every track (70–250 %), for the arcs a figure should emphasise; also saved
   with the session.
 
+## RNA-seq and genomic DNA
+
+Each sample is either **RNA-seq** or **genomic DNA** (exome, genome, long reads), and the viewer
+decides which from the file itself: the aligner named in the header (`@PG` lines: STAR, HISAT2,
+TopHat, `minimap2 -ax splice`, DRAGEN RNA mean RNA; BWA, bowtie2, minimap2 genome presets, Isaac,
+pbmm2, DRAGEN mean DNA), then the reads of the first gene opened, which have the last word: at a
+multi-exon gene with at least 200 reads, 2 % or more of them spliced (a CIGAR `N` gap) means
+RNA-seq, fewer than 0.2 % means DNA. The sample chip carries the verdict as an **RNA**, **DNA** or
+**?** badge whose tooltip gives the evidence; a click on the badge switches the type and the choice
+is then kept (saved with sessions and carried by exports). An undetermined sample behaves as RNA.
+
+A DNA track draws the coverage and, when asked, the reads, and nothing about splicing: no junction
+arcs, pills, usage percentages or retention. Its label says *DNA*, and the track is shorter since
+no arc space is needed. Options that only concern splicing (*Reads | Usage*, *Min reads*, *Min %*,
+*Intron retention*, the splicing legend) stay while at least one RNA track is shown, and are put
+away when every shown sample is DNA. RNA and DNA samples can share a page and a view (a proband's
+RNA next to the parents' genomes), but not a group. Structural evidence (deletions, split reads,
+soft-clip clusters, discordant pairs) and a variant strip for DNA tracks are the next steps.
+
 ## Views
 
 Every gene or locus opened from the search box in the header becomes a **view**. Opening a second

@@ -3,7 +3,7 @@
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
  * browser on top of local BAM/CRAM files and the UCSC / Ensembl REST APIs (src/standalone).
  */
-import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant } from './types';
+import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant, LibraryEvidence } from './types';
 
 export interface SampleRef { id: number; name: string }
 
@@ -39,6 +39,8 @@ export interface SashimiDataSource {
   getReference(chrom: string, start: number, end: number): Promise<string | null>;
   /** Protein domains (UniProt / Pfam) of a coding model, amino-acid coordinates. */
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]>;
+  /** Library type of a sample from what the source knows before any read is decoded (the aligner named in the header); absent when it cannot tell. */
+  getLibraryType?(sampleId: number): Promise<LibraryEvidence>;
   /** Variants previously identified in a sample (clinical indication, diagnostic, chromosome map); absent when the source has no such record. */
   getKnownVariants?(sampleId: number): Promise<KnownVariant[]>;
   /** Common variants (dbSNP 155 common via UCSC, Ensembl fallback) overlapping a 0-based half-open window. */

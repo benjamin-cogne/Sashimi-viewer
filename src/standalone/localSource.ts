@@ -8,7 +8,7 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
-import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
 import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
@@ -17,12 +17,32 @@ import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, get
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
-export interface LocalSample { id: number; name: string; kind: 'bam' | 'cram'; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean }
+export interface LocalSample { id: number; name: string; kind: 'bam' | 'cram'; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence }
 export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
 
 type Opened =
-  | { kind: 'bam'; bam: BamFile; refNames: string[] }
-  | { kind: 'cram'; cram: IndexedCramFile; refNames: string[] };
+  | { kind: 'bam'; bam: BamFile; refNames: string[]; header: string }
+  | { kind: 'cram'; cram: IndexedCramFile; refNames: string[]; header: string };
+
+/**
+ * Library type from the SAM header: the aligner named in the @PG lines (program name and command line).
+ * Spliced aligners mean RNA-seq, genome aligners mean DNA; DRAGEN does both and says which on its command line.
+ */
+export function classifyHeader(header: string): LibraryEvidence {
+  const pg = header.split('\n').filter(l => l.startsWith('@PG'));
+  const text = pg.join(' ').toLowerCase();
+  const name = (re: RegExp) => re.test(text);
+  if (!pg.length) return { type: 'unknown', source: 'none', note: 'no @PG line in the header' };
+  if (name(/\bstar\b|starsolo|hisat2|hisat|tophat|\bsubjunc\b|gsnap|olego|mapsplice|crac\b/) || name(/minimap2[^\n]*(-ax? ?splice|-x ?splice)/) || name(/dragen[^\n]*(--enable-rna(?:\s+|=)true|rna)/))
+    return { type: 'rna', source: 'header', note: `spliced aligner in the header: ${pgName(pg)}` };
+  if (name(/\bbwa\b|bwa-mem2|bwa mem|bowtie2|bowtie|minimap2|isaac|novoalign|ngmlr|winnowmap|pbmm2|dragen/))
+    return { type: 'dna', source: 'header', note: `genome aligner in the header: ${pgName(pg)}` };
+  return { type: 'unknown', source: 'none', note: `aligner not recognised: ${pgName(pg)}` };
+}
+const pgName = (pg: string[]): string => {
+  const names = pg.map(l => /\tPN:([^\t]+)/.exec(l)?.[1] ?? /\tID:([^\t]+)/.exec(l)?.[1] ?? '').filter(Boolean);
+  return [...new Set(names)].slice(0, 3).join(', ') || 'unnamed program';
+};
 
 const MAX_REGION_BP = 5_000_000;
 const MAX_READS_REGION_BP = 250_000;
@@ -160,7 +180,8 @@ export class LocalDataSource implements SashimiDataSource {
           const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: BAM_CACHE_BYTES });
           await bam.getHeader();
           const refNames = (bam.indexToChr || []).map(r => r.refName);
-          return { kind: 'bam', bam, refNames };
+          const header = (await bam.getHeaderText().catch(() => '')) ?? '';
+          return { kind: 'bam', bam, refNames, header };
         }
         const cram = new IndexedCramFile({
           cramFilehandle: new BlobFile(s.file),
@@ -176,7 +197,8 @@ export class LocalDataSource implements SashimiDataSource {
           },
         });
         const info = await cram.cram.getReferenceInfo();
-        return { kind: 'cram', cram, refNames: info.map(r => r.name) };
+        const header = (await cram.cram.getHeaderText().catch(() => '')) ?? '';
+        return { kind: 'cram', cram, refNames: info.map(r => r.name), header };
       })().catch(e => { this.opened.delete(id); throw e; }));
     }
     return this.opened.get(id)!;
@@ -254,6 +276,11 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   // ---- SashimiDataSource ----
+  async getLibraryType(sampleId: number): Promise<LibraryEvidence> {
+    if (!this.samples.has(sampleId)) return { type: 'unknown', source: 'none', note: 'sample not found' };
+    const o = await this.open(sampleId);
+    return classifyHeader(o.header);
+  }
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> { return getTranscript(this.reference.build, geneName, geneId, hint); }
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }
   async getRunSamples(): Promise<SampleRef[]> { return this.list(); }
@@ -311,6 +338,7 @@ export class LocalDataSource implements SashimiDataSource {
     const win = await this.budgetWindow(sampleId, chrom, start, end, opts?.core ?? { start, end }, cap);
     const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true);
     const reads = kept.map(r => encodeRead(r, null, 0));
+    const splicedReads = kept.reduce((n, r) => n + (/\d+N/.test(r.cigar) ? 1 : 0), 0);
     const junctions = junctionCounts(reads, win.start, win.end);
     // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)
     const spanning = boundarySpanning(reads,
@@ -320,6 +348,7 @@ export class LocalDataSource implements SashimiDataSource {
       sample_id: sampleId, sample_name: s.name,
       coverage: scaleRuns(coverageRuns(reads, win.start, win.end), rate), junctions: scaleCounts(junctions, rate), spanning: scaleSpanning(spanning, rate),
       window: win, sampled: rate > 1 ? { rate, total, decoded: kept.length } : undefined,
+      spliced: { reads: kept.length, fraction: kept.length ? splicedReads / kept.length : 0 },
     };
   }
 

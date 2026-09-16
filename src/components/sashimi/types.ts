@@ -32,6 +32,11 @@ export interface JunctionArc { start: number; end: number; count: number; }
 export interface BoundarySpanning { intronStart: Record<number, number>; intronEnd: Record<number, number> }
 /** Boundaries a coverage request wants spanning counts for (the displayed model's exons); junction ends are always included. */
 export interface BoundaryHint { intronStarts: number[]; intronEnds: number[] }
+/** What a library is: RNA-seq (spliced reads, junction arcs) or genomic DNA (exome, genome, long reads). */
+export type LibraryType = 'rna' | 'dna' | 'unknown';
+/** How a sample's library type was decided. */
+export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
+
 export interface SampleCoverage {
   sample_id: number; sample_name: string;
   coverage: CoverageRun[]; junctions: JunctionArc[];
@@ -41,6 +46,8 @@ export interface SampleCoverage {
   window?: { start: number; end: number };
   /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
   sampled?: { rate: number; total: number; decoded: number };
+  /** reads decoded and the fraction of them carrying a splice gap (CIGAR N): the library-type evidence of this window */
+  spliced?: { reads: number; fraction: number };
   error?: string;
 }
 

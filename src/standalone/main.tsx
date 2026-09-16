@@ -13,6 +13,7 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedReads } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
+import type { LibraryEvidence, LibraryType } from '../components/sashimi/types';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink } from './link';
 import '../index.css';
@@ -192,6 +193,8 @@ function App() {
     const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s }));
     for (const s of added) ds.addSample(s);
     if (added.length) setSamples(prev => [...prev, ...added]);
+    // library type from the header (the aligner); the reads of the first gene opened confirm or correct it
+    for (const s of added) ds.getLibraryType?.(s.id).then(ev => setSamples(prev => prev.map(x => (x.id === s.id && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...x, lib: ev } : x)))).catch(() => {});
     if (unmatched.length) msgs.push(`No index found for ${unmatched.join(', ')} (add the .bai / .crai file together with it)`);
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
@@ -248,6 +251,22 @@ function App() {
     setSamples(prev => prev.map(s => (s.id === id ? { ...s, name } : s)));
   }, [ds]);
   const sampleNames = useMemo(() => Object.fromEntries(samples.map(s => [s.id, s.name])) as Record<number, string>, [samples]);
+  const sampleTypes = useMemo(() => Object.fromEntries(samples.map(s => [s.id, s.lib?.type ?? 'unknown'])) as Record<number, LibraryType>, [samples]);
+  /** Evidence from the reads of a window: decisive fractions settle the type unless the user chose it; the header only breaks ties. */
+  const onLibraryEvidence = useCallback((sid: number, ev: { reads: number; fraction: number; multiExon: boolean }) => {
+    if (ev.reads < 200 || !ev.multiExon) return;
+    const type: LibraryType | null = ev.fraction >= 0.02 ? 'rna' : ev.fraction < 0.002 ? 'dna' : null;
+    if (!type) return;
+    const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString()} reads spliced`;
+    setSamples(prev => prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s)));
+  }, []);
+  /** The user decides the type of a sample (a click on its badge): RNA ↔ DNA, an undetermined sample becomes RNA. */
+  const cycleLibrary = useCallback((sid: number) => setSamples(prev => prev.map(s => {
+    if (s.id !== sid) return s;
+    const type: LibraryType = s.lib?.type === 'rna' ? 'dna' : 'rna';
+    return { ...s, lib: { type, source: 'user', note: 'chosen by the user' } };
+  })), []);
+  const libBadge = (lib: LibraryEvidence | undefined) => (lib?.type === 'rna' ? 'RNA' : lib?.type === 'dna' ? 'DNA' : '?');
 
   const removeSample = useCallback((id: number) => { ds.removeSample(id); setSamples(prev => prev.filter(s => s.id !== id)); }, [ds]);
 
@@ -389,7 +408,7 @@ function App() {
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
-        samples: samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: s.file.name, index: s.index.name })),
+        samples: samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: s.file.name, index: s.index.name, library: s.lib })),
         session, views: evs, knownVariants: ds.knownVariants,
       };
       const html = await buildExportHtml(payload);
@@ -460,7 +479,7 @@ function App() {
   const applySession = useCallback((session: SessionFile) => {
     const { matched } = matchSession(session, samples);
     for (const { entry, sample } of matched) if (sample.name !== entry.name) ds.renameSample(sample.id, entry.name);
-    const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name } : s; });
+    const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name, lib: m.entry.library ?? s.lib } : s; });
     const ordered = [...matched.map(m => renamed.find(s => s.id === m.sample.id)!), ...renamed.filter(s => !matched.some(m => m.sample.id === s.id))];
     setSamples(ordered);
     setSessionSeq(n => n + 1);
@@ -609,6 +628,11 @@ function App() {
               onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
               onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
               {i === 0 && <span title="primary sample">★</span>}
+              <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
+                className={`px-1 rounded text-[9px] font-bold leading-4 ${s.lib?.type === 'dna' ? 'bg-slate-700 text-white' : s.lib?.type === 'rna' ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-700'}`}
+                title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
+                {libBadge(s.lib)}
+              </button>
               {renaming?.id === s.id ? (
                 <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
                   onBlur={() => renameSample(s.id, renaming.value)}
@@ -712,7 +736,7 @@ function App() {
       ) : (
         <div className="p-3">
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div>
       )}

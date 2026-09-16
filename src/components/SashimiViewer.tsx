@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
+import type { LibraryType } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
 import {
@@ -52,6 +53,10 @@ interface SashimiViewerProps {
   initialReads?: boolean;
   /** Display names chosen by the host (renamed samples), by sample id; tracks follow without remounting. */
   sampleNames?: Record<number, string>;
+  /** Library type of each sample (RNA-seq or genomic DNA), by sample id: DNA tracks show no junction arcs and no usage. */
+  sampleTypes?: Record<number, LibraryType>;
+  /** Called after each coverage load with the spliced-read fraction of the window, the host's evidence for the library type. */
+  onLibraryEvidence?: (sampleId: number, evidence: { reads: number; fraction: number; multiExon: boolean }) => void;
   /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
   initialSettings?: Partial<ViewerSettings>;
   /** Called whenever an option or the navigation changes, with everything a session file needs. */
@@ -168,7 +173,7 @@ interface TrackData {
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
-  group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number>; /** the group's colour (chosen or from the palette) */ color: string };
+  group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number>; /** the group's colour (chosen or from the palette) */ color: string; /** every member is a DNA sample */ dna: boolean };
 }
 
 /** A named set of samples pooled into one track in the aggregate ("Groups") view. */
@@ -342,7 +347,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, initialSettings, onStateChange,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, sampleTypes, onLibraryEvidence, initialSettings, onStateChange,
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   const ds = dataSource;
@@ -852,6 +857,11 @@ export default function SashimiViewer({
   const covers = (f: FetchWindow | undefined, v: { chrom: string; start: number; end: number; uniqueOnly: boolean }) =>
     !!f && f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && f.start <= v.start && f.end >= v.end;
 
+  const onLibraryEvidenceRef = useRef(onLibraryEvidence);
+  onLibraryEvidenceRef.current = onLibraryEvidence;
+  /** DNA samples: no splicing, so no arcs, pills, usage or retention on their tracks. */
+  const isDnaSample = useCallback((sid: number) => sampleTypes?.[sid] === 'dna', [sampleTypes]);
+  const isDnaTrack = useCallback((t: TrackData) => !t.gtex && (t.group ? t.group.dna : isDnaSample(t.sampleId)), [isDnaSample]);
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
     const view = viewRef.current;
     const win = fetchWindowFor(view);
@@ -868,6 +878,7 @@ export default function SashimiViewer({
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
+      if (data.spliced) onLibraryEvidenceRef.current?.(sid, { ...data.spliced, multiExon: (txRef.current?.exons.length ?? 0) > 1 });
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
         ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, loading: false, error: data.error, fetched,
       } : t));
@@ -1160,6 +1171,7 @@ export default function SashimiViewer({
     const spanning = poolSpanning(members);
     const failed = members.filter(m => m.error && !m.coverage.length);
     const pending = g.sampleIds.filter(sid => !members.some(m => m.sampleId === sid) && runSamples.some(x => x.id === sid));
+    const dna = g.sampleIds.length > 0 && g.sampleIds.every(sid => isDnaSample(sid));
     const sampledMembers = members.filter(m => m.sampled);
     const sampled = sampledMembers.length
       ? { rate: Math.max(...sampledMembers.map(m => m.sampled!.rate)), total: sampledMembers.reduce((a, m) => a + m.sampled!.total, 0), decoded: sampledMembers.reduce((a, m) => a + m.sampled!.decoded, 0) }
@@ -1169,9 +1181,9 @@ export default function SashimiViewer({
       coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning, sampled,
       loading: members.some(m => m.loading) || pending.length > 0,
       error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
-      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, includeRetention ? spanning : undefined), samplesWith, color: g.color || TRACK_COLORS[gi % TRACK_COLORS.length] },
+      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(dna ? [] : junctions, tx, includeRetention && !dna ? spanning : undefined), samplesWith, color: g.color || TRACK_COLORS[gi % TRACK_COLORS.length], dna },
     };
-  }), [groups, tracks, tx, runSamples, includeRetention]);
+  }), [groups, tracks, tx, runSamples, includeRetention, isDnaSample]);
 
   const displayTracks = useMemo(() => {
     const withProfile = gtexTracks.map(t => {
@@ -1283,13 +1295,13 @@ export default function SashimiViewer({
   /** Junction keys seen (above threshold) in the comparison tracks, for "unique to primary" highlighting. */
   /** Tracks compared for the "unique to the first track" highlight: the samples, or the groups in aggregate view. */
   const comparedTracks = viewMode === 'groups' ? groupTracks : tracks;
+  /** Comparison tracks that can carry junctions: DNA tracks are left out, otherwise every junction of the primary would look unique. */
+  const rnaOthers = useMemo(() => comparedTracks.slice(1).filter(t => !isDnaTrack(t)), [comparedTracks, isDnaTrack]);
   const otherTrackJunctionKeys = useMemo(() => {
     const keys = new Set<string>();
-    for (let i = 1; i < comparedTracks.length; i++) {
-      for (const j of comparedTracks[i].junctions) if (j.count >= minJunctionCount) keys.add(junctionKey(j));
-    }
+    for (const t of rnaOthers) for (const j of t.junctions) if (j.count >= minJunctionCount) keys.add(junctionKey(j));
     return keys;
-  }, [comparedTracks, minJunctionCount]);
+  }, [rnaOthers, minJunctionCount]);
 
   const plotRight = PLOT_LEFT + plotWidth;
 
@@ -1674,9 +1686,11 @@ export default function SashimiViewer({
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
     const m = new Map<number, AggResult>();
-    if (arcLabel === 'usage') for (const t of tracks) m.set(t.sampleId, aggregateJunctions(t.junctions, tx, includeRetention ? t.spanning : undefined));
+    if (arcLabel === 'usage') for (const t of tracks) if (!isDnaSample(t.sampleId)) m.set(t.sampleId, aggregateJunctions(t.junctions, tx, includeRetention ? t.spanning : undefined));
     return m;
-  }, [arcLabel, tracks, tx, includeRetention]);
+  }, [arcLabel, tracks, tx, includeRetention, isDnaSample]);
+  /** At least one shown sample track is RNA (or of unknown type): the splicing controls and legend apply. */
+  const anyRna = useMemo(() => displayTracks.some(t => !t.gtex && !isDnaTrack(t)) || !displayTracks.some(t => !t.gtex), [displayTracks, isDnaTrack]);
 
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
@@ -1690,7 +1704,9 @@ export default function SashimiViewer({
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
       const trackEvents = trackAgg?.events;
       const otherGroups = track.group ? displayTracks.filter(o => o.group && o.sampleId !== track.sampleId) : [];
+      const dnaTrack = isDnaTrack(track);
       const passes = (j: JunctionArc) => {
+        if (dnaTrack) return false;
         if (hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)) return false;
         if (track.gtex) return j.count >= 1;
         const ev = trackEvents?.get(junctionKey(j));
@@ -1718,7 +1734,7 @@ export default function SashimiViewer({
         const dragKey = `${track.sampleId}:${key}`;
         const { model, info, foreign } = junctionContext(j);
         const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
-        const unique = idx === 0 && comparedTracks.length > 1 && !otherTrackJunctionKeys.has(key);
+        const unique = idx === 0 && rnaOthers.length > 0 && !otherTrackJunctionKeys.has(key);
         const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
@@ -1812,7 +1828,7 @@ export default function SashimiViewer({
       }
       const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
       // intron retention pills: on the baseline at the middle of the visible part of each intron, above the Min % threshold
-      const retention = (trackAgg?.retention ?? [])
+      const retention = (dnaTrack ? [] : trackAgg?.retention ?? [])
         .filter(r => r.pct * 100 >= minUsagePct && r.pct > 0 && r.end > viewStart && r.start < viewEnd)
         .map(r => {
           const xa = scale.x(Math.max(r.start, viewStart)), xb = scale.x(Math.min(r.end, viewEnd));
@@ -1829,7 +1845,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -1855,10 +1871,10 @@ export default function SashimiViewer({
         </g>
       ),
     });
-    line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
-    line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
-    if (showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
-    if (showUsage && includeRetention) items.push({
+    if (anyRna) line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
+    if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
+    if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
+    if (anyRna && showUsage && includeRetention) items.push({
       w: 300, el: (
         <g key="lir">
           <rect x={0} y={y - 6.5} width={32} height={13} rx={6.5} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
@@ -1867,7 +1883,7 @@ export default function SashimiViewer({
         </g>
       ),
     });
-    items.push({
+    if (anyRna) items.push({
       w: 150, el: (
         <g key="lf">
           {renderFrameGlyph(FRAME_GLYPH_R, y, { frame: 'in', delta: 0, cdsBases: 0, text: '' }, 'lf1')}
@@ -1892,7 +1908,7 @@ export default function SashimiViewer({
       g(SAME_SENSE_COLOR, 'neighbouring gene, same strand', 'ln1');
       g(ANTISENSE_COLOR, 'neighbouring gene, antisense', 'ln2');
     }
-    if (comparedTracks.length > 1) line(UNIQUE_COLOR, false, `only in ${comparedTracks[0].sampleName}`, 'l3');
+    if (anyRna && rnaOthers.length > 0) line(UNIQUE_COLOR, false, `only in ${comparedTracks[0].sampleName}`, 'l3');
     items.push({
       w: 60, el: (
         <g key="l4">
@@ -1982,7 +1998,7 @@ export default function SashimiViewer({
       });
     }
     items.push({
-      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? `arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (reads pooled over the group)${groups.length > 1 ? ' · coloured value = difference with the group of that colour, in points' : ''}` : showUsage ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
+      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{!anyRna ? 'genomic DNA: depth and reads, no splicing arcs' : viewMode === 'groups' ? `arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (reads pooled over the group)${groups.length > 1 ? ' · coloured value = difference with the group of that colour, in points' : ''}` : showUsage ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
     });
     return items;
   })();
@@ -2068,11 +2084,12 @@ export default function SashimiViewer({
     const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
     const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
+    const dnaNote = isDnaTrack(track) ? '  ·  DNA' : '';
     const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
     const sampledTitle = track.sampled
       ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
       : '';
-    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2;
+    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2;
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
       : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
@@ -2214,6 +2231,7 @@ export default function SashimiViewer({
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
             {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
+            {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)</title></tspan>}
             {sampledNote && <tspan fill={SNP_INDEL_COLOR} fontSize={9} fontWeight={600}>{sampledNote}<title>{sampledTitle}</title></tspan>}
 
           </text>
@@ -2920,13 +2938,14 @@ export default function SashimiViewer({
                   title={`Collapse the reads into consensus groups: one row per local haplotype × splice pattern with its number of supporting reads. Variable sites (★) need at least 3 alternate reads and the Min VAF fraction of the depth; groups below "Min reads" fold into a minor bucket. Sites never co-covered by a read stay in separate groups (no invented phase).`} />
               )}
             </span>
-            <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}
+            {anyRna && <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}
               title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
               options={[
                 { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
                 { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
-              ]} />
-            {showUsage ? (
+              ]} />}
+            {!anyRna && <span className={`text-xs ${t.muted}`} title="Every shown sample is genomic DNA: no splice junctions, so the arc, usage and retention controls are put away. Add an RNA sample to get them back.">DNA · no splicing controls</span>}
+            {anyRna && (showUsage ? (
               <>
                 <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
                   Min %
@@ -2942,7 +2961,7 @@ export default function SashimiViewer({
                 <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
                   className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
               </label>
-            )}
+            ))}
             {hiddenHere > 0 && (
               <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))} className={`${t.btn} px-2 py-1 text-xs`}
                 title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
@@ -3303,7 +3322,13 @@ export default function SashimiViewer({
                       <select value="" onChange={e => { const id = parseInt(e.target.value); if (id) addToGroup(g.id, id); }}
                         className={`${t.inp} border rounded px-1 py-0.5 text-xs`} title="Add a sample loaded in the page to this group">
                         <option value="">+ add sample…</option>
-                        {free.map(x => { const other = groups.find(o => o.id !== g.id && o.sampleIds.includes(x.id)); return <option key={x.id} value={x.id}>{x.name}{other ? ` (moves from ${other.name})` : ''}</option>; })}
+                        {free.map(x => {
+                          const other = groups.find(o => o.id !== g.id && o.sampleIds.includes(x.id));
+                          const gType = g.sampleIds.map(sid => sampleTypes?.[sid]).find(ty => ty === 'rna' || ty === 'dna');
+                          const xType = sampleTypes?.[x.id];
+                          const mixed = !!gType && (xType === 'rna' || xType === 'dna') && xType !== gType;
+                          return <option key={x.id} value={x.id} disabled={mixed}>{x.name}{xType === 'dna' ? ' (DNA)' : ''}{mixed ? ' · cannot mix RNA and DNA in one group' : other ? ` (moves from ${other.name})` : ''}</option>;
+                        })}
                       </select>
                     </div>
                   </div>
