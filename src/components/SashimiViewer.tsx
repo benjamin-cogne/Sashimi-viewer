@@ -3001,6 +3001,13 @@ export default function SashimiViewer({
           viewBox={`0 0 ${svgWidth} ${totalHeight}`}
           style={{ cursor: regionSelect ? 'col-resize' : dragging ? 'grabbing' : 'crosshair', userSelect: 'none', display: 'block' }}
           onMouseDown={handleMouseDown}
+          onContextMenu={e => {
+            // right click on the searched locus (its band or line, whatever track element lies on top) removes the highlight
+            if (!locusMark || chromKey(locusMark.chrom) !== chromKey(currentChrom)) return;
+            const { x } = svgPoint(e);
+            const a = scale.x(locusMark.start), b = scale.x(locusMark.end);
+            if (x >= Math.min(a, b) - 6 && x <= Math.max(a, b) + 6) { e.preventDefault(); setLocusMark(null); }
+          }}
           onMouseMove={handleMouseMove}
           onDoubleClick={resetZoom}
           xmlns="http://www.w3.org/2000/svg"
@@ -3024,13 +3031,20 @@ export default function SashimiViewer({
             const label = point ? `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}` : `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}-${locusMark.end.toLocaleString()}`;
             const w = label.length * 5.6 + 10;
             const lx = Math.min(plotRight - w - 2, Math.max(PLOT_LEFT + 2, (left + right) / 2 - w / 2));
+            // left button and hover pass through to the plot (pan, positions); a right click removes the highlight
             return (
-              <g pointerEvents="none" fontFamily={FONT}>
+              <g fontFamily={FONT} onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setLocusMark(null); }}>
                 {point
-                  ? <line x1={(a + b) / 2} y1={RULER_H} x2={(a + b) / 2} y2={legendY} stroke={INK.select} strokeWidth={1.2} strokeDasharray="5 3" opacity={0.8} />
+                  ? <>
+                      <line x1={(a + b) / 2} y1={RULER_H} x2={(a + b) / 2} y2={legendY} stroke="transparent" strokeWidth={8} />
+                      <line x1={(a + b) / 2} y1={RULER_H} x2={(a + b) / 2} y2={legendY} stroke={INK.select} strokeWidth={1.2} strokeDasharray="5 3" opacity={0.8} pointerEvents="none" />
+                    </>
                   : <rect x={left} y={RULER_H} width={Math.max(1, right - left)} height={legendY - RULER_H} fill={withAlpha(INK.select, 0.08)} stroke={INK.select} strokeWidth={0.8} strokeDasharray="5 3" opacity={0.9} />}
-                <rect x={lx} y={RULER_H - 40} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
-                <text x={lx + w / 2} y={RULER_H - 29.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
+                <g style={{ cursor: 'context-menu' }}>
+                  <title>{`Locus you searched for · right-click to remove the highlight`}</title>
+                  <rect x={lx} y={RULER_H - 40} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
+                  <text x={lx + w / 2} y={RULER_H - 29.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
+                </g>
               </g>
             );
           })()}
@@ -3257,7 +3271,7 @@ export default function SashimiViewer({
         </div>
       )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
-        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · drag an arc vertically to untangle it · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
+        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc vertically to untangle it · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>
     </div>
   );

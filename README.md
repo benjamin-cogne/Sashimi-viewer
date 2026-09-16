@@ -211,6 +211,9 @@ appear as tracks in the same window. Pressing *Open* again reproduces the linked
 
 The same works without a link: typing a gene or a locus and pressing *Open* before adding any
 file shows the annotation alone (gene model, all transcripts, common SNPs, GTEx tissue tracks).
+A locus searched by coordinates (in the header or the viewer's search box) is highlighted as a
+dashed band or line with its position pinned above the ruler; right-click the band, the line or
+the pinned label to remove the highlight (the next search draws a new one).
 
 | Parameter | Meaning | Default |
 |---|---|---|
