@@ -6,7 +6,7 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import SashimiViewer, { type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
+import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
@@ -41,6 +41,13 @@ interface ViewTab { id: number; label: string; opened: Opened; state: ViewerStat
 const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
 /** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
 const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
+/** A tab's state: what its viewer last reported, else (a tab loaded from a session or an export and never opened yet) its region with the options it will start with. */
+const stateOfTab = (t: ViewTab): ViewerState => t.state ?? {
+  ...DEFAULT_VIEWER_SETTINGS, ...(t.settings ?? {}),
+  gene: { name: t.opened.geneName, id: t.opened.geneId, chrom: t.opened.chrom, start: t.opened.start, end: t.opened.end },
+  view: { chrom: t.opened.chrom, start: t.opened.view?.start ?? t.opened.start, end: t.opened.view?.end ?? t.opened.end },
+  mark: t.opened.mark ?? null,
+};
 const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? null });
 /** Largest window fetched around a view (the viewer's own rule), for the export. */
 const MAX_FETCH_BP = 2_000_000;
@@ -303,9 +310,9 @@ function App() {
   const viewerInit: Partial<ViewerSettings> | undefined = pendingSettingsRef.current ?? (viewerStateRef.current ? { ...viewerStateRef.current } : undefined);
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
   const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [activeId, opened, samples, build, fasta, sessionSeq]);
-  /** Tabs as they are now, the active one refreshed, and the index of the active one among those with a state. */
+  /** Every tab with a full state (the active one refreshed from the viewer, never-opened ones from their region and options), and the index of the active one. */
   const currentViews = useCallback(() => {
-    const tabs = snapshot(views).filter(v => v.state);
+    const tabs = snapshot(views).map(v => ({ ...v, state: stateOfTab(v) }));
     return { tabs, activeIndex: Math.max(0, tabs.findIndex(v => v.id === activeIdRef.current)) };
   }, [views, snapshot]);
   const makePrimary = useCallback((id: number) => setSamples(prev => [...prev.filter(s => s.id === id), ...prev.filter(s => s.id !== id)]), []);
@@ -399,7 +406,7 @@ function App() {
     }
     setBusy(false);
   }, [build, samples, fasta, sessionName, ds, currentViews]);
-  const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : v.state?.reads)).length;
+  const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : stateOfTab(v).reads)).length;
 
   // ---- Every view on one SVG page: each tab is shown in turn, its plot serialised once loaded, then the current view comes back ----
   const exportAllSvg = useCallback(async () => {

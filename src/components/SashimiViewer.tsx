@@ -77,6 +77,14 @@ export interface ViewerSettings {
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
+/** The options a fresh viewer starts with (the same defaults as its state initialisers), for hosts that need a full state before the viewer has reported one. */
+export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
+  equalIntrons: false, intronWidth: null, allTranscripts: false, commonSnps: false, snpMinAf: 0.01,
+  depthAxis: 'shared', uniqueOnly: false,
+  reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
+  minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [],
+};
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
   gene: { name: string; id?: string; chrom: string; start: number; end: number };
