@@ -120,6 +120,15 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   *Min %*, hiding events below that usage; hidden and off-screen junctions still count in the
   denominators, so a canonical arc below 100 % lists in its tooltip the other events at its intron,
   shown or not.
+  With two groups or more, each percentage is followed by its **difference with every other
+  group**, in points and in that group's colour (`+10 %`, `−10 %`); the tooltip names the group.
+  Group colours are chosen in the *Groups…* dialog (click the swatch; *default* returns to the
+  palette) and saved with the session.
+- **Hiding an arc**: hover an arc and click the × at the end of its pill (or *Hide arc* in the
+  junction's detail panel) to remove it from every track, for instance the `n=…` junctions of
+  another transcript that clutter a group view. Hidden arcs still count in the percentages, like
+  arcs under the thresholds; the *hidden arcs · show* chip in the toolbar brings them back, and the
+  list is saved with the session.
 
 ## Sessions
 

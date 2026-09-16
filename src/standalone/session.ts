@@ -22,7 +22,7 @@ export interface SessionGene {
   mark: { start: number; end: number } | null;
 }
 /** Viewer options with samples referred to by name (ids are per page load). */
-export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample'> & { groups: { name: string; samples: string[] }[]; readsSample: string | null };
+export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample'> & { groups: { name: string; samples: string[]; color?: string }[]; readsSample: string | null };
 export interface SessionFile {
   app: typeof SESSION_APP;
   version: number;
@@ -62,8 +62,8 @@ export function buildSession(args: {
     reads: state.reads, readsAll: state.readsAll, readsSample: nameOf(state.readsSample), collapseReads: state.collapseReads, minVafPct: state.minVafPct,
     minJunctionReads: state.minJunctionReads, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
-    groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n) })),
-    knownVariants: state.knownVariants, transcriptId: state.transcriptId,
+    groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
+    knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], transcriptId: state.transcriptId,
   } : null;
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
@@ -95,8 +95,9 @@ export function parseSession(text: string): SessionFile {
   const v = raw.viewer && typeof raw.viewer === 'object' ? raw.viewer : null;
   const viewer: SessionViewer | null = v ? {
     ...v,
-    groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [] })) : [],
+    groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [], color: typeof x.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : undefined })) : [],
     readsSample: typeof v.readsSample === 'string' ? v.readsSample : null,
+    hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
   } : null;
   return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null, gene, viewer };
 }
@@ -123,6 +124,6 @@ export function viewerSettingsOf(session: SessionFile, samples: SampleLike[]): P
   return {
     ...rest,
     readsSample: readsSample ? idOf(readsSample) ?? null : null,
-    groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null) })),
+    groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
   };
 }

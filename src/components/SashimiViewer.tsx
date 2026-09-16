@@ -65,8 +65,10 @@ export interface ViewerSettings {
   depthAxis: DepthAxis; uniqueOnly: boolean;
   reads: boolean; readsAll: boolean; readsSample: number | null; collapseReads: boolean; minVafPct: number;
   minJunctionReads: number; minUsagePct: number; arcLabels: 'reads' | 'usage'; intronRetention: boolean;
-  viewMode: 'samples' | 'groups'; groups: { name: string; sampleIds: number[] }[];
+  viewMode: 'samples' | 'groups'; groups: { name: string; sampleIds: number[]; /** CSS colour chosen by the user; absent = palette */ color?: string }[];
   knownVariants: boolean;
+  /** arcs the user hid by clicking them, as "chrom:start-end" (0-based half-open); they still count in the percentages */
+  hiddenJunctions: string[];
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -153,11 +155,11 @@ interface TrackData {
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
-  group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number> };
+  group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number>; /** the group's colour (chosen or from the palette) */ color: string };
 }
 
 /** A named set of samples pooled into one track in the aggregate ("Groups") view. */
-interface SampleGroup { id: number; name: string; sampleIds: number[] }
+interface SampleGroup { id: number; name: string; sampleIds: number[]; color?: string }
 const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
 const PSEUDO_EXON_COLOR = '#7c3aed';
 const RETENTION_COLOR = '#0d9488';
@@ -358,7 +360,11 @@ export default function SashimiViewer({
   const [intronWidth, setIntronWidth] = useState<number | null>(init.intronWidth ?? null);
   const [depthAxis, setDepthAxis] = useState<DepthAxis>(init.depthAxis ?? 'shared');
   // ---- Sample groups (aggregate view): one pooled track per group ----
-  const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds] })));
+  const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds], color: g.color })));
+  /** Arcs hidden by a click on them ("chrom:start-end"); they still count in the percentages, like arcs under the thresholds. */
+  const [hiddenArcs, setHiddenArcs] = useState<string[]>(() => init.hiddenJunctions ?? []);
+  /** Arc under the pointer (track:junction), which shows the hide button on its pill. */
+  const [hoverArc, setHoverArc] = useState<string | null>(null);
   const groupIdSeq = useRef((init.groups?.length ?? 0) + 1);
   const [viewMode, setViewMode] = useState<'samples' | 'groups'>(init.viewMode === 'groups' && (init.groups ?? []).some(g => g.sampleIds.length) ? 'groups' : 'samples');
   const [showGroupsDialog, setShowGroupsDialog] = useState(false);
@@ -902,6 +908,10 @@ export default function SashimiViewer({
   // ---- Sample groups ----
   const addGroup = useCallback(() => setGroups(prev => [...prev, { id: groupIdSeq.current++, name: `Group ${prev.length + 1}`, sampleIds: [] }]), []);
   const renameGroup = useCallback((id: number, name: string) => setGroups(prev => prev.map(g => g.id === id ? { ...g, name } : g)), []);
+  const setGroupColor = useCallback((id: number, color: string | undefined) => setGroups(prev => prev.map(g => g.id === id ? { ...g, color } : g)), []);
+  const hideKey = useCallback((j: JunctionArc) => `${currentChrom}:${junctionKey(j)}`, [currentChrom]);
+  const hideArc = useCallback((j: JunctionArc) => { const k = hideKey(j); setHiddenArcs(prev => (prev.includes(k) ? prev : [...prev, k])); setHoverArc(null); }, [hideKey]);
+  const hiddenHere = useMemo(() => hiddenArcs.filter(k => k.startsWith(`${currentChrom}:`)).length, [hiddenArcs, currentChrom]);
   const deleteGroup = useCallback((id: number) => setGroups(prev => prev.filter(g => g.id !== id)), []);
   const removeFromGroup = useCallback((id: number, sid: number) => setGroups(prev => prev.map(g => g.id === id ? { ...g, sampleIds: g.sampleIds.filter(x => x !== sid) } : g)), []);
   /** A sample belongs to one group: adding it moves it out of any other. Its coverage loads at once so the group track can be drawn. */
@@ -1116,7 +1126,7 @@ export default function SashimiViewer({
    * where the gene's median TPM is below GTEX_MIN_TPM show nothing but "low coverage".
    */
   /** One pooled track per sample group: summed coverage, summed junction reads, per-intron shares of every splicing event. */
-  const groupTracks = useMemo((): TrackData[] => groups.map(g => {
+  const groupTracks = useMemo((): TrackData[] => groups.map((g, gi) => {
     const members = g.sampleIds.map(sid => tracks.find(t => t.sampleId === sid)).filter((t): t is TrackData => !!t);
     const { junctions, samplesWith } = poolJunctions(members);
     const spanning = poolSpanning(members);
@@ -1131,7 +1141,7 @@ export default function SashimiViewer({
       coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning, sampled,
       loading: members.some(m => m.loading) || pending.length > 0,
       error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
-      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, includeRetention ? spanning : undefined), samplesWith },
+      group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, includeRetention ? spanning : undefined), samplesWith, color: g.color || TRACK_COLORS[gi % TRACK_COLORS.length] },
     };
   }), [groups, tracks, tx, runSamples, includeRetention]);
 
@@ -1597,6 +1607,8 @@ export default function SashimiViewer({
   }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, readsAll, readsSampleIds, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
     equalIntrons, showAllTx, depthAxis, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere, viewMode, groups, runSamples]);
 
+  /** width of a pill: its text and the coloured deltas after it */
+  const pillWidth = (a: { text: string; deltas: { text: string }[] }) => (a.text.length + a.deltas.reduce((n, d) => n + d.text.length + 1, 0)) * 6 + 10;
   interface ArcRender {
     j: JunctionArc; key: string; dragKey: string; level: number; color: string; dashed: boolean; unique: boolean;
     title: string; strokeW: number; geom: ReturnType<typeof arcGeom>;
@@ -1607,6 +1619,8 @@ export default function SashimiViewer({
     apexH: number;
     /** pill text: spliced reads, or the share at the intron for a group track */
     text: string;
+    /** group tracks with several groups: this share minus the other group's, in points, in that group's colour */
+    deltas: { text: string; color: string; name: string }[];
     /** aggregate-view event of this junction (group tracks only) */
     agg?: AggEvent;
     /** Reading-frame consequence, for non-canonical junctions of a coding model. */
@@ -1618,7 +1632,7 @@ export default function SashimiViewer({
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
-    retention: { x: number; y: number; text: string; title: string }[];
+    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[] }[];
   }
 
   const transcriptY = RULER_H;
@@ -1639,11 +1653,16 @@ export default function SashimiViewer({
     let y = tracksTop;
     const out: TrackLayout[] = [];
     const plotRight = PLOT_LEFT + plotWidth;
+    const hiddenSet = new Set(hiddenArcs);
+    /** difference in percentage points with another group, signed */
+    const deltaText = (d: number) => (Math.abs(d) < 0.0005 ? '±0 %' : `${d < 0 ? '−' : '+'}${pctLabel(Math.abs(d))}`);
     displayTracks.forEach((track, idx) => {
-      const color = track.gtex ? track.gtex.tissue.color : TRACK_COLORS[idx % TRACK_COLORS.length];
+      const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? TRACK_COLORS[idx % TRACK_COLORS.length];
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
       const trackEvents = trackAgg?.events;
+      const otherGroups = track.group ? displayTracks.filter(o => o.group && o.sampleId !== track.sampleId) : [];
       const passes = (j: JunctionArc) => {
+        if (hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)) return false;
         if (track.gtex) return j.count >= 1;
         const ev = trackEvents?.get(junctionKey(j));
         if (ev && ev.shares.length) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
@@ -1675,6 +1694,7 @@ export default function SashimiViewer({
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
         const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString()}`) : approx + j.count.toLocaleString();
+        const deltas = share ? otherGroups.map(o => ({ text: deltaText(share.pct - (o.group!.agg.events.get(key)?.shares[0]?.pct ?? 0)), color: o.group!.color, name: o.sampleName })) : [];
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
         const y2 = depthToY(depthAt(track.coverage, j.end));
@@ -1709,10 +1729,12 @@ export default function SashimiViewer({
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +
           (unique ? `\nnot seen in the comparison ${track.group ? 'group' : 'sample'}${comparedTracks.length > 2 ? 's' : ''}` : '') +
-          (track.sampled ? `\n≈ deep window: 1 read in ${track.sampled.rate} decoded${track.group ? ' in at least one sample' : ''}, counts scaled back (estimates)` : '');
+          (track.sampled ? `\n≈ deep window: 1 read in ${track.sampled.rate} decoded${track.group ? ' in at least one sample' : ''}, counts scaled back (estimates)` : '') +
+          deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join('') +
+          '\nclick the × on the pill to hide this arc (it still counts in the percentages)';
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, agg,
+          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, agg,
         };
       });
       // Push colliding read-count pills upward (lower arcs keep their place) so every count stays legible,
@@ -1720,7 +1742,7 @@ export default function SashimiViewer({
       const placed: { x: number; y: number; w: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
-        const w = a.text.length * 6 + 10 + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
+        const w = pillWidth(a) + (a.frame && a.frame.frame !== 'unknown' ? FRAME_GLYPH_R * 2 + 6 : 0);
         for (let iter = 0; iter < 24; iter++) {
           const hit = placed.some(p => Math.abs(p.x - a.label!.x) < (p.w + w) / 2 + 4 && Math.abs(p.y - a.label!.y) < LABEL_H + 2);
           if (!hit) break;
@@ -1749,9 +1771,11 @@ export default function SashimiViewer({
         .filter(r => r.pct * 100 >= minUsagePct && r.pct > 0 && r.end > viewStart && r.start < viewEnd)
         .map(r => {
           const xa = scale.x(Math.max(r.start, viewStart)), xb = scale.x(Math.min(r.end, viewEnd));
+          const deltas = otherGroups.map(o => ({ text: deltaText(r.pct - (o.group!.agg.retention.find(x => x.start === r.start && x.end === r.end)?.pct ?? 0)), color: o.group!.color, name: o.sampleName }));
           return {
-            x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`,
-            title: `${pctLabel(r.pct)} ${r.note}\n${track.group ? 'reads pooled over the group' : track.sampleName} · unspliced through both boundaries, ≥ 6 aligned bases on the exon side and ≥ 10 on the intron side`,
+            x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`, deltas,
+            title: `${pctLabel(r.pct)} ${r.note}\n${track.group ? 'reads pooled over the group' : track.sampleName} · unspliced through both boundaries, ≥ 6 aligned bases on the exon side and ≥ 10 on the intron side` +
+              deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join(''),
           };
         });
       const height = juncH + COVERAGE_H;
@@ -1760,7 +1784,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -1913,7 +1937,7 @@ export default function SashimiViewer({
       });
     }
     items.push({
-      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (reads pooled over the group)' : showUsage ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
+      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? `arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (reads pooled over the group)${groups.length > 1 ? ' · coloured value = difference with the group of that colour, in points' : ''}` : showUsage ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
     });
     return items;
   })();
@@ -2040,6 +2064,7 @@ export default function SashimiViewer({
           {arcs.map(a => (
             <g key={a.key} transform={a.offset ? `translate(0, ${a.offset})` : undefined}
               style={{ cursor: junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
+              onMouseEnter={() => setHoverArc(a.dragKey)} onMouseLeave={() => setHoverArc(h => (h === a.dragKey ? null : h))}
               onMouseDown={e => {
                 e.stopPropagation();
                 dragMoved.current = false;
@@ -2079,26 +2104,41 @@ export default function SashimiViewer({
           })}
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
-            const txt = a.text;
-            const w = txt.length * 6 + 10;
+            const w = pillWidth(a);
             const lx = a.label!.x, ly = a.label!.y + a.offset;
             const glyph = a.frame && a.frame.frame !== 'unknown' ? a.frame : null;
+            const hideX = lx + w / 2 + (glyph ? FRAME_GLYPH_R * 2 + 6 : 0) + 9;
             return (
               <g key={`l-${a.key}`} pointerEvents="none">
                 <rect x={lx - w / 2} y={ly - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={a.color} strokeWidth={1} />
-                <text x={lx} y={ly + 3.5} textAnchor="middle" fill={INK.text} fontSize={9.5} fontWeight={700}>{txt}</text>
+                <text x={lx} y={ly + 3.5} textAnchor="middle" fill={INK.text} fontSize={9.5} fontWeight={700}>
+                  {a.text}
+                  {a.deltas.map((d, i) => <tspan key={i} fill={d.color}>{` ${d.text}`}</tspan>)}
+                </text>
                 {glyph && renderFrameGlyph(lx + w / 2 + FRAME_GLYPH_R + 3, ly, glyph, `fg-${a.key}`)}
+                {/* hide button, shown while the arc is under the pointer */}
+                {hoverArc === a.dragKey && (
+                  <g pointerEvents="all" style={{ cursor: 'pointer' }} onMouseEnter={() => setHoverArc(a.dragKey)}
+                    onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); hideArc(a.j); }}>
+                    <title>Hide this arc (it still counts in the percentages; "hidden arcs · show" in the toolbar brings it back)</title>
+                    <circle cx={hideX} cy={ly} r={6.5} fill={INK.bg} stroke={a.color} strokeWidth={1} />
+                    <text x={hideX} y={ly + 3.5} textAnchor="middle" fill={a.color} fontSize={10} fontWeight={700}>×</text>
+                  </g>
+                )}
               </g>
             );
           })}
           {/* Intron-retention pills on the baseline (usage mode) */}
           {L.retention.map((r, i) => {
-            const w = r.text.length * 6 + 10;
+            const w = pillWidth(r);
             return (
               <g key={`ir-${i}`}>
                 <title>{r.title}</title>
                 <rect x={r.x - w / 2} y={r.y - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
-                <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={RETENTION_COLOR} fontSize={9.5} fontWeight={700}>{r.text}</text>
+                <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={RETENTION_COLOR} fontSize={9.5} fontWeight={700}>
+                  {r.text}
+                  {r.deltas.map((d, k) => <tspan key={k} fill={d.color}>{` ${d.text}`}</tspan>)}
+                </text>
               </g>
             );
           })}
@@ -2679,13 +2719,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds] })), knownVariants: showKnown,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -2837,6 +2877,12 @@ export default function SashimiViewer({
                 <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
                   className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
               </label>
+            )}
+            {hiddenHere > 0 && (
+              <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))} className={`${t.btn} px-2 py-1 text-xs`}
+                title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
+                {hiddenHere} hidden arc{hiddenHere === 1 ? '' : 's'} · show
+              </button>
             )}
           </div>
         </div>
@@ -3084,6 +3130,10 @@ export default function SashimiViewer({
                   <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
                 )}
+                {popover.kind === 'junction' && (
+                  <button onClick={() => { hideArc(popover.j); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
+                    title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
+                )}
                 <button onClick={() => setPopover(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close (Esc)">×</button>
               </div>
             </div>
@@ -3137,13 +3187,15 @@ export default function SashimiViewer({
             <div className="px-4 py-3 space-y-3 max-h-[60vh] overflow-y-auto">
               {groups.length === 0 && <div className="text-xs text-gray-500">No group yet. Create one and add samples to it; a sample belongs to one group at a time.</div>}
               {groups.map((g, gi) => {
-                const color = TRACK_COLORS[gi % TRACK_COLORS.length];
+                const color = g.color || TRACK_COLORS[gi % TRACK_COLORS.length];
                 const nameOf = (sid: number) => runSamples.find(x => x.id === sid)?.name ?? tracks.find(x => x.sampleId === sid)?.sampleName ?? `#${sid}`;
                 const free = runSamples.filter(x => !g.sampleIds.includes(x.id));
                 return (
                   <div key={g.id} className="border border-gray-200 rounded-lg p-3">
                     <div className="flex items-center gap-2">
-                      <span className="inline-block w-3 h-3 rounded-sm shrink-0" style={{ background: color }} />
+                      <input type="color" value={color} onChange={e => setGroupColor(g.id, e.target.value)} title="Colour of the group's track (click to change)"
+                        className="w-5 h-5 p-0 border border-gray-300 rounded shrink-0 cursor-pointer bg-transparent" />
+                      {g.color && <button onClick={() => setGroupColor(g.id, undefined)} className="text-[10px] text-gray-400 hover:text-gray-700" title="Back to the palette colour">default</button>}
                       <input value={g.name} onChange={e => renameGroup(g.id, e.target.value)} placeholder="Group name"
                         className={`${t.inp} border rounded px-2 py-1 text-sm font-semibold flex-1 min-w-0`} />
                       <span className="text-[11px] text-gray-500 whitespace-nowrap">{g.sampleIds.length} sample{g.sampleIds.length === 1 ? '' : 's'}</span>
