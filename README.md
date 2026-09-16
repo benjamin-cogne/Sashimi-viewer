@@ -74,6 +74,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   ignored. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or MAPQ ≥ 30 when no `NH` tag is present.
 - **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
   usage statistics.
+- **Equal introns** draws every intron at the same width so exons and junctions dominate; the
+  *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
+  model's median exon length, kept between 80 and 300; clear the box to go back to it).
 - **Reference model**: the top track shows the MANE Select transcript (RefSeq Select or the
   longest CDS when there is none). Tick *All transcripts* and click any model in the list to make
   it the reference: exon numbering, junction classes, HGVS and usage percentages follow it, until

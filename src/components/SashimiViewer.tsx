@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
 import {
-  LINEAR_AXIS, equalIntronAxis, makeScale, toTxModel, intronsOf,
+  LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
   classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
   niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus,
@@ -60,6 +60,8 @@ interface SashimiViewerProps {
 /** Every user option of the viewer, as stored in a session file. Samples are referred to by id (the host maps names ↔ ids). */
 export interface ViewerSettings {
   equalIntrons: boolean; allTranscripts: boolean; commonSnps: boolean; snpMinAf: number;
+  /** width of every intron in equal-introns mode, bp-equivalents; null = default (median exon length, 80–300) */
+  intronWidth: number | null;
   depthAxis: DepthAxis; uniqueOnly: boolean;
   reads: boolean; readsAll: boolean; readsSample: number | null; collapseReads: boolean; minVafPct: number;
   minJunctionReads: number; minUsagePct: number; arcLabels: 'reads' | 'usage'; intronRetention: boolean;
@@ -350,6 +352,7 @@ export default function SashimiViewer({
 
   // ---- Options ----
   const [equalIntrons, setEqualIntrons] = useState(init.equalIntrons ?? false);
+  const [intronWidth, setIntronWidth] = useState<number | null>(init.intronWidth ?? null);
   const [depthAxis, setDepthAxis] = useState<DepthAxis>(init.depthAxis ?? 'shared');
   // ---- Sample groups (aggregate view): one pooled track per group ----
   const [groups, setGroups] = useState<SampleGroup[]>(() => (init.groups ?? []).map((g, i) => ({ id: i + 1, name: g.name, sampleIds: [...g.sampleIds] })));
@@ -446,7 +449,7 @@ export default function SashimiViewer({
   const txRef = useRef(tx);
   txRef.current = tx;
   const reverse = tx?.strand === -1;
-  const axis: VirtualAxis = useMemo(() => (equalIntrons && tx ? equalIntronAxis(tx) : LINEAR_AXIS), [equalIntrons, tx]);
+  const axis: VirtualAxis = useMemo(() => (equalIntrons && tx ? equalIntronAxis(tx, intronWidth) : LINEAR_AXIS), [equalIntrons, tx, intronWidth]);
   const plotWidth = svgWidth - PLOT_LEFT - PLOT_RIGHT_PAD;
   const scale: Scale = useMemo(
     () => makeScale(axis, viewStart, viewEnd, PLOT_LEFT, plotWidth, reverse),
@@ -1166,7 +1169,7 @@ export default function SashimiViewer({
             setCurrentGeneName(txData.gene_name);
             setCurrentGeneStart(model.start); setCurrentGeneEnd(model.end);
             setTranscript(txData);
-            ax = equalIntrons ? equalIntronAxis(model) : LINEAR_AXIS;
+            ax = equalIntrons ? equalIntronAxis(model, intronWidth) : LINEAR_AXIS;
           } else {
             hintRef.current = undefined;
             setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString()}`);
@@ -1194,7 +1197,7 @@ export default function SashimiViewer({
       setCurrentGeneStart(model.start);
       setCurrentGeneEnd(model.end);
       setTranscript(txData);
-      const ax = equalIntrons ? equalIntronAxis(model) : LINEAR_AXIS;
+      const ax = equalIntrons ? equalIntronAxis(model, intronWidth) : LINEAR_AXIS;
       const [s, e] = defaultView(model.start, model.end, ax);
       setViewStart(s); setViewEnd(e);
       setJunctionOffsets({});
@@ -1205,7 +1208,7 @@ export default function SashimiViewer({
       setSearchError(String(e?.message || e || 'not found').replace(/^Error:\s*/, ''));
     }
     setGeneSearchLoading(false);
-  }, [geneSearch, equalIntrons, defaultView, axis, currentChrom, setViewFromV]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [geneSearch, equalIntrons, intronWidth, defaultView, axis, currentChrom, setViewFromV]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- SVG export (white background, full plot) ----
   const exportSvg = useCallback(() => {
@@ -2655,7 +2658,7 @@ export default function SashimiViewer({
   onStateChangeRef.current = onStateChange;
   useEffect(() => {
     onStateChangeRef.current?.({
-      equalIntrons, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
+      equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
       viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds] })), knownVariants: showKnown,
@@ -2664,7 +2667,7 @@ export default function SashimiViewer({
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -2725,6 +2728,16 @@ export default function SashimiViewer({
           <div className="flex flex-wrap items-center gap-3">
             <Toggle checked={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns"
               title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
+            {equalIntrons && tx && intronsOf(tx).length > 0 && (
+              <label className={`flex items-center gap-1 text-xs ${t.muted}`}
+                title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300. Clear the box for the default.`}>
+                Intron width
+                <input type="number" min={10} max={20000} step={10} value={intronWidth ?? ''} placeholder={String(defaultIntronV(tx))}
+                  onChange={e => setIntronWidth(e.target.value === '' ? null : Math.min(20000, Math.max(10, parseInt(e.target.value) || 10)))}
+                  className={`${t.inp} w-20 px-1.5 py-0.5 text-xs rounded border`} />
+                {intronWidth != null && <button onClick={() => setIntronWidth(null)} className="text-gray-400 hover:text-gray-700" title="Back to the default width">×</button>}
+              </label>
+            )}
             <Toggle checked={showAllTx} onChange={setShowAllTx} label="All transcripts"
               title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
             <Toggle checked={showSnps} onChange={setShowSnps} label="Common SNPs"

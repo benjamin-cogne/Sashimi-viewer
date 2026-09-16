@@ -101,10 +101,15 @@ export function median(xs: number[]): number {
  * like one more exon-sized block; the flanks outside the transcript are
  * compressed at the median intron's factor so they do not dwarf the gene.
  */
-export function equalIntronAxis(tx: TxModel): VirtualAxis {
+/** Default virtual intron width: the median exon length, clamped to [80, 300] bp-equivalents. */
+export function defaultIntronV(tx: TxModel): number {
+  return Math.min(300, Math.max(80, Math.round(median(tx.exons.map(e => e.end - e.start)))));
+}
+
+export function equalIntronAxis(tx: TxModel, intronWidth?: number | null): VirtualAxis {
   const introns = intronsOf(tx);
   if (introns.length === 0) return LINEAR_AXIS;
-  const intronV = Math.min(300, Math.max(80, Math.round(median(tx.exons.map(e => e.end - e.start)))));
+  const intronV = intronWidth && intronWidth > 0 ? Math.round(intronWidth) : defaultIntronV(tx);
   const flankFactor = Math.min(1, intronV / median(introns.map(i => i.end - i.start)));
 
   // Segments in genomic order; each maps [gStart, next.gStart) linearly with `factor`.

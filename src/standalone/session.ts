@@ -57,7 +57,7 @@ export function buildSession(args: {
   const folder = args.folder ?? null;
   const nameOf = (id: number | null | undefined) => samples.find(s => s.id === id)?.name ?? null;
   const viewer: SessionViewer | null = state ? {
-    equalIntrons: state.equalIntrons, allTranscripts: state.allTranscripts, commonSnps: state.commonSnps, snpMinAf: state.snpMinAf,
+    equalIntrons: state.equalIntrons, intronWidth: state.intronWidth ?? null, allTranscripts: state.allTranscripts, commonSnps: state.commonSnps, snpMinAf: state.snpMinAf,
     depthAxis: state.depthAxis, uniqueOnly: state.uniqueOnly,
     reads: state.reads, readsAll: state.readsAll, readsSample: nameOf(state.readsSample), collapseReads: state.collapseReads, minVafPct: state.minVafPct,
     minJunctionReads: state.minJunctionReads, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
