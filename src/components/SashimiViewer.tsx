@@ -148,6 +148,8 @@ interface TrackData {
   fetched?: FetchWindow;
   /** Unspliced reads through the exon–intron boundaries (intron retention), when the source counts them. */
   spanning?: BoundarySpanning;
+  /** The source decoded one read in `rate` of this window: depths and counts are scaled estimates. */
+  sampled?: { rate: number; total: number; decoded: number };
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
@@ -202,6 +204,7 @@ const LEGEND_ROW_H = 22;
 const MIN_V_SPAN = 40;            // smallest zoom window, in virtual (bp-equivalent) units
 const MAX_VIEW_BP = 4_000_000;    // largest zoom-out window
 const MAX_FETCH_BP = 2_000_000;   // largest window fetched at once (view + margins)
+const MAX_READS_PER_TRACK = 250_000; // reads decoded per coverage request; the source shrinks the margins and then samples 1 in 2, 4, 8… past it
 
 // Reads track (IGV-like alignment view)
 const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
@@ -816,7 +819,8 @@ export default function SashimiViewer({
     !!f && f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && f.start <= v.start && f.end >= v.end;
 
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
-    const win = fetchWindowFor(viewRef.current);
+    const view = viewRef.current;
+    const win = fetchWindowFor(view);
     const seq = (reqSeq.current.get(sid) || 0) + 1;
     reqSeq.current.set(sid, seq);
     setTracks(prev => {
@@ -825,10 +829,13 @@ export default function SashimiViewer({
       return [...prev, { sampleId: sid, sampleName: sname, coverage: [], junctions: [], loading: true }];
     });
     try {
-      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current));
+      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
+        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
+      // the source may have read less margin than asked for (deep library): remember what it really covered
+      const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, loading: false, error: data.error, fetched: win,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, loading: false, error: data.error, fetched,
       } : t));
     } catch (err: any) {
       if (reqSeq.current.get(sid) !== seq) return;
@@ -1115,9 +1122,13 @@ export default function SashimiViewer({
     const spanning = poolSpanning(members);
     const failed = members.filter(m => m.error && !m.coverage.length);
     const pending = g.sampleIds.filter(sid => !members.some(m => m.sampleId === sid) && runSamples.some(x => x.id === sid));
+    const sampledMembers = members.filter(m => m.sampled);
+    const sampled = sampledMembers.length
+      ? { rate: Math.max(...sampledMembers.map(m => m.sampled!.rate)), total: sampledMembers.reduce((a, m) => a + m.sampled!.total, 0), decoded: sampledMembers.reduce((a, m) => a + m.sampled!.decoded, 0) }
+      : undefined;
     return {
       sampleId: GROUP_ID_BASE - g.id, sampleName: g.name || `Group ${g.id}`,
-      coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning,
+      coverage: sumCoverage(members.map(m => m.coverage)), junctions, spanning, sampled,
       loading: members.some(m => m.loading) || pending.length > 0,
       error: failed.length ? `${failed.map(m => m.sampleName).join(', ')}: ${failed[0].error}` : undefined,
       group: { id: g.id, n: g.sampleIds.length, loaded: members.length, agg: aggregateJunctions(junctions, tx, includeRetention ? spanning : undefined), samplesWith },
@@ -1662,7 +1673,8 @@ export default function SashimiViewer({
         const unique = idx === 0 && comparedTracks.length > 1 && !otherTrackJunctionKeys.has(key);
         const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
-        const text = agg ? (share ? pctLabel(share.pct) : `n=${j.count.toLocaleString()}`) : j.count.toLocaleString();
+        const approx = track.sampled ? '≈' : '';
+        const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString()}`) : approx + j.count.toLocaleString();
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
         const y1 = depthToY(depthAt(track.coverage, j.start - 1));
         const y2 = depthToY(depthAt(track.coverage, j.end));
@@ -1696,7 +1708,8 @@ export default function SashimiViewer({
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +
-          (unique ? `\nnot seen in the comparison ${track.group ? 'group' : 'sample'}${comparedTracks.length > 2 ? 's' : ''}` : '');
+          (unique ? `\nnot seen in the comparison ${track.group ? 'group' : 'sample'}${comparedTracks.length > 2 ? 's' : ''}` : '') +
+          (track.sampled ? `\n≈ deep window: 1 read in ${track.sampled.rate} decoded${track.group ? ' in at least one sample' : ''}, counts scaled back (estimates)` : '');
         return {
           j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
           strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, agg,
@@ -1986,7 +1999,11 @@ export default function SashimiViewer({
     const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
     const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
-    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2;
+    const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
+    const sampledTitle = track.sampled
+      ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
+      : '';
+    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2;
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
       : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
@@ -2112,6 +2129,7 @@ export default function SashimiViewer({
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
             {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
+            {sampledNote && <tspan fill={SNP_INDEL_COLOR} fontSize={9} fontWeight={600}>{sampledNote}<title>{sampledTitle}</title></tspan>}
 
           </text>
           {/* Make primary chip (standalone): promote this sample to the first track */}

@@ -8,9 +8,9 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
-import type { AlignedRead, AllTranscripts, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
-import type { SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
-import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, isUnique, junctionCounts, keepRead, strandKeeper, type RawRead, type StrandnessCall } from './alignments';
+import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
+import type { CoverageOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
+import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
@@ -26,6 +26,59 @@ type Opened =
 
 const MAX_REGION_BP = 5_000_000;
 const MAX_READS_REGION_BP = 250_000;
+
+// ---------------- Deep regions ----------------
+// A very deep library (targeted RNA-seq, a highly expressed gene) can hold millions of records over one gene,
+// and decoding them all froze the page. Requests are therefore budgeted: the window is sized from the index
+// before anything is decoded, records are scanned tile by tile with only the fields the filter needs, and past
+// a cap every k-th read is kept (k = 2, 4, 8…) with the counts scaled back by k.
+/** Reads decoded per coverage request unless the caller says otherwise. */
+const DEFAULT_MAX_READS = 250_000;
+/** Reads decoded per exon for the exon-usage statistics (fractions and medians only need a sample). */
+const EXON_USAGE_MAX_READS = 100_000;
+/** A window is scanned in tiles so that one tile's decoded records can be released before the next is read. */
+const TILE_BP = 250_000;
+/** Compressed bytes per record assumed before a file has been scanned once (a scan then calibrates it). */
+const BYTES_PER_READ: Record<'bam' | 'cram', number> = { bam: 60, cram: 30 };
+/** Margins are halved while the window looks too deep; below this they are dropped altogether. */
+const MIN_MARGIN_BP = 2_000;
+/** Decoded BAM chunks the library keeps in memory (its default is 1 GB, too much for a browser tab). */
+const BAM_CACHE_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Uniform access to one decoded record of either library. Nothing heavy (name, sequence, qualities) is touched
+ * unless `raw` is asked for a full record: BAM records decode their fields on demand, so a scan that reads only
+ * flags and MAPQ stays cheap even over millions of records.
+ */
+interface RecordView<R> {
+  start(r: R): number;
+  flags(r: R): number;
+  mapq(r: R): number;
+  nh(r: R): number | null;
+  /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks). */
+  raw(r: R, light: boolean): RawRead;
+}
+const BAM_VIEW: RecordView<any> = {
+  start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  raw: (r, light) => ({ name: light ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')) }),
+};
+const CRAM_VIEW: RecordView<any> = {
+  start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  raw: (r, light) => {
+    const feats = r.readFeatures as any;
+    const qual = r.qualityScores ?? null;
+    const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
+    return { name: light ? '' : (r.readName ?? ''), start: r.start, cigar, seq: light ? '' : (r.readBases ?? ''), qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
+      mismatches: light ? undefined : cramMismatches(feats, qual) };
+  },
+};
+
+/** Result of a budgeted scan: `kept` holds every `rate`-th of the `total` reads that passed the filters. */
+interface Scan { total: number; rate: number; kept: RawRead[] }
+const scaleRuns = <T extends { depth: number }>(runs: T[], k: number): T[] => (k === 1 ? runs : runs.map(r => ({ ...r, depth: r.depth * k })));
+const scaleCounts = <T extends { count: number }>(xs: T[], k: number): T[] => (k === 1 ? xs : xs.map(x => ({ ...x, count: x.count * k })));
+const scaleRecord = (o: Record<number, number>, k: number): Record<number, number> => (k === 1 ? o : Object.fromEntries(Object.entries(o).map(([p, n]) => [p, n * k])));
+const scaleSpanning = (sp: BoundarySpanning, k: number): BoundarySpanning => ({ intronStart: scaleRecord(sp.intronStart, k), intronEnd: scaleRecord(sp.intronEnd, k) });
 
 function resolveName(names: string[], chrom: string): string | null {
   if (names.includes(chrom)) return chrom;
@@ -104,7 +157,7 @@ export class LocalDataSource implements SashimiDataSource {
     if (!this.opened.has(id)) {
       this.opened.set(id, (async (): Promise<Opened> => {
         if (s.kind === 'bam') {
-          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index) });
+          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: BAM_CACHE_BYTES });
           await bam.getHeader();
           const refNames = (bam.indexToChr || []).map(r => r.refName);
           return { kind: 'bam', bam, refNames };
@@ -129,32 +182,75 @@ export class LocalDataSource implements SashimiDataSource {
     return this.opened.get(id)!;
   }
 
-  private async records(id: number, chrom: string, start: number, end: number): Promise<RawRead[]> {
+  /** Compressed bytes per record of a file, from its last scan (a size estimate before anything is decoded). */
+  private bytesPerRead = new Map<number, number>();
+
+  private async locate(id: number, chrom: string): Promise<{ o: Opened; name: string; seqId: number } | null> {
     const o = await this.open(id);
     const name = resolveName(o.refNames, chrom);
-    if (!name) return [];
-    const out: RawRead[] = [];
-    if (o.kind === 'bam') {
-      const recs = await o.bam.getRecordsForRange(name, start, end);
-      for (const r of recs) {
-        out.push({ name: r.name, start: r.start, cigar: r.CIGAR, seq: r.seq, qual: r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')) });
-      }
-    } else {
-      const seqId = o.refNames.indexOf(name);
-      const recs = await o.cram.getRecordsForRange(seqId, start, end);
-      for (const r of recs) {
-        const feats = r.readFeatures as any;
-        const qual = r.qualityScores ?? null;
-        const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
-        out.push({ name: r.readName ?? '', start: r.start, cigar, seq: r.readBases ?? '', qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
-          mismatches: cramMismatches(feats, qual) });
-      }
-    }
-    return out;
+    return name ? { o, name, seqId: o.refNames.indexOf(name) } : null;
   }
 
-  private filtered(raw: RawRead[], uniqueOnly: boolean): RawRead[] {
-    return raw.filter(r => keepRead(r) && (!uniqueOnly || isUnique(r)));
+  /** Compressed bytes the index says [start, end) occupies: BAI chunks for BAM, CRAI slices for CRAM. */
+  private async indexBytes(loc: { o: Opened; name: string; seqId: number }, start: number, end: number): Promise<number> {
+    if (loc.o.kind === 'bam') {
+      const chunks = await loc.o.bam.blocksForRange(loc.name, start, end);
+      return chunks.reduce((a, c) => a + c.fetchedSize(), 0);
+    }
+    const slices = await loc.o.cram.index.getEntriesForRange(loc.seqId, start, end);
+    return slices.reduce((a, sl) => a + sl.sliceBytes, 0);
+  }
+
+  /**
+   * Reads of [start, end) passing the flag (and uniqueness) filters, decoded tile by tile, at most about `cap`
+   * of them: when the kept reads outgrow the cap they are thinned to every other one and the rate doubles, so
+   * `kept` is always the reads whose rank (among the passing reads, in file order) is a multiple of `rate` — a
+   * systematic sample that is exact (rate 1) whenever the region holds no more than `cap` reads. A read spanning
+   * two tiles is counted in the tile holding its start (or the first tile when it starts before the window).
+   */
+  private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean): Promise<Scan> {
+    const loc = await this.locate(id, chrom);
+    if (!loc) return { total: 0, rate: 1, kept: [] };
+    const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
+    let kept: RawRead[] = [], total = 0, rate = 1, seen = 0;
+    const bytes = await this.indexBytes(loc, start, end);
+    for (let ts = start; ts < end; ts += TILE_BP) {
+      const te = Math.min(end, ts + TILE_BP);
+      const recs: any[] = loc.o.kind === 'bam' ? await loc.o.bam.getRecordsForRange(loc.name, ts, te) : await loc.o.cram.getRecordsForRange(loc.seqId, ts, te);
+      for (const r of recs) {
+        if (ts > start && view.start(r) < ts) continue; // already counted in the previous tile
+        seen++;
+        if (!keepFlags(view.flags(r))) continue;
+        if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
+        if (total % rate === 0) {
+          kept.push(view.raw(r, light));
+          if (kept.length > cap) { kept = kept.filter((_, i) => i % 2 === 0); rate *= 2; }
+        }
+        total++;
+      }
+    }
+    if (seen >= 1000 && bytes > 0) this.bytesPerRead.set(id, bytes / seen);
+    return { total, rate, kept };
+  }
+
+  /**
+   * The window to read for a request: the core is always read; the margins around it are halved while the
+   * index suggests more reads than the budget, and dropped once they get small.
+   */
+  private async budgetWindow(id: number, chrom: string, start: number, end: number, core: { start: number; end: number }, cap: number): Promise<{ start: number; end: number }> {
+    const loc = await this.locate(id, chrom);
+    const s = this.samples.get(id);
+    if (!loc || !s) return { start, end };
+    const bpr = this.bytesPerRead.get(id) ?? BYTES_PER_READ[s.kind];
+    const coreStart = Math.max(start, Math.min(end, core.start)), coreEnd = Math.max(coreStart, Math.min(end, core.end));
+    let left = coreStart - start, right = end - coreEnd;
+    let win = { start, end };
+    while ((left > 0 || right > 0) && (await this.indexBytes(loc, win.start, win.end)) / bpr > cap) {
+      left = left >= 2 * MIN_MARGIN_BP ? Math.floor(left / 2) : 0;
+      right = right >= 2 * MIN_MARGIN_BP ? Math.floor(right / 2) : 0;
+      win = { start: coreStart - left, end: coreEnd + right };
+    }
+    return win;
   }
 
   // ---- SashimiDataSource ----
@@ -184,17 +280,21 @@ export class LocalDataSource implements SashimiDataSource {
     const samples: SampleExonDepths[] = [];
     for (const s of this.list()) {
       try {
-        const perExon = await Promise.all(exons.map(([a, b]) => this.records(s.id, chrom, a, b).then(raw => this.filtered(raw, uniqueOnly))));
+        const perExon: Scan[] = [];
+        for (const [a, b] of exons) perExon.push(await this.scan(s.id, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS, true));
         let strandness = this.strandCalls.get(s.id), fraction: number | null = null;
         if (!strandness) {
-          const call = detectStrandness(perExon.flat(), geneStrand);
+          const call = detectStrandness(perExon.flatMap(x => x.kept), geneStrand);
           strandness = call.strandness; fraction = call.fraction;
           if (strandness === 'firststrand' || strandness === 'secondstrand') this.strandCalls.set(s.id, strandness);
         }
         const keep = strandKeeper(strandness, geneStrand);
         samples.push({
           sample_id: s.id, sample_name: s.name, strandness, strand_fraction: fraction,
-          exons: perExon.map((raw, i) => exonDepth(raw.filter(keep).map(r => encodeRead(r, null, 0)), exons[i][0], exons[i][1])),
+          exons: perExon.map((sc, i) => {
+            const d = exonDepth(sc.kept.filter(keep).map(r => encodeRead(r, null, 0)), exons[i][0], exons[i][1]);
+            return sc.rate === 1 ? d : { median: d.median * sc.rate, mean: d.mean * sc.rate, reads: d.reads * sc.rate };
+          }),
         });
       } catch (e: any) {
         samples.push({ sample_id: s.id, sample_name: s.name, strandness: 'unknown', strand_fraction: null, exons: [], error: e?.message || String(e) });
@@ -203,18 +303,24 @@ export class LocalDataSource implements SashimiDataSource {
     return { run_id: 0, chrom, exons, samples };
   }
 
-  async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint): Promise<SampleCoverage> {
+  async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
-    const raw = this.filtered(await this.records(sampleId, chrom, start, end), uniqueOnly);
-    const reads = raw.map(r => encodeRead(r, null, 0));
-    const junctions = junctionCounts(reads, start, end);
+    const cap = Math.max(1000, opts?.maxReads ?? DEFAULT_MAX_READS);
+    const win = await this.budgetWindow(sampleId, chrom, start, end, opts?.core ?? { start, end }, cap);
+    const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true);
+    const reads = kept.map(r => encodeRead(r, null, 0));
+    const junctions = junctionCounts(reads, win.start, win.end);
     // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)
     const spanning = boundarySpanning(reads,
-      [...junctions.map(j => j.start), ...(boundaries?.intronStarts ?? [])].filter(p => p >= start && p < end),
-      [...junctions.map(j => j.end), ...(boundaries?.intronEnds ?? [])].filter(p => p > start && p <= end));
-    return { sample_id: sampleId, sample_name: s.name, coverage: coverageRuns(reads, start, end), junctions, spanning };
+      [...junctions.map(j => j.start), ...(boundaries?.intronStarts ?? [])].filter(p => p >= win.start && p < win.end),
+      [...junctions.map(j => j.end), ...(boundaries?.intronEnds ?? [])].filter(p => p > win.start && p <= win.end));
+    return {
+      sample_id: sampleId, sample_name: s.name,
+      coverage: scaleRuns(coverageRuns(reads, win.start, win.end), rate), junctions: scaleCounts(junctions, rate), spanning: scaleSpanning(spanning, rate),
+      window: win, sampled: rate > 1 ? { rate, total, decoded: kept.length } : undefined,
+    };
   }
 
   async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
@@ -223,10 +329,9 @@ export class LocalDataSource implements SashimiDataSource {
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
     const collapsed = mode === 'collapsed';
-    let raw = this.filtered(await this.records(sampleId, chrom, start, end), uniqueOnly);
-    const total = raw.length;
     const cap = collapsed ? 40000 : Math.max(100, Math.min(maxReads, 10000));
-    if (total > cap) { const step = total / cap; raw = Array.from({ length: cap }, (_, i) => raw[Math.floor(i * step)]); }
+    // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them
+    const { total, kept: raw } = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false);
     const refStart = Math.max(0, start - 500);
     const ref = await this.getReferenceSeq(chrom, refStart, end + 500);
     const reads: AlignedRead[] = raw.map(r => encodeRead(r, ref, refStart));

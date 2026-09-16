@@ -7,12 +7,20 @@ import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTr
 
 export interface SampleRef { id: number; name: string }
 
+/** Budget of a coverage request. */
+export interface CoverageOptions {
+  /** the part of the window that must be read whatever its depth (the visible view); the rest is margin the source may shrink */
+  core?: { start: number; end: number };
+  /** reads decoded at most; a deeper window is sampled systematically (1 read in 2, 4, 8…) and its counts scaled back */
+  maxReads?: number;
+}
+
 export interface SashimiDataSource {
   /** Displayed model of a gene (MANE Select / RefSeq Select). `hint` is the gene span when already known (skips the symbol lookup). */
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData>;
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts>;
   /** Coverage runs and junctions for a 0-based half-open window; `boundaries` asks for unspliced reads through those exon–intron boundaries too (junction ends are always counted). */
-  getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint): Promise<SampleCoverage>;
+  getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
   getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse>;
   /** All samples that can be added as tracks. */

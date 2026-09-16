@@ -74,6 +74,18 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   ignored. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or MAPQ ≥ 30 when no `NH` tag is present.
 - **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
   usage statistics.
+- **Very deep libraries** (targeted RNA-seq, highly expressed genes) are read on a budget so the page
+  never freezes: each track decodes at most 250,000 reads per request. The window is first sized from
+  the index (the margins around the visible region shrink, the visible region is always read in
+  full); if that region alone holds more reads, every 2nd, 4th, 8th… read is kept (a systematic
+  sample in file order) and depths, junction and boundary counts are scaled back by that factor.
+  Such a track shows **≈ 1 read in k** next to its name and its read counts start with ≈: they are
+  estimates, exact to within a few reads for anything with hundreds of reads but coarse for rare
+  junctions (a junction seen once in the sample shows k reads, one seen in none shows nothing).
+  Zooming in reduces the window until the counts are exact again. Percentages (Groups view,
+  *Arc labels: % usage*) are unaffected in expectation. The reads track and the exon-usage
+  statistics use the same filter-then-sample order, so names and sequences are decoded only for
+  the reads actually drawn.
 - **Equal introns** draws every intron at the same width so exons and junctions dominate; the
   *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
   model's median exon length, kept between 80 and 300; clear the box to go back to it).
@@ -232,6 +244,7 @@ storage.
 | Coverage but no arcs | The BAM comes from an unspliced aligner, or *Min reads* is above the junction's support. |
 | "This file is the development entry" | You opened `index.html` from disk. Use `sashimi-viewer.html`. On a web server the page forwards to it by itself. |
 | Exon usage panel is grey | Fewer than the required reads, or a single file open: usage is compared across the open files. |
+| Counts start with ≈, "≈ 1 read in k" next to a sample | The window holds more than 250,000 reads for that sample: it was sampled 1 in k and scaled back. Zoom in for exact counts. |
 
 ## Build from source
 

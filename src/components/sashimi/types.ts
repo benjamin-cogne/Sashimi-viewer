@@ -37,6 +37,10 @@ export interface SampleCoverage {
   coverage: CoverageRun[]; junctions: JunctionArc[];
   /** unspliced reads through the exon–intron boundaries (absent from sources that do not compute it) */
   spanning?: BoundarySpanning;
+  /** the window actually read (0-based half-open) when the source shrank the requested margins to stay within its read budget */
+  window?: { start: number; end: number };
+  /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
+  sampled?: { rate: number; total: number; decoded: number };
   error?: string;
 }
 

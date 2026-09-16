@@ -33,13 +33,13 @@ export function cramMismatches(features: CramFeatureLike[] | undefined, qual: Ar
   return out;
 }
 
-/** Same filter as pysam count_coverage(read_callback='all'). */
-export function keepRead(r: RawRead): boolean {
-  return (r.flags & (FLAG_UNMAPPED | FLAG_SECONDARY | FLAG_QCFAIL | FLAG_DUP)) === 0;
-}
-export function isUnique(r: RawRead): boolean {
-  return r.nh != null ? r.nh === 1 : r.mapq >= 30;
-}
+/** Same filter as pysam count_coverage(read_callback='all'): flags of the records left out. */
+export const DROP_FLAGS = FLAG_UNMAPPED | FLAG_SECONDARY | FLAG_QCFAIL | FLAG_DUP;
+export const keepFlags = (flags: number): boolean => (flags & DROP_FLAGS) === 0;
+/** Uniquely mapped: NH:1 when the tag is there, else MAPQ ≥ 30. */
+export const uniqueFrom = (nh: number | null, mapq: number): boolean => (nh != null ? nh === 1 : mapq >= 30);
+export function keepRead(r: RawRead): boolean { return keepFlags(r.flags); }
+export function isUnique(r: RawRead): boolean { return uniqueFrom(r.nh, r.mapq); }
 
 const CIGAR_RE = /(\d+)([MIDNSHP=X])/g;
 
