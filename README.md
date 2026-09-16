@@ -147,8 +147,8 @@ are saved with the session and are what the HTML export carries.
 **Export HTML** (next to the session buttons) downloads a copy of the viewer itself with the data of
 every registered view embedded: for each view, the gene models (reference transcript, every
 transcript, neighbouring genes) and, for every loaded sample, the coverage, junctions and
-intron-retention counts of the window already fetched around it (the view plus its margins, up to
-2 Mb), together with the sample names, the groups and every option. The recipient opens the file in
+intron-retention counts of a window around it chosen in the export dialog (see below), together
+with the sample names, the groups and every option. The recipient opens the file in
 any browser: no BAM, no server, nothing to install. They see an *Exported viewer* banner, the same
 sample chips and view tabs, and can switch views, zoom, pan inside each exported window, toggle
 groups or usage percentages, click arcs and exons for the HGVS and frame details. Coverage is
@@ -157,9 +157,10 @@ exact where you had it exact and marked ≈ where the source had sampled it.
 **Reads.** For every view whose reads track is on, the export also embeds the reads of every loaded
 sample, with the reference bases and the mismatches, so the recipient sees the same pile-up, can
 switch between reads and the collapsed haplotype view and change *Min VAF*. Read names are
-replaced by numbers. The dialog that opens on *Export HTML* chooses the window (the view as shown,
-the view with a half-width margin on each side, or the widest 100 kb reads window) and the number
-of reads per sample (up to 2,500 as displayed, about 300 kB per sample and view; up to 20,000 for
+replaced by numbers. The dialog that opens on *Export HTML* chooses the window exported around each view, for the
+coverage, junctions and retention counts as much as for the reads (the view as shown; the view with
+a half-width margin on each side, the default; or the widest window the viewer itself loads, up to
+2 Mb for coverage and 100 kb for reads) and the number of reads per sample (up to 2,500 as displayed, about 300 kB per sample and view; up to 20,000 for
 zooming in; or every read of the window, which can reach tens of MB for a deep window). Views wider
 than 100 kb have no reads track and are skipped.
 

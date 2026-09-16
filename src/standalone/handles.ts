@@ -130,12 +130,17 @@ export function filesFromFolderInput(list: FileList): { folder: string | null; f
  * Files of a drop: plain files as they are; a dropped folder is walked (every browser, through
  * webkitGetAsEntry) and its files carry their relative paths. Chromium also gives the handles.
  */
-export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string | null; folderHandle: FSDirHandle | null; files: PathedFile[]; fileHandles: Map<string, FSHandle> }> {
+export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string | null; folderHandle: FSDirHandle | null; files: PathedFile[]; fileHandles: Map<string, FSHandle>; /** dropped files that are not alignments: session files (.json) */ others: File[] }> {
   const files: PathedFile[] = [];
   const fileHandles = new Map<string, FSHandle>();
+  const others: File[] = [];
   let folder: string | null = null, folderHandle: FSDirHandle | null = null;
+  // Everything the DataTransfer can give is taken now, synchronously: browsers (Chrome first) empty the item list
+  // and `dt.files` as soon as the drop handler yields, so a getAsFile() after an await returns null.
   const items = Array.from(dt.items || []);
   const entries = items.map(it => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null));
+  const plain = items.map(it => (it.kind === 'file' ? it.getAsFile() : null));
+  const fallback = Array.from(dt.files || []);
   const handlePromises = items.map(it => (typeof (it as any).getAsFileSystemHandle === 'function' ? (it as any).getAsFileSystemHandle().catch(() => null) : Promise.resolve(null)));
   const readDir = (d: FileSystemDirectoryEntry): Promise<FileSystemEntry[]> => new Promise((resolve, reject) => {
     const reader = d.createReader(); const all: FileSystemEntry[] = [];
@@ -157,10 +162,12 @@ export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string 
       // paths are relative to the dropped folder itself
       for (const c of await readDir(e as FileSystemDirectoryEntry)) await walk(c, '', 1);
     } else {
-      const f = items[i].getAsFile();
-      if (f && KEEP.test(f.name)) { files.push({ file: f }); if (h && h.kind === 'file') fileHandles.set(f.name, h as FSHandle); }
+      const f = plain[i];
+      if (!f) continue;
+      if (KEEP.test(f.name)) { files.push({ file: f }); if (h && h.kind === 'file') fileHandles.set(f.name, h as FSHandle); }
+      else others.push(f);
     }
   }
-  if (!items.length) for (const f of Array.from(dt.files)) if (KEEP.test(f.name)) files.push({ file: f });
-  return { folder, folderHandle, files, fileHandles };
+  if (!items.length) for (const f of fallback) { if (KEEP.test(f.name)) files.push({ file: f }); else others.push(f); }
+  return { folder, folderHandle, files, fileHandles, others };
 }

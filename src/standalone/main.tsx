@@ -45,8 +45,8 @@ const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: s
 const MAX_FETCH_BP = 2_000_000;
 /** The reads track exists below this window size (the viewer's rule); the export follows it. */
 const READS_MAX_VIEW_BP = 100_000;
-/** Choices of the export dialog: which window and how many reads per sample for the views whose reads track is on. */
-interface ExportOptions { readsWindow: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
+/** Choices of the export dialog: the window exported around each view (coverage, junctions, retention and reads alike) and the reads per sample. */
+interface ExportOptions { window: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
 const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 2500, dense: 20000, all: Number.MAX_SAFE_INTEGER };
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
@@ -222,10 +222,15 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const onFolderInput = useCallback((list: FileList) => { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); }, [addFolder]);
   const onDropFiles = useCallback(async (dt: DataTransfer) => {
-    const { folder, folderHandle, files, fileHandles } = await filesFromDrop(dt);
+    const { folder, folderHandle, files, fileHandles, others } = await filesFromDrop(dt);
     for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
-    if (folder) addFolder(folder, folderHandle, files); else addFiles(files);
+    if (folder) addFolder(folder, folderHandle, files); else if (files.length) addFiles(files);
+    const session = others.find(f => /\.json$/i.test(f.name));
+    if (session) void loadSessionRef.current?.(session);
+    else if (!files.length && !folder && others.length) setNotes([`Nothing usable in the drop (${others.map(f => f.name).join(', ')}): expected BAM/CRAM files with their index, a FASTA, a folder, or a session .json.`]);
   }, [addFolder, addFiles]);
+  /** loadSession is defined below (it depends on the samples); the drop handler reaches it through a ref. */
+  const loadSessionRef = useRef<((file: File) => Promise<void>) | null>(null);
 
   const renameSample = useCallback((id: number, raw: string) => {
     const name = raw.trim();
@@ -334,7 +339,8 @@ function App() {
         const st = t.state!;
         setNotes([`Exporting ${t.label}…`]);
         const vs = st.view.start - 1, ve = st.view.end, span = ve - vs;
-        const margin = Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
+        // the window exported around the view: as shown, with a half-width margin, or what the viewer itself fetched
+        const margin = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
         const ws = Math.max(0, vs - margin), we = ve + margin;
         const hint = { chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end };
         const transcript = await ds.getTranscript(st.gene.name, st.gene.id, hint);
@@ -358,7 +364,7 @@ function App() {
         if (st.reads) {
           if (span > READS_MAX_VIEW_BP) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above the ${READS_MAX_VIEW_BP / 1000} kb reads limit)`);
           else {
-            const half = opts.readsWindow === 'view' ? 0 : opts.readsWindow === 'margin' ? Math.floor(span / 2) : Math.floor((READS_MAX_VIEW_BP - span) / 2);
+            const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((READS_MAX_VIEW_BP - span) / 2);
             const rs = Math.max(0, vs - half), re = ve + half;
             reads = {};
             for (const smp of samples) {
@@ -462,6 +468,7 @@ function App() {
   }, [samples, addFiles]);
 
   const loadSession = useCallback(async (file: File) => {
+    setNotes([`Loading session ${file.name}…`]);
     setError(null);
     try {
       const session = parseSession(await file.text());
@@ -480,6 +487,8 @@ function App() {
     if (EMBEDDED && !embeddedOpened.current) { embeddedOpened.current = true; applySession(EMBEDDED.session); }
   }, [applySession]);
 
+  loadSessionRef.current = loadSession;
+
   // A pending session applies itself as soon as every one of its files is present (or right away when it needs none)
   useEffect(() => {
     if (!pendingSession) return;
@@ -490,11 +499,11 @@ function App() {
   // Default file name follows the gene until the user types one
   useEffect(() => { if (!sessionNameEdited) setSessionName(defaultSessionName(opened?.geneName)); }, [opened?.geneName, sessionNameEdited]);
 
-  const dropRef = useRef<HTMLDivElement>(null);
-  const onDrop = (e: React.DragEvent) => { e.preventDefault(); void onDropFiles(e.dataTransfer); };
+  /** Drops are accepted anywhere on the page: files, a folder, or a session .json. */
+  const onDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); void onDropFiles(e.dataTransfer); };
 
   return (
-    <div className="min-h-screen bg-gray-100 text-gray-900">
+    <div className="min-h-screen bg-gray-100 text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
       {DEV && (
         <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
           style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
@@ -565,7 +574,7 @@ function App() {
             Load session
             <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
           </label>
-          <button onClick={() => setExportDialog({ readsWindow: 'view', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
+          <button onClick={() => setExportDialog({ window: 'margin', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
             title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'}>
             {busy ? '…' : 'Export HTML'}
           </button>
@@ -626,9 +635,8 @@ function App() {
         </div>
       )}
       {!opened ? (
-        <div ref={dropRef} onDragOver={e => e.preventDefault()} onDrop={onDrop}
-          className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
-          <div className="text-xl font-semibold text-indigo-700">Drop a run folder, or BAM / CRAM files, here</div>
+        <div className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
+          <div className="text-xl font-semibold text-indigo-700">Drop a run folder, BAM / CRAM files, or a session file anywhere on this page</div>
           <div className="text-sm text-gray-600 mt-2 max-w-2xl mx-auto">
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
             CRAM needs the reference: add an indexed FASTA (<code>.fa</code> + <code>.fai</code>, bgzipped with <code>.gzi</code>) or let the page fetch it from the UCSC API.
@@ -642,7 +650,7 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="p-3" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+        <div className="p-3">
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
             sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
@@ -659,14 +667,14 @@ function App() {
               <button onClick={() => setExportDialog(null)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
             </div>
             <div className="px-4 py-3 space-y-3">
-              <div className="font-semibold">Reads track · {viewsWithReads ? `${viewsWithReads} view${viewsWithReads === 1 ? '' : 's'} with the reads track on` : 'no view has the reads track on'}</div>
-              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Windows above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
-                <legend className="font-medium mb-1">Window of the reads</legend>
-                {([['view', 'the view as shown'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest reads window (${READS_MAX_VIEW_BP / 1000} kb centred on the view)`]] as const).map(([v, label]) => (
-                  <label key={v} className="flex items-center gap-2"><input type="radio" name="readsWindow" checked={exportDialog.readsWindow === v} onChange={() => setExportDialog({ ...exportDialog, readsWindow: v })} disabled={!viewsWithReads} />{label}</label>
+                <legend className="font-medium mb-1">Window exported around each view · coverage, junctions, retention counts and reads</legend>
+                {([['view', 'the view as shown: the recipient cannot pan outside it'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest window: what the viewer itself loads around the view (up to ${MAX_FETCH_BP / 1e6} Mb for coverage and junctions, ${READS_MAX_VIEW_BP / 1000} kb for reads)`]] as const).map(([v, label]) => (
+                  <label key={v} className="flex items-center gap-2"><input type="radio" name="exportWindow" checked={exportDialog.window === v} onChange={() => setExportDialog({ ...exportDialog, window: v })} />{label}</label>
                 ))}
               </fieldset>
+              <div className="font-semibold">Reads track · {viewsWithReads ? `${viewsWithReads} view${viewsWithReads === 1 ? '' : 's'} with the reads track on` : 'no view has the reads track on'}</div>
+              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Reads per sample in that window</legend>
                 {([['shown', 'as displayed: up to 2,500 reads (sampled evenly when the window holds more) · about 300 kB per sample and view'], ['dense', 'dense: up to 20,000 reads, for zooming in · a few MB per sample and view'], ['all', 'every read of the window · exact at any zoom, can reach tens of MB for a deep window']] as const).map(([v, label]) => (
