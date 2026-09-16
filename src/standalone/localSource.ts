@@ -8,8 +8,8 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
-import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
-import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
+import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
+import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import type { GenomeBuild } from './ensembl';
@@ -46,6 +46,8 @@ const pgName = (pg: string[]): string => {
 
 const MAX_REGION_BP = 5_000_000;
 const MAX_READS_REGION_BP = 250_000;
+/** Tile of the full variant scan: the reads of one tile are decoded, called and dropped before the next, so memory stays bounded on any window. */
+const VARIANT_TILE_BP = 100_000;
 
 // ---------------- Deep regions ----------------
 // A very deep library (targeted RNA-seq, a highly expressed gene) can hold millions of records over one gene,
@@ -292,6 +294,31 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   // ---- SashimiDataSource ----
+  /** Every site above the thresholds from every read of the window, one tile at a time (no read cap, any window width). */
+  async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    const s = this.samples.get(sampleId);
+    if (!s) throw new Error('Sample not found');
+    const sites: VariantSite[] = [];
+    let total = 0, longReads: boolean | null = null;
+    for (let ts = start; ts < end; ts += VARIANT_TILE_BP) {
+      if (opts?.signal?.aborted) throw new DOMException('Variant scan cancelled', 'AbortError');
+      const te = Math.min(end, ts + VARIANT_TILE_BP);
+      // every read overlapping the tile (those starting before it too: they cover its first positions), decoded in full
+      const { kept } = await this.scan(sampleId, chrom, ts, te, uniqueOnly, Number.MAX_SAFE_INTEGER, false);
+      for (const r of kept) if (ts === start || r.start >= ts) total++;   // a read spanning two tiles is counted once
+      if (kept.length) {
+        const refStart = Math.max(0, ts - 500);
+        const ref = await this.getReferenceSeq(chrom, refStart, te + 500);
+        const reads = kept.map(r => encodeRead(r, ref, refStart));
+        if (longReads == null) longReads = isLongRead(reads);   // decided on the first tile holding reads, kept for the whole window
+        const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
+        const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
+        sites.push(...callSites(reads, ts, te, ref, refStart, 3, vaf, 20, minIndel));
+      }
+      opts?.onProgress?.((te - start) / (end - start));
+    }
+    return { sites, total, long_reads: longReads ?? false };
+  }
   async getLibraryType(sampleId: number): Promise<LibraryEvidence> {
     if (!this.samples.has(sampleId)) return { type: 'unknown', source: 'none', note: 'sample not found' };
     const o = await this.open(sampleId);

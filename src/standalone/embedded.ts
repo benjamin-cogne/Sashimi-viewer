@@ -11,7 +11,7 @@
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
 import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
-import type { CoverageOptions, ReadsOptions, SampleRef } from '../components/sashimi/datasource';
+import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
 import type { SessionFile } from './session';
@@ -154,6 +154,13 @@ export class EmbeddedDataSource extends LocalDataSource {
     this.knownVariants = payload.knownVariants ?? [];
   }
   isEmbedded(id: number) { return this.names.has(id); }
+  /** An exported sample has no file to scan: its variant sites come from the exported reads of the window, when they were exported. */
+  override async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
+    const r = await this.getReads(sampleId, chrom, start, end, uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
+    opts?.onProgress?.(1);
+    return { sites: r.sites, total: r.total, long_reads: !!r.long_reads };
+  }
   override async getLibraryType(id: number): Promise<LibraryEvidence> {
     if (!this.names.has(id)) return super.getLibraryType(id);
     return this.payload.samples.find(s => s.id === id)?.library ?? { type: 'unknown', source: 'none', note: 'not recorded in the exported file' };

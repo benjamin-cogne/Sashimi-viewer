@@ -187,7 +187,8 @@ sites from the reads in the background, reads track or not: the allele-fraction 
 star strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), and *Min VAF*
 applies. That automatic call works from the sampled reads (at most 2,500 in the window), so on a
 deep or wide window it misses sites with few supporting reads: the **variants** chip next to the
-sample name scans every read of the current window (up to 250 kb) and calls every site above the
+sample name scans every read of the current window, whatever its width (tile by tile, so memory stays
+bounded, with the progress shown on the chip and a click to stop), and calls every site above the
 thresholds; it then reads *variants ✓ N* until the window or a threshold changes. When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
 for a minus-strand gene. Common SNPs are switched on when the first DNA track appears,

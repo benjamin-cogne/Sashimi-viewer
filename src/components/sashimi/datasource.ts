@@ -3,7 +3,7 @@
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
  * browser on top of local BAM/CRAM files and the UCSC / Ensembl REST APIs (src/standalone).
  */
-import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant, LibraryEvidence } from './types';
+import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant, LibraryEvidence, VariantSite } from './types';
 
 export interface SampleRef { id: number; name: string }
 
@@ -13,6 +13,20 @@ export interface ReadsOptions {
   longReadMinIndel?: number;
   /** for long reads: floor of the alternate-allele fraction a site needs (their error rate makes the short-read threshold too low) */
   longReadMinVaf?: number;
+}
+/** A full variant scan of a window (every read, tile by tile). */
+export interface VariantScanOptions extends ReadsOptions {
+  /** called after each tile with the fraction of the window scanned (0–1) */
+  onProgress?: (fraction: number) => void;
+  /** aborts between tiles; the promise then rejects with an AbortError */
+  signal?: AbortSignal;
+}
+/** Result of a full variant scan. */
+export interface VariantScan {
+  sites: VariantSite[];
+  /** reads scanned (each counted once) */
+  total: number;
+  long_reads: boolean;
 }
 /** Budget of a coverage request. */
 export interface CoverageOptions {
@@ -48,6 +62,12 @@ export interface SashimiDataSource {
   getReference(chrom: string, start: number, end: number): Promise<string | null>;
   /** Protein domains (UniProt / Pfam) of a coding model, amino-acid coordinates. */
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]>;
+  /**
+   * Every variant site above `minVaf` in a 0-based half-open window, from every read of the window: scanned tile
+   * by tile so the window can be as wide as the coverage window, with no read cap. Absent when the source cannot
+   * scan (no alignment file behind the sample).
+   */
+  getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
   /** Library type of a sample from what the source knows before any read is decoded (the aligner named in the header); absent when it cannot tell. */
   getLibraryType?(sampleId: number): Promise<LibraryEvidence>;
   /** Variants previously identified in a sample (clinical indication, diagnostic, chromosome map); absent when the source has no such record. */
