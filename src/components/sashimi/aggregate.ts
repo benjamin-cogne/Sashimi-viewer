@@ -3,15 +3,15 @@
  *
  * - Coverage is the sum of the members' depth profiles (drawn relative to its own maximum).
  * - Junction reads are pooled (summed) over the members.
- * - For every annotated intron of the displayed model, the junctions that use its donor or its
- *   acceptor compete: the canonical intron, alternative 5′ / 3′ sites, exon skipping and
- *   pseudo-exons (an alternative-3′ arc into a short cryptic exon followed by an alternative-5′
- *   arc out of it, paired into one event). Each event's share of that intron's reads is the
- *   percentage shown on the arc instead of a read count.
- * - Exon skipping is measured rMATS-style against its two inclusion junctions pooled:
- *   2·S / (I₁ + I₂ + 2·S), one value for the skip and one for both inclusion arcs.
- * - Intron retention is measured the same way from the unspliced reads through the two
- *   boundaries of the intron: (R5 + R3) / (R5 + R3 + 2·C).
+ * - For every annotated intron of the displayed model, the events that use its donor or its
+ *   acceptor compete: the canonical junction (C), alternative 5′ / 3′ sites (n), pseudo-exons (an
+ *   alternative-3′ arc into a short cryptic exon and an alternative-5′ arc out of it, paired and
+ *   weighted by the mean of their two arcs), exon skipping (S) and intron retention (the unspliced
+ *   reads through the two boundaries, weighted by their mean). Each event is labelled with its
+ *   weight over the sum of every weight at that intron, so the labels of one intron add up to 100 %.
+ * - An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
+ *   rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns.
+ * - Tooltips also give the rMATS-style value of each event against the canonical form alone.
  */
 import type { BoundarySpanning, CoverageRun, JunctionArc } from './types';
 import { classifyJunction, junctionKey, type TxModel } from './geometry';
@@ -88,11 +88,11 @@ export const AGG_CLASS_LABEL: Record<AggClass, string> = {
   novel: 'novel junction',
 };
 
-/** Share of one event: at one annotated intron, or of one exon-skipping event against its two inclusion junctions. */
+/** Share of one event of the reads competing at its intron (both introns for an exon-skipping arc). */
 export interface AggShare {
-  /** event reads / reads of every competing event */
+  /** event weight / sum of the weights of every competing event */
   pct: number;
-  /** reads of every competing event (the denominator) */
+  /** sum of the weights (the denominator) */
   total: number;
   /** what the percentage is relative to, for the tooltip */
   note: string;
@@ -105,9 +105,9 @@ export interface AggEvent {
   cls: AggClass;
   /** the other arc of a pseudo-exon pair */
   partner?: string;
-  /** reads counted for the event (mean of the two arcs for a pseudo-exon, mean of the two inclusion junctions for a canonical arc flanking a skip) */
+  /** weight of the event at its intron (mean of the two arcs for a pseudo-exon, own reads otherwise) */
   eventCount: number;
-  /** one share per intron the event competes at; an exon-skipping arc carries a single share */
+  /** the event's share (one entry; an exon-skipping arc's single share spans its two introns) */
   shares: AggShare[];
 }
 
@@ -119,7 +119,7 @@ export interface AggRetention {
   /** unspliced reads through the genomic-left boundary (intron start) and the genomic-right one (intron end); which is the donor depends on the strand */
   rStart: number; rEnd: number;
   canonical: number;
-  /** (rStart + rEnd) / (rStart + rEnd + 2·canonical) */
+  /** (rStart + rEnd) / 2 over every weight competing at the intron */
   pct: number;
   note: string;
 }
@@ -137,21 +137,11 @@ export function pctLabel(p: number): string {
 }
 
 /**
- * Shares of every junction against the displayed model.
- *
- * - Exon skipping (exon a → exon b, b > a + 1): one value, rMATS-style, from the two inclusion
- *   junctions pooled: skipping = 2·S / (I₁ + I₂ + 2·S), where I₁ and I₂ are the canonical
- *   junctions a → a+1 and b−1 → b and S the skipping reads. Both inclusion arcs then show the
- *   same inclusion level, (I₁ + I₂) / (I₁ + I₂ + 2·S), since a canonical arc flanking a skip is
- *   weighted by the mean of the two inclusion junctions, I/2, wherever it competes.
- * - Pseudo-exon (alternative-3′ arc A into a cryptic exon, alternative-5′ arc B out of it): the same
- *   rule against the canonical junction C that excludes it, inclusion = (A + B) / (A + B + 2·C),
- *   one value on both arcs.
- * - Alternative 5′ / 3′ site (one junction n): n / (n + C) against the canonical junction.
- * - The canonical arc shows a multi-way share at its intron: its weight (I/2 when it flanks a
- *   skip, its own reads otherwise) over every competitor (pseudo-exons as the mean of their two
- *   arcs, alternative sites, skips using one of its sites), so it reflects all of them at once.
- * - Junctions touching no annotated splice site get no share (drawn with their pooled reads).
+ * Shares of every junction against the displayed model: at each annotated intron, every competing
+ * event's weight over the sum of the weights (see the module comment). Weights: canonical C, alternative
+ * site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S (at each of the two introns it spans),
+ * intron retention (R5 + R3) / 2. A skipping arc is labelled 2·S / (total₁ + total₂). Junctions
+ * touching no annotated splice site get no share (drawn with their pooled reads).
  */
 export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null, spanning?: BoundarySpanning, maxPseudoExon = PSEUDO_EXON_MAX_BP): AggResult {
   const out = new Map<string, AggEvent>();
@@ -169,29 +159,34 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
   /** canonical junction reads of intron k (0 when absent) */
   const canonical = Array.from({ length: nIntrons }, (_, k) => junctions.find(j => j.start === intronStart(k) && j.end === intronEnd(k))?.count ?? 0);
 
-  // ---- exon skipping: one share per skip, from the two inclusion junctions pooled ----
+  // ---- exon skipping junctions: both ends annotated with at least one exon between them ----
   const exonIndexAtEnd = new Map<number, number>(), exonIndexAtStart = new Map<number, number>();
   tx.exons.forEach((e, i) => { exonIndexAtEnd.set(e.end, i); exonIndexAtStart.set(e.start, i); });
-  const skips: { j: JunctionArc; k1: number; k2: number; inclusion: number }[] = [];
+  const skips: { j: JunctionArc; k1: number; k2: number }[] = [];
   for (const j of junctions) {
     const li = exonIndexAtEnd.get(j.start), ri = exonIndexAtStart.get(j.end);
     if (li == null || ri == null || ri <= li + 1) continue;
-    const k1 = li, k2 = ri - 1;                       // flanking introns: exon li → li+1 and exon ri−1 → ri
-    const inclusion = canonical[k1] + canonical[k2];
-    skips.push({ j, k1, k2, inclusion });
-    const total = inclusion + 2 * j.count;
-    if (total > 0) out.get(junctionKey(j))!.shares.push({
-      pct: (2 * j.count) / total, total,
-      note: `skipping of exon${ri - li > 2 ? `s ${exonLabel(li + 1, ri - 1)}` : ` ${tx.exons[li + 1].rank}`} = 2 × ${j.count.toLocaleString()} skipping reads / (${canonical[k1].toLocaleString()} + ${canonical[k2].toLocaleString()} inclusion reads at introns ${exonLabel(k1, k1 + 1)} and ${exonLabel(k2, k2 + 1)} + 2 × ${j.count.toLocaleString()})`,
-    });
+    skips.push({ j, k1: li, k2: ri - 1 });               // flanking introns: exon li → li+1 and exon ri−1 → ri
   }
+  const isSkip = (j: JunctionArc) => skips.some(sk => sk.j === j);
 
-  // ---- per intron: canonical vs alternative sites, pseudo-exons and skips using one of its sites ----
+  // ---- pass 1, per intron: the competing events and their weights ----
+  interface Pool {
+    k: number; iStart: number; iEnd: number; label: string;
+    C: number;
+    /** unspliced reads through the two boundaries (when the source counted both) */
+    hasSpan: boolean; rStart: number; rEnd: number; R: number; sideNote: string;
+    pairs: { a: JunctionArc; b: JunctionArc; n: number }[];
+    /** competing junctions that are neither canonical, nor paired, nor skips: alternative sites and other single junctions */
+    alts: JunctionArc[];
+    skips: { j: JunctionArc; k1: number; k2: number }[];
+    /** every weight summed: C + Σ alt + Σ (A + B)/2 + Σ S + R/2 */
+    total: number;
+  }
+  const pools: (Pool | null)[] = [];
   for (let k = 0; k < nIntrons; k++) {
     const iStart = intronStart(k), iEnd = intronEnd(k);
-    if (iEnd <= iStart) continue;
-    const label = exonLabel(k, k + 1);
-    // intron retention: unspliced reads through the two boundaries (only when the source counted both)
+    if (iEnd <= iStart) { pools.push(null); continue; }
     const rStart = spanning?.intronStart[iStart], rEnd = spanning?.intronEnd[iEnd];
     const hasSpan = rStart != null && rEnd != null;
     const R = hasSpan ? rStart + rEnd : 0;
@@ -202,25 +197,13 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     const sideNote = hasSpan
       ? `${(plus ? rStart : rEnd).toLocaleString()} unspliced reads through the donor at ${donorPos.toLocaleString()} + ${(plus ? rEnd : rStart).toLocaleString()} through the acceptor at ${acceptorPos.toLocaleString()}`
       : '';
-    if (hasSpan) {
-      const denom = R + 2 * canonical[k];
-      retention.push({
-        intron: k, start: iStart, end: iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, rStart, rEnd, canonical: canonical[k],
-        pct: denom > 0 ? R / denom : 0,
-        note: `intron retention ${label} = (${sideNote}; positions = last exonic base, 1-based) / (${R.toLocaleString()} + 2 × ${canonical[k].toLocaleString()} canonical reads)`,
-      });
-    }
     const competing = junctions.filter(j => j.start === iStart || j.end === iEnd);
-    if (!competing.length) continue;
-    const touching = skips.filter(sk => sk.k1 === k || sk.k2 === k);
-    // a canonical arc flanking one or more skips weighs the mean of the two inclusion junctions
-    const canonicalWeight = touching.length ? touching.reduce((a, sk) => a + sk.inclusion / 2, 0) / touching.length : canonical[k];
     // pseudo-exon pairing: left-anchored arc ending inside the intron + right-anchored arc starting
     // inside it, in that order, with a short cryptic exon between them
     const lefts = competing.filter(j => j.start === iStart && j.end < iEnd).sort((a, b) => b.count - a.count);
     const rights = competing.filter(j => j.end === iEnd && j.start > iStart);
     const paired = new Set<string>();
-    const pairs: { a: JunctionArc; b: JunctionArc; n: number }[] = [];
+    const pairs: Pool['pairs'] = [];
     for (const a of lefts) {
       const kA = junctionKey(a);
       if (paired.has(kA)) continue;
@@ -229,50 +212,82 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
       if (!candidates.length) continue;
       const b = candidates[0];
       paired.add(kA); paired.add(junctionKey(b));
-      pairs.push({ a, b, n: Math.round((a.count + b.count) / 2) });
+      pairs.push({ a, b, n: (a.count + b.count) / 2 });
     }
-    const isSkip = (j: JunctionArc) => skips.some(sk => sk.j === j);
-    const isCanonical = (j: JunctionArc) => j.start === iStart && j.end === iEnd;
-    const singles = competing.filter(j => !paired.has(junctionKey(j)));
-    // multi-way total at the intron: canonical (weighted), pseudo-exons (mean of both arcs), alternative sites, skips, retention (mean of both boundaries)
-    const total = pairs.reduce((a, p) => a + p.n, 0) + singles.reduce((a, j) => a + (isCanonical(j) ? canonicalWeight : j.count), 0) + R / 2;
+    const alts = competing.filter(j => !paired.has(junctionKey(j)) && !isSkip(j) && !(j.start === iStart && j.end === iEnd));
+    const here = skips.filter(sk => sk.k1 === k || sk.k2 === k);
+    const total = canonical[k] + alts.reduce((a, j) => a + j.count, 0) + pairs.reduce((a, p) => a + p.n, 0) + here.reduce((a, sk) => a + sk.j.count, 0) + R / 2;
+    pools.push({ k, iStart, iEnd, label: exonLabel(k, k + 1), C: canonical[k], hasSpan, rStart: rStart ?? 0, rEnd: rEnd ?? 0, R, sideNote, pairs, alts, skips: here, total });
+  }
+
+  // ---- pass 2: every event's share of the reads competing at its intron ----
+  const pctTxt = (num: number, den: number) => pctLabel(den > 0 ? num / den : 0);
+  const num = (x: number) => (Number.isInteger(x) ? x.toLocaleString() : x.toFixed(1));
+  for (const pool of pools) {
+    if (!pool) continue;
+    const { k, label, C, R, total } = pool;
+    const totalTxt = `${num(total)} reads competing at intron ${label}`;
+    if (pool.hasSpan) {
+      retention.push({
+        intron: k, start: pool.iStart, end: pool.iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, rStart: pool.rStart, rEnd: pool.rEnd, canonical: C,
+        pct: total > 0 ? (R / 2) / total : 0,
+        note: `intron retention ${label} = (${pool.sideNote}; positions = last exonic base, 1-based) / 2 / ${totalTxt}` +
+          `\nvs the canonical junction alone (rMATS-style): (${R.toLocaleString()}) / (${R.toLocaleString()} + 2 × ${C.toLocaleString()}) = ${pctTxt(R, R + 2 * C)}`,
+      });
+    }
     if (!total) continue;
-    const C = canonical[k];
-    const cTxt = `${C.toLocaleString()} canonical reads at intron ${label}`;
-    // pseudo-exon: the two inclusion arcs against the canonical junction that excludes the cryptic exon
-    for (const p of pairs) {
-      const sum = p.a.count + p.b.count, denom = sum + 2 * C;
+    // pseudo-exon: one value on both arcs, the mean of the two junctions over the intron's total
+    for (const p of pool.pairs) {
+      const sum = p.a.count + p.b.count;
       for (const [me, other] of [[p.a, p.b], [p.b, p.a]] as const) {
         const ev = out.get(junctionKey(me))!;
         ev.cls = 'pseudo_exon'; ev.partner = junctionKey(other); ev.eventCount = p.n;
-        if (denom > 0) ev.shares.push({ pct: sum / denom, total: denom, note: `pseudo-exon inclusion = (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads of its two junctions) / (${sum.toLocaleString()} + 2 × ${cTxt})` });
-      }
-    }
-    for (const j of singles) {
-      if (isSkip(j)) continue;                          // a skip carries its own single share
-      const ev = out.get(junctionKey(j))!;
-      if (isCanonical(j)) {
-        ev.eventCount = Math.round(canonicalWeight);
-        // the competitors, so a canonical arc below 100 % is explained even when they are hidden (below the threshold) or off-screen
-        const others = [
-          ...(R > 0 ? [`intron retention (${sideNote})`] : []),
-          ...pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads)`),
-          ...singles.filter(x => x !== j).map(x => {
-            const cls = out.get(junctionKey(x))!.cls;
-            return `${AGG_CLASS_LABEL[cls]} ${(x.start + 1).toLocaleString()}-${x.end.toLocaleString()} (${x.count.toLocaleString()} reads)`;
-          }),
-        ];
         ev.shares.push({
-          pct: canonicalWeight / total, total: Math.round(total),
-          note: `of the ${Math.round(total).toLocaleString()} reads competing at intron ${label}${touching.length ? ' (canonical weighted by the mean of the two inclusion junctions of the skip)' : ''}` +
-            (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : ''),
+          pct: p.n / total, total,
+          note: `pseudo-exon = (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads of its two junctions) / 2 / ${totalTxt}` +
+            `\nvs the canonical junction alone (rMATS-style): (${sum.toLocaleString()}) / (${sum.toLocaleString()} + 2 × ${C.toLocaleString()}) = ${pctTxt(sum, sum + 2 * C)}`,
         });
-      } else {
-        // alternative 5′ / 3′ site (or another single junction using one site of the intron) against the canonical junction
-        const denom = j.count + C;
-        if (denom > 0) ev.shares.push({ pct: j.count / denom, total: denom, note: `= ${j.count.toLocaleString()} reads / (${j.count.toLocaleString()} + ${cTxt})` });
       }
     }
+    // alternative 5′ / 3′ site, or another single junction using one site of the intron
+    for (const j of pool.alts) {
+      out.get(junctionKey(j))!.shares.push({
+        pct: j.count / total, total,
+        note: `= ${j.count.toLocaleString()} reads / ${totalTxt}` +
+          `\nvs the canonical junction alone (rMATS-style): ${j.count.toLocaleString()} / (${j.count.toLocaleString()} + ${C.toLocaleString()}) = ${pctTxt(j.count, j.count + C)}`,
+      });
+    }
+    // canonical: its own reads over the total; the competitors are listed so a value below 100 % is explained even when they are hidden or off-screen
+    const cj = junctions.find(j => j.start === pool.iStart && j.end === pool.iEnd);
+    if (cj) {
+      const ev = out.get(junctionKey(cj))!;
+      ev.eventCount = C;
+      const others = [
+        ...(R > 0 ? [`intron retention (${pool.sideNote}; counted as their mean)`] : []),
+        ...pool.pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads, counted as their mean)`),
+        ...pool.alts.map(x => `${AGG_CLASS_LABEL[out.get(junctionKey(x))!.cls]} ${(x.start + 1).toLocaleString()}-${x.end.toLocaleString()} (${x.count.toLocaleString()} reads)`),
+        ...pool.skips.map(sk => `exon skipping ${(sk.j.start + 1).toLocaleString()}-${sk.j.end.toLocaleString()} (${sk.j.count.toLocaleString()} reads)`),
+      ];
+      ev.shares.push({
+        pct: C / total, total,
+        note: `= ${C.toLocaleString()} canonical reads / ${totalTxt}` +
+          (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : ''),
+      });
+    }
+  }
+  // exon skipping: one value for the arc, 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes there)
+  for (const sk of skips) {
+    const p1 = pools[sk.k1], p2 = pools[sk.k2];
+    if (!p1 || !p2) continue;
+    const S = sk.j.count, den = p1.total + p2.total, I1 = canonical[sk.k1], I2 = canonical[sk.k2];
+    const li = sk.k1, ri = sk.k2 + 1;
+    if (den <= 0) continue;
+    out.get(junctionKey(sk.j))!.shares.push({
+      pct: (2 * S) / den, total: den,
+      note: `skipping of exon${ri - li > 2 ? `s ${exonLabel(li + 1, ri - 1)}` : ` ${tx.exons[li + 1].rank}`} = 2 × ${S.toLocaleString()} skipping reads / (${num(p1.total)} reads competing at intron ${p1.label} + ${num(p2.total)} at intron ${p2.label})` +
+        `\nshare at intron ${p1.label}: ${pctTxt(S, p1.total)} · at intron ${p2.label}: ${pctTxt(S, p2.total)}` +
+        `\nvs the inclusion junctions alone (rMATS-style): 2 × ${S.toLocaleString()} / (${I1.toLocaleString()} + ${I2.toLocaleString()} + 2 × ${S.toLocaleString()}) = ${pctTxt(2 * S, I1 + I2 + 2 * S)}`,
+    });
   }
   return { events: out, retention };
 }

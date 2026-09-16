@@ -1794,7 +1794,7 @@ export default function SashimiViewer({
         <g key="lir">
           <rect x={0} y={y - 6.5} width={32} height={13} rx={6.5} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
           <text x={16} y={y + 3} textAnchor="middle" fill={RETENTION_COLOR} fontSize={8.5} fontWeight={700}>IR %</text>
-          <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>intron retention: unspliced reads through both boundaries vs canonical</text>
+          <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>intron retention: unspliced reads through both boundaries, share of the intron's reads</text>
         </g>
       ),
     });
@@ -1913,7 +1913,7 @@ export default function SashimiViewer({
       });
     }
     items.push({
-      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ usage · label = % usage of the event against its canonical junction (reads pooled over the group)' : showUsage ? 'arc width ∝ usage · label = % usage of the event against its canonical junction (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
+      w: 0, el: <text key="l6" x={0} y={y + 3.5} fill={INK.faint} fontSize={9}>{viewMode === 'groups' ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (reads pooled over the group)' : showUsage ? 'arc width ∝ usage · label = % of the reads competing at the intron, 100 % per intron (sample reads)' : 'arc width ∝ log₂ reads · label = spliced reads'}</text>,
     });
     return items;
   })();
@@ -2819,7 +2819,7 @@ export default function SashimiViewer({
               title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
               options={[
                 { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
-                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each event against its canonical junction: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C), exon skipping 2·S / (I₁ + I₂ + 2·S), intron retention (R5 + R3) / (R5 + R3 + 2·C) shown as IR pills on the baseline' },
+                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
               ]} />
             {showUsage ? (
               <>
@@ -3130,7 +3130,7 @@ export default function SashimiViewer({
             <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
               <div>
                 <div className="font-bold text-sm">Sample groups</div>
-                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with a percentage instead of a read count. Each splicing defect is measured against the canonical junction it competes with, rMATS-style: alternative site n / (n + C), pseudo-exon (A + B) / (A + B + 2·C) on both arcs, exon skipping 2·S / (I₁ + I₂ + 2·S) with both inclusion arcs at (I₁ + I₂) / (I₁ + I₂ + 2·S), intron retention (R5 + R3) / (R5 + R3 + 2·C) from the unspliced reads through both boundaries. The canonical arc shows its share among every competitor at its intron.</div>
+                <div className="text-[11px] text-gray-500">Each group becomes one pooled track in the Groups view: coverage and junction reads summed over its samples, every arc labelled with a percentage instead of a read count. At each intron of the reference model the events using its donor or acceptor compete, and every arc shows its share of their reads, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 from the unspliced reads through both boundaries. A skipping arc shows 2·S over the totals of the two introns it spans, the rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes there. Tooltips also give each event against the canonical junction alone.</div>
               </div>
               <button onClick={() => setShowGroupsDialog(false)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
             </div>

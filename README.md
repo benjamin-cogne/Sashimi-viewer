@@ -100,25 +100,26 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 - **Groups (aggregate view)**: *Groups…* creates named sample groups (patients, controls, a
   tissue…); the *Samples | Groups* switch then draws one pooled track per group. Coverage and
   junction reads are summed over the group's samples, the coverage is drawn relative to its own
-  maximum, and each arc is labelled with a **percentage** instead of a read count. Every splicing
-  defect is measured against the canonical junction it competes with, rMATS-style, so an event made
-  of two junctions counts the single alternative twice: an alternative 5′ or 3′ site shows
-  n / (n + C); a pseudo-exon (an alternative-3′ arc A into a cryptic exon of at most 500 bp and an
-  alternative-5′ arc B out of it, drawn in purple) shows (A + B) / (A + B + 2·C) on both arcs; exon
-  skipping shows 2·S / (I₁ + I₂ + 2·S), with I₁ and I₂ the canonical junctions flanking the skipped
-  exon(s), and both inclusion arcs then show (I₁ + I₂) / (I₁ + I₂ + 2·S). Intron retention follows
-  the same rule from the reads that run unspliced through the two boundaries of the intron (one
-  aligned block with at least 6 bases on the exon side and 10 on the intron side): a teal *IR*
-  pill on the intron baseline shows (R5 + R3) / (R5 + R3 + 2·C); the *Intron retention* box next to
-  *Min %* switches this off for junction-only percentages. The canonical arc of an intron shows its
-  share among every competitor at that intron, retention included when the box is ticked. Tooltips spell each formula out
-  with the pooled read counts. Junctions touching no annotated splice site show their pooled read
-  count (`n=…`). Red arcs are events seen in the first group only. The same percentages are
+  maximum, and each arc is labelled with a **percentage** instead of a read count. At every intron
+  of the reference model the events that use its donor or its acceptor compete, and each shows its
+  share of their reads, so the labels of one intron add up to 100 %: the canonical junction C, an
+  alternative 5′ or 3′ site n, a pseudo-exon (an alternative-3′ arc A into a cryptic exon of at
+  most 500 bp and an alternative-5′ arc B out of it, drawn in purple) weighted (A + B) / 2 with the
+  same value on both arcs, exon skipping S, and intron retention weighted (R5 + R3) / 2 from the
+  reads that run unspliced through the two boundaries of the intron (one aligned block with at
+  least 6 bases on the exon side and 10 on the intron side), shown as a teal *IR* pill on the intron
+  baseline. An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
+  rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns; its tooltip gives
+  its share at each intron. Every tooltip also gives the event against the canonical junction
+  alone, rMATS-style (n / (n + C), (A + B) / (A + B + 2·C), 2·S / (I₁ + I₂ + 2·S),
+  (R5 + R3) / (R5 + R3 + 2·C)). The *Intron retention* box next to *Min %* removes retention from
+  the shares. Junctions touching no annotated splice site show their pooled read count (`n=…`) and
+  compete nowhere. Red arcs are events seen in the first group only. The same percentages are
   available per sample in the Samples view through *Arc labels: % usage* (computed on each
   sample's own reads); the Groups view always shows percentages. In that mode *Min reads* becomes
   *Min %*, hiding events below that usage; hidden and off-screen junctions still count in the
   denominators, so a canonical arc below 100 % lists in its tooltip the other events at its intron,
-  shown or not. Intron retention produces no junction and is never counted.
+  shown or not.
 
 ## Sessions
 
