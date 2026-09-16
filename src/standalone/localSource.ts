@@ -17,7 +17,7 @@ import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, get
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
-export interface LocalSample { id: number; name: string; kind: 'bam' | 'cram'; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string }
+export interface LocalSample { id: number; name: string; kind: 'bam' | 'cram'; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean }
 export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
 
 type Opened =

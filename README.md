@@ -132,6 +132,37 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   junction's label on every track (70–250 %), for the arcs a figure should emphasise; also saved
   with the session.
 
+## Views
+
+Every gene or locus opened from the search box in the header becomes a **view**. Opening a second
+one folds the first into a tab under the sample chips (a *Views* row appears from the second view
+on); opening a third keeps the two. Click a tab to reopen that view exactly as you left it: the
+gene, the window, the highlight, and every option of the viewer (depth axis, filters, groups,
+reads track, chosen transcript, hidden arcs, label sizes), since each view keeps its own full
+snapshot. × forgets a view. A new view starts with the options of the view you came from. Views
+are saved with the session and are what the HTML export carries.
+
+## Sharing a view without the alignments
+
+**Export HTML** (next to the session buttons) downloads a copy of the viewer itself with the data of
+every registered view embedded: for each view, the gene models (reference transcript, every
+transcript, neighbouring genes) and, for every loaded sample, the coverage, junctions and
+intron-retention counts of the window already fetched around it (the view plus its margins, up to
+2 Mb), together with the sample names, the groups and every option. The recipient opens the file in
+any browser: no BAM, no server, nothing to install. They see an *Exported viewer* banner, the same
+sample chips and view tabs, and can switch views, zoom, pan inside each exported window, toggle
+groups or usage percentages, click arcs and exons for the HGVS and frame details. Coverage is
+exact where you had it exact and marked ≈ where the source had sampled it.
+
+What the export does not carry: the reads track and the exon-depth statistics (they need the
+alignments; the recipient can add the BAM/CRAM files and the page then reads them as usual), and
+regions outside the exported windows (a track there says *not in this exported file*). Gene
+lookups, common SNPs, GTEx and reference bases still come from the network when it is available.
+The exported page is a normal viewer: it can save sessions and export again. Exporting needs the
+built `sashimi-viewer.html` (or the published page), not the development entry. Sizes: about 1 MB
+for the viewer plus the run-length coverage of each window, typically a few hundred kB per sample
+and view for a gene, more for very deep or very wide windows.
+
 ## Sessions
 
 *Save session* in the header downloads a JSON file (the name is editable, default

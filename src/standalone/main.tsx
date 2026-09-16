@@ -10,8 +10,9 @@ import SashimiViewer, { type ViewerSettings, type ViewerState } from '../compone
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
+import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage } from './embedded';
 import type { GenomeBuild } from './ensembl';
-import { parseLocus } from '../components/sashimi/geometry';
+import { parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { describeLink, parseLink } from './link';
 import '../index.css';
 
@@ -29,7 +30,19 @@ if (DEV) {
 const LINK = parseLink(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
-interface Pending { file: File }
+/** The data an exported page carries (null for the normal viewer). */
+const EMBEDDED = readEmbedded();
+
+/** A region open in the viewer: the gene (1-based inclusive bounds) and, optionally, the window, the pinned locus and the reads track. */
+type Opened = { geneName: string; geneId?: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; mark?: { start: number; end: number }; reads?: boolean };
+/** A registered view (tab): its region, the last state the viewer reported for it, and the options it must start with when reopened. */
+interface ViewTab { id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings> }
+const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
+/** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
+const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
+const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? undefined });
+/** Largest window fetched around a view (the viewer's own rule), for the export. */
+const MAX_FETCH_BP = 2_000_000;
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
@@ -83,13 +96,22 @@ function Logo({ size = 28 }: { size?: number }) {
 }
 
 function App() {
-  const [build, setBuild] = useState<GenomeBuild>(LINK?.build ?? 'GRCh38');
-  const [samples, setSamples] = useState<LocalSample[]>([]);
+  const [build, setBuild] = useState<GenomeBuild>(EMBEDDED?.build ?? LINK?.build ?? 'GRCh38');
+  const [samples, setSamples] = useState<LocalSample[]>(() => (EMBEDDED ? embeddedSamples(EMBEDDED) : []));
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
   const [gene, setGene] = useState(LINK_TEXT);
-  const [opened, setOpened] = useState<{ geneName: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; mark?: { start: number; end: number }; reads?: boolean } | null>(null);
+  // ---- Views: every region opened from the header is a tab; the active one drives the viewer ----
+  const [views, setViews] = useState<ViewTab[]>([]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const activeIdRef = useRef<number | null>(null);
+  activeIdRef.current = activeId;
+  const tabSeq = useRef(1);
+  const active = views.find(v => v.id === activeId) ?? null;
+  const opened: Opened | null = active?.opened ?? null;
+  /** Options the next mounted viewer starts with (a reopened tab's snapshot, a session); cleared once that viewer reports. */
+  const pendingSettingsRef = useRef<Partial<ViewerSettings> | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // ---- Sessions: the viewer's latest state (options + navigation), a loaded session waiting for its files ----
@@ -97,16 +119,56 @@ function App() {
   const [sessionName, setSessionName] = useState(() => defaultSessionName());
   const [sessionNameEdited, setSessionNameEdited] = useState(false);
   const [pendingSession, setPendingSession] = useState<{ file: SessionFile; name: string } | null>(null);
-  const [viewerSettings, setViewerSettings] = useState<Partial<ViewerSettings> | undefined>();
   const [sessionSeq, setSessionSeq] = useState(0);   // bumps the viewer key so a loaded session always remounts the viewer
   /** The run folder the sample paths are relative to; the handle (Chromium) lets a session reopen it later. */
   const [runFolder, setRunFolder] = useState<{ name: string; handle: FSDirHandle | null } | null>(null);
   const fileHandlesRef = useRef(new Map<string, FSHandle>());   // Chromium bookmarks of individually added files, by name
   const [reopenState, setReopenState] = useState<{ folder: string; ready: boolean; note?: string } | null>(null);
-  const nextId = useRef(1);
+  const nextId = useRef(EMBEDDED ? Math.max(0, ...EMBEDDED.samples.map(s => s.id)) + 1 : 1);
   const dsRef = useRef<LocalDataSource>();
-  if (!dsRef.current) { dsRef.current = new LocalDataSource({ build }); if (LINK) dsRef.current.knownVariants = LINK.variants; }
+  if (!dsRef.current) { dsRef.current = EMBEDDED ? new EmbeddedDataSource(EMBEDDED, { build }) : new LocalDataSource({ build }); if (LINK && !EMBEDDED) dsRef.current.knownVariants = LINK.variants; }
   const ds = dsRef.current;
+
+  /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */
+  const snapshot = useCallback((tabs: ViewTab[]): ViewTab[] => {
+    const st = viewerStateRef.current, id = activeIdRef.current;
+    if (!st || id == null) return tabs;
+    return tabs.map(v => (v.id === id && st.gene.chrom ? { ...v, state: st, opened: openedOfState(st, v.opened), label: labelOf(openedOfState(st, v.opened)) } : v));
+  }, []);
+  /** Opens a region in a new tab; the current view folds into its tab. The new viewer keeps the current options (a chosen transcript only for the same gene). */
+  const openNew = useCallback((o: Opened) => {
+    const id = tabSeq.current++;
+    const prev = viewerStateRef.current;
+    pendingSettingsRef.current = prev ? { ...prev, transcriptId: prev.gene.name === o.geneName ? prev.transcriptId : undefined } : undefined;
+    setViews(tabs => [...snapshot(tabs), { id, label: labelOf(o), opened: o, state: null }]);
+    setActiveId(id);
+    setGene(o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : o.geneName);
+  }, [snapshot]);
+  /** Reopens a tab with everything as it was left (full snapshot of the options). */
+  const activateTab = useCallback((id: number) => {
+    if (id === activeIdRef.current) return;
+    setViews(tabs => {
+      const snap = snapshot(tabs);
+      const tab = snap.find(v => v.id === id);
+      if (tab) { pendingSettingsRef.current = tab.state ?? tab.settings; setGene(tab.opened.mark ? fmtLocus(tab.opened.chrom, tab.opened.mark.start, tab.opened.mark.end) : tab.opened.geneName); }
+      return snap;
+    });
+    viewerStateRef.current = null;
+    setActiveId(id);
+  }, [snapshot]);
+  const closeTab = useCallback((id: number) => {
+    setViews(tabs => {
+      const idx = tabs.findIndex(v => v.id === id);
+      const rest = tabs.filter(v => v.id !== id);
+      if (id === activeIdRef.current) {
+        const next = rest[Math.max(0, idx - 1)] ?? null;
+        if (next) { pendingSettingsRef.current = next.state ?? next.settings; setGene(next.opened.geneName); }
+        viewerStateRef.current = null;
+        setActiveId(next?.id ?? null);
+      }
+      return rest;
+    });
+  }, []);
   (window as any).__sashimiDs = ds; // for debugging from the console
 
   const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
@@ -186,12 +248,12 @@ function App() {
         best = { gene_name: t.gene_name, start: t.start, end: t.end } as any;
       }
       if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString()}-${view.end.toLocaleString()} (add gene=SYMBOL to the link)`);
-      setOpened({ geneName: best.gene_name, chrom: view.chrom, start: best.start, end: best.end, view: { start: view.start, end: view.end }, mark: { start: mark.start, end: mark.end }, reads: LINK.reads });
+      openNew({ geneName: best.gene_name, chrom: view.chrom, start: best.start, end: best.end, view: { start: view.start, end: view.end }, mark: { start: mark.start, end: mark.end }, reads: LINK.reads });
     } catch (e: any) {
       setError(`Could not open the linked locus: ${e.message}. Check the genome build (${LINK.build}) and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     }
     setBusy(false);
-  }, [ds]);
+  }, [ds, openNew]);
 
   // A link opens the browser right away; files added afterwards become tracks
   const autoOpened = useRef(false);
@@ -213,32 +275,33 @@ function App() {
         const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
         if (!best) throw new Error(`no RefSeq gene at ${q}`);
         const point = locus.start === locus.end;
-        setOpened({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end } });
+        openNew({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } });
       } else {
         const t = await ds.getTranscript(q, q.toUpperCase().startsWith('ENSG') ? q : undefined);
-        setOpened({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end });
+        openNew({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end });
       }
     } catch (e: any) {
       setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     }
     setBusy(false);
-  }, [gene, ds, openLink]);
+  }, [gene, ds, openLink, openNew]);
 
-  // Options the viewer starts with: a loaded session, else the previous viewer's options (kept across gene searches;
-  // a chosen reference transcript only when it is the same gene)
-  const viewerInit: Partial<ViewerSettings> | undefined = (() => {
-    if (viewerSettings) return viewerSettings;
-    const prev = viewerStateRef.current;
-    if (!prev) return undefined;
-    return { ...prev, transcriptId: prev.gene.name === opened?.geneName ? prev.transcriptId : undefined };
-  })();
+  // Options the viewer starts with: a reopened tab's snapshot or a loaded session, else the live options of the
+  // viewer being remounted (a sample added, the build changed)
+  const viewerInit: Partial<ViewerSettings> | undefined = pendingSettingsRef.current ?? (viewerStateRef.current ? { ...viewerStateRef.current } : undefined);
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
-  const viewerKey = useMemo(() => `${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [opened, samples, build, fasta, sessionSeq]);
+  const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [activeId, opened, samples, build, fasta, sessionSeq]);
+  /** Tabs as they are now, the active one refreshed, and the index of the active one among those with a state. */
+  const currentViews = useCallback(() => {
+    const tabs = snapshot(views).filter(v => v.state);
+    return { tabs, activeIndex: Math.max(0, tabs.findIndex(v => v.id === activeIdRef.current)) };
+  }, [views, snapshot]);
   const makePrimary = useCallback((id: number) => setSamples(prev => [...prev.filter(s => s.id === id), ...prev.filter(s => s.id !== id)]), []);
 
   // ---- Save / load a session (JSON) ----
   const saveSession = useCallback(() => {
-    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null });
+    const { tabs, activeIndex } = currentViews();
+    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex });
     if (hasFileSystemAccess()) {
       const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : [])]
         .map(f => ({ name: f.name, size: f.size, handle: fileHandlesRef.current.get(f.name)! })).filter(e => e.handle);
@@ -248,8 +311,58 @@ function App() {
     const url = URL.createObjectURL(new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setNotes([`Session saved as ${name} (${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}). Files are recorded by name: add them again when loading.`]);
-  }, [build, samples, fasta, opened, sessionName, runFolder]);
+    setNotes([`Session saved as ${name} (${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}). Files are recorded by name: add them again when loading.`]);
+  }, [build, samples, fasta, opened, sessionName, runFolder, currentViews]);
+
+  // ---- Export: this page with the data of every view embedded, for a reader without the alignment files ----
+  const exportHtml = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const { tabs, activeIndex } = currentViews();
+      if (!tabs.length) throw new Error('open a gene first');
+      const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex });
+      const evs: EmbeddedView[] = [];
+      for (const t of tabs) {
+        const st = t.state!;
+        setNotes([`Exporting ${t.label}…`]);
+        const vs = st.view.start - 1, ve = st.view.end, span = ve - vs;
+        const margin = Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
+        const ws = Math.max(0, vs - margin), we = ve + margin;
+        const hint = { chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end };
+        const transcript = await ds.getTranscript(st.gene.name, st.gene.id, hint);
+        let allTranscripts: EmbeddedView['allTranscripts']; try { allTranscripts = await ds.getAllTranscripts(st.gene.name, st.gene.id, hint); } catch { /* optional */ }
+        let regionGenes: EmbeddedView['regionGenes']; try { regionGenes = await ds.getRegionGenes(st.gene.chrom, ws + 1, we, transcript.gene_name); } catch { /* optional */ }
+        // boundary-spanning reads are counted at every exon boundary of every model, so the reader may pick any reference transcript
+        const intronStarts = new Set<number>(), intronEnds = new Set<number>();
+        const exonSets = [toTxModel(transcript).exons.map(e => ({ start: e.start, end: e.end })), ...(allTranscripts?.transcripts ?? []).map(m => m.exons.map(e => ({ start: e.start - 1, end: e.end })))];
+        for (const ex of exonSets) { const sorted = [...ex].sort((a, b) => a.start - b.start); for (let i = 0; i + 1 < sorted.length; i++) { intronStarts.add(sorted[i].end); intronEnds.add(sorted[i + 1].start); } }
+        const coverage: Record<string, EncodedCoverage> = {};
+        for (const smp of samples) {
+          try {
+            const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000 });
+            coverage[String(smp.id)] = encodeCoverage(c, { start: ws, end: we });
+          } catch (e: any) {
+            coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
+          }
+        }
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, uniqueOnly: st.uniqueOnly, coverage });
+      }
+      const payload: EmbeddedExport = {
+        app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
+        samples: samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: s.file.name, index: s.index.name })),
+        session, views: evs, knownVariants: ds.knownVariants,
+      };
+      const html = await buildExportHtml(payload);
+      const name = (sessionName.trim() || defaultSessionName(tabs[activeIndex].state!.gene.name)).replace(/\.json$/i, '').replace(/\.html$/i, '') + '.html';
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotes([`Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}. The file opens in any browser without the alignment files; it holds the coverage, junctions and retention counts of each view's window (not the reads).`]);
+    } catch (e: any) {
+      setError(`Export failed: ${e?.message || String(e)}`);
+    }
+    setBusy(false);
+  }, [build, samples, fasta, sessionName, ds, currentViews]);
 
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
@@ -258,15 +371,22 @@ function App() {
     const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name } : s; });
     const ordered = [...matched.map(m => renamed.find(s => s.id === m.sample.id)!), ...renamed.filter(s => !matched.some(m => m.sample.id === s.id))];
     setSamples(ordered);
-    setViewerSettings(viewerSettingsOf(session, ordered));
     setSessionSeq(n => n + 1);
     setPendingSession(null);
     setReopenState(null);
-    if (session.gene) {
-      setGene(session.gene.name);
-      setOpened({ geneName: session.gene.name, chrom: session.gene.chrom, start: session.gene.start, end: session.gene.end, view: session.gene.view, mark: session.gene.mark ?? undefined });
-    }
-    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}${session.gene ? `, ${session.gene.name}` : ''}.`]);
+    const list = session.views ?? (session.gene ? [{ label: session.gene.name, gene: session.gene, viewer: session.viewer }] : []);
+    const tabs: ViewTab[] = list.map(v => ({
+      id: tabSeq.current++, label: v.label, state: null,
+      opened: { geneName: v.gene.name, geneId: v.gene.id, chrom: v.gene.chrom, start: v.gene.start, end: v.gene.end, view: v.gene.view, mark: v.gene.mark ?? undefined },
+      settings: viewerSettingsOf({ viewer: v.viewer }, ordered),
+    }));
+    const act = tabs[Math.min(session.activeView ?? 0, Math.max(0, tabs.length - 1))] ?? null;
+    viewerStateRef.current = null;
+    pendingSettingsRef.current = act?.settings;
+    setViews(tabs);
+    setActiveId(act?.id ?? null);
+    if (act) setGene(act.opened.geneName);
+    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.`]);
   }, [samples, ds]);
 
   /**
@@ -323,6 +443,12 @@ function App() {
       setError(`Could not load the session ${file.name}: ${e.message}`);
     }
   }, [build, ds, fasta]);
+
+  // An exported page opens its views at once (its samples are embedded)
+  const embeddedOpened = useRef(false);
+  useEffect(() => {
+    if (EMBEDDED && !embeddedOpened.current) { embeddedOpened.current = true; applySession(EMBEDDED.session); }
+  }, [applySession]);
 
   // A pending session applies itself as soon as every one of its files is present (or right away when it needs none)
   useEffect(() => {
@@ -384,7 +510,7 @@ function App() {
         <div className="flex flex-wrap items-center gap-1.5">
           {samples.map((s, i) => (
             <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
-              title={`${s.file.name} · ${(s.file.size / 1e9).toFixed(2)} GB · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+              title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
               onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
               onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
               {i === 0 && <span title="primary sample">★</span>}
@@ -409,8 +535,25 @@ function App() {
             Load session
             <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
           </label>
+          <button onClick={exportHtml} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
+            title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them. The reads are not included.'}>
+            {busy ? '…' : 'Export HTML'}
+          </button>
         </div>
         </div>
+        {views.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
+            <span className="text-xs text-gray-600">Views</span>
+            {views.map(v => (
+              <span key={v.id} onClick={() => activateTab(v.id)}
+                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400 hover:bg-indigo-50'}`}
+                title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
+                {v.label}
+                <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
+              </span>
+            ))}
+          </div>
+        )}
       </header>
       {pendingSession && (() => {
         const { matched, missing } = matchSession(pendingSession.file, samples);
@@ -435,6 +578,12 @@ function App() {
           </div>
         );
       })()}
+      {EMBEDDED && (
+        <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900">
+          <b>Exported viewer</b> · {EMBEDDED.views.length} view{EMBEDDED.views.length === 1 ? '' : 's'} and {EMBEDDED.samples.length} sample{EMBEDDED.samples.length === 1 ? '' : 's'} embedded{EMBEDDED.saved ? ` on ${EMBEDDED.saved.slice(0, 10)}` : ''}: coverage, junctions and retention counts of each view's window are in this file, the alignment files are not needed for them.
+          Other genes, the reads track and exon depths need the original BAM/CRAM files (add them with the buttons above); gene lookups, common SNPs and GTEx use the network when it is available.
+        </div>
+      )}
       {(notes.length > 0 || error || (opened && !samples.length)) && (
         <div className="px-5 py-2 text-xs space-y-0.5">
           {opened && !samples.length && (
@@ -464,9 +613,9 @@ function App() {
         </div>
       ) : (
         <div className="p-3" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
-          <SashimiViewer key={viewerKey} geneName={opened.geneName} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => setOpened(null)} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
-            initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; if (viewerSettings) setViewerSettings(undefined); }} />
+          <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
+            initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
