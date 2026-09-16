@@ -438,6 +438,10 @@ export default function SashimiViewer({
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
+  /** Variant sites of DNA tracks without a reads track: called from the reads in the background so the strip and allele bars are always there below the reads window. */
+  type DnaSites = { fetched: FetchWindow; minVaf: number; sites: VariantSite[]; total: number; error?: string };
+  const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
+  const dnaSitesSeq = useRef(new Map<number, number>());
   const readsSeq = useRef(new Map<number, number>());
 
   // ---- UI state ----
@@ -1030,6 +1034,36 @@ export default function SashimiViewer({
     }, 250);
     return () => clearTimeout(timer);
   }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Variant sites of DNA tracks (those without a reads track), below the reads window ----
+  useEffect(() => {
+    const wanted = tracks.filter(t => isDnaSample(t.sampleId) && !readsSampleIds.includes(t.sampleId)).map(t => t.sampleId);
+    if (!wanted.length) return;
+    const v = viewRef.current;
+    const span = v.end - v.start;
+    if (span > READS_MAX_VIEW_BP) return;
+    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+    const stale = wanted.filter(sid => { const cur = dnaSites[sid]; return !(cur && cur.minVaf === minVaf && covers(cur.fetched, v)); });
+    if (!stale.length) return;
+    const margin = Math.floor(span * 0.25);
+    const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
+    const timer = setTimeout(() => {
+      for (const sid of stale) {
+        const seq = (dnaSitesSeq.current.get(sid) ?? 0) + 1;
+        dnaSitesSeq.current.set(sid, seq);
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, 'reads', 1, minVaf)
+          .then(data => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, sites: data.sites, total: data.total } })); })
+          .catch((err: any) => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, sites: [], total: 0, error: err?.message || String(err) } })); });
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [tracks, readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, dnaSites, isDnaSample]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Common SNPs are what separates a known polymorphism from a novel change on a DNA track: switched on once when the first DNA track appears
+  const snpAutoRef = useRef(false);
+  useEffect(() => {
+    if (!snpAutoRef.current && tracks.some(t => isDnaSample(t.sampleId))) { snpAutoRef.current = true; setShowSnps(true); }
+  }, [tracks, isDnaSample]);
 
   // ---- Mouse interaction ----
   const svgPoint = (e: { clientX: number; clientY: number }) => {
@@ -1691,6 +1725,10 @@ export default function SashimiViewer({
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
     retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string }[];
+    /** variant sites drawn in the strip and as allele bars: from the reads track, or from the background call of a DNA track */
+    sites: VariantSite[];
+    /** allele balance of the heterozygous common SNPs of a DNA track */
+    balance?: { text: string; title: string; warn: boolean };
   }
 
   const transcriptY = RULER_H;
@@ -1735,7 +1773,25 @@ export default function SashimiViewer({
       const levels = layerJunctions(visible);
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
-      const strip = readsBelow && readsBelow.sites.length ? SITES_STRIP_H : 0;
+      const trackSites: VariantSite[] = readsBelow?.sites ?? (dnaTrack ? dnaSites[track.sampleId]?.sites : undefined) ?? [];
+      const strip = trackSites.length ? SITES_STRIP_H : 0;
+      // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
+      let balance: TrackLayout['balance'];
+      if (dnaTrack && trackSites.length) {
+        const known = trackSites.filter(st => st.kind === 'snv' && knownSnp(st));
+        const het = known.filter(st => st.vaf >= 0.2 && st.vaf <= 0.8), hom = known.filter(st => st.vaf > 0.8);
+        if (known.length >= 3) {
+          const devs = het.map(st => Math.abs(st.vaf - 0.5)).sort((a, b) => a - b);
+          const medDev = devs.length ? devs[devs.length >> 1] : null;
+          const imbalance = het.length >= 5 && medDev != null && medDev > 0.15;
+          const noHet = het.length === 0 && hom.length >= 8;
+          balance = {
+            text: `  ·  ${het.length} het SNP${het.length === 1 ? '' : 's'}${medDev != null ? `, VAF ${(0.5 - medDev).toFixed(2)}–${(0.5 + medDev).toFixed(2)}` : ''}${imbalance ? ' · allele imbalance?' : noHet ? ' · no heterozygous SNP (LOH / UPD?)' : ''}`,
+            warn: imbalance || noHet,
+            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from the drawn reads (up to ${READS_MAX.toLocaleString()} in the window).`,
+          };
+        }
+      }
       void maxLevel;
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1.
       // Relative mode draws each sample as a fraction of its own maximum in view (the axis reads 0–100 %).
@@ -1899,12 +1955,12 @@ export default function SashimiViewer({
         }
       }
       const height = juncH + COVERAGE_H;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention });
+      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, knownSnp]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2050,7 +2106,7 @@ export default function SashimiViewer({
     }
     if (showSnps) {
       items.push({
-        w: 176, el: (
+        w: 246, el: (
           <g key="l11">
             <line x1={6} y1={y + 6} x2={6} y2={y - 4} stroke={SNP_SNV_COLOR} strokeWidth={1} /><circle cx={6} cy={y - 4} r={2.6} fill={SNP_SNV_COLOR} />
             <line x1={22} y1={y + 6} x2={22} y2={y - 4} stroke={SNP_INDEL_COLOR} strokeWidth={1} /><rect x={19} y={y - 6.5} width={6} height={5} rx={1} fill={SNP_INDEL_COLOR} />
@@ -2171,7 +2227,7 @@ export default function SashimiViewer({
     const sampledTitle = track.sampled
       ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
       : '';
-    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2;
+    const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2 + (L.balance?.text.length ?? 0) * 5.2;
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
       : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
@@ -2228,7 +2284,7 @@ export default function SashimiViewer({
             </g>
           ))}
           {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.strip > 0 && readsTracks.get(track.sampleId)?.sites.map(st => {
+          {L.strip > 0 && L.sites.map(st => {
             const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
             let left = Math.min(xa, xb), w = Math.abs(xb - xa);
             if (w < 3) { left += w / 2 - 1.5; w = 3; }
@@ -2314,6 +2370,7 @@ export default function SashimiViewer({
             {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
             {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)</title></tspan>}
+            {L.balance && <tspan fill={L.balance.warn ? SNP_INDEL_COLOR : INK.faint} fontSize={9} fontWeight={L.balance.warn ? 700 : 400}>{L.balance.text}<title>{L.balance.title}</title></tspan>}
             {sampledNote && <tspan fill={SNP_INDEL_COLOR} fontSize={9} fontWeight={600}>{sampledNote}<title>{sampledTitle}</title></tspan>}
 
           </text>
@@ -3026,8 +3083,8 @@ export default function SashimiViewer({
                   <option value="all">All samples</option>
                 </select>
               )}
-              {showReads && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20.">
+              {(showReads || anyDna) && (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. DNA tracks call their sites from the reads in the background below the reads window, reads track or not.">
                   Min VAF
                   <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
@@ -3235,15 +3292,14 @@ export default function SashimiViewer({
           {readsPlacements.map(p => <g key={`reads-${p.sid}`} transform={`translate(0, ${p.y})`}>{p.rt.el}</g>)}
 
           {/* Variant sites: stars in the strip above each sample's sashimi, guide lines through coverage and reads */}
-          {readsPlacements.map(p => {
-            const L = layouts.find(l => l.strip > 0 && l.track.sampleId === p.sid);
-            if (!L) return null;
+          {layouts.filter(l => l.strip > 0).map(L => {
+            const p = readsPlacements.find(x => x.sid === L.track.sampleId);
             const cy = L.yOff + TRACK_LABEL_H + L.strip / 2;
-            const bottom = p.y + p.rt.height;
+            const bottom = p ? p.y + p.rt.height : L.yOff + L.height;
             return (
-              <g key={`sites-${p.sid}`} fontFamily={FONT}>
+              <g key={`sites-${L.track.sampleId}`} fontFamily={FONT}>
                 <text x={PLOT_LEFT + 8} y={cy + 3.5} fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>VARIANT SITES</text>
-                {p.rt.sites.map(st => {
+                {L.sites.map(st => {
                   const cx = scale.x(st.pos + 0.5);
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (

@@ -167,6 +167,18 @@ Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool 
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the
 discordant pairs (CRAM mate fields are read when the file records them).
 
+**Variants and allele balance.** Below the reads window (100 kb) a DNA track calls its variant
+sites from the reads in the background, reads track or not: the *variant sites* strip (★, a ring
+when the site matches a common SNP) and the allele-fraction bars on the coverage appear as for the
+reads track, and *Min VAF* applies. Common SNPs are switched on when the first DNA track appears,
+since they are what separates a known polymorphism from a novel change. The track label then
+summarises the **allele balance** of the common SNPs covered: how many are heterozygous
+(0.2 ≤ VAF ≤ 0.8) and the range of their fractions around 0.5. Heterozygous fractions far from 0.5
+(median deviation above 0.15 over at least 5 SNPs) are flagged *allele imbalance?* (mosaic copy
+change, loss of heterozygosity, contamination), and a window with at least 8 homozygous common SNPs
+and none heterozygous is flagged *no heterozygous SNP (LOH / UPD?)*. Fractions come from the drawn
+reads, up to 2,500 in the window, so they are approximate on very deep data.
+
 ## Views
 
 Every gene or locus opened from the search box in the header becomes a **view**. Opening a second
