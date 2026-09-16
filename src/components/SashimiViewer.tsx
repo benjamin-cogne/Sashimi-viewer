@@ -71,6 +71,8 @@ export interface ViewerSettings {
   hiddenJunctions: string[];
   /** label size factor of individual junctions ("chrom:start-end" → 0.7–2.5), set from the junction panel; absent = 1 */
   labelScales?: Record<string, number>;
+  /** transcript models removed from the "All transcripts" list by the user, in removal order (undo restores the last) */
+  hiddenTranscripts?: string[];
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -374,6 +376,10 @@ export default function SashimiViewer({
     if (Math.abs(sc - 1) < 0.01) delete next[k]; else next[k] = sc;
     return next;
   }), []);
+  /** Transcript models removed from the "All transcripts" list, in removal order; undo restores the last one. */
+  const [hiddenTranscripts, setHiddenTranscripts] = useState<string[]>(() => [...(init.hiddenTranscripts ?? [])]);
+  const hideTranscript = useCallback((id: string) => setHiddenTranscripts(prev => (prev.includes(id) ? prev : [...prev, id])), []);
+  const undoHideTranscript = useCallback(() => setHiddenTranscripts(prev => prev.slice(0, -1)), []);
   /** Arc under the pointer (track:junction), which shows the hide button on its pill. */
   const [hoverArc, setHoverArc] = useState<string | null>(null);
   const groupIdSeq = useRef((init.groups?.length ?? 0) + 1);
@@ -532,14 +538,16 @@ export default function SashimiViewer({
   /** Transcript models in 0-based half-open coordinates, for the current gene. */
   const altModels = useMemo(() => {
     if (!showAllTx || !altTx || altTx.geneName !== currentGeneName) return null;
-    return altTx.data.transcripts.slice(0, ALT_TX_MAX_ROWS).map(m => ({
+    return altTx.data.transcripts.filter(m => !hiddenTranscripts.includes(m.id)).slice(0, ALT_TX_MAX_ROWS).map(m => ({
       ...m,
       exons: [...m.exons].map(e => ({ start: e.start - 1, end: e.end })).sort((a, b) => a.start - b.start),
       start: m.start - 1,
       cdsStart: m.cds_start != null && m.cds_end != null ? m.cds_start - 1 : null,
       cdsEnd: m.cds_start != null && m.cds_end != null ? m.cds_end : null,
     }));
-  }, [showAllTx, altTx, currentGeneName]);
+  }, [showAllTx, altTx, currentGeneName, hiddenTranscripts]);
+  /** Models of this gene the user removed from the list (the undo and "show all" links of the panel). */
+  const hiddenHereTx = useMemo(() => (altTx && altTx.geneName === currentGeneName ? hiddenTranscripts.filter(id => altTx.data.transcripts.some(m => m.id === id)) : []), [altTx, currentGeneName, hiddenTranscripts]);
   /** Make one of the listed transcripts the displayed reference model (exon numbering, junction classes, HGVS, usage percentages). */
   const applyModel = useCallback((t: TranscriptModel) => {
     const sorted = [...t.exons].sort((a, b) => a.start - b.start);
@@ -2526,7 +2534,7 @@ export default function SashimiViewer({
       });
       const shown = !!tx && m.id === tx.transcriptId;
       const label = `${m.id}${m.is_mane ? ' · MANE' : ''}${shown ? ' · shown' : ''}`;
-      const lw = label.length * 5.4 + 8;
+      const lw = label.length * 5.4 + 8 + (shown ? 0 : 12);
       const nNovel = m.exons.filter(ex => !manes.has(`s${ex.start}`) && !manes.has(`e${ex.end}`)).length;
       const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.exons.length} exons` +
         (m.cdsStart == null ? ' · non-coding' : '') + (m.is_mane ? '\nsame exon structure as the MANE Select transcript' : shown ? '\nthe model displayed on the top track' : nNovel ? `\n${nNovel} exon${nNovel > 1 ? 's' : ''} absent from the displayed model (amber)` : '') +
@@ -2539,9 +2547,17 @@ export default function SashimiViewer({
           {parts}
           <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} stroke={shown ? '#4f46e5' : 'none'} strokeWidth={0.8} />
           <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={shown ? '#4338ca' : m.is_mane ? INK.text : INK.muted} fontSize={9} fontWeight={m.is_mane || shown ? 700 : 500}>{label}</text>
+          {!shown && (
+            <g style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); hideTranscript(m.id); }}>
+              <title>{`Remove ${m.id} from the list (undo and "show all" in the panel header; saved with the session)`}</title>
+              <circle cx={PLOT_LEFT + 3 + lw - 7} cy={mid} r={5.5} fill={INK.bg} />
+              <text x={PLOT_LEFT + 3 + lw - 7} y={mid + 3.3} textAnchor="middle" fill={INK.faint} fontSize={10} fontWeight={700}>×</text>
+            </g>
+          )}
         </g>
       );
     });
+    const nHidden = hiddenHereTx.length;
     const status = altTxError ? altTxError : !altModels ? 'loading…' : models.length === 0 ? 'no other transcript models' : '';
     return (
       <g fontFamily={FONT}>
@@ -2549,7 +2565,19 @@ export default function SashimiViewer({
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
         <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
           <tspan fill={INK.text} fontWeight={700}>All transcripts</tspan>
-          <tspan fill={altTxError ? UNIQUE_COLOR : INK.muted}>{'  '}{altModels ? `${src} · ${altTx?.data.transcripts.length ?? 0} model${(altTx?.data.transcripts.length ?? 0) === 1 ? '' : 's'}${(altTx?.data.transcripts.length ?? 0) > ALT_TX_MAX_ROWS ? ` (first ${ALT_TX_MAX_ROWS})` : ''} · amber exon = absent from ${tx?.modelKind === 'mane' ? 'MANE Select' : 'the displayed model'} · click a model to make it the reference` : status}</tspan>
+          <tspan fill={altTxError ? UNIQUE_COLOR : INK.muted}>{'  '}{altModels ? `${src} · ${altTx?.data.transcripts.length ?? 0} model${(altTx?.data.transcripts.length ?? 0) === 1 ? '' : 's'}${(altTx?.data.transcripts.length ?? 0) > ALT_TX_MAX_ROWS ? ` (first ${ALT_TX_MAX_ROWS})` : ''} · amber exon = absent from ${tx?.modelKind === 'mane' ? 'MANE Select' : 'the displayed model'} · click a model to make it the reference, × to remove it from the list` : status}</tspan>
+          {nHidden > 0 && (
+            <>
+              <tspan fill={INK.muted}>{`  ·  ${nHidden} hidden  `}</tspan>
+              <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); undoHideTranscript(); }}>
+                undo<title>{`Bring back ${hiddenHereTx[nHidden - 1]}`}</title>
+              </tspan>
+              <tspan fill={INK.muted}>{'  ·  '}</tspan>
+              <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setHiddenTranscripts(prev => prev.filter(id => !hiddenHereTx.includes(id))); }}>
+                show all<title>Bring back every removed model of this gene</title>
+              </tspan>
+            </>
+          )}
         </text>
         <g clipPath="url(#sashimi-clip-alt)">{rows}</g>
       </g>
@@ -2734,13 +2762,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',

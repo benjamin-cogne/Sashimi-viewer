@@ -92,7 +92,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 - **Reference model**: the top track shows the MANE Select transcript (RefSeq Select or the
   longest CDS when there is none). Tick *All transcripts* and click any model in the list to make
   it the reference: exon numbering, junction classes, HGVS and usage percentages follow it, until
-  the next gene search.
+  the next gene search. The × at the end of a model's label removes it from the list (a model that
+  clutters the panel, a predicted XM_ model…); the panel header then offers *undo*, which brings
+  back the last one removed, and *show all*. Removed models are saved with the session.
 - **Depth axis**: *shared* (one axis for every sample, heights comparable), *per sample* (each
   sample scaled to its own maximum) or *relative* (each sample drawn as a percentage of its own
   maximum in the current window, axis 0–100 %, the maximum shown next to the sample name), so
