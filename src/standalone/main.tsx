@@ -10,7 +10,7 @@ import SashimiViewer, { type ViewerSettings, type ViewerState } from '../compone
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
-import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage } from './embedded';
+import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedReads } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { describeLink, parseLink } from './link';
@@ -43,6 +43,11 @@ const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom,
 const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? null });
 /** Largest window fetched around a view (the viewer's own rule), for the export. */
 const MAX_FETCH_BP = 2_000_000;
+/** The reads track exists below this window size (the viewer's rule); the export follows it. */
+const READS_MAX_VIEW_BP = 100_000;
+/** Choices of the export dialog: which window and how many reads per sample for the views whose reads track is on. */
+interface ExportOptions { readsWindow: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
+const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 2500, dense: 20000, all: Number.MAX_SAFE_INTEGER };
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
@@ -114,6 +119,7 @@ function App() {
   const pendingSettingsRef = useRef<Partial<ViewerSettings> | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exportDialog, setExportDialog] = useState<ExportOptions | null>(null);
   // ---- Sessions: the viewer's latest state (options + navigation), a loaded session waiting for its files ----
   const viewerStateRef = useRef<ViewerState | null>(null);
   const [sessionName, setSessionName] = useState(() => defaultSessionName());
@@ -315,8 +321,10 @@ function App() {
   }, [build, samples, fasta, opened, sessionName, runFolder, currentViews]);
 
   // ---- Export: this page with the data of every view embedded, for a reader without the alignment files ----
-  const exportHtml = useCallback(async () => {
+  const exportHtml = useCallback(async (opts: ExportOptions) => {
     setBusy(true); setError(null);
+    let nReads = 0, nReadSets = 0;
+    const skipped: string[] = [];
     try {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
@@ -345,7 +353,25 @@ function App() {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, uniqueOnly: st.uniqueOnly, coverage });
+        // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
+        let reads: Record<string, EncodedReads> | undefined;
+        if (st.reads) {
+          if (span > READS_MAX_VIEW_BP) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above the ${READS_MAX_VIEW_BP / 1000} kb reads limit)`);
+          else {
+            const half = opts.readsWindow === 'view' ? 0 : opts.readsWindow === 'margin' ? Math.floor(span / 2) : Math.floor((READS_MAX_VIEW_BP - span) / 2);
+            const rs = Math.max(0, vs - half), re = ve + half;
+            reads = {};
+            for (const smp of samples) {
+              setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
+              try {
+                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05);
+                reads[String(smp.id)] = { window: { start: rs, end: re }, total: r.total, reads: r.reads.map((x, i) => ({ ...x, n: `read ${i + 1}` })), reference: r.reference, reference_source: r.reference_source };
+                nReads += r.reads.length; nReadSets++;
+              } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
+            }
+          }
+        }
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, uniqueOnly: st.uniqueOnly, coverage, reads });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -357,12 +383,16 @@ function App() {
       const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setNotes([`Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}. The file opens in any browser without the alignment files; it holds the coverage, junctions and retention counts of each view's window (not the reads).`]);
+      setNotes([
+        `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString()} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
+        ...(skipped.length ? [`Reads not exported for ${skipped.join('; ')}`] : []),
+      ]);
     } catch (e: any) {
       setError(`Export failed: ${e?.message || String(e)}`);
     }
     setBusy(false);
   }, [build, samples, fasta, sessionName, ds, currentViews]);
+  const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : v.state?.reads)).length;
 
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
@@ -535,8 +565,8 @@ function App() {
             Load session
             <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
           </label>
-          <button onClick={exportHtml} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
-            title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them. The reads are not included.'}>
+          <button onClick={() => setExportDialog({ readsWindow: 'view', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
+            title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'}>
             {busy ? '…' : 'Export HTML'}
           </button>
         </div>
@@ -616,6 +646,42 @@ function App() {
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
             sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
+        </div>
+      )}
+      {exportDialog && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setExportDialog(null)}>
+          <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-xl text-gray-900 text-xs" onMouseDown={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
+              <div>
+                <div className="font-bold text-sm">Export HTML</div>
+                <div className="text-[11px] text-gray-500 mt-0.5">One file, this viewer with the data of the {views.length || 1} registered view{views.length === 1 ? '' : 's'} embedded: gene models, and for every sample the coverage, junctions and retention counts of each view's window with its margins. The recipient opens it in a browser without the alignment files.</div>
+              </div>
+              <button onClick={() => setExportDialog(null)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
+            </div>
+            <div className="px-4 py-3 space-y-3">
+              <div className="font-semibold">Reads track · {viewsWithReads ? `${viewsWithReads} view${viewsWithReads === 1 ? '' : 's'} with the reads track on` : 'no view has the reads track on'}</div>
+              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Windows above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
+              <fieldset className="space-y-1">
+                <legend className="font-medium mb-1">Window of the reads</legend>
+                {([['view', 'the view as shown'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest reads window (${READS_MAX_VIEW_BP / 1000} kb centred on the view)`]] as const).map(([v, label]) => (
+                  <label key={v} className="flex items-center gap-2"><input type="radio" name="readsWindow" checked={exportDialog.readsWindow === v} onChange={() => setExportDialog({ ...exportDialog, readsWindow: v })} disabled={!viewsWithReads} />{label}</label>
+                ))}
+              </fieldset>
+              <fieldset className="space-y-1">
+                <legend className="font-medium mb-1">Reads per sample in that window</legend>
+                {([['shown', 'as displayed: up to 2,500 reads (sampled evenly when the window holds more) · about 300 kB per sample and view'], ['dense', 'dense: up to 20,000 reads, for zooming in · a few MB per sample and view'], ['all', 'every read of the window · exact at any zoom, can reach tens of MB for a deep window']] as const).map(([v, label]) => (
+                  <label key={v} className="flex items-center gap-2"><input type="radio" name="readsCap" checked={exportDialog.readsCap === v} onChange={() => setExportDialog({ ...exportDialog, readsCap: v })} disabled={!viewsWithReads} />{label}</label>
+                ))}
+              </fieldset>
+            </div>
+            <div className="flex items-center gap-2 px-4 py-3 border-t border-gray-200">
+              <span className="text-[11px] text-gray-500">File name: <code>{(sessionName.trim() || defaultSessionName(opened?.geneName)).replace(/\.json$/i, '').replace(/\.html$/i, '')}.html</code></span>
+              <span className="ml-auto flex gap-2">
+                <button onClick={() => setExportDialog(null)} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+                <button onClick={() => { const o = exportDialog; setExportDialog(null); void exportHtml(o); }} className="px-3 py-1 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700 font-medium">Export</button>
+              </span>
+            </div>
+          </div>
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">

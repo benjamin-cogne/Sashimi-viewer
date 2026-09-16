@@ -329,7 +329,7 @@ export class LocalDataSource implements SashimiDataSource {
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
     const collapsed = mode === 'collapsed';
-    const cap = collapsed ? 40000 : Math.max(100, Math.min(maxReads, 10000));
+    const cap = collapsed ? Math.max(40000, maxReads) : Math.max(100, maxReads);
     // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them
     const { total, kept: raw } = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false);
     const refStart = Math.max(0, start - 500);

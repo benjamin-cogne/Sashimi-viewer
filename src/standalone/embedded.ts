@@ -10,9 +10,10 @@
  * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
-import type { AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, ReadsResponse, RegionHint, SampleCoverage, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, ReadsResponse, RegionHint, SampleCoverage, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, SampleRef } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
+import { callSites, collapseReads } from './collapse';
 import type { SessionFile } from './session';
 import type { GenomeBuild } from './ensembl';
 
@@ -33,6 +34,15 @@ export interface EncodedCoverage {
   sampled?: { rate: number; total: number; decoded: number };
   error?: string;
 }
+/** Reads of one sample over one window (names replaced by numbers; mismatches and reference bases kept). */
+export interface EncodedReads {
+  window: { start: number; end: number };
+  /** reads passing the filters in the window, before the cap */
+  total: number;
+  reads: AlignedRead[];
+  reference: { start: number; seq: string } | null;
+  reference_source: ReadsResponse['reference_source'];
+}
 export interface EmbeddedView {
   label: string;
   gene: { name: string; id?: string; chrom: string; start: number; end: number };
@@ -45,6 +55,8 @@ export interface EmbeddedView {
   uniqueOnly: boolean;
   /** by sample id */
   coverage: Record<string, EncodedCoverage>;
+  /** reads by sample id, for views exported with their reads track on */
+  reads?: Record<string, EncodedReads>;
 }
 export interface EmbeddedExport {
   app: typeof EMBEDDED_APP;
@@ -180,9 +192,31 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (!best) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see it` };
     return decodeCoverage(best, sampleId, name);
   }
-  override async getReads(sampleId: number, ...rest: [string, number, number, boolean, number, 'reads' | 'collapsed', number, number]): Promise<ReadsResponse> {
-    if (this.names.has(sampleId)) throw new Error('The reads are not part of this exported file; add the alignment files to see them');
-    return super.getReads(sampleId, ...rest);
+  override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse> {
+    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf);
+    const name = this.names.get(sampleId)!;
+    // the exported reads window overlapping the request the most
+    let best: EncodedReads | null = null, bestOv = 0;
+    for (const v of this.payload.views) {
+      const r = v.reads?.[String(sampleId)];
+      if (!r || !sameChrom(v.window.chrom, chrom)) continue;
+      const ov = Math.min(r.window.end, end) - Math.max(r.window.start, start);
+      if (ov > bestOv) { best = r; bestOv = ov; }
+    }
+    if (!best) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see them`);
+    const collapsed = mode === 'collapsed';
+    let reads = best.reads.filter(r => r.e > start && r.s < end);
+    const total = reads.length;
+    const cap = collapsed ? 40000 : Math.max(100, maxReads);
+    if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
+    const ref = best.reference?.seq ?? null, refStart = best.reference?.start ?? 0;
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, reference: best.reference, reference_source: best.reference_source };
+    if (collapsed) {
+      const summary = collapseReads(reads, start, end, ref, refStart, 3, minVaf, 20, Math.max(1, minSupport));
+      return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
+    }
+    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, minVaf, 20), groups: [] };
   }
   override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
     const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };

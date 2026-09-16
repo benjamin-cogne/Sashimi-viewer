@@ -154,9 +154,18 @@ sample chips and view tabs, and can switch views, zoom, pan inside each exported
 groups or usage percentages, click arcs and exons for the HGVS and frame details. Coverage is
 exact where you had it exact and marked ≈ where the source had sampled it.
 
-What the export does not carry: the reads track and the exon-depth statistics (they need the
-alignments; the recipient can add the BAM/CRAM files and the page then reads them as usual), and
-regions outside the exported windows (a track there says *not in this exported file*). Gene
+**Reads.** For every view whose reads track is on, the export also embeds the reads of every loaded
+sample, with the reference bases and the mismatches, so the recipient sees the same pile-up, can
+switch between reads and the collapsed haplotype view and change *Min VAF*. Read names are
+replaced by numbers. The dialog that opens on *Export HTML* chooses the window (the view as shown,
+the view with a half-width margin on each side, or the widest 100 kb reads window) and the number
+of reads per sample (up to 2,500 as displayed, about 300 kB per sample and view; up to 20,000 for
+zooming in; or every read of the window, which can reach tens of MB for a deep window). Views wider
+than 100 kb have no reads track and are skipped.
+
+What the export does not carry: the exon-depth statistics (they need the alignments; the recipient
+can add the BAM/CRAM files and the page then reads them as usual), reads of views whose reads track
+was off, and regions outside the exported windows (a track there says *not in this exported file*). Gene
 lookups, common SNPs, GTEx and reference bases still come from the network when it is available.
 The exported page is a normal viewer: it can save sessions and export again. Exporting needs the
 built `sashimi-viewer.html` (or the published page), not the development entry. Sizes: about 1 MB
