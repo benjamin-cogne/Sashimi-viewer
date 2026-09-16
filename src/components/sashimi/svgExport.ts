@@ -1,9 +1,13 @@
-/** The plot's SVG element as a standalone document: interactive helpers marked data-export="skip" removed, namespace declared. */
+/** The plot's SVG element as a standalone document: interactive helpers marked data-export="skip" removed, namespace declared, white background added. */
 export function serializePlotSvg(svg: SVGSVGElement): string {
   const clone = svg.cloneNode(true) as SVGSVGElement;
   clone.querySelectorAll('[data-export="skip"]').forEach(n => n.remove());
   clone.removeAttribute('data-sashimi-plot'); clone.removeAttribute('data-loading');
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  // an opaque background: on screen the page supplies it, in a file a transparent plot turns dark in many viewers
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  bg.setAttribute('width', '100%'); bg.setAttribute('height', '100%'); bg.setAttribute('fill', '#ffffff');
+  clone.insertBefore(bg, clone.firstChild);
   return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
 }
 /** A file name safe on every system, from a view label. */
