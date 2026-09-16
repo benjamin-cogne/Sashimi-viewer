@@ -86,14 +86,16 @@ export function poolStructural(samples: { structural?: StructuralEvidence }[]): 
     for (const l of lists) for (const j of l) { const k = `${j.start}-${j.end}`; const p = m.get(k); if (p) p.count += j.count; else m.set(k, { ...j }); }
     return [...m.values()].sort((a, b) => a.start - b.start || a.end - b.end);
   };
-  const clips = new Map<string, StructuralEvidence['clips'][number]>(), elsewhere = new Map<string, StructuralEvidence['elsewhere'][number]>();
+  const clips = new Map<string, StructuralEvidence['clips'][number]>(), elsewhere = new Map<string, StructuralEvidence['elsewhere'][number]>(), ins = new Map<number, StructuralEvidence['insertions'][number]>();
   for (const s of withData) {
     for (const c of s.clips) { const k = `${c.side}${c.pos}`; const p = clips.get(k); if (p) p.count += c.count; else clips.set(k, { ...c }); }
     for (const e of s.elsewhere) { const k = `${e.kind}${e.chrom}@${e.pos}`; const p = elsewhere.get(k); if (p) p.count += e.count; else elsewhere.set(k, { ...e }); }
+    for (const x of s.insertions) { const p = ins.get(x.pos); if (p) { p.len = Math.round((p.len * p.count + x.len * x.count) / (p.count + x.count)); p.count += x.count; } else ins.set(x.pos, { ...x }); }
   }
   const medians = withData.map(s => s.insertMedian).filter((x): x is number => x != null).sort((a, b) => a - b);
   return {
-    deletions: sumArcs(withData.map(s => s.deletions)), splits: sumArcs(withData.map(s => s.splits)), discordant: sumArcs(withData.map(s => s.discordant)),
+    deletions: sumArcs(withData.map(s => s.deletions)), splits: sumArcs(withData.map(s => s.splits)), duplications: sumArcs(withData.map(s => s.duplications)), inversions: sumArcs(withData.map(s => s.inversions)), discordant: sumArcs(withData.map(s => s.discordant)),
+    insertions: [...ins.values()].sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].sort((a, b) => a.pos - b.pos), elsewhere: [...elsewhere.values()].sort((a, b) => a.pos - b.pos),
     insertMedian: medians.length ? medians[medians.length >> 1] : null, reads: withData.reduce((a, s) => a + s.reads, 0),
   };

@@ -79,6 +79,12 @@ export interface ViewerSettings {
   labelScales?: Record<string, number>;
   /** transcript models removed from the "All transcripts" list by the user, in removal order (undo restores the last) */
   hiddenTranscripts?: string[];
+  /** long reads (ONT, PacBio): draw mismatches and indels only at called variant sites (default on) */
+  consensusMode?: boolean;
+  /** long reads: indels shorter than this many bases are neither drawn nor called (default 10) */
+  minIndelBp?: number;
+  /** long reads: a variant site needs at least this alternate-allele fraction, in percent (default 20) */
+  longReadMinVafPct?: number;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -184,9 +190,9 @@ const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - 
 const PSEUDO_EXON_COLOR = '#7c3aed';
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
-type SvKind = 'deletion' | 'split' | 'discordant';
-const SV_COLORS: Record<SvKind | 'clip' | 'elsewhere', string> = { deletion: '#b91c1c', split: '#7c3aed', discordant: '#d97706', clip: '#0f766e', elsewhere: '#6d28d9' };
-const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion inside reads (CIGAR D)', split: 'split reads (SA tag)', discordant: 'discordant pairs' };
+type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
+const SV_COLORS: Record<SvKind | 'clip' | 'elsewhere' | 'insertion', string> = { deletion: '#b91c1c', split: '#7c3aed', duplication: '#15803d', inversion: '#2563eb', discordant: '#d97706', clip: '#0f766e', elsewhere: '#6d28d9', insertion: '#9333ea' };
+const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion inside reads (CIGAR D)', split: 'split reads, deletion-type (the read continues further on)', duplication: 'split reads, duplication-type (the read goes back)', inversion: 'split reads, inversion (the read continues on the other strand)', discordant: 'discordant pairs' };
 /** Exon–intron boundaries of a model, for the unspliced-read counts of the coverage request. */
 const boundariesOf = (t: TxModel | null): BoundaryHint | undefined =>
   t && t.exons.length > 1 ? { intronStarts: t.exons.slice(0, -1).map(e => e.end), intronEnds: t.exons.slice(1).map(e => e.start) } : undefined;
@@ -419,6 +425,10 @@ export default function SashimiViewer({
   const [readsAll, setReadsAll] = useState(init.readsAll ?? false); // one reads track under every sample (primary only by default)
   const [collapseReads, setCollapseReads] = useState(init.collapseReads ?? false);
   const [minVafPct, setMinVafPct] = useState(init.minVafPct ?? 10); // variant sites need at least this alternate-allele fraction
+  // long reads (ONT, PacBio): their sequencing errors would paint every read with mismatches and small indels
+  const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
+  const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
+  const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
   const [showSnps, setShowSnps] = useState(init.commonSnps ?? false);
   const [snpMinAf, setSnpMinAf] = useState(init.snpMinAf ?? 0.01);
@@ -433,13 +443,13 @@ export default function SashimiViewer({
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; minSupport: number; minVaf: number; data: ReadsResponse };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse };
   // Per sample, so that "all samples" keeps one reads track under each coverage track
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
   /** Variant sites of DNA tracks without a reads track: called from the reads in the background so the strip and allele bars are always there below the reads window. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; sites: VariantSite[]; total: number; error?: string };
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const dnaSitesSeq = useRef(new Map<number, number>());
   const readsSeq = useRef(new Map<number, number>());
@@ -1014,7 +1024,7 @@ export default function SashimiViewer({
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.minVaf === minVaf && (mode === 'reads' || cur.minSupport === minJunctionCount) && covers(cur.fetched, v));
+      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || cur.minSupport === minJunctionCount) && covers(cur.fetched, v));
     });
     if (!stale.length) return;
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
@@ -1026,14 +1036,14 @@ export default function SashimiViewer({
         readsSeq.current.set(sid, seq);
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf)
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, minSupport: minJunctionCount, minVaf, data } })); })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100 })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => { if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false })); });
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Variant sites of DNA tracks (those without a reads track), below the reads window ----
   useEffect(() => {
@@ -1043,7 +1053,7 @@ export default function SashimiViewer({
     const span = v.end - v.start;
     if (span > READS_MAX_VIEW_BP) return;
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    const stale = wanted.filter(sid => { const cur = dnaSites[sid]; return !(cur && cur.minVaf === minVaf && covers(cur.fetched, v)); });
+    const stale = wanted.filter(sid => { const cur = dnaSites[sid]; return !(cur && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && covers(cur.fetched, v)); });
     if (!stale.length) return;
     const margin = Math.floor(span * 0.25);
     const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
@@ -1051,13 +1061,13 @@ export default function SashimiViewer({
       for (const sid of stale) {
         const seq = (dnaSitesSeq.current.get(sid) ?? 0) + 1;
         dnaSitesSeq.current.set(sid, seq);
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, 'reads', 1, minVaf)
-          .then(data => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, sites: data.sites, total: data.total } })); })
-          .catch((err: any) => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, sites: [], total: 0, error: err?.message || String(err) } })); });
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, 'reads', 1, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100 })
+          .then(data => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: data.sites, total: data.total } })); })
+          .catch((err: any) => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); });
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [tracks, readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, dnaSites, isDnaSample]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, isDnaSample]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Common SNPs are what separates a known polymorphism from a novel change on a DNA track: switched on once when the first DNA track appears
   const snpAutoRef = useRef(false);
@@ -1589,7 +1599,14 @@ export default function SashimiViewer({
     const showLetters = rowH >= 9;
     const readsTop = bodyTop + 2;
 
-    const modelBoundaries = boundariesOf(tx);
+    // no exon–intron boundary outline on a DNA track (every read crosses boundaries there); long reads get their noise filters
+    const modelBoundaries = isDnaSample(sid) ? undefined : boundariesOf(tx);
+    const longReads = !!current.long_reads;
+    const indelMin = longReads ? minIndelBp : 1;
+    const consensus = longReads && consensusMode;
+    const snvSites = new Set(current.sites.filter(s => s.kind === 'snv').map(s => `${s.pos}\t${s.alt}`));
+    const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
+    const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
     const nSpan = visible.filter((r, i) => rows[i] >= 0 && readSpansBoundary(r, modelBoundaries)).length;
     const readEls = visible.map((r: AlignedRead, idx: number) => {
       const row = rows[idx];
@@ -1619,10 +1636,14 @@ export default function SashimiViewer({
           const gs = be, ge = r.b[k + 1][0];
           const isDel = r.d.some(dd => dd[0] === gs);
           const g1 = scale.x(gs), g2 = scale.x(ge);
-          if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
+          // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body
+          const quiet = isDel && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
+          if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} fill={READ_FILL} opacity={lowMapq ? 0.35 : 1} />);
+          else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
         }
       });
       for (const [pos, base, qual] of r.m) {
+        if (consensus && !snvSites.has(`${pos}\t${base}`)) continue;
         const { left, w } = basePx(pos);
         const color = BASE_COLORS[base] || BASE_COLORS.N;
         const alpha = qual < 10 ? 0.3 : qual < 20 ? 0.6 : 1;
@@ -1630,6 +1651,7 @@ export default function SashimiViewer({
         if (showLetters && w >= 7) parts.push(<text key={`mt${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
       }
       for (const [pos, len] of r.i) {
+        if (len < indelMin || (consensus && !insSites.has(pos))) continue;
         const x = scale.x(pos);
         parts.push(
           <g key={`i${pos}`}>
@@ -1650,12 +1672,15 @@ export default function SashimiViewer({
     const info = `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads` +
       (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
-      (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') + commonInfo;
+      (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
+      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse]);
+  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp]);
+  /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
+  const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
 
   // ---- Screenshot to the basket (PNG + the viewer state and effect it documents) ----
   const takeSnapshot = useCallback(async () => {
@@ -1862,7 +1887,7 @@ export default function SashimiViewer({
       // Structural evidence of a DNA track, drawn with the same arcs: deletions, split reads, discordant pairs
       if (dnaTrack && track.structural) {
         const sv = track.structural;
-        const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.discordant, kind: 'discordant' }];
+        const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
         const all = kinds.flatMap(k => k.list.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
         const svLevels = layerJunctions(all.map(x => x.j));
         const approx = track.sampled ? '≈' : '';
@@ -1948,6 +1973,11 @@ export default function SashimiViewer({
           retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString()}`, deltas: [], color: SV_COLORS.clip,
             title: `soft-clip cluster: ${approx}${c.count.toLocaleString()} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString()} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
+        for (const x of track.structural.insertions ?? []) {
+          if (x.count < minJunctionCount || x.pos < viewStart || x.pos > viewEnd) continue;
+          retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString()}`, deltas: [], color: SV_COLORS.insertion,
+            title: `insertion: ${approx}${x.count.toLocaleString()} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString()}\nevidence, not a call: open the reads to check it` });
+        }
         for (const e of track.structural.elsewhere) {
           if (e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
           retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString()}`, deltas: [], color: SV_COLORS.elsewhere,
@@ -2025,8 +2055,19 @@ export default function SashimiViewer({
     }
     if (anyDna) {
       line(SV_COLORS.deletion, false, 'deletion inside reads (≥ 50 bp, CIGAR)', 'lsv1');
-      line(SV_COLORS.split, true, 'split reads (SA tag)', 'lsv2');
+      line(SV_COLORS.split, true, 'split reads, deletion-type', 'lsv2');
+      line(SV_COLORS.duplication, true, 'split reads, duplication-type', 'lsv2b');
+      line(SV_COLORS.inversion, true, 'split reads, inversion', 'lsv2c');
       line(SV_COLORS.discordant, true, 'discordant pairs (insert > 5× median or same strand)', 'lsv3');
+      items.push({
+        w: 250, el: (
+          <g key="lsv6">
+            <rect x={0} y={y - 6.5} width={52} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.insertion} strokeWidth={1} />
+            <text x={26} y={y + 3} textAnchor="middle" fill={SV_COLORS.insertion} fontSize={8.5} fontWeight={700}>ins 1 kb n</text>
+            <text x={58} y={y + 3.5} fill={INK.muted} fontSize={9.5}>insertion between two parts of a read</text>
+          </g>
+        ),
+      });
       items.push({
         w: 290, el: (
           <g key="lsv4">
@@ -2853,7 +2894,7 @@ export default function SashimiViewer({
     if (popover.kind === 'structural') {
       const { j, sv } = popover;
       const rows = displayTracks.filter(t => t.structural).map(t => {
-        const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : t.structural!.discordant;
+        const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
         const mine = list.find(x => x.start === j.start && x.end === j.end);
         return [t.sampleName, mine ? mine.count.toLocaleString() : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
       });
@@ -2862,10 +2903,10 @@ export default function SashimiViewer({
         title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
         subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${sv === 'split' ? ' · breakpoints rounded to 5 bp' : ''}`,
         cartoon: null,
-        hgvs: sv === 'deletion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'split' ? [`breakpoints near ${currentChrom}:${(j.start + 1).toLocaleString()} and ${currentChrom}:${j.end.toLocaleString()} (deletion, inversion or duplication depending on the orientation of the parts)`] : [],
+        hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (one breakpoint pair; an inversion has two)`] : [],
         tables: [{ head: ['sample', 'supporting reads', 'median insert'], rows }],
         strip: null,
-        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more, split reads from the SA tag, discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more; split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };
     }
     if (popover.kind === 'junction') {
@@ -2959,13 +3000,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3089,6 +3130,22 @@ export default function SashimiViewer({
                   <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
                 </label>
+              )}
+              {showReads && anyLongReads && (
+                <>
+                  <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
+                    title="Long reads (ONT, PacBio): draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read. Off: every mismatch and indel of every read." />
+                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it).">
+                    Min VAF (long)
+                    <input type="number" min={1} max={100} value={longReadMinVafPct} onChange={e => setLongReadMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
+                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
+                  </label>
+                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: insertions and deletions shorter than this are neither drawn in the reads nor called as sites (homopolymer errors); deletions of 50 bp or more are still structural evidence.">
+                    Min indel
+                    <input type="number" min={1} max={200} value={minIndelBp} onChange={e => setMinIndelBp(Math.min(200, Math.max(1, parseInt(e.target.value) || 1)))}
+                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />bp
+                  </label>
+                </>
               )}
               {showReads && (
                 <Toggle checked={collapseReads} onChange={setCollapseReads} label="Collapse"

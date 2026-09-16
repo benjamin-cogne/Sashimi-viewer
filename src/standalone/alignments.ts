@@ -254,26 +254,52 @@ export function exonDepth(reads: AlignedRead[], start: number, end: number): { m
 // ======================== Structural evidence (genomic libraries) ========================
 
 export const SV_MIN_DELETION = 50, SV_MIN_CLIP = 20, SV_MIN_SUPPORT = 3;
-const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32;
+const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32, FLAG_SUPPLEMENTARY = 2048;
 
 const cigarRefLen = (cigar: string) => parseCigar(cigar).reduce((n, [len, op]) => n + ('MDN=X'.includes(op) ? len : 0), 0);
 const sameChrom = (a: string, b: string) => a.replace(/^chr/i, '').toUpperCase() === b.replace(/^chr/i, '').toUpperCase();
+
+/** One aligned part of a read: reference interval (0-based half-open), strand, and the read (query) interval it covers. */
+interface Segment { chrom: string; start: number; end: number; rev: boolean; qs: number; qe: number }
+/** Segment geometry from a CIGAR: leading and trailing clips (S or H) give the query interval, reversed on the minus strand. */
+function segment(chrom: string, start: number, rev: boolean, cigar: string): Segment {
+  const ops = parseCigar(cigar);
+  let refLen = 0, qLen = 0, lead = 0, trail = 0, seenAligned = false;
+  for (const [len, op] of ops) {
+    if (op === 'S' || op === 'H') { if (!seenAligned) lead += len; else trail += len; qLen += len; continue; }
+    if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
+    if ('MDN=X'.includes(op)) { refLen += len; seenAligned = true; }
+  }
+  const qs = rev ? trail : lead, qe = qLen - (rev ? lead : trail);
+  return { chrom, start, end: start + refLen, rev, qs, qe };
+}
 
 /**
  * Deletions inside reads, split reads, soft-clip clusters and discordant pairs of a window (0-based half-open),
  * from the light records of the scan. `rate` scales every count back when the window was sampled; support
  * thresholds apply to the scaled counts. `chrom` is the window's chromosome as named in the file.
+ *
+ * Split reads are read as chains: every part of a read (the record itself plus the parts its SA tag lists,
+ * primary and supplementary alike) is placed on the read by its clips and the parts are ordered along the
+ * read; each pair of adjacent parts is one breakpoint, classified by where the read continues: further on
+ * the same strand (deletion-type), backwards (duplication-type), on the other strand (inversion), on another
+ * chromosome (translocation), or after an unaligned stretch of the read (insertion). Each read counts once,
+ * whichever of its parts fall in the window.
  */
 export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number): StructuralEvidence {
-  const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
+  const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), dups = new Map<string, JunctionArc>(), invs = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
+  const insertions = new Map<number, { pos: number; len: number; count: number }>();
   const add = (m: Map<string, JunctionArc>, s: number, e: number) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count++; else m.set(k, { start: s, end: e, count: 1 }); };
+  const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
+  const r5 = (x: number) => Math.round(x / 5) * 5;
+  const inWindow = (a: number, b: number) => b > start && a < end;
   const inserts: number[] = [];
-  for (const r of reads) {
-    if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
-  }
+  for (const r of reads) if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
   const median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
+  /** one record per split read, the primary when it is in the window */
+  const chains = new Map<string, RawRead>();
   for (const r of reads) {
     const ops = parseCigar(r.cigar);
     let pos = r.start, leftClip = 0, rightClip = 0;
@@ -283,26 +309,13 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       if ('MDN=X'.includes(op)) pos += len;
     });
     const alnEnd = pos;
-    // clip clusters: reads whose clipped part is placed elsewhere (SA tag) are split reads, drawn as arcs instead
+    // clip clusters: reads whose clipped part is placed elsewhere (SA tag) are split reads, drawn from their chain instead
     if (!r.sa && leftClip >= SV_MIN_CLIP && r.start >= start && r.start < end) { const k = `L${r.start}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: r.start, side: 'left', count: 1 }); }
     if (!r.sa && rightClip >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) { const k = `R${alnEnd}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: alnEnd, side: 'right', count: 1 }); }
-    // split reads: the clipped side of the primary continues at the supplementary alignment
-    if (r.sa) {
-      const here = rightClip >= leftClip ? alnEnd : r.start;
-      for (const part of r.sa.split(';')) {
-        const f = part.split(',');
-        if (f.length < 4) continue;
-        const saChrom = f[0], saStart = parseInt(f[1]) - 1, saCigar = f[3];
-        if (!Number.isFinite(saStart)) continue;
-        if (!sameChrom(saChrom, chrom)) { const k = `S${saChrom}@${here}`; const x = elsewhere.get(k); if (x) x.count++; else elsewhere.set(k, { kind: 'split', pos: here, chrom: saChrom, count: 1 }); continue; }
-        const there = rightClip >= leftClip ? saStart : saStart + cigarRefLen(saCigar);
-        const a = Math.round(Math.min(here, there) / 5) * 5, b = Math.round(Math.max(here, there) / 5) * 5;
-        if (b - a >= SV_MIN_DELETION && b > start && a < end) add(splits, a, b);
-      }
-    }
+    if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
     // discordant pairs, counted once from the leftmost mate
     if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
-      if (!sameChrom(r.mateChrom, chrom)) { const k = `P${r.mateChrom}@${r.start}`; const x = elsewhere.get(k); if (x) x.count++; else elsewhere.set(k, { kind: 'pair', pos: r.start, chrom: r.mateChrom, count: 1 }); }
+      if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', r.start, r.mateChrom);
       else if (r.start <= r.matePos) {
         const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
         const span = Math.abs(r.tlen ?? (r.matePos + (alnEnd - r.start) - r.start));
@@ -313,9 +326,37 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       }
     }
   }
+  // split reads: the chain of every part of the read, ordered along the read
+  for (const r of chains.values()) {
+    const segs: Segment[] = [segment(chrom, r.start, (r.flags & FLAG_REVERSE) !== 0, r.cigar)];
+    for (const part of (r.sa ?? '').split(';')) {
+      const f = part.split(',');
+      if (f.length < 4) continue;
+      const saStart = parseInt(f[1]) - 1;
+      if (!Number.isFinite(saStart)) continue;
+      segs.push(segment(f[0], saStart, f[2] === '-', f[3]));
+    }
+    segs.sort((a, b) => a.qs - b.qs);
+    for (let i = 0; i + 1 < segs.length; i++) {
+      const a = segs[i], b = segs[i + 1];
+      const aOut = a.rev ? a.start : a.end;          // where the read leaves part a on the reference
+      const bIn = b.rev ? b.end : b.start;           // where it enters part b
+      const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
+      if (!aHere && !bHere) continue;
+      if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); continue; }
+      const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
+      if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) add(invs, lo, hi); continue; }
+      const refGap = a.rev ? a.start - b.end : b.start - a.end;
+      const qGap = b.qs - a.qe;
+      if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) add(splits, lo, hi); }
+      else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) add(dups, lo, hi); }
+      else if (qGap >= SV_MIN_DELETION && aOut >= start && aOut < end) { const k = r5(aOut); const x = insertions.get(k); if (x) { x.count++; x.len = Math.round((x.len * (x.count - 1) + qGap) / x.count); } else insertions.set(k, { pos: k, len: qGap, count: 1 }); }
+    }
+  }
   const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
   return {
-    deletions: scaled(dels), splits: scaled(splits), discordant: scaled(disc),
+    deletions: scaled(dels), splits: scaled(splits), duplications: scaled(dups), inversions: scaled(invs), discordant: scaled(disc),
+    insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     insertMedian: median, reads: reads.length,

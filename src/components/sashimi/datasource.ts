@@ -7,6 +7,13 @@ import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTr
 
 export interface SampleRef { id: number; name: string }
 
+/** Noise handling of a reads request. */
+export interface ReadsOptions {
+  /** for long reads (median aligned length above 1 kb): indels shorter than this are neither called nor collapsed on */
+  longReadMinIndel?: number;
+  /** for long reads: floor of the alternate-allele fraction a site needs (their error rate makes the short-read threshold too low) */
+  longReadMinVaf?: number;
+}
 /** Budget of a coverage request. */
 export interface CoverageOptions {
   /** the part of the window that must be read whatever its depth (the visible view); the rest is margin the source may shrink */
@@ -24,7 +31,7 @@ export interface SashimiDataSource {
   /** Coverage runs and junctions for a 0-based half-open window; `boundaries` asks for unspliced reads through those exon–intron boundaries too (junction ends are always counted). */
   getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
   getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
-    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse>;
+    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
   /** All samples that can be added as tracks. */
   getRunSamples(runId: number): Promise<SampleRef[]>;
   /** One comparison sample to load next to the primary one; may reject when none exists. */

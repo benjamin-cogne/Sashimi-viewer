@@ -9,7 +9,7 @@ import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData } from '../components/sashimi/types';
-import type { CoverageOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
+import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef } from '../components/sashimi/datasource';
 import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import type { GenomeBuild } from './ensembl';
@@ -83,8 +83,12 @@ const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: nu
 });
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
-  raw: (r, light, structural, refNames) => ({ name: light ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
-    ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, r.getTag('SA')) : {}) }),
+  raw: (r, light, structural, refNames) => {
+    const sa = structural ? r.getTag('SA') : undefined;
+    // the name is what ties the parts of a split read together: kept for reads with an SA tag even in the light scan
+    return { name: light && typeof sa !== 'string' ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
+      ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
+  },
 };
 const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
@@ -92,9 +96,10 @@ const CRAM_VIEW: RecordView<any> = {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
-    return { name: light ? '' : (r.readName ?? ''), start: r.start, cigar, seq: light ? '' : (r.readBases ?? ''), qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
+    const sa = structural ? r.getTag('SA') : undefined;
+    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: light ? '' : (r.readBases ?? ''), qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
-      ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, (r.nextStart ?? 0) - 1, r.templateLength ?? r.templateSize ?? 0, r.getTag('SA')) : {}) };
+      ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, (r.nextStart ?? 0) - 1, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
 };
 
@@ -113,6 +118,12 @@ function resolveName(names: string[], chrom: string): string | null {
 
 function tagNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+/** Long reads (ONT, PacBio): the median aligned length of the window's reads is above 1 kb. */
+export function isLongRead(reads: { s: number; e: number }[]): boolean {
+  if (!reads.length) return false;
+  const lens = reads.map(r => r.e - r.s).sort((a, b) => a - b);
+  return lens[lens.length >> 1] > 1000;
 }
 
 export class LocalDataSource implements SashimiDataSource {
@@ -361,7 +372,7 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
-    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse> {
+    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
@@ -372,12 +383,15 @@ export class LocalDataSource implements SashimiDataSource {
     const refStart = Math.max(0, start - 500);
     const ref = await this.getReferenceSeq(chrom, refStart, end + 500);
     const reads: AlignedRead[] = raw.map(r => encodeRead(r, ref, refStart));
-    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length,
+    const longReads = isLongRead(reads);
+    const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
+    const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
+    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length, long_reads: longReads,
       reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null };
     if (collapsed) {
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, minVaf, 20, Math.max(1, minSupport));
+      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
     }
-    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, minVaf, 20), groups: [] };
+    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
   }
 }

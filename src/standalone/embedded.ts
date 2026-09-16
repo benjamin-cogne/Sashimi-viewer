@@ -11,8 +11,8 @@
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
 import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
-import type { CoverageOptions, SampleRef } from '../components/sashimi/datasource';
-import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
+import type { CoverageOptions, ReadsOptions, SampleRef } from '../components/sashimi/datasource';
+import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
 import type { SessionFile } from './session';
 import type { GenomeBuild } from './ensembl';
@@ -199,8 +199,8 @@ export class EmbeddedDataSource extends LocalDataSource {
     return decodeCoverage(best, sampleId, name);
   }
   override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
-    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number): Promise<ReadsResponse> {
-    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf);
+    mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
+    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
     const name = this.names.get(sampleId)!;
     // the exported reads window overlapping the request the most
     let best: EncodedReads | null = null, bestOv = 0;
@@ -217,12 +217,15 @@ export class EmbeddedDataSource extends LocalDataSource {
     const cap = collapsed ? 40000 : Math.max(100, maxReads);
     if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
     const ref = best.reference?.seq ?? null, refStart = best.reference?.start ?? 0;
-    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, reference: best.reference, reference_source: best.reference_source };
+    const longReads = isLongRead(reads);
+    const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
+    const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source };
     if (collapsed) {
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, minVaf, 20, Math.max(1, minSupport));
+      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
     }
-    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, minVaf, 20), groups: [] };
+    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
   }
   override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
     const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };

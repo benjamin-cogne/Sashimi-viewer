@@ -154,18 +154,33 @@ RNA next to the parents' genomes), but not a group.
 
 **Structural hints.** Where an RNA track shows junction arcs, a DNA track shows the structural
 evidence of its reads, drawn as evidence and never as calls: **deletions inside reads** (a CIGAR `D`
-run of 50 bp or more) as solid red arcs; **split reads** (the clipped end of a read whose other part
-maps elsewhere, from the SA tag) as dashed purple arcs between the two breakpoints, rounded to
-5 bp; **discordant pairs** (insert size above five times the window's median, at least 1 kb, or
-both mates on the same strand) as dashed amber arcs between 500 bp bins; **soft-clip clusters**
-(at least 3 reads clipped by 20 bases or more at one position, split reads excluded) as teal pills
-on the baseline (⇤ clipped before, ⇥ clipped after); and mates or split alignments on **another
-chromosome** as purple `→ chr` pills. *Min supporting reads* sets the support needed to draw a
+run of 50 bp or more) as solid red arcs; **split reads**, read as chains: every part of a read (the
+primary alignment and its supplementary alignments, from the SA tag, whichever of them fall in
+the window) is placed along the read by its clips, the parts are ordered along the read and each
+pair of adjacent parts is one breakpoint, each read counted once. The breakpoint is typed by where
+the read continues: further along the same strand, a dashed purple *deletion-type* arc; backwards,
+a dashed green *duplication-type* arc; on the other strand, a dashed blue *inversion* arc; on
+another chromosome, a purple `→ chr` pill; and an unaligned stretch of the read between two parts
+adjacent on the reference, a purple `ins` pill with its size. Breakpoints are rounded to 5 bp.
+**Discordant pairs** (insert size above five times the window's median, at least 1 kb, or both
+mates on the same strand) are dashed amber arcs between 500 bp bins, and **soft-clip clusters**
+(at least 3 reads clipped by 20 bases or more at one position, split reads excluded) teal pills on
+the baseline (⇤ clipped before, ⇥ clipped after). *Min supporting reads* sets the support needed to draw a
 hint. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
 the count in every DNA sample shown, the median insert size, and a g. notation for a deletion.
 Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool the evidence of
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the
 discordant pairs (CRAM mate fields are read when the file records them).
+
+**Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets its own
+noise handling, since sequencing errors would otherwise paint every read: *Consensus* (on by
+default) draws mismatches and indels only where a variant site is called; *Min VAF (long)*
+(20 %) is the allele fraction a site needs on long reads, above the short-read *Min VAF*; *Min
+indel* (10 bp) hides and leaves uncalled the shorter indels typical of homopolymer errors. The
+three controls appear next to *Collapse* when such reads are shown and are saved with the session.
+Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On DNA
+tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
+device for RNA).
 
 **Variants and allele balance.** Below the reads window (100 kb) a DNA track calls its variant
 sites from the reads in the background, reads track or not: the *variant sites* strip (★, a ring

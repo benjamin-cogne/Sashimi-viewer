@@ -48,8 +48,14 @@ export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: str
 export interface StructuralEvidence {
   /** deletions of at least 50 bp inside reads (CIGAR D), by span */
   deletions: JunctionArc[];
-  /** split reads: the clipped end of the primary alignment joined to its supplementary alignment (SA tag) on the same chromosome, breakpoints rounded to 5 bp */
+  /** split reads whose next part continues further along the chromosome on the same strand (deletion-type), from the chain of alignments of each read (primary + SA parts ordered along the read), breakpoints rounded to 5 bp */
   splits: JunctionArc[];
+  /** split reads whose next part goes back (tandem duplication-type) */
+  duplications: JunctionArc[];
+  /** split reads whose next part is on the other strand (inversion breakpoints) */
+  inversions: JunctionArc[];
+  /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
+  insertions: { pos: number; len: number; count: number }[];
   /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
   discordant: JunctionArc[];
   /** split alignments and mates on other chromosomes */
@@ -101,6 +107,8 @@ export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
   sites: VariantSite[]; groups: ReadGroup[];
+  /** the reads are long (median aligned length above 1 kb): noise filters apply */
+  long_reads?: boolean;
   /** Reference sequence covering the window (plus margin), or null when no source is available. */
   reference: { start: number; seq: string } | null;
   reference_source: 'fasta' | 'ensembl' | 'browser' | null;

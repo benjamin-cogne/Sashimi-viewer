@@ -6,14 +6,14 @@ import type { AlignedRead, ReadGroup, VariantSite } from '../components/sashimi/
 import { depthArray } from './alignments';
 
 export function callSites(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minAlt = 3, minVaf = 0.05, minBq = 20): VariantSite[] {
+  minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1): VariantSite[] {
   const depth = depthArray(reads, start, end);
   const snv = new Map<string, number>(), ins = new Map<string, number>(), del = new Map<string, number>();
   const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) || 0) + 1);
   for (const r of reads) {
     for (const [pos, base, qual] of r.m) if (qual >= minBq && pos >= start && pos < end) bump(snv, `${pos}\t${base}`);
-    for (const [pos, len] of r.i) if (pos >= start && pos < end) bump(ins, `${pos}\t${len}`);
-    for (const [ds, de] of r.d) if (ds >= start && ds < end) bump(del, `${ds}\t${de}`);
+    for (const [pos, len] of r.i) if (len >= minIndel && pos >= start && pos < end) bump(ins, `${pos}\t${len}`);
+    for (const [ds, de] of r.d) if (de - ds >= minIndel && ds >= start && ds < end) bump(del, `${ds}\t${de}`);
   }
   const sites: VariantSite[] = [];
   for (const [k, n] of snv) {
@@ -99,8 +99,8 @@ function compatible(g: Group, anchor: Group): boolean {
 }
 
 export function collapseReads(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minAlt = 3, minVaf = 0.05, minBq = 20, minSupport = 3): { sites: VariantSite[]; groups: ReadGroup[]; total: number } {
-  const sites = callSites(reads, start, end, ref, refStart, minAlt, minVaf, minBq);
+  minAlt = 3, minVaf = 0.05, minBq = 20, minSupport = 3, minIndel = 1): { sites: VariantSite[]; groups: ReadGroup[]; total: number } {
+  const sites = callSites(reads, start, end, ref, refStart, minAlt, minVaf, minBq, minIndel);
   const exact = new Map<string, Group>();
   for (const r of reads) {
     const chain = spliceChain(r), alleles = readAlleles(r, sites, minBq);
