@@ -449,9 +449,12 @@ export default function SashimiViewer({
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
   /** Variant sites of DNA tracks without a reads track: called from the reads in the background so the strip and allele bars are always there below the reads window. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string };
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** every read of the window was scanned (the "variants" chip), not the sampled 2,500 */ full?: boolean };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
+  const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   const dnaSitesSeq = useRef(new Map<number, number>());
+  /** Largest window the "variants" chip scans in full (the source's own reads limit). */
+  const FULL_VARIANTS_MAX_BP = 250_000;
   const readsSeq = useRef(new Map<number, number>());
 
   // ---- UI state ----
@@ -1070,6 +1073,21 @@ export default function SashimiViewer({
     }, 300);
     return () => clearTimeout(timer);
   }, [tracks, readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, isDnaSample]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The "variants" chip of a DNA track: every read of the current window is scanned so that every site above the thresholds is called, not only what the sampled 2,500 reads show. */
+  const loadAllVariants = useCallback((sid: number) => {
+    const v = viewRef.current;
+    if (v.end - v.start > FULL_VARIANTS_MAX_BP) return;
+    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+    const want: FetchWindow = { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly };
+    const seq = (dnaSitesSeq.current.get(sid) ?? 0) + 1;
+    dnaSitesSeq.current.set(sid, seq);
+    setDnaSitesLoading(p => ({ ...p, [sid]: true }));
+    ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100 })
+      .then(data => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: data.sites, total: data.total, full: true } })); })
+      .catch((err: any) => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
+      .finally(() => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSitesLoading(p => ({ ...p, [sid]: false })); });
+  }, [minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Common SNPs are what separates a known polymorphism from a novel change on a DNA track: switched on once when the first DNA track appears
   const snpAutoRef = useRef(false);
@@ -2437,6 +2455,31 @@ export default function SashimiViewer({
                 <title>{active ? (readsAll ? `Show only ${track.sampleName} reads` : 'Hide the reads track') : `Show ${track.sampleName} reads under this track`}</title>
                 <rect x={0} y={0} width={44} height={14} rx={7} fill={active ? color : INK.bg} stroke={active ? color : INK.faint} strokeWidth={0.8} />
                 <text x={22} y={10} textAnchor="middle" fill={active ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{active ? 'reads ✓' : 'reads'}</text>
+              </g>
+            );
+          })()}
+          {/* Variants chip (DNA track without its reads track): scan every read of the window and call every site */}
+          {!track.gtex && !track.group && isDnaTrack(track) && !readsSampleIds.includes(track.sampleId) && (() => {
+            const span = viewEnd - viewStart;
+            const entry = dnaSites[track.sampleId];
+            const loading = !!dnaSitesLoading[track.sampleId];
+            const done = !!entry?.full && !entry.error && entry.fetched.chrom === currentChrom && entry.fetched.start <= viewStart && entry.fetched.end >= viewEnd
+              && entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct;
+            const tooWide = span > FULL_VARIANTS_MAX_BP;
+            const nHere = done ? entry.sites.filter(s => s.pos >= viewStart && s.pos < viewEnd).length : 0;
+            const text = loading ? 'variants…' : done ? `variants ✓ ${nHere.toLocaleString()}` : 'variants';
+            const w = text.length * 5.6 + 14;
+            const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
+            const title = tooWide ? `Zoom below ${formatBp(FULL_VARIANTS_MAX_BP)} to scan every read of the window for variants (window is ${formatBp(span)})`
+              : loading ? 'Scanning every read of the window…'
+              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). Click to scan again.`
+              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF: the automatic call behind the allele bars uses at most ${READS_MAX.toLocaleString()} sampled reads, so sites with few supporting reads can be missing. Takes a few seconds on a deep window.`;
+            return (
+              <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: tooWide || loading ? 'default' : 'pointer' }} opacity={tooWide ? 0.5 : 1}
+                onClick={e => { e.stopPropagation(); if (!tooWide && !loading) loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
+                <title>{title}</title>
+                <rect x={0} y={0} width={w} height={14} rx={7} fill={done ? SNP_INDEL_COLOR : INK.bg} stroke={done ? SNP_INDEL_COLOR : INK.faint} strokeWidth={0.8} />
+                <text x={w / 2} y={10} textAnchor="middle" fill={done ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{text}</text>
               </g>
             );
           })()}

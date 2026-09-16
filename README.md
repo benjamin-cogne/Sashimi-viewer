@@ -185,8 +185,12 @@ device for RNA).
 **Variants and allele balance.** Below the reads window (100 kb) a DNA track calls its variant
 sites from the reads in the background, reads track or not: the allele-fraction bars on the coverage appear as for the reads track (no
 star strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), and *Min VAF*
-applies. When every shown sample is DNA the axis keeps the genomic orientation, coordinates
-increasing to the right, even for a minus-strand gene. Common SNPs are switched on when the first DNA track appears,
+applies. That automatic call works from the sampled reads (at most 2,500 in the window), so on a
+deep or wide window it misses sites with few supporting reads: the **variants** chip next to the
+sample name scans every read of the current window (up to 250 kb) and calls every site above the
+thresholds; it then reads *variants ✓ N* until the window or a threshold changes. When every shown
+sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
+for a minus-strand gene. Common SNPs are switched on when the first DNA track appears,
 since they are what separates a known polymorphism from a novel change. The track label then
 summarises the **allele balance** of the common SNPs covered: how many are heterozygous
 (0.2 ≤ VAF ≤ 0.8) and the range of their fractions around 0.5. Heterozygous fractions far from 0.5
