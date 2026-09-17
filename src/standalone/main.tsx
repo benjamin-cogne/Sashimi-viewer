@@ -115,6 +115,8 @@ function App() {
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
+  /** What the page is doing with a folder or files that were just given, before their chips exist (listing a folder, reading a drop, reopening a session's folder). */
+  const [intake, setIntake] = useState<string | null>(null);
   const [gene, setGene] = useState(LINK_TEXT);
   // ---- Views: every region opened from the header is a tab; the active one drives the viewer ----
   const [views, setViews] = useState<ViewTab[]>([]);
@@ -222,15 +224,18 @@ function App() {
   const openFolderInput = useCallback(() => { setNotes([UPLOAD_NOTE]); folderInputRef.current?.click(); }, []);
   const chooseFolder = useCallback(async () => {
     if (!hasFileSystemAccess()) { openFolderInput(); return; }
-    try {
-      const h = await pickFolder();
-      setNotes([`Reading ${h.name}…`]);
-      addFolder(h.name, h, await filesInFolder(h));
-    } catch (e: any) {
+    let h: FSDirHandle;
+    try { h = await pickFolder(); } catch (e: any) {
       if (e?.name === 'AbortError') return;
       // the picker is refused in some contexts (a page opened from disk, an iframe): the plain folder input still works
       openFolderInput();
+      return;
     }
+    setIntake(`Listing the folder ${h.name}…`);
+    setNotes([`Reading ${h.name}…`]);
+    try { addFolder(h.name, h, await filesInFolder(h)); }
+    catch (e: any) { setError(`Could not list the folder ${h.name}: ${e.message}`); }
+    finally { setIntake(null); }
   }, [addFolder, openFolderInput]);
   const chooseFiles = useCallback(async () => {
     if (typeof (window as any).showOpenFilePicker !== 'function') { fileInputRef.current?.click(); return; }
@@ -242,14 +247,21 @@ function App() {
   }, [addFiles]);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const onFolderInput = useCallback((list: FileList) => { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); }, [addFolder]);
+  const onFolderInput = useCallback((list: FileList) => {
+    setIntake(`Listing ${list.length.toLocaleString()} file${list.length === 1 ? '' : 's'}…`);
+    try { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); } finally { setIntake(null); }
+  }, [addFolder]);
   const onDropFiles = useCallback(async (dt: DataTransfer) => {
-    const { folder, folderHandle, files, fileHandles, others } = await filesFromDrop(dt);
-    for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
-    if (folder) addFolder(folder, folderHandle, files); else if (files.length) addFiles(files);
-    const session = others.find(f => /\.json$/i.test(f.name));
-    if (session) void loadSessionRef.current?.(session);
-    else if (!files.length && !folder && others.length) setNotes([`Nothing usable in the drop (${others.map(f => f.name).join(', ')}): expected BAM/CRAM files with their index, a FASTA, a folder, or a session .json.`]);
+    setIntake('Reading what was dropped…');
+    try {
+      const { folder, folderHandle, files, fileHandles, others } = await filesFromDrop(dt);
+      for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
+      if (folder) addFolder(folder, folderHandle, files); else if (files.length) addFiles(files);
+      const session = others.find(f => /\.json$/i.test(f.name));
+      if (session) void loadSessionRef.current?.(session);
+      else if (!files.length && !folder && others.length) setNotes([`Nothing usable in the drop (${others.map(f => f.name).join(', ')}): expected BAM/CRAM files with their index, a FASTA, a folder, or a session .json.`]);
+    } catch (e: any) { setError(`Could not read the drop: ${e.message}`); }
+    finally { setIntake(null); }
   }, [addFolder, addFiles]);
   /** loadSession is defined below (it depends on the samples); the drop handler reaches it through a ref. */
   const loadSessionRef = useRef<((file: File) => Promise<void>) | null>(null);
@@ -535,6 +547,8 @@ function App() {
     if (!missing.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
+    if (session.folder) setIntake(`Looking for the session's files in ${session.folder}…`);
+    try {
     if (session.folder) {
       dir = await recallFolder(session.folder);
       if (dir) {
@@ -565,6 +579,7 @@ function App() {
       folder: session.folder ?? '', ready: needPermission,
       note: needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : undefined,
     } : null);
+    } finally { setIntake(null); }
   }, [samples, addFiles]);
 
   const loadSession = useCallback(async (file: File) => {
@@ -646,6 +661,12 @@ function App() {
           + Files…
         </button>
         <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+        {intake && (
+          <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs border border-indigo-300 bg-indigo-50 text-indigo-800" role="status" data-intake>
+            <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+            {intake}
+          </span>
+        )}
         <div className="flex flex-wrap items-center gap-1.5">
           {samples.map((s, i) => (
             <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}

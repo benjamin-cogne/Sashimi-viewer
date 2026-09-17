@@ -37,7 +37,9 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
 3. **Add files**: drag one or several BAM (+ `.bai`) or CRAM (+ `.crai`) files onto the page.
    The first file is the *primary sample*, the others are *comparison samples* (controls, parents, other patients).
    Double-click a sample chip (or its ✎) to rename it, for instance `proband`, `mother`, `control`; the track labels follow.
-   A chip spins while its file is being opened (header and index read); the badge then shows the library type.
+   A status pill next to the buttons shows what the page is doing with a drop or a folder before the
+   chips exist (reading the drop, listing the folder); each chip then spins while its file is opened
+   (header and index read), and its badge shows the library type.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
