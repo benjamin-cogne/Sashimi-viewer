@@ -182,14 +182,14 @@ Deletions of 50 bp or more inside reads remain structural evidence whatever the 
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
 
-**Variants and allele balance.** Below the reads window (100 kb) a DNA track calls its variant
-sites from the reads in the background, reads track or not: the allele-fraction bars on the coverage appear as for the reads track (no
-star strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), and *Min VAF*
-applies. That automatic call works from the sampled reads (at most 2,500 in the window), so on a
-deep or wide window it misses sites with few supporting reads: the **variants** chip next to the
-sample name scans every read of the current window, whatever its width (tile by tile, so memory stays
-bounded, with the progress shown on the chip and a click to stop), and calls every site above the
-thresholds; it then reads *variants ✓ N* until the window or a threshold changes. When every shown
+**Variants and allele balance.** A DNA track opens as a plain coverage histogram: no read is
+decoded until asked. Its variant sites are drawn as allele-fraction bars on the coverage (no star
+strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), from the reads track
+when it is shown, or from the **variants** chip next to the sample name otherwise: the chip scans
+every read of the current window, whatever its width (tile by tile, so memory stays bounded, with
+the progress shown on the chip and a click to stop), calls every site above *Min VAF*, and then reads
+*variants ✓ N* until the window or a threshold changes. The **Variants** toggle of the options panel
+removes the bars (and the chip) for a plain coverage. When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
 for a minus-strand gene. Common SNPs are switched on when the first DNA track appears,
 since they are what separates a known polymorphism from a novel change. The track label then

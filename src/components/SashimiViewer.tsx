@@ -85,6 +85,8 @@ export interface ViewerSettings {
   minIndelBp?: number;
   /** long reads: a variant site needs at least this alternate-allele fraction, in percent (default 20) */
   longReadMinVafPct?: number;
+  /** DNA tracks: draw the variant sites called from the reads as allele bars on the coverage (default on); off = plain coverage */
+  coverageVariants?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -94,7 +96,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [],
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -427,6 +429,7 @@ export default function SashimiViewer({
   const [minVafPct, setMinVafPct] = useState(init.minVafPct ?? 10); // variant sites need at least this alternate-allele fraction
   // long reads (ONT, PacBio): their sequencing errors would paint every read with mismatches and small indels
   const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
+  const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
@@ -448,8 +451,8 @@ export default function SashimiViewer({
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
-  /** Variant sites of DNA tracks without a reads track: called from the reads in the background so the strip and allele bars are always there below the reads window. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** every read of the window was scanned (the "variants" chip), not the sampled 2,500 */ full?: boolean };
+  /** Variant sites of DNA tracks without a reads track, from the "variants" chip (every read of the window); nothing is read until the user asks. */
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** every read of the window was scanned (the "variants" chip) */ full?: boolean };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   /** Fraction of the window the running full scan has covered, per sample. */
@@ -1050,30 +1053,6 @@ export default function SashimiViewer({
     }, 250);
     return () => clearTimeout(timer);
   }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ---- Variant sites of DNA tracks (those without a reads track), below the reads window ----
-  useEffect(() => {
-    const wanted = tracks.filter(t => isDnaSample(t.sampleId) && !readsSampleIds.includes(t.sampleId)).map(t => t.sampleId);
-    if (!wanted.length) return;
-    const v = viewRef.current;
-    const span = v.end - v.start;
-    if (span > READS_MAX_VIEW_BP) return;
-    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    const stale = wanted.filter(sid => { const cur = dnaSites[sid]; return !(cur && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && covers(cur.fetched, v)); });
-    if (!stale.length) return;
-    const margin = Math.floor(span * 0.25);
-    const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
-    const timer = setTimeout(() => {
-      for (const sid of stale) {
-        const seq = (dnaSitesSeq.current.get(sid) ?? 0) + 1;
-        dnaSitesSeq.current.set(sid, seq);
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, 'reads', 1, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100 })
-          .then(data => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: data.sites, total: data.total } })); })
-          .catch((err: any) => { if (dnaSitesSeq.current.get(sid) === seq) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); });
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [tracks, readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, isDnaSample]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Stops the running full scan of a sample (its result is dropped, the sampled call stays). */
   const cancelAllVariants = useCallback((sid: number) => {
@@ -1791,7 +1770,7 @@ export default function SashimiViewer({
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
     retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string }[];
-    /** variant sites drawn in the strip and as allele bars: from the reads track, or from the background call of a DNA track */
+    /** variant sites drawn in the strip and as allele bars: from the reads track, or from the "variants" chip scan of a DNA track (none when the Variants toggle is off) */
     sites: VariantSite[];
     /** allele balance of the heterozygous common SNPs of a DNA track */
     balance?: { text: string; title: string; warn: boolean };
@@ -1839,7 +1818,7 @@ export default function SashimiViewer({
       const levels = layerJunctions(visible);
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
-      const trackSites: VariantSite[] = readsBelow?.sites ?? (dnaTrack ? dnaSites[track.sampleId]?.sites : undefined) ?? [];
+      const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.sites ?? (dnaTrack ? dnaSites[track.sampleId]?.sites : undefined) ?? [];
       // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
       const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
@@ -1855,7 +1834,7 @@ export default function SashimiViewer({
           balance = {
             text: `  ·  ${het.length} het SNP${het.length === 1 ? '' : 's'}${medDev != null ? `, VAF ${(0.5 - medDev).toFixed(2)}–${(0.5 + medDev).toFixed(2)}` : ''}${imbalance ? ' · allele imbalance?' : noHet ? ' · no heterozygous SNP (LOH / UPD?)' : ''}`,
             warn: imbalance || noHet,
-            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from the drawn reads (up to ${READS_MAX.toLocaleString()} in the window).`,
+            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString()} in the window)` : 'every read of the window (variants chip)'}.`,
           };
         }
       }
@@ -2032,7 +2011,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, knownSnp]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, knownSnp]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2480,7 +2459,7 @@ export default function SashimiViewer({
             );
           })()}
           {/* Variants chip (DNA track without its reads track): scan every read of the window and call every site */}
-          {!track.gtex && !track.group && isDnaTrack(track) && !readsSampleIds.includes(track.sampleId) && !!ds.getVariantSites && (() => {
+          {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsSampleIds.includes(track.sampleId) && !!ds.getVariantSites && (() => {
             const span = viewEnd - viewStart;
             const entry = dnaSites[track.sampleId];
             const loading = !!dnaSitesLoading[track.sampleId];
@@ -2493,7 +2472,7 @@ export default function SashimiViewer({
             const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
             const title = loading ? `Scanning every read of the window (${formatBp(span)}), ${pct} % done. Click to stop.`
               : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). Click to scan again.`
-              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF: the automatic call behind the allele bars uses at most ${READS_MAX.toLocaleString()} sampled reads, so sites with few supporting reads can be missing. The scan runs tile by tile with no read cap; a wide deep window takes a while and can be stopped.`;
+              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage. Nothing is read until you ask; the scan runs tile by tile with no read cap, so a wide deep window takes a while and can be stopped.`;
             return (
               <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: 'pointer' }}
                 onClick={e => { e.stopPropagation(); if (loading) cancelAllVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
@@ -3073,13 +3052,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3197,8 +3176,12 @@ export default function SashimiViewer({
                   <option value="all">All samples</option>
                 </select>
               )}
-              {(showReads || anyDna) && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. DNA tracks call their sites from the reads in the background below the reads window, reads track or not.">
+              {anyDna && (
+                <Toggle checked={coverageVariants} onChange={setCoverageVariants} label="Variants"
+                  title="DNA tracks: draw the variant sites called from the reads as allele bars on the coverage, from the reads track when it is shown or from the variants chip next to the sample name otherwise. Off: plain coverage, no site." />
+              )}
+              {(showReads || (anyDna && coverageVariants)) && (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">
                   Min VAF
                   <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
