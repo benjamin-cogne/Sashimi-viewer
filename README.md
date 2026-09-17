@@ -324,8 +324,11 @@ as `chr17:g.43094464A>G` or `NC_000017.11:g.43094464A>G`, or a VCF-like line) an
 (`BRCA1 p.Glu23Asp`, a sample name, anything), then **+ Add**. Each becomes a chip (× removes it)
 and is drawn on every view like the variants of a deep link: the **Known variants** option of the
 viewer, on by default as soon as one exists, shows a panel under the transcript with the labels,
-guide lines through every track, and a *go to…* menu to centre the view on one of them. They are
-saved with the session and carried by the exported page.
+guide lines through every track, and a *go to…* menu to centre the view on one of them. A variant
+on another chromosome can be chosen too: the gene at its position is opened (coding gene first, then
+the largest overlap) and the view centred on the variant; when no RefSeq gene is there, the window
+opens alone, in genomic (sense) orientation. They are saved with the session and carried by the
+exported page.
 
 ## Open on a variant from another tool (deep links)
 

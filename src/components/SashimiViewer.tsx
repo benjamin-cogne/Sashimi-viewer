@@ -707,7 +707,7 @@ export default function SashimiViewer({
   const primaryKnownHere = useMemo(() => knownOnChrom(primaryId), [knownOnChrom, primaryId]);
   const primaryKnownElsewhere = primaryKnown.length - primaryKnownHere.length;
   /** Title line of the known-variant panel: the sample and how many of its variants fall on this chromosome. */
-  const knownStatus = `${tracks[0]?.sampleName ?? sampleName} · ${primaryKnownHere.length} on ${currentChrom}${primaryKnownElsewhere ? ` · ${primaryKnownElsewhere} elsewhere (${[...new Set(primaryKnown.filter(v => !primaryKnownHere.includes(v)).map(v => v.chrom || '?'))].join(', ')})` : ''}`;
+  const knownStatus = `${primaryKnownHere.length} on ${currentChrom}${primaryKnownElsewhere ? ` · ${primaryKnownElsewhere} elsewhere (${[...new Set(primaryKnown.filter(v => !primaryKnownHere.includes(v)).map(v => v.chrom || '?'))].join(', ')})` : ''}`;
   /** Rows of the known-variant panel: variants stacked so their marks and labels do not overlap on screen.
    *  The first row is the title line: variants that would sit under the title text move to the next row. */
   const knownRows = useMemo((): KnownVariant[][] => {
@@ -729,15 +729,6 @@ export default function SashimiViewer({
   /** Vertical centre of row `i` of the known-variant panel, relative to the panel top. */
   const knownRowMid = (i: number) => KNOWN_PAD + i * KNOWN_ROW_H + KNOWN_ROW_H / 2;
   /** Centre the window on a known variant (bands get a 10 % margin, points a 1 kb window at most). */
-  const jumpToVariant = useCallback((v: KnownVariant) => {
-    const span = v.end - v.start;
-    let s: number, e: number;
-    if (isPointVariant(v)) { const half = Math.min(500, Math.max(MIN_V_SPAN, (viewEnd - viewStart) / 2)); s = Math.floor((v.start + v.end) / 2 - half); e = Math.ceil((v.start + v.end) / 2 + half); }
-    else { const m = Math.max(50, Math.round(span * 0.1)); s = v.start - m; e = v.end + m; }
-    if (e - s > MAX_VIEW_BP) { const c = (s + e) / 2; s = Math.round(c - MAX_VIEW_BP / 2); e = Math.round(c + MAX_VIEW_BP / 2); }
-    setViewFromV(axis.toV(Math.max(0, s)), axis.toV(e));
-  }, [axis, setViewFromV, viewStart, viewEnd]);
-
   // ---- Neighbouring genes: canonical transcript of every other gene overlapping the window ----
   // The data sources cache 500 kb chunks, so panning only costs a request when a new chunk is entered.
   interface NeighbourModel extends TxModel { geneId: string; biotype: string; isCanonical: boolean }
@@ -1308,6 +1299,50 @@ export default function SashimiViewer({
   }, [tracks, gtexTracks, tx, viewMode, groupTracks]);
 
   // ---- Gene navigation ----
+  /**
+   * Shows a locus (1-based inclusive): a position gets a 1 kb window, a range is shown as typed plus `pad` on each side
+   * (capped to the zoom limit). On another chromosome the gene at the locus (coding first, then the largest overlap)
+   * becomes the queried gene; without one the window opens alone, in genomic (sense) orientation.
+   */
+  const goToLocus = useCallback(async (locus: { chrom: string; start: number; end: number }, pad = 0) => {
+    const point = locus.start === locus.end;
+    let s = point ? Math.max(0, locus.start - 1 - 500) : Math.max(0, locus.start - 1 - pad), e = point ? locus.start + 500 : locus.end + pad;
+    if (e - s > MAX_VIEW_BP) { const c = (s + e) / 2; s = Math.max(0, Math.round(c - MAX_VIEW_BP / 2)); e = s + MAX_VIEW_BP; }
+    let ax = axis;
+    if (chromKey(locus.chrom) !== chromKey(currentChrom)) {
+      // Another chromosome: the gene at the locus (coding first, then the largest overlap) becomes the queried gene
+      const genes = await ds.getRegionGenes(locus.chrom, locus.start, locus.end).catch(() => [] as GeneModel[]);
+      const ov = (g: GeneModel) => Math.min(g.end, locus.end) - Math.max(g.start, locus.start);
+      const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
+      setCurrentChrom(locus.chrom);
+      setCurrentGeneId(undefined);
+      let opened = false;
+      if (best) {
+        try {
+          hintRef.current = { chrom: locus.chrom, start: best.start, end: best.end };
+          const txData = await ds.getTranscript(best.gene_name, undefined, hintRef.current);
+          const model = toTxModel(txData);
+          setCurrentGeneName(txData.gene_name);
+          setCurrentGeneStart(model.start); setCurrentGeneEnd(model.end);
+          setTranscript(txData); setTranscriptMissing(false);
+          ax = equalIntrons ? equalIntronAxis(model, intronWidth) : LINEAR_AXIS;
+          opened = true;
+        } catch (err) { console.warn('[sashimi] gene at the locus could not be opened:', err); }
+      }
+      if (!opened) {
+        hintRef.current = undefined;
+        setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString()}`);
+        setCurrentGeneStart(s); setCurrentGeneEnd(e);
+        setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus');
+        ax = LINEAR_AXIS;
+      }
+    }
+    setLocusMark({ chrom: locus.chrom, start: locus.start - 1, end: locus.end });
+    setViewFromV(ax.toV(s), ax.toV(e), ax);
+    setJunctionOffsets({});
+    setReloadTrigger(n => n + 1);
+  }, [axis, currentChrom, equalIntrons, intronWidth, setViewFromV]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const navigateToGene = useCallback(async () => {
     const query = geneSearch.trim();
     if (!query) return;
@@ -1316,38 +1351,7 @@ export default function SashimiViewer({
     try {
       const locus = parseLocus(query);
       if (locus) {
-        // Coordinates: a position gets a 1 kb window, a range is shown as typed (capped to the zoom limit).
-        const point = locus.start === locus.end;
-        let s = point ? Math.max(0, locus.start - 1 - 500) : locus.start - 1, e = point ? locus.start + 500 : locus.end;
-        if (e - s > MAX_VIEW_BP) { const c = (s + e) / 2; s = Math.max(0, Math.round(c - MAX_VIEW_BP / 2)); e = s + MAX_VIEW_BP; }
-        let ax = axis;
-        if (chromKey(locus.chrom) !== chromKey(currentChrom)) {
-          // Another chromosome: the gene at the locus (coding first, then the largest overlap) becomes the queried gene
-          const genes = await ds.getRegionGenes(locus.chrom, locus.start, locus.end);
-          const ov = (g: GeneModel) => Math.min(g.end, locus.end) - Math.max(g.start, locus.start);
-          const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
-          setCurrentChrom(locus.chrom);
-          setCurrentGeneId(undefined);
-          if (best) {
-            hintRef.current = { chrom: locus.chrom, start: best.start, end: best.end };
-            const txData = await ds.getTranscript(best.gene_name, undefined, hintRef.current);
-            const model = toTxModel(txData);
-            setCurrentGeneName(txData.gene_name);
-            setCurrentGeneStart(model.start); setCurrentGeneEnd(model.end);
-            setTranscript(txData);
-            ax = equalIntrons ? equalIntronAxis(model, intronWidth) : LINEAR_AXIS;
-          } else {
-            hintRef.current = undefined;
-            setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString()}`);
-            setCurrentGeneStart(s); setCurrentGeneEnd(e);
-            setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus');
-            ax = LINEAR_AXIS;
-          }
-        }
-        setLocusMark({ chrom: locus.chrom, start: locus.start - 1, end: locus.end });
-        setViewFromV(ax.toV(s), ax.toV(e), ax);
-        setJunctionOffsets({});
-        setReloadTrigger(n => n + 1);
+        await goToLocus(locus);
         setGeneSearch('');
         setGeneSearchLoading(false);
         return;
@@ -1374,7 +1378,23 @@ export default function SashimiViewer({
       setSearchError(String(e?.message || e || 'not found').replace(/^Error:\s*/, ''));
     }
     setGeneSearchLoading(false);
-  }, [geneSearch, equalIntrons, intronWidth, defaultView, axis, currentChrom, setViewFromV]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [geneSearch, equalIntrons, intronWidth, defaultView, goToLocus]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Centres the view on a known variant; on another chromosome the gene at the variant is opened first (the window alone, sense orientation, when there is none). */
+  const jumpToVariant = useCallback((v: KnownVariant) => {
+    if (v.chrom && chromKey(v.chrom) !== chromKey(currentChrom)) {
+      const pad = isPointVariant(v) ? 0 : Math.max(50, Math.round((v.end - v.start) * 0.1));
+      setGeneSearchLoading(true); setSearchError(null);
+      goToLocus({ chrom: v.chrom, start: v.start + 1, end: v.end }, pad).catch((e: any) => setSearchError(String(e?.message || e))).finally(() => setGeneSearchLoading(false));
+      return;
+    }
+    const span = v.end - v.start;
+    let s: number, e: number;
+    if (isPointVariant(v)) { const half = Math.min(500, Math.max(MIN_V_SPAN, (viewEnd - viewStart) / 2)); s = Math.floor((v.start + v.end) / 2 - half); e = Math.ceil((v.start + v.end) / 2 + half); }
+    else { const m = Math.max(50, Math.round(span * 0.1)); s = v.start - m; e = v.end + m; }
+    if (e - s > MAX_VIEW_BP) { const c = (s + e) / 2; s = Math.round(c - MAX_VIEW_BP / 2); e = Math.round(c + MAX_VIEW_BP / 2); }
+    setViewFromV(axis.toV(Math.max(0, s)), axis.toV(e));
+  }, [axis, setViewFromV, viewStart, viewEnd, currentChrom, goToLocus]);
 
   // ---- SVG export (white background, full plot) ----
   const exportSvg = useCallback(() => {
@@ -3209,11 +3229,11 @@ export default function SashimiViewer({
                 <Toggle checked={showKnown} onChange={setShowKnown} label="Known variants"
                   title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants." />
                 {showKnown && (
-                  <select value="" onChange={e => { const v = primaryKnownHere.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
-                    className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the sample's known variants">
+                  <select value="" onChange={e => { const v = primaryKnown.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
+                    className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
                     <option value="">go to…</option>
                     {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString()}</option>)}
-                    {primaryKnown.filter(v => !primaryKnownHere.includes(v)).map(v => <option key={v.id} value={v.id} disabled>{v.label} · {v.chrom || '?'} (other chromosome)</option>)}
+                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString()} (opens the gene there)</option>)}
                   </select>
                 )}
               </span>
