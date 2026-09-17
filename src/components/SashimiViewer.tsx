@@ -7,10 +7,11 @@ import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
   classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
-  niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus,
+  niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus, exonPhases,
   usageIntervals, referenceExons, exonUsage, usageCohort, usageZ, exonSiteUsage,
   type TxModel, type Scale, type VirtualAxis, type JunctionInfo, type FrameInfo,
 } from './sashimi/geometry';
+import type { ExonPhase } from './sashimi/geometry';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
@@ -314,6 +315,13 @@ function modelKindLabel(m: { transcriptId: string; modelKind: string }): string 
   if (m.modelKind === 'chosen') return 'chosen in the transcript list';
   if (m.modelKind === 'canonical') return isEnsemblId(m.transcriptId) ? 'Ensembl canonical (no MANE Select)' : 'RefSeq Select (no MANE Select)';
   return isEnsemblId(m.transcriptId) ? 'longest CDS (no MANE Select, no canonical flag)' : 'longest CDS (no MANE Select, no RefSeq Select)';
+}
+
+/** One line on the codon phases of a coding exon, for its tooltip and panel. */
+function phaseTitle(p: ExonPhase): string {
+  const rem = p.cds % 3;
+  const skip = p.hasStart && p.hasStop ? 'holds the whole CDS' : p.hasStart ? 'holds the start codon' : p.hasStop ? 'holds the stop codon' : p.symmetric ? 'skipping keeps the frame' : `skipping shifts the frame (${rem} base${rem === 1 ? '' : 's'} over a multiple of 3)`;
+  return `${p.cds.toLocaleString()} coding bases (3n${rem ? `+${rem}` : ''}) · codon phase ${p.phaseIn} | ${p.phaseOut} · ${skip}`;
 }
 
 /** A neighbouring gene (1-based, from the data source) as a 0-based transcript model; exons ranked in transcription order. */
@@ -2207,6 +2215,22 @@ export default function SashimiViewer({
         </g>
       ),
     });
+    if (tx && tx.cdsStart != null) {
+      // the three end shapes of the coding exons: codon phase 0 flat, 1 round, 2 pointed
+      const r = 3, t = y - 6, b = y + 6;
+      const piece = (x: number, p: 0 | 1 | 2) => `M${x},${t} L${x + 14},${t} ${p === 0 ? `L${x + 14},${b}` : p === 1 ? `L${x + 14},${y - r} A${r},${r} 0 0 1 ${x + 14},${y + r} L${x + 14},${b}` : `L${x + 14},${y - r} L${x + 18},${y} L${x + 14},${y + r} L${x + 14},${b}`} L${x},${b} ${p === 0 ? `L${x},${t} Z` : p === 1 ? `L${x},${y + r} A${r},${r} 0 0 1 ${x},${y - r} L${x},${t} Z` : `L${x},${y + r} L${x + 4},${y} L${x},${y - r} L${x},${t} Z`}`;
+      items.push({
+        w: 236, el: (
+          <g key="l5b">
+            <title>Exon ends are shaped by the codon phase (0 flat, 1 round, 2 pointed): a 3′ tab fits a 5′ socket of the same phase, so two exons that lock together are joined in frame, and an exon whose two ends match can be skipped without shifting the frame. Click an exon for its phases.</title>
+            <path d={piece(0, 0)} fill={INK.exon} /><text x={22} y={y + 3.5} fill={INK.muted} fontSize={9.5}>0</text>
+            <path d={piece(32, 1)} fill={INK.exon} /><text x={54} y={y + 3.5} fill={INK.muted} fontSize={9.5}>1</text>
+            <path d={piece(64, 2)} fill={INK.exon} /><text x={86} y={y + 3.5} fill={INK.muted} fontSize={9.5}>2</text>
+            <text x={98} y={y + 3.5} fill={INK.muted} fontSize={9.5}>codon phase at exon ends</text>
+          </g>
+        ),
+      });
+    }
     if (showReads) {
       items.push({
         w: 118, el: (
@@ -2623,10 +2647,40 @@ export default function SashimiViewer({
       boxes.push(<rect key={key} x={left} y={midY - h / 2} width={w} height={h} fill={fill} rx={1.5} style={{ cursor: 'pointer' }}
         onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)} />);
     };
+    /**
+     * A coding exon as a puzzle piece: each end is shaped by its codon phase (0 flat, 1 round, 2 pointed), a tab on the
+     * 3′ end and the matching socket on the 5′ end. Two ends of the same phase lock together (joined in frame), and an
+     * exon whose two ends match can be skipped without shifting the frame. The 5′ end is on the left unless the axis
+     * keeps the genomic orientation of a minus-strand gene.
+     */
+    const phaseBox = (ex: { start: number; end: number; rank: number }, s: number, e: number, ph: ExonPhase, key: string) => {
+      const a = scale.x(s), b = scale.x(e);
+      const left = Math.min(a, b), w = Math.max(1, Math.abs(b - a));
+      if (left > plotRight || left + w < PLOT_LEFT) return;
+      const h = exonH, t = midY - h / 2, btm = midY + h / 2, r = Math.min(4.5, h / 4, w / 3);
+      const x0 = left, x1 = left + w;
+      // the 5′ end is on the left for a plus-strand gene and for a minus-strand gene on the reversed axis
+      const fivePrimeLeft = reverse || tx!.strand > 0;
+      // right end drawn top to bottom, left end bottom to top; `out` = a tab sticking out, else a socket cut in
+      const rightEnd = (x: number, p: number, out: boolean) => p === 0 ? `L${x},${btm} `
+        : p === 1 ? `L${x},${midY - r} A${r},${r} 0 0 ${out ? 1 : 0} ${x},${midY + r} L${x},${btm} `
+        : `L${x},${midY - r} L${x + (out ? 1 : -1) * (r + 1)},${midY} L${x},${midY + r} L${x},${btm} `;
+      const leftEnd = (x: number, p: number, out: boolean) => p === 0 ? `L${x},${t} Z`
+        : p === 1 ? `L${x},${midY + r} A${r},${r} 0 0 ${out ? 0 : 1} ${x},${midY - r} L${x},${t} Z`
+        : `L${x},${midY + r} L${x + (out ? -1 : 1) * (r + 1)},${midY} L${x},${midY - r} L${x},${t} Z`;
+      const d = fivePrimeLeft
+        ? `M${x0},${t} L${x1},${t} ${rightEnd(x1, ph.phaseOut, true)}L${x0},${btm} ${leftEnd(x0, ph.phaseIn, false)}`
+        : `M${x0},${t} L${x1},${t} ${rightEnd(x1, ph.phaseIn, false)}L${x0},${btm} ${leftEnd(x0, ph.phaseOut, true)}`;
+      boxes.push(<path key={key} d={d} fill={INK.exon} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
+        <title>{`Exon ${ex.rank} · ${phaseTitle(ph)} · click for ψ`}</title>
+      </path>);
+    };
+    const phases = new Map(exonPhases(tx).map(p => [p.rank, p]));
     for (const ex of tx.exons) {
       if (tx.cdsStart == null || tx.cdsEnd == null) { box(ex, ex.start, ex.end, exonH, INK.exon, `x${ex.rank}`); continue; }
       const cs = Math.max(ex.start, tx.cdsStart), ce = Math.min(ex.end, tx.cdsEnd);
-      if (ce > cs) box(ex, cs, ce, exonH, INK.exon, `c${ex.rank}`);
+      const ph = phases.get(ex.rank);
+      if (ce > cs) { if (ph) phaseBox(ex, cs, ce, ph, `c${ex.rank}`); else box(ex, cs, ce, exonH, INK.exon, `c${ex.rank}`); }
       if (ex.start < Math.min(ex.end, tx.cdsStart)) box(ex, ex.start, Math.min(ex.end, tx.cdsStart), utrH, INK.utr, `u5${ex.rank}`);
       if (Math.max(ex.start, tx.cdsEnd) < ex.end) box(ex, Math.max(ex.start, tx.cdsEnd), ex.end, utrH, INK.utr, `u3${ex.rank}`);
     }
@@ -3101,9 +3155,10 @@ export default function SashimiViewer({
       { caption: 'Junction reads', head: ['sample', 'inclusion 5′', 'inclusion 3′', 'skipping', 'ψ (inclusion)'],
         rows: psiRows.map(r => [r.name, r.inclusionUp.toLocaleString(), r.inclusionDown.toLocaleString(), r.exclusion.toLocaleString(), pct(r.psi)]) },
     ];
+    const ph = tx ? exonPhases(tx).find(p => p.rank === ex.rank) : undefined;
     return {
       title: `Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp`,
-      subtitle: cFirst && cLast ? `${tx!.transcriptId}: ${cFirst}_${cLast.replace(/^[cn]\./, '')}` : '',
+      subtitle: (cFirst && cLast ? `${tx!.transcriptId}: ${cFirst}_${cLast.replace(/^[cn]\./, '')}` : '') + (ph ? ` · ${phaseTitle(ph)}` : ''),
       hgvs: [] as string[], tables, strip: idx >= 0 ? stripFor(idx) : null,
       note: `Usage = median depth of the exon / median depth of the gene's other coding exons (${u ? u.refIdx.length : '…'} exons); ± is a delta-method sd from the read counts. ` +
         'vs controls = usage / median usage of the other samples of the run; z = robust z-score (median/MAD, ≥ 5 controls).' + strandNote +

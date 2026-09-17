@@ -739,6 +739,47 @@ export function junctionPsi(j: JunctionArc, junctions: JunctionArc[], strand: nu
 
 export type FrameEffect = 'in' | 'out' | 'utr' | 'unknown';
 
+/** Codon phases of one coding exon: where the codon is cut at its 5′ and 3′ ends (Ensembl convention). */
+export interface ExonPhase {
+  rank: number;
+  /** coding bases of the exon */
+  cds: number;
+  /** bases of the codon already read when the exon starts (0 = the exon opens on a codon start) */
+  phaseIn: 0 | 1 | 2;
+  /** bases of the last codon read when the exon ends (0 = the exon closes a codon) */
+  phaseOut: 0 | 1 | 2;
+  /** the exon holds the start codon / the stop codon: skipping it is more than a frame question */
+  hasStart: boolean; hasStop: boolean;
+  /** coding length is a multiple of three: skipping the exon alone keeps the frame (phaseIn === phaseOut) */
+  symmetric: boolean;
+}
+
+/**
+ * Codon phase at both ends of every coding exon, in transcript order (5′→3′), from the CDS coordinates alone.
+ * Phase p means p bases of a codon are already read when the exon starts; an exon of coding length L ends in
+ * phase (p + L) mod 3. Two exon ends of the same phase join in frame; an exon with phaseIn === phaseOut can be
+ * skipped without shifting the frame. Empty for a non-coding model.
+ */
+export function exonPhases(tx: TxModel): ExonPhase[] {
+  if (tx.cdsStart == null || tx.cdsEnd == null) return [];
+  const plus = tx.strand > 0;
+  const order = plus ? [...tx.exons] : [...tx.exons].reverse();
+  const out: ExonPhase[] = [];
+  let read = 0;
+  for (const e of order) {
+    const cs = Math.max(e.start, tx.cdsStart), ce = Math.min(e.end, tx.cdsEnd);
+    if (ce <= cs) continue;
+    const cds = ce - cs;
+    const phaseIn = (read % 3) as 0 | 1 | 2;
+    read += cds;
+    const phaseOut = (read % 3) as 0 | 1 | 2;
+    const hasStart = plus ? e.start <= tx.cdsStart && tx.cdsStart < e.end : e.start < tx.cdsEnd && tx.cdsEnd <= e.end;
+    const hasStop = plus ? e.start < tx.cdsEnd && tx.cdsEnd <= e.end : e.start <= tx.cdsStart && tx.cdsStart < e.end;
+    out.push({ rank: e.rank, cds, phaseIn, phaseOut, hasStart, hasStop, symmetric: cds % 3 === 0 });
+  }
+  return out;
+}
+
 export interface FrameInfo {
   frame: FrameEffect;
   /** Signed change in transcript length (bases), when derivable. */
