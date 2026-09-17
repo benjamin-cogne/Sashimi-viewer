@@ -2856,7 +2856,11 @@ export default function SashimiViewer({
         </g>
       );
     });
-    const marks = layouts.filter(L => L.track.sampleId >= 0 && !L.track.gtex).flatMap(L => knownOnChrom(L.track.sampleId).map(v => knownMark(v, L.yOff + L.juncH - 8, true, false)));
+    // a sample's own variants (not in the primary sample's list shown in the panel) get a small mark on its track; variants
+    // shared by every sample (the variants of interest of the page) are in the panel and the guide lines only
+    const inPanel = new Set(primaryKnown.map(v => `${v.chrom}\t${v.start}\t${v.end}\t${v.label}`));
+    const marks = layouts.filter(L => L.track.sampleId >= 0 && !L.track.gtex).flatMap(L => knownOnChrom(L.track.sampleId)
+      .filter(v => !inPanel.has(`${v.chrom}\t${v.start}\t${v.end}\t${v.label}`)).map(v => knownMark(v, L.yOff + L.juncH - 8, true, false)));
     return <g fontFamily={FONT}><g pointerEvents="none">{guides}</g>{marks}</g>;
   };
 
@@ -3227,7 +3231,7 @@ export default function SashimiViewer({
             {primaryKnown.length > 0 && (
               <span className="flex items-center gap-1">
                 <Toggle checked={showKnown} onChange={setShowKnown} label="Known variants"
-                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants." />
+                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants (those not already in the panel)." />
                 {showKnown && (
                   <select value="" onChange={e => { const v = primaryKnown.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
                     className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
