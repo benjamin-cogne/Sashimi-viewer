@@ -2131,7 +2131,7 @@ export default function SashimiViewer({
     if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
     if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     if (anyRna && showUsage && includeRetention) items.push({
-      w: 300, el: (
+      w: 38 + 'intron retention: unspliced reads through both boundaries, share of the intron\'s reads'.length * 5.3 + 14, el: (
         <g key="lir">
           <rect x={0} y={y - 6.5} width={32} height={13} rx={6.5} fill={INK.bg} stroke={RETENTION_COLOR} strokeWidth={1} />
           <text x={16} y={y + 3} textAnchor="middle" fill={RETENTION_COLOR} fontSize={8.5} fontWeight={700}>IR %</text>
@@ -2215,18 +2215,14 @@ export default function SashimiViewer({
         </g>
       ),
     });
-    if (tx && tx.cdsStart != null) {
-      // the three end shapes of the coding exons: codon phase 0 flat, 1 round, 2 pointed
-      const r = 3, t = y - 6, b = y + 6;
-      const piece = (x: number, p: 0 | 1 | 2) => `M${x},${t} L${x + 14},${t} ${p === 0 ? `L${x + 14},${b}` : p === 1 ? `L${x + 14},${y - r} A${r},${r} 0 0 1 ${x + 14},${y + r} L${x + 14},${b}` : `L${x + 14},${y - r} L${x + 18},${y} L${x + 14},${y + r} L${x + 14},${b}`} L${x},${b} ${p === 0 ? `L${x},${t} Z` : p === 1 ? `L${x},${y + r} A${r},${r} 0 0 1 ${x},${y - r} L${x},${t} Z` : `L${x},${y + r} L${x + 4},${y} L${x},${y - r} L${x},${t} Z`}`;
+    if (tx && exonPhases(tx).some(p => !p.symmetric && !p.hasStart && !p.hasStop)) {
       items.push({
         w: 236, el: (
           <g key="l5b">
-            <title>Exon ends are shaped by the codon phase (0 flat, 1 round, 2 pointed): a 3′ tab fits a 5′ socket of the same phase, so two exons that lock together are joined in frame, and an exon whose two ends match can be skipped without shifting the frame. Click an exon for its phases.</title>
-            <path d={piece(0, 0)} fill={INK.exon} /><text x={22} y={y + 3.5} fill={INK.muted} fontSize={9.5}>0</text>
-            <path d={piece(32, 1)} fill={INK.exon} /><text x={54} y={y + 3.5} fill={INK.muted} fontSize={9.5}>1</text>
-            <path d={piece(64, 2)} fill={INK.exon} /><text x={86} y={y + 3.5} fill={INK.muted} fontSize={9.5}>2</text>
-            <text x={98} y={y + 3.5} fill={INK.muted} fontSize={9.5}>codon phase at exon ends</text>
+            <title>Sign above a coding exon whose coding length is not a multiple of three: skipping it alone shifts the reading frame. Exons holding the start or the stop codon carry no sign. Click an exon for its coding length and codon phases.</title>
+            <circle cx={7} cy={y} r={4} fill={FRAME_OUT_COLOR} stroke="#ffffff" strokeWidth={1} />
+            <rect x={7 - 4 * 0.62} y={y - 1} width={4 * 1.24} height={2} rx={1} fill="#ffffff" />
+            <text x={16} y={y + 3.5} fill={INK.muted} fontSize={9.5}>exon whose skipping shifts the frame</text>
           </g>
         ),
       });
@@ -2647,40 +2643,23 @@ export default function SashimiViewer({
       boxes.push(<rect key={key} x={left} y={midY - h / 2} width={w} height={h} fill={fill} rx={1.5} style={{ cursor: 'pointer' }}
         onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)} />);
     };
-    /**
-     * A coding exon as a puzzle piece: each end is shaped by its codon phase (0 flat, 1 round, 2 pointed), a tab on the
-     * 3′ end and the matching socket on the 5′ end. Two ends of the same phase lock together (joined in frame), and an
-     * exon whose two ends match can be skipped without shifting the frame. The 5′ end is on the left unless the axis
-     * keeps the genomic orientation of a minus-strand gene.
-     */
-    const phaseBox = (ex: { start: number; end: number; rank: number }, s: number, e: number, ph: ExonPhase, key: string) => {
-      const a = scale.x(s), b = scale.x(e);
-      const left = Math.min(a, b), w = Math.max(1, Math.abs(b - a));
-      if (left > plotRight || left + w < PLOT_LEFT) return;
-      const h = exonH, t = midY - h / 2, btm = midY + h / 2, r = Math.min(4.5, h / 4, w / 3);
-      const x0 = left, x1 = left + w;
-      // the 5′ end is on the left for a plus-strand gene and for a minus-strand gene on the reversed axis
-      const fivePrimeLeft = reverse || tx!.strand > 0;
-      // right end drawn top to bottom, left end bottom to top; `out` = a tab sticking out, else a socket cut in
-      const rightEnd = (x: number, p: number, out: boolean) => p === 0 ? `L${x},${btm} `
-        : p === 1 ? `L${x},${midY - r} A${r},${r} 0 0 ${out ? 1 : 0} ${x},${midY + r} L${x},${btm} `
-        : `L${x},${midY - r} L${x + (out ? 1 : -1) * (r + 1)},${midY} L${x},${midY + r} L${x},${btm} `;
-      const leftEnd = (x: number, p: number, out: boolean) => p === 0 ? `L${x},${t} Z`
-        : p === 1 ? `L${x},${midY + r} A${r},${r} 0 0 ${out ? 0 : 1} ${x},${midY - r} L${x},${t} Z`
-        : `L${x},${midY + r} L${x + (out ? -1 : 1) * (r + 1)},${midY} L${x},${midY - r} L${x},${t} Z`;
-      const d = fivePrimeLeft
-        ? `M${x0},${t} L${x1},${t} ${rightEnd(x1, ph.phaseOut, true)}L${x0},${btm} ${leftEnd(x0, ph.phaseIn, false)}`
-        : `M${x0},${t} L${x1},${t} ${rightEnd(x1, ph.phaseIn, false)}L${x0},${btm} ${leftEnd(x0, ph.phaseOut, true)}`;
-      boxes.push(<path key={key} d={d} fill={INK.exon} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
-        <title>{`Exon ${ex.rank} · ${phaseTitle(ph)} · click for ψ`}</title>
-      </path>);
-    };
     const phases = new Map(exonPhases(tx).map(p => [p.rank, p]));
     for (const ex of tx.exons) {
       if (tx.cdsStart == null || tx.cdsEnd == null) { box(ex, ex.start, ex.end, exonH, INK.exon, `x${ex.rank}`); continue; }
       const cs = Math.max(ex.start, tx.cdsStart), ce = Math.min(ex.end, tx.cdsEnd);
+      if (ce > cs) box(ex, cs, ce, exonH, INK.exon, `c${ex.rank}`);
+      // a small frameshift sign above an exon whose skipping shifts the reading frame (first and last coding exons excepted: they hold the start or stop codon)
       const ph = phases.get(ex.rank);
-      if (ce > cs) { if (ph) phaseBox(ex, cs, ce, ph, `c${ex.rank}`); else box(ex, cs, ce, exonH, INK.exon, `c${ex.rank}`); }
+      if (ce > cs && ph && !ph.symmetric && !ph.hasStart && !ph.hasStop) {
+        const a = scale.x(cs), b = scale.x(ce);
+        const cx = (a + b) / 2, cy = midY - exonH / 2 - 6, r = 4;
+        if (cx >= PLOT_LEFT && cx <= plotRight) boxes.push(
+          <g key={`fs${ex.rank}`} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
+            <title>{`Exon ${ex.rank} · ${phaseTitle(ph)}`}</title>
+            <circle cx={cx} cy={cy} r={r} fill={FRAME_OUT_COLOR} stroke="#ffffff" strokeWidth={1} />
+            <rect x={cx - r * 0.62} y={cy - 1} width={r * 1.24} height={2} rx={1} fill="#ffffff" />
+          </g>);
+      }
       if (ex.start < Math.min(ex.end, tx.cdsStart)) box(ex, ex.start, Math.min(ex.end, tx.cdsStart), utrH, INK.utr, `u5${ex.rank}`);
       if (Math.max(ex.start, tx.cdsEnd) < ex.end) box(ex, Math.max(ex.start, tx.cdsEnd), ex.end, utrH, INK.utr, `u3${ex.rank}`);
     }
@@ -2730,7 +2709,7 @@ export default function SashimiViewer({
           if (w < 14) return null;
           return (
             <g key={`n${ex.rank}`} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
-              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp · click for ψ`}</title>
+              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp${phases.get(ex.rank) ? ` · ${phaseTitle(phases.get(ex.rank)!)}` : ''} · click for ψ`}</title>
               <text x={cx} y={inCds ? midY + 3.5 : midY + 20} textAnchor="middle" fill={inCds ? '#ffffff' : INK.muted} fontSize={8.5} fontWeight={600}>{ex.rank}</text>
             </g>
           );
