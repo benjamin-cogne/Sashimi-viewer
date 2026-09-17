@@ -1089,12 +1089,6 @@ export default function SashimiViewer({
   // a scan still running when the viewer unmounts is stopped
   useEffect(() => () => { for (const c of dnaSitesAbort.current.values()) c.abort(); }, []);
 
-  // Common SNPs are what separates a known polymorphism from a novel change on a DNA track: switched on once when the first DNA track appears
-  const snpAutoRef = useRef(false);
-  useEffect(() => {
-    if (!snpAutoRef.current && tracks.some(t => isDnaSample(t.sampleId))) { snpAutoRef.current = true; setShowSnps(true); }
-  }, [tracks, isDnaSample]);
-
   // ---- Mouse interaction ----
   const svgPoint = (e: { clientX: number; clientY: number }) => {
     const rect = svgRef.current?.getBoundingClientRect();

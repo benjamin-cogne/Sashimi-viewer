@@ -191,8 +191,8 @@ the progress shown on the chip and a click to stop), calls every site above *Min
 *variants ✓ N* until the window or a threshold changes. The **Variants** toggle of the options panel
 removes the bars (and the chip) for a plain coverage. When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
-for a minus-strand gene. Common SNPs are switched on when the first DNA track appears,
-since they are what separates a known polymorphism from a novel change. The track label then
+for a minus-strand gene. *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch
+them on to separate a known polymorphism from a novel change. The track label then
 summarises the **allele balance** of the common SNPs covered: how many are heterozygous
 (0.2 ≤ VAF ≤ 0.8) and the range of their fractions around 0.5. Heterozygous fractions far from 0.5
 (median deviation above 0.15 over at least 5 SNPs) are flagged *allele imbalance?* (mosaic copy
