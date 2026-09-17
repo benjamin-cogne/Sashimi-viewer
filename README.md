@@ -188,8 +188,12 @@ strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), 
 when it is shown, or from the **variants** chip next to the sample name otherwise: the chip scans
 every read of the current window, whatever its width (tile by tile, so memory stays bounded, with
 the progress shown on the chip and a click to stop), calls every site above *Min VAF*, and then reads
-*variants ✓ N* until the window or a threshold changes. The **Variants** toggle of the options panel
-removes the bars (and the chip) for a plain coverage. When every shown
+*variants ✓ N*. From then on the variants follow the window: moving or widening it scans only the
+part not scanned yet and merges it, so the bars are always those of the frame shown; another
+chromosome, the unique-reads switch, a lower *Min VAF* or a changed long-read threshold start the
+window over (a raised *Min VAF* filters at once). A click on the ✓ chip forgets the variants (plain
+coverage until the next click). The **Variants** toggle of the options panel removes the bars (and the
+chip) for a plain coverage. When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
 for a minus-strand gene. *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch
 them on to separate a known polymorphism from a novel change. The track label then

@@ -1054,24 +1054,24 @@ export default function SashimiViewer({
     return () => clearTimeout(timer);
   }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Stops the running full scan of a sample (its result is dropped, the sampled call stays). */
-  const cancelAllVariants = useCallback((sid: number) => {
+  /** Forgets the variants of a sample: its running scan is stopped and its sites dropped (plain coverage again until the chip is clicked). */
+  const forgetVariants = useCallback((sid: number) => {
     dnaSitesAbort.current.get(sid)?.abort();
     dnaSitesAbort.current.delete(sid);
     dnaSitesSeq.current.set(sid, (dnaSitesSeq.current.get(sid) ?? 0) + 1);
     setDnaSitesLoading(p => ({ ...p, [sid]: false }));
+    setDnaSites(p => { const { [sid]: _, ...rest } = p; return rest; });
   }, []);
 
   /**
-   * The "variants" chip of a DNA track: every read of the current window is scanned, tile by tile with no read cap
-   * and whatever the window width, so that every site above the thresholds is called, not only what the sampled
-   * 2,500 reads show.
+   * Scans every read of one or more ranges of the current chromosome for a sample (tile by tile, no read cap, whatever
+   * the width) and stores the sites: replacing what the sample had, or merged into it (`extend`) when the ranges are the
+   * parts of the window not scanned yet. The thresholds of the call are the current ones.
    */
-  const loadAllVariants = useCallback((sid: number) => {
-    if (!ds.getVariantSites) return;
+  const scanVariants = useCallback((sid: number, ranges: { start: number; end: number }[], extend: boolean) => {
+    if (!ds.getVariantSites || !ranges.length) return;
     const v = viewRef.current;
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    const want: FetchWindow = { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly };
     dnaSitesAbort.current.get(sid)?.abort();
     const ctl = new AbortController();
     dnaSitesAbort.current.set(sid, ctl);
@@ -1080,12 +1080,39 @@ export default function SashimiViewer({
     setDnaSitesLoading(p => ({ ...p, [sid]: true }));
     setDnaSitesProgress(p => ({ ...p, [sid]: 0 }));
     const live = () => dnaSitesSeq.current.get(sid) === seq;
-    ds.getVariantSites(sid, want.chrom, want.start, want.end, want.uniqueOnly, minVaf,
-      { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: f })); } })
-      .then(data => { if (live()) setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: data.sites, total: data.total, full: true } })); })
-      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: want, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
+    const span = ranges.reduce((t, r) => t + (r.end - r.start), 0);
+    const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
+    (async () => {
+      const sites: VariantSite[] = [];
+      let total = 0, done = 0;
+      for (const r of ranges) {
+        const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.uniqueOnly, minVaf,
+          { ...opts, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: (done + f * (r.end - r.start)) / span })); } });
+        sites.push(...res.sites); total += res.total; done += r.end - r.start;
+      }
+      return { sites, total };
+    })()
+      .then(data => {
+        if (!live()) return;
+        setDnaSites(p => {
+          const old = p[sid];
+          const lo = Math.min(...ranges.map(r => r.start)), hi = Math.max(...ranges.map(r => r.end));
+          const keep = extend && old && !old.error && old.fetched.chrom === v.chrom;
+          const fetched: FetchWindow = { chrom: v.chrom, uniqueOnly: v.uniqueOnly, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
+          const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
+          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true } };
+        });
+      })
+      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
       .finally(() => { if (live()) { setDnaSitesLoading(p => ({ ...p, [sid]: false })); if (dnaSitesAbort.current.get(sid) === ctl) dnaSitesAbort.current.delete(sid); } });
   }, [minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** The "variants" chip of a DNA track: scans the whole current window. */
+  const loadAllVariants = useCallback((sid: number) => {
+    const v = viewRef.current;
+    scanVariants(sid, [{ start: v.start, end: v.end }], false);
+  }, [scanVariants]);
+
   // a scan still running when the viewer unmounts is stopped
   useEffect(() => () => { for (const c of dnaSitesAbort.current.values()) c.abort(); }, []);
 
@@ -1387,7 +1414,7 @@ export default function SashimiViewer({
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
-  type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[] };
+  type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[]; /** reads of the window are shown (not a placeholder message) */ loaded: boolean };
   /** One reads track per shown sample (Map in track order); each is drawn under its sample's coverage track. */
   const readsTracks = useMemo((): Map<number, ReadsTrack> => {
     const out = new Map<number, ReadsTrack>();
@@ -1404,7 +1431,7 @@ export default function SashimiViewer({
         <tspan fill={color}>{'  '}{name}{name ? ' · ' : ''}{text}</tspan>
       </text>
     );
-    const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[] });
+    const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[], loaded: false });
 
     if (span > READS_MAX_VIEW_BP) return message(`zoom in below ${formatBp(READS_MAX_VIEW_BP)} to load reads (window is ${formatBp(span)})`);
     const mode = collapseReads ? 'collapsed' : 'reads';
@@ -1498,6 +1525,7 @@ export default function SashimiViewer({
     const wrap = (height: number, info: string, body: JSX.Element[], _bodyHeight: number) => ({
       height,
       sites,
+      loaded: true,
       el: (
         <g key={`reads${sid}`} fontFamily={FONT}>
           <defs><clipPath id={clipId}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} /></clipPath></defs>
@@ -1787,6 +1815,33 @@ export default function SashimiViewer({
   const anyRna = useMemo(() => displayTracks.some(t => !t.gtex && !isDnaTrack(t)) || !displayTracks.some(t => !t.gtex), [displayTracks, isDnaTrack]);
   const anyDna = useMemo(() => displayTracks.some(t => isDnaTrack(t)), [displayTracks, isDnaTrack]);
 
+  /**
+   * A DNA track whose variants were asked for keeps them in step with the window: when the window moves or widens,
+   * only its part not scanned yet is scanned and merged; another chromosome, unique-reads switch, a lower Min VAF or a
+   * changed long-read threshold start the window over. Nothing is read for a track that never had the chip clicked.
+   */
+  const scannedTooFar = (f: FetchWindow, v: { start: number; end: number }) => f.end - f.start > Math.max(5_000_000, 4 * (v.end - v.start));
+  useEffect(() => {
+    if (!coverageVariants || !ds.getVariantSites) return;
+    const v = viewRef.current;
+    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+    const jobs: { sid: number; ranges: { start: number; end: number }[]; extend: boolean }[] = [];
+    for (const t of tracks) {
+      const sid = t.sampleId;
+      const e = dnaSites[sid];
+      if (!isDnaSample(sid) || !e?.full || e.error || dnaSitesLoading[sid] || readsTracks.get(sid)?.loaded) continue;
+      const f = e.fetched;
+      const same = f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
+      if (!same || v.end <= f.start || v.start >= f.end || scannedTooFar(f, v)) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
+      const ranges: { start: number; end: number }[] = [];
+      if (v.start < f.start) ranges.push({ start: v.start, end: f.start });
+      if (v.end > f.end) ranges.push({ start: f.end, end: v.end });
+      if (ranges.length) jobs.push({ sid, ranges, extend: true });
+    }
+    if (!jobs.length) return;
+    const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
+    return () => clearTimeout(timer);
+  }, [tracks, readsTracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
     const out: TrackLayout[] = [];
@@ -1812,7 +1867,14 @@ export default function SashimiViewer({
       const levels = layerJunctions(visible);
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
-      const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.sites ?? (dnaTrack ? dnaSites[track.sampleId]?.sites : undefined) ?? [];
+      // sites of the coverage: the reads track's when its reads are shown, else the chip scan of a DNA track (same chromosome, thresholds not lowered since; a raised Min VAF filters at once)
+      const chipSites = (): VariantSite[] => {
+        const e = dnaSites[track.sampleId];
+        const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+        if (!e || e.error || e.fetched.chrom !== currentChrom || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
+        return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
+      };
+      const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.loaded ? readsBelow.sites : dnaTrack ? chipSites() : [];
       // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
       const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
@@ -2005,7 +2067,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, knownSnp]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2453,23 +2515,24 @@ export default function SashimiViewer({
             );
           })()}
           {/* Variants chip (DNA track without its reads track): scan every read of the window and call every site */}
-          {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsSampleIds.includes(track.sampleId) && !!ds.getVariantSites && (() => {
+          {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsTracks.get(track.sampleId)?.loaded && !!ds.getVariantSites && (() => {
             const span = viewEnd - viewStart;
             const entry = dnaSites[track.sampleId];
             const loading = !!dnaSitesLoading[track.sampleId];
+            const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
             const done = !!entry?.full && !entry.error && entry.fetched.chrom === currentChrom && entry.fetched.start <= viewStart && entry.fetched.end >= viewEnd
-              && entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct;
-            const nHere = done ? entry.sites.filter(s => s.pos >= viewStart && s.pos < viewEnd).length : 0;
+              && entry.minVaf <= minVaf && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct;
+            const nHere = done ? entry.sites.filter(s => s.pos >= viewStart && s.pos < viewEnd && s.vaf >= minVaf).length : 0;
             const pct = Math.round((dnaSitesProgress[track.sampleId] ?? 0) * 100);
             const text = loading ? `variants… ${pct} %` : done ? `variants ✓ ${nHere.toLocaleString()}` : 'variants';
             const w = text.length * 5.6 + 14;
             const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
-            const title = loading ? `Scanning every read of the window (${formatBp(span)}), ${pct} % done. Click to stop.`
-              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). Click to scan again.`
-              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage. Nothing is read until you ask; the scan runs tile by tile with no read cap, so a wide deep window takes a while and can be stopped.`;
+            const title = loading ? `Scanning every read of the window (${formatBp(span)}), ${pct} % done. Click to stop and forget the variants.`
+              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). The variants follow the window: moving or widening it scans the new part. Click to forget them (plain coverage).`
+              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage; the variants then follow the window. Nothing is read until you ask; the scan runs tile by tile with no read cap, so a wide deep window takes a while and can be stopped.`;
             return (
               <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: 'pointer' }}
-                onClick={e => { e.stopPropagation(); if (loading) cancelAllVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
+                onClick={e => { e.stopPropagation(); if (loading || done) forgetVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
                 <title>{title}</title>
                 <rect x={0} y={0} width={w} height={14} rx={7} fill={done ? SNP_INDEL_COLOR : INK.bg} stroke={done || loading ? SNP_INDEL_COLOR : INK.faint} strokeWidth={0.8} />
                 {loading && <rect x={0} y={0} width={Math.max(0, Math.min(w, w * (dnaSitesProgress[track.sampleId] ?? 0)))} height={14} rx={7} fill={SNP_INDEL_COLOR} opacity={0.25} />}
