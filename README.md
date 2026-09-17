@@ -37,6 +37,7 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
 3. **Add files**: drag one or several BAM (+ `.bai`) or CRAM (+ `.crai`) files onto the page.
    The first file is the *primary sample*, the others are *comparison samples* (controls, parents, other patients).
    Double-click a sample chip (or its ✎) to rename it, for instance `proband`, `mother`, `control`; the track labels follow.
+   A chip spins while its file is being opened (header and index read); the badge then shows the library type.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
@@ -172,12 +173,16 @@ Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool 
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the
 discordant pairs (CRAM mate fields are read when the file records them).
 
-**Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets its own
-noise handling, since sequencing errors would otherwise paint every read: *Consensus* (on by
-default) draws mismatches and indels only where a variant site is called; *Min VAF (long)*
-(20 %) is the allele fraction a site needs on long reads, above the short-read *Min VAF*; *Min
-indel* (10 bp) hides and leaves uncalled the shorter indels typical of homopolymer errors. The
-three controls appear next to *Collapse* when such reads are shown and are saved with the session.
+**Consensus reads.** *Consensus* (on by default) draws mismatches and indels only where a variant
+site is called (at least 3 reads and *Min VAF*), so sequencing errors do not paint every read. It
+is offered for every genomic DNA reads track, short reads included, and for long reads whatever
+the library; off, every mismatch and indel of every read is drawn.
+
+**Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets two
+more noise controls: *Min VAF (long)* (20 %) is the allele fraction a site needs on long reads,
+above the short-read *Min VAF*; *Min indel* (10 bp) hides and leaves uncalled the shorter indels
+typical of homopolymer errors. The controls appear next to *Collapse* when such reads are shown
+and are saved with the session.
 Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On DNA
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
@@ -255,6 +260,7 @@ and view for a gene, more for very deep or very wide windows.
 by its path inside that folder (with index name and size), the sample names and order (first =
 primary), the FASTA, the gene and the window shown, and every option of the viewer: depth axis,
 arc labels, thresholds, reads track, groups (by sample name), the chosen reference transcript…
+The variants of interest of the header are saved too.
 
 Give the files through **+ Run folder…** (or drop the folder on the page): the page lists the
 BAM/CRAM files with their index and the FASTA found inside, without reading them, and remembers
@@ -307,6 +313,17 @@ Files can be tens of gigabytes: only the indexed slices of the window are read.
 **Scope.** This is a visualisation and review tool for trained users. Splice, ψ, exon usage and NMD
 calls are computed from the reads and the MANE model in view; confirm findings with your
 validated pipeline before reporting.
+
+## Variants of interest (known variants)
+
+The **Known variants** row of the header takes any number of variants to keep in sight: a locus
+(`chr17:43,094,464`, or an interval `chr17:43,094,464-43,094,470`, an HGVS genomic notation such
+as `chr17:g.43094464A>G` or `NC_000017.11:g.43094464A>G`, or a VCF-like line) and a free label
+(`BRCA1 p.Glu23Asp`, a sample name, anything), then **+ Add**. Each becomes a chip (× removes it)
+and is drawn on every view like the variants of a deep link: the **Known variants** option of the
+viewer, on by default as soon as one exists, shows a panel under the transcript with the labels,
+guide lines through every track, and a *go to…* menu to centre the view on one of them. They are
+saved with the session and carried by the exported page.
 
 ## Open on a variant from another tool (deep links)
 

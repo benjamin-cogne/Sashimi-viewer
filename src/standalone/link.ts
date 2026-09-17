@@ -79,6 +79,16 @@ function variantOf(text: string, index: number, label: string | undefined, fallb
   return null;
 }
 
+/**
+ * A variant of interest typed by the user: a locus (chr17:43,094,464 or chr17:43,094,464-43,094,470), an HGVS
+ * genomic notation (NC_000017.11:g.43094464A>G, chr17:g.43094464A>G) or a VCF-like line (chr17 43094464 A G).
+ * `label` is the text drawn next to it (a gene and protein change, say); null when nothing parses.
+ */
+export function variantOfInterest(text: string, label: string, id: string): KnownVariant | null {
+  const v = variantOf(text, 0, label.trim() || undefined, '');
+  return v ? { ...v, id } : null;
+}
+
 /** The request carried by the page URL, or null when there is none (or nothing parses). */
 export function parseLink(hash: string, search: string): LinkRequest | null {
   const p = readParams(hash, search);

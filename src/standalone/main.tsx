@@ -13,9 +13,9 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedReads } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
-import type { LibraryEvidence, LibraryType } from '../components/sashimi/types';
+import type { KnownVariant, LibraryEvidence, LibraryType } from '../components/sashimi/types';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
-import { describeLink, parseLink } from './link';
+import { describeLink, parseLink, variantOfInterest } from './link';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
@@ -128,6 +128,13 @@ function App() {
   const pendingSettingsRef = useRef<Partial<ViewerSettings> | undefined>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ---- Variants of interest (header): drawn on every view through the viewer's known-variant layer ----
+  const [knownVars, setKnownVars] = useState<KnownVariant[]>(() => EMBEDDED?.knownVariants ?? LINK?.variants ?? []);
+  const knownSeq = useRef(0);
+  const nextKnownId = useRef(1);
+  const [knownLocus, setKnownLocus] = useState('');
+  const [knownLabel, setKnownLabel] = useState('');
+  const [knownError, setKnownError] = useState<string | null>(null);
   const [exportDialog, setExportDialog] = useState<ExportOptions | null>(null);
   // ---- Sessions: the viewer's latest state (options + navigation), a loaded session waiting for its files ----
   const viewerStateRef = useRef<ViewerState | null>(null);
@@ -190,11 +197,15 @@ function App() {
     const files = Array.from(list as ArrayLike<File | PathedFile>);
     const { samples: found, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
     const msgs: string[] = [];
-    const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s }));
+    const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s, pending: true }));
     for (const s of added) ds.addSample(s);
     if (added.length) setSamples(prev => [...prev, ...added]);
-    // library type from the header (the aligner); the reads of the first gene opened confirm or correct it
-    for (const s of added) ds.getLibraryType?.(s.id).then(ev => setSamples(prev => prev.map(x => (x.id === s.id && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...x, lib: ev } : x)))).catch(() => {});
+    // library type from the header (the aligner); the reads of the first gene opened confirm or correct it. The chip pulses until the file is open.
+    for (const s of added) {
+      const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? ev : x.lib } : x)));
+      if (ds.getLibraryType) ds.getLibraryType(s.id).then(settle).catch(() => settle(null));
+      else settle(null);
+    }
     if (unmatched.length) msgs.push(`No index found for ${unmatched.join(', ')} (add the .bai / .crai file together with it)`);
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
@@ -270,6 +281,19 @@ function App() {
 
   const removeSample = useCallback((id: number) => { ds.removeSample(id); setSamples(prev => prev.filter(s => s.id !== id)); }, [ds]);
 
+  /** Sets the variants of interest: the data source serves them for every sample and the viewer fetches them again. */
+  const setKnown = useCallback((list: KnownVariant[]) => { ds.knownVariants = list; knownSeq.current++; setKnownVars(list); }, [ds]);
+  const addKnown = useCallback(() => {
+    const text = knownLocus.trim();
+    if (!text) return;
+    const v = variantOfInterest(text, knownLabel, `user${nextKnownId.current++}`);
+    if (!v) { setKnownError(`"${text}" is not a locus (chr17:43,094,464 or chr17:43,094,464-43,094,470), an HGVS genomic notation or a VCF-like line`); return; }
+    setKnownError(null);
+    setKnown([...knownVars, v]);
+    setKnownLocus(''); setKnownLabel('');
+  }, [knownLocus, knownLabel, knownVars, setKnown]);
+  const removeKnown = useCallback((id: string) => setKnown(knownVars.filter(v => v.id !== id)), [knownVars, setKnown]);
+
   const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); };
 
   /** Open the window a deep link asked for: the gene at the locus (coding first), else the `gene` parameter, with the variant pinned. */
@@ -339,7 +363,7 @@ function App() {
   // ---- Save / load a session (JSON) ----
   const saveSession = useCallback(() => {
     const { tabs, activeIndex } = currentViews();
-    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex });
+    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
     if (hasFileSystemAccess()) {
       const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : [])]
         .map(f => ({ name: f.name, size: f.size, handle: fileHandlesRef.current.get(f.name)! })).filter(e => e.handle);
@@ -360,7 +384,7 @@ function App() {
     try {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
-      const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex });
+      const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
       for (const t of tabs) {
         const st = t.state!;
@@ -409,7 +433,7 @@ function App() {
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
         samples: samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: s.file.name, index: s.index.name, library: s.lib })),
-        session, views: evs, knownVariants: ds.knownVariants,
+        session, views: evs, knownVariants: knownVars,
       };
       const html = await buildExportHtml(payload);
       const name = (sessionName.trim() || defaultSessionName(tabs[activeIndex].state!.gene.name)).replace(/\.json$/i, '').replace(/\.html$/i, '') + '.html';
@@ -477,6 +501,7 @@ function App() {
 
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
+    if (session.knownVariants) setKnown(session.knownVariants.map(k => variantOfInterest(k.text, k.label, `user${nextKnownId.current++}`)).filter((v): v is KnownVariant => !!v).map((v, i) => ({ ...v, id: `session${i + 1}` })));
     const { matched } = matchSession(session, samples);
     for (const { entry, sample } of matched) if (sample.name !== entry.name) ds.renameSample(sample.id, entry.name);
     const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name, lib: m.entry.library ?? s.lib } : s; });
@@ -628,10 +653,11 @@ function App() {
               onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
               onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
               {i === 0 && <span title="primary sample">★</span>}
+              {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
               <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
-                className={`px-1 rounded text-[9px] font-bold leading-4 ${s.lib?.type === 'dna' ? 'bg-slate-700 text-white' : s.lib?.type === 'rna' ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-700'}`}
+                className={`px-1 rounded text-[9px] font-bold leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-700 text-white' : s.lib?.type === 'rna' ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-700'}`}
                 title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
-                {libBadge(s.lib)}
+                {s.pending ? '…' : libBadge(s.lib)}
               </button>
               {renaming?.id === s.id ? (
                 <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
@@ -644,6 +670,12 @@ function App() {
             </span>
           ))}
           {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
+          {samples.some(s => s.pending) && (
+            <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
+              <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+              Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1.5 ml-auto" title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again.">
           <span className="text-xs text-gray-600">Session</span>
@@ -663,6 +695,25 @@ function App() {
             {views.length > 1 ? `SVG · ${views.length} views` : 'SVG'}
           </button>
         </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+          <span className="text-xs text-gray-600">Known variants</span>
+          <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="flex items-center gap-1">
+            <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false}
+              className={`border rounded px-2 py-0.5 text-xs w-44 bg-white font-mono ${knownError ? 'border-red-400' : 'border-gray-300'}`}
+              title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
+            <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" className="border border-gray-300 rounded px-2 py-0.5 text-xs w-52 bg-white"
+              title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
+            <button type="submit" disabled={!knownLocus.trim()} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40">+ Add</button>
+          </form>
+          {knownError && <span className="text-xs text-red-600">{knownError}</span>}
+          {knownVars.map(v => (
+            <span key={v.id} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border bg-rose-50 border-rose-300 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
+              <span className="font-medium">{v.label}</span>
+              <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString()}{v.end > v.start + 1 ? `-${v.end.toLocaleString()}` : ''}</span>
+              <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove">×</button>
+            </span>
+          ))}
         </div>
         {views.length > 1 && (
           <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
@@ -736,7 +787,7 @@ function App() {
       ) : (
         <div className="p-3">
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div>
       )}

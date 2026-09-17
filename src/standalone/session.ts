@@ -39,6 +39,8 @@ export interface SessionFile {
   /** every registered view (tab), in order; `gene` / `viewer` above describe the active one (older readers use them) */
   views?: SessionView[];
   activeView?: number;
+  /** variants of interest entered in the header (notation as typed, label shown), drawn on every view */
+  knownVariants?: { text: string; label: string }[];
 }
 /** One registered view: the region and the full set of options it was left with. */
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
@@ -61,6 +63,7 @@ export function buildSession(args: {
   /** every registered view with its own state (the active one included) */
   views?: { label: string; state: ViewerState }[];
   activeView?: number;
+  knownVariants?: { text: string; label: string }[];
 }): SessionFile {
   const { build, samples, fasta, state } = args;
   const folder = args.folder ?? null;
@@ -85,6 +88,7 @@ export function buildSession(args: {
     viewer: state ? viewerOf(state) : null,
     views: views && views.length ? views : undefined,
     activeView: views && views.length ? Math.min(Math.max(0, args.activeView ?? 0), views.length - 1) : undefined,
+    knownVariants: args.knownVariants?.length ? args.knownVariants.map(k => ({ text: k.text, label: k.label })) : undefined,
   };
 }
 
@@ -120,7 +124,10 @@ export function parseSession(text: string): SessionFile {
     ? raw.views.map((x: any) => { const g = parseGene(x?.gene); return g ? { label: typeof x.label === 'string' && x.label ? x.label : g.name, gene: g, viewer: parseViewer(x.viewer) } : null; }).filter((x: any): x is SessionView => !!x)
     : undefined;
   const activeView = views?.length ? Math.min(Math.max(0, Number(raw.activeView) || 0), views.length - 1) : undefined;
-  return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null, gene, viewer, views: views?.length ? views : undefined, activeView };
+  const knownVariants = Array.isArray(raw.knownVariants)
+    ? raw.knownVariants.filter((k: any) => k && typeof k.text === 'string' && k.text.trim()).map((k: any) => ({ text: String(k.text), label: typeof k.label === 'string' ? k.label : '' }))
+    : undefined;
+  return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null, gene, viewer, views: views?.length ? views : undefined, activeView, knownVariants: knownVariants?.length ? knownVariants : undefined };
 }
 
 /** Which session samples are present among the loaded files (by relative path, else by file name, else by index name), and which are still missing. */

@@ -53,6 +53,8 @@ interface SashimiViewerProps {
   initialReads?: boolean;
   /** Display names chosen by the host (renamed samples), by sample id; tracks follow without remounting. */
   sampleNames?: Record<number, string>;
+  /** Bumped by the host when the known variants of the samples changed (variants of interest added or removed): they are fetched again. */
+  knownVariantsVersion?: number;
   /** Library type of each sample (RNA-seq or genomic DNA), by sample id: DNA tracks show no junction arcs and no usage. */
   sampleTypes?: Record<number, LibraryType>;
   /** Called after each coverage load with the spliced-read fraction of the window, the host's evidence for the library type. */
@@ -361,7 +363,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, sampleTypes, onLibraryEvidence, initialSettings, onStateChange,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, onLibraryEvidence, initialSettings, onStateChange,
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   const ds = dataSource;
@@ -679,6 +681,9 @@ export default function SashimiViewer({
   const [knownVariants, setKnownVariants] = useState<Map<number, KnownVariant[]>>(() => new Map());
   const [showKnown, setShowKnown] = useState(init.knownVariants ?? true);
   const knownRequested = useRef<Set<number>>(new Set());
+  // the host changed the variants: forget what was fetched, the effect below fetches again
+  const knownVersionSeen = useRef(knownVariantsVersion);
+  if (knownVersionSeen.current !== knownVariantsVersion) { knownVersionSeen.current = knownVariantsVersion; knownRequested.current.clear(); }
   useEffect(() => {
     if (!ds.getKnownVariants) return;
     // Without any alignment (sampleId 0) the host may still hand over variants, e.g. from a deep link
@@ -690,7 +695,7 @@ export default function SashimiViewer({
         .then(list => setKnownVariants(prev => new Map(prev).set(sid, list)))
         .catch(e => { knownRequested.current.delete(sid); console.warn('[sashimi] known variants unavailable:', e?.message || e); });
     }
-  }, [tracks, ds, sampleId]);
+  }, [tracks, ds, sampleId, knownVariantsVersion]);
   const chromKey = (c: string) => (c.startsWith('chr') ? c : `chr${c}`).replace(/^chrMT$/, 'chrM');
   /** Variants of a sample placed on the current chromosome (a bare g. notation of the queried gene counts as here). */
   const knownOnChrom = useCallback((sid: number): KnownVariant[] => {
@@ -1645,7 +1650,8 @@ export default function SashimiViewer({
     const modelBoundaries = isDnaSample(sid) ? undefined : boundariesOf(tx);
     const longReads = !!current.long_reads;
     const indelMin = longReads ? minIndelBp : 1;
-    const consensus = longReads && consensusMode;
+    // consensus drawing (mismatches and indels only at called sites) for long reads and for every genomic DNA track
+    const consensus = (longReads || isDnaSample(sid)) && consensusMode;
     const snvSites = new Set(current.sites.filter(s => s.kind === 'snv').map(s => `${s.pos}\t${s.alt}`));
     const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
     const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
@@ -3173,7 +3179,8 @@ export default function SashimiViewer({
             <button onClick={() => zoomBy(1.4)} className={`${t.btn} font-bold`} title="Zoom out (Ctrl + scroll down)">&minus;</button>
             <button onClick={resetZoom} className={t.btn} title="Reset to the whole gene (or double-click the plot)">Reset</button>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          {/* the options always start a new line under the title, search and zoom */}
+          <div className="flex flex-wrap items-center gap-3 basis-full">
             <Toggle checked={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns"
               title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
             {equalIntrons && tx && intronsOf(tx).length > 0 && (
@@ -3244,10 +3251,12 @@ export default function SashimiViewer({
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
                 </label>
               )}
+              {showReads && (anyLongReads || anyDna) && (
+                <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
+                  title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: for long reads (ONT, PacBio) and for every genomic DNA track, short reads included. Off: every mismatch and indel of every read." />
+              )}
               {showReads && anyLongReads && (
                 <>
-                  <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
-                    title="Long reads (ONT, PacBio): draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read. Off: every mismatch and indel of every read." />
                   <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it).">
                     Min VAF (long)
                     <input type="number" min={1} max={100} value={longReadMinVafPct} onChange={e => setLongReadMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
