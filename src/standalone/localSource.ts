@@ -8,6 +8,7 @@ import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
+import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
@@ -153,7 +154,7 @@ export class LocalDataSource implements SashimiDataSource {
 
   addSample(s: LocalSample) { this.samples.set(s.id, s); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); }
+  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }
 
   // ---- reference ----
@@ -189,6 +190,39 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   // ---- files ----
+  /** SAM header text of each sample, read without its index (memoised). */
+  private headers = new Map<number, Promise<string>>();
+
+  /**
+   * The SAM header of a BAM from the start of the file alone: the header sits before the first record, so a few bgzf
+   * blocks give it. The library's own header read first parses the whole index to size the header (5–10 MB for a
+   * genome), which is what made adding a file on a slow disk or share wait; the index is parsed later, at the first
+   * region request. A CRAM's header is in its first container, read the same way by the CRAM library.
+   */
+  private headerText(id: number): Promise<string> {
+    const s = this.samples.get(id);
+    if (!s) return Promise.reject(new Error('Sample not found'));
+    if (!this.headers.has(id)) {
+      this.headers.set(id, (async () => {
+        if (s.kind === 'cram') return (await this.open(id)).header;
+        // read, inflate, and grow the read until the header text is complete (64 kB covers most files; a header of
+        // thousands of contigs and hundreds of @PG lines takes a few hundred kB)
+        for (let len = 64 * 1024; ; len *= 4) {
+          const bytes = new Uint8Array(await s.file.slice(0, Math.min(len, s.file.size)).arrayBuffer());
+          const data = await unzip(bytes);   // whole blocks only; a block cut by the read end is left for the next round
+          if (data.length >= 8) {
+            if (!(data[0] === 66 && data[1] === 65 && data[2] === 77 && data[3] === 1)) throw new Error(`${s.file.name} is not a BAM file`);
+            const lText = new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(4, true);
+            if (lText < 0) throw new Error(`${s.file.name}: invalid BAM header`);
+            if (8 + lText <= data.length) return new TextDecoder().decode(data.subarray(8, 8 + lText)).replace(/\0+$/, '');
+          }
+          if (len >= s.file.size || len >= 64 * 1024 * 1024) throw new Error(`${s.file.name}: BAM header not found`);
+        }
+      })().catch(e => { this.headers.delete(id); throw e; }));
+    }
+    return this.headers.get(id)!;
+  }
+
   private open(id: number): Promise<Opened> {
     const s = this.samples.get(id);
     if (!s) return Promise.reject(new Error('Sample not found'));
@@ -321,8 +355,7 @@ export class LocalDataSource implements SashimiDataSource {
   }
   async getLibraryType(sampleId: number): Promise<LibraryEvidence> {
     if (!this.samples.has(sampleId)) return { type: 'unknown', source: 'none', note: 'sample not found' };
-    const o = await this.open(sampleId);
-    return classifyHeader(o.header);
+    return classifyHeader(await this.headerText(sampleId));
   }
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> { return getTranscript(this.reference.build, geneName, geneId, hint); }
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }
