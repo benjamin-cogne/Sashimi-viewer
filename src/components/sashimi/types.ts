@@ -91,6 +91,8 @@ export interface SampleCoverage {
 export interface AlignedRead {
   n: string; s: number; e: number; r: 0 | 1; q: number; f: number; nh: number | null;
   b: [number, number][]; d: [number, number][]; i: [number, number][]; m: [number, string, number][]; c: [number, number];
+  /** mate: 0-based start (`mp`), chromosome when not the read's own (`mc`), template length as the aligner set it (`tl`); absent when unpaired or unknown */
+  mp?: number; mc?: string; tl?: number;
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {

@@ -177,6 +177,12 @@ Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool 
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the
 discordant pairs (CRAM mate fields are read when the file records them).
 
+**Pairs.** In the reads track the two mates of a pair share one row and are joined by a line
+(*Pairs*, on by default, next to *Reads*); the tooltip of a read gives its mate's position and the
+insert size. Reads of a **discordant pair** are amber: mate on another chromosome, pair not flagged
+as proper by the aligner, or, on genomic DNA, an insert above five times the median of the window.
+The pairs are kept in exported pages.
+
 **Consensus reads.** *Consensus* (on by default) draws mismatches and indels only where a variant
 site is called (at least 3 reads and *Min VAF*), so sequencing errors do not paint every read. It
 is offered for every genomic DNA reads track, short reads included, and for long reads whatever
@@ -239,16 +245,27 @@ groups or usage percentages, click arcs and exons for the HGVS and frame details
 exact where you had it exact and marked ≈ where the source had sampled it.
 
 **Reads.** For every view whose reads track is on, the export also embeds the reads of every loaded
-sample, with the reference bases and the mismatches, so the recipient sees the same pile-up, can
-switch between reads and the collapsed haplotype view and change *Min VAF*. Read names are
-replaced by numbers. While an export runs (HTML or SVG), a progress window names the step in progress (view, sample,
+sample, with the reference bases, the mismatches and the mate positions, so the recipient sees the
+same pile-up with its pairs, can switch between reads and the collapsed haplotype view and change
+*Min VAF*. Read names are replaced by numbers.
+
+**Size.** Reads and coverage are stored in a compact binary form (columns of small integers,
+compressed with the browser's own deflate, written in base64): about 6 bytes per read with its
+mate, 24 times less than the JSON of earlier exports, and 5 times less for the coverage. The
+format is specified in [`docs/embedded-format.md`](docs/embedded-format.md) so other tools can
+write or read it. A page decodes a view the first time it is shown, off the main thread, the
+active view first and the others in idle moments, so opening a page with many views costs
+nothing up front. Browsers without a built-in decompressor (before Chrome 80, Firefox 113,
+Safari 16.4) use a small JavaScript one bundled in the viewer. Pages exported by earlier versions
+still open. While an export runs (HTML or SVG), a progress window names the step in progress (view, sample,
 coverage or reads) with a bar over the total number of steps; the download starts when it
 closes, so the tab should stay open. The dialog that opens on *Export HTML* chooses the window exported around each view, for the
 coverage, junctions and retention counts as much as for the reads (the view as shown; the view with
 a half-width margin on each side, the default; or the widest window the viewer itself loads, up to
-2 Mb for coverage and 100 kb for reads) and the number of reads per sample (up to 2,500 as displayed, about 300 kB per sample and view; up to 20,000 for
-zooming in; or every read of the window, which can reach tens of MB for a deep window). Views wider
-than 100 kb have no reads track and are skipped.
+2 Mb for coverage and 100 kb for reads) and the number of reads per sample (up to 20,000 as
+displayed, about 150 kB per sample and view; up to 100,000 for deep windows, under 1 MB; or every
+read of the window, a few MB for a deep window). Views wider than 100 kb have no reads track and
+are skipped.
 
 What the export does not carry: the exon-depth statistics (they need the alignments; the recipient
 can add the BAM/CRAM files and the page then reads them as usual), reads of views whose reads track

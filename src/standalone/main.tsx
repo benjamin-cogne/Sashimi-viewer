@@ -10,7 +10,7 @@ import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type Viewe
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
-import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverage, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedReads } from './embedded';
+import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
 import type { KnownVariant, LibraryEvidence, LibraryType } from '../components/sashimi/types';
@@ -56,7 +56,7 @@ const MAX_FETCH_BP = 2_000_000;
 const READS_MAX_VIEW_BP = 100_000;
 /** Choices of the export dialog: the window exported around each view (coverage, junctions, retention and reads alike) and the reads per sample. */
 interface ExportOptions { window: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
-const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 2500, dense: 20000, all: Number.MAX_SAFE_INTEGER };
+const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 20000, dense: 100000, all: Number.MAX_SAFE_INTEGER };
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
@@ -421,20 +421,20 @@ function App() {
         const intronStarts = new Set<number>(), intronEnds = new Set<number>();
         const exonSets = [toTxModel(transcript).exons.map(e => ({ start: e.start, end: e.end })), ...(allTranscripts?.transcripts ?? []).map(m => m.exons.map(e => ({ start: e.start - 1, end: e.end })))];
         for (const ex of exonSets) { const sorted = [...ex].sort((a, b) => a.start - b.start); for (let i = 0; i + 1 < sorted.length; i++) { intronStarts.add(sorted[i].end); intronEnds.add(sorted[i + 1].start); } }
-        const coverage: Record<string, EncodedCoverage> = {};
+        const coverage: Record<string, EncodedCoverage | EncodedCoverageV2> = {};
         done++;
         for (const smp of samples) {
           progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
             const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000 });
-            coverage[String(smp.id)] = encodeCoverage(c, { start: ws, end: we });
+            coverage[String(smp.id)] = await encodeCoverageV2(c, { start: ws, end: we });
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
           done++;
         }
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
-        let reads: Record<string, EncodedReads> | undefined;
+        let reads: Record<string, EncodedReadsV2> | undefined;
         if (st.reads) {
           if (span > READS_MAX_VIEW_BP) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above the ${READS_MAX_VIEW_BP / 1000} kb reads limit)`);
           else {
@@ -446,7 +446,7 @@ function App() {
               progress(`${t.label}: reads of ${smp.name}`);
               try {
                 const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05);
-                reads[String(smp.id)] = { window: { start: rs, end: re }, total: r.total, reads: r.reads.map((x, i) => ({ ...x, n: `read ${i + 1}` })), reference: r.reference, reference_source: r.reference_source };
+                reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
               done++;
@@ -618,7 +618,11 @@ function App() {
   // An exported page opens its views at once (its samples are embedded)
   const embeddedOpened = useRef(false);
   useEffect(() => {
-    if (EMBEDDED && !embeddedOpened.current) { embeddedOpened.current = true; applySession(EMBEDDED.session); }
+    if (EMBEDDED && !embeddedOpened.current) {
+      embeddedOpened.current = true; applySession(EMBEDDED.session);
+      // the active view's blocks first, the others in idle moments: the page never waits for a decode
+      if (ds instanceof EmbeddedDataSource) ds.prefetchAll(EMBEDDED.session.activeView ?? 0);
+    }
   }, [applySession]);
 
   loadSessionRef.current = loadSession;
@@ -872,7 +876,7 @@ function App() {
               <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Reads per sample in that window</legend>
-                {([['shown', 'as displayed: up to 2,500 reads (sampled evenly when the window holds more) · about 300 kB per sample and view'], ['dense', 'dense: up to 20,000 reads, for zooming in · a few MB per sample and view'], ['all', 'every read of the window · exact at any zoom, can reach tens of MB for a deep window']] as const).map(([v, label]) => (
+                {([['shown', 'as displayed: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (
                   <label key={v} className="flex items-center gap-2"><input type="radio" name="readsCap" checked={exportDialog.readsCap === v} onChange={() => setExportDialog({ ...exportDialog, readsCap: v })} disabled={!viewsWithReads} />{label}</label>
                 ))}
               </fieldset>

@@ -123,6 +123,14 @@ function tagNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 /** Long reads (ONT, PacBio): the median aligned length of the window's reads is above 1 kb. */
+/** Adds the pair fields of a paired, mate-mapped record to its encoded read: mate start, template length, mate chromosome when it differs. */
+function withMate(a: AlignedRead, r: RawRead, own: string): AlignedRead {
+  if (!(r.flags & 1) || r.flags & 8 || r.matePos == null || r.matePos < 0) return a;
+  a.mp = r.matePos; a.tl = r.tlen ?? 0;
+  if (r.mateChrom && r.mateChrom !== own) a.mc = r.mateChrom;
+  return a;
+}
+
 export function isLongRead(reads: { s: number; e: number }[]): boolean {
   if (!reads.length) return false;
   const lens = reads.map(r => r.e - r.s).sort((a, b) => a - b);
@@ -438,11 +446,13 @@ export class LocalDataSource implements SashimiDataSource {
     if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
     const collapsed = mode === 'collapsed';
     const cap = collapsed ? Math.max(40000, maxReads) : Math.max(100, maxReads);
-    // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them
-    const { total, kept: raw } = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false);
+    // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them; the
+    // pair fields (mate position, template length) come along so that mates can be drawn linked
+    const { total, kept: raw } = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false, true);
     const refStart = Math.max(0, start - 500);
     const ref = await this.getReferenceSeq(chrom, refStart, end + 500);
-    const reads: AlignedRead[] = raw.map(r => encodeRead(r, ref, refStart));
+    const own = (await this.locate(sampleId, chrom))?.name ?? chrom;
+    const reads: AlignedRead[] = raw.map(r => withMate(encodeRead(r, ref, refStart), r, own));
     const longReads = isLongRead(reads);
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;

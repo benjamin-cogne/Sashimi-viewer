@@ -90,6 +90,8 @@ export interface ViewerSettings {
   longReadMinVafPct?: number;
   /** DNA tracks: draw the variant sites called from the reads as allele bars on the coverage (default on); off = plain coverage */
   coverageVariants?: boolean;
+  /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
+  pairs?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -99,7 +101,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -269,6 +271,9 @@ const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto
 const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#6b7280' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const READ_FILL = '#c8cdd6';
+/** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
+const READ_DISCORDANT_FILL = '#fcd34d';
+const PAIR_LINK_COLOR = '#9ca3af';
 const INSERTION_COLOR = '#7c3aed';
 const STAR_COLOR = '#f59e0b';
 const SNP_SNV_COLOR = '#2563eb';
@@ -439,6 +444,7 @@ export default function SashimiViewer({
   const [minVafPct, setMinVafPct] = useState(init.minVafPct ?? 10); // variant sites need at least this alternate-allele fraction
   // long reads (ONT, PacBio): their sequencing errors would paint every read with mismatches and small indels
   const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
+  const [showPairs, setShowPairs] = useState(init.pairs ?? true);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
@@ -1667,7 +1673,45 @@ export default function SashimiViewer({
 
     // ======================= Raw mode: packed alignments =======================
     const visible = current.reads.filter(r => r.e > viewStart && r.s < viewEnd);
-    const { rows, nRows, hidden } = packReads(visible, READS_MAX_ROWS);
+    // Pairs: two mates both in the window share one row (their span packed as one unit) and are joined by a line
+    const pairMode = showPairs && visible.some(r => r.mp != null);
+    const mateOf = new Int32Array(visible.length).fill(-1);
+    let rows: Int32Array, nRows: number, hidden: number;
+    if (pairMode) {
+      const byStart = new Map<number, number[]>();
+      visible.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
+      visible.forEach((r, i) => {
+        if (mateOf[i] >= 0 || r.mp == null || r.mc) return;
+        for (const j of byStart.get(r.mp) ?? []) {
+          if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; break; }
+        }
+      });
+      const units: { s: number; e: number }[] = [];
+      const unitOf = new Int32Array(visible.length);
+      visible.forEach((r, i) => {
+        const j = mateOf[i];
+        if (j >= 0 && j < i) { unitOf[i] = unitOf[j]; return; }
+        unitOf[i] = units.length;
+        units.push(j >= 0 ? { s: Math.min(r.s, visible[j].s), e: Math.max(r.e, visible[j].e) } : { s: r.s, e: r.e });
+      });
+      const packed = packReads(units, READS_MAX_ROWS);
+      rows = new Int32Array(visible.length); hidden = 0;
+      visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
+      nRows = packed.nRows;
+    } else {
+      ({ rows, nRows, hidden } = packReads(visible, READS_MAX_ROWS));
+    }
+    // discordance: mate elsewhere, not flagged as a proper pair, or (genomic DNA) an insert far above the median
+    const inserts = visible.map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
+    const medianInsert = inserts.length ? inserts[inserts.length >> 1] : 0;
+    const dnaTrack = isDnaSample(sid);
+    const discordantOf = (r: AlignedRead): string | null => {
+      if (r.mp == null) return null;
+      if (r.mc) return `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`;
+      if (!(r.f & 2)) return 'not a proper pair';
+      if (dnaTrack && medianInsert > 0 && Math.abs(r.tl ?? 0) > Math.max(1000, 5 * medianInsert)) return `insert ${Math.abs(r.tl!).toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp)`;
+      return null;
+    };
     const rowH = nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode
     const bodyHeight = Math.max(1, nRows) * (rowH + 1) + 6;
     const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
@@ -1694,6 +1738,14 @@ export default function SashimiViewer({
       const parts: JSX.Element[] = [];
       const lowMapq = r.q === 0;
       const spans = readSpansBoundary(r, modelBoundaries);
+      const discordant = pairMode ? discordantOf(r) : null;
+      const fill = discordant ? READ_DISCORDANT_FILL : READ_FILL;
+      // the line to the mate, drawn once per pair from the left mate
+      const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
+      if (mate && (r.s < mate.s || (r.s === mate.s && idx < mateOf[idx]))) {
+        const a = scale.x(Math.min(r.e, mate.e)), b = scale.x(Math.max(r.s, mate.s));
+        if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? SV_COLORS.discordant : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
+      }
       r.b.forEach(([bs, be], k) => {
         const xa = scale.x(bs), xb = scale.x(be);
         const left = Math.min(xa, xb), right = Math.max(xa, xb), w = Math.max(1, right - left);
@@ -1703,9 +1755,9 @@ export default function SashimiViewer({
           const d = tipRight
             ? `M${left},${top} H${right - 4} L${right},${mid} L${right - 4},${top + rowH} H${left} Z`
             : `M${right},${top} H${left + 4} L${left},${mid} L${left + 4},${top + rowH} H${right} Z`;
-          parts.push(<path key={`b${k}`} d={d} fill={READ_FILL} opacity={lowMapq ? 0.35 : 1} />);
+          parts.push(<path key={`b${k}`} d={d} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
         } else {
-          parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} fill={READ_FILL} opacity={lowMapq ? 0.35 : 1} />);
+          parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
         }
         if (spans) parts.push(<rect key={`s${k}`} x={left} y={top} width={w} height={rowH} fill="none" stroke={RETENTION_COLOR} strokeWidth={1.2} />);
         if (k + 1 < r.b.length) {
@@ -1714,7 +1766,7 @@ export default function SashimiViewer({
           const g1 = scale.x(gs), g2 = scale.x(ge);
           // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body
           const quiet = isDel && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
-          if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} fill={READ_FILL} opacity={lowMapq ? 0.35 : 1} />);
+          if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
           else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
         }
       });
@@ -1741,6 +1793,7 @@ export default function SashimiViewer({
       const title = `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
+        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant}` : ''}` : '') +
         (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '');
       return <g key={r.n + r.s + r.f}><title>{title}</title>{parts}</g>;
     });
@@ -1749,14 +1802,17 @@ export default function SashimiViewer({
       (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
-      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') + commonInfo;
+      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
+      (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter(r => discordantOf(r)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp]);
+  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
+  /** Some loaded reads carry a mate: the Pairs option applies. */
+  const anyPairs = useMemo(() => Object.values(readsData).some(e => e.data.reads.some(r => r.mp != null)), [readsData]);
 
   // ---- Screenshot to the basket (PNG + the viewer state and effect it documents) ----
   const takeSnapshot = useCallback(async () => {
@@ -2223,6 +2279,18 @@ export default function SashimiViewer({
             <circle cx={7} cy={y} r={4} fill={FRAME_OUT_COLOR} stroke="#ffffff" strokeWidth={1} />
             <rect x={7 - 4 * 0.62} y={y - 1} width={4 * 1.24} height={2} rx={1} fill="#ffffff" />
             <text x={16} y={y + 3.5} fill={INK.muted} fontSize={9.5}>exon whose skipping shifts the frame</text>
+          </g>
+        ),
+      });
+    }
+    if (showReads && anyPairs && showPairs) {
+      items.push({
+        w: 210, el: (
+          <g key="lpair">
+            <rect x={0} y={y - 4} width={10} height={8} fill={READ_FILL} /><line x1={10} y1={y} x2={24} y2={y} stroke={PAIR_LINK_COLOR} strokeWidth={1} /><rect x={24} y={y - 4} width={10} height={8} fill={READ_FILL} />
+            <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mates joined</text>
+            <rect x={104} y={y - 4} width={10} height={8} fill={READ_DISCORDANT_FILL} /><line x1={114} y1={y} x2={124} y2={y} stroke={SV_COLORS.discordant} strokeWidth={1.5} />
+            <text x={128} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant pair</text>
           </g>
         ),
       });
@@ -3173,13 +3241,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3308,6 +3376,10 @@ export default function SashimiViewer({
                   <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
                 </label>
+              )}
+              {showReads && anyPairs && (
+                <Toggle checked={showPairs} onChange={setShowPairs} label="Pairs"
+                  title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair (mate on another chromosome, not a proper pair, or on genomic DNA an insert above 5 times the median) are amber. Off: every read on its own row." />
               )}
               {showReads && (anyLongReads || anyDna) && (
                 <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
