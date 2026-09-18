@@ -146,6 +146,9 @@ function App() {
   const [sessionNameEdited, setSessionNameEdited] = useState(false);
   const [pendingSession, setPendingSession] = useState<{ file: SessionFile; name: string } | null>(null);
   const [sessionSeq, setSessionSeq] = useState(0);   // bumps the viewer key so a loaded session always remounts the viewer
+  // The upper panel (title, search, files, session, known variants) folds away to leave the views the whole window; remembered per browser
+  const [panelHidden, setPanelHidden] = useState(() => { try { return localStorage.getItem('sashimi.panel') === 'hidden'; } catch { return false; } });
+  const togglePanel = () => setPanelHidden(h => { try { localStorage.setItem('sashimi.panel', h ? 'shown' : 'hidden'); } catch { /* private mode */ } return !h; });
   /** The run folder the sample paths are relative to; the handle (Chromium) lets a session reopen it later. */
   const [runFolder, setRunFolder] = useState<{ name: string; handle: FSDirHandle | null } | null>(null);
   const fileHandlesRef = useRef(new Map<string, FSHandle>());   // Chromium bookmarks of individually added files, by name
@@ -652,6 +655,7 @@ function App() {
       )}
       <header className="bg-white border-b border-gray-200 px-5 py-3 space-y-2">
         {/* Row 1: title, build, gene search. Row 2: files and sample chips, which may wrap over several lines without moving the search. */}
+        {!panelHidden && <>
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
         <div className="flex items-center gap-2.5 flex-1 min-w-[320px]">
           <Logo size={34} />
@@ -682,6 +686,9 @@ function App() {
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
         <button onClick={chooseFiles} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium" title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)">
           + Files…
+        </button>
+        <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Hide this panel (title, search, files, session, known variants) so the views take the whole window; a button on the remaining bar brings it back" aria-label="Hide the upper panel">
+          ▲ Hide panel
         </button>
         <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
         {intake && (
@@ -759,9 +766,16 @@ function App() {
             </span>
           ))}
         </div>
-        {views.length > 1 && (
+        </>}
+        {(views.length > 1 || panelHidden) && (
           <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
+            {panelHidden && (
+              <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600 mr-1" title="Show the upper panel again (title, search, files, session, known variants)" aria-label="Show the upper panel">
+                ▼ Show panel
+              </button>
+            )}
             <span className="text-xs text-gray-600">Views</span>
+            {views.length === 0 && <span className="text-xs text-gray-400">none yet: show the panel to open a gene</span>}
             {views.map(v => (
               <span key={v.id} onClick={() => activateTab(v.id)}
                 className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400 hover:bg-indigo-50'}`}
