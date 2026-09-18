@@ -57,8 +57,10 @@ Directory:
 `reference_source` (`"fasta"`, `"ensembl"`, `"browser"` or null).
 
 Reads are sorted by start, then end, and cut into **blocks** of at most 1,000 reads. Each block
-has a `core` section and, when any read of the stream has a mate, a `pairs` section right after
-it. Block sections carry `block` (index), `start` and `end` (genomic span covered by the block's
+has a `core` section followed by its companion sections, each present only when the block needs
+it: `pairs` (any read has a mate), `clips` (soft-clipped bases, hard-clipped lengths), `inserts`
+(inserted bases) and `sa` (SA tags of split reads). A reader takes every section that follows a
+`core` section with the same block index, in any order, and skips the names it does not know. Block sections carry `block` (index), `start` and `end` (genomic span covered by the block's
 reads, 0-based half-open) and `n` (reads in the block), so a reader can decode only the blocks
 overlapping a window. Read names are not stored: a reader numbers the reads `read 1`,
 `read 2`, … in stream order.
@@ -100,7 +102,29 @@ n × s   mate start delta      mate start minus the read start (0 when no mate)
 n × s   template length       TLEN as the aligner set it (0 when no mate)
 ```
 
-### 3.3 `reference` section
+### 3.3 `clips` section (per block, present when any read of the block has a soft or hard clip)
+
+```
+n × ( string left, string right, u hard left, u hard right )
+```
+
+The soft-clipped bases at each end of the alignment, as the record stores them (reference
+strand), empty when the sequence was not available; then the hard-clipped lengths (bases the
+record does not carry: they sit in the read's primary record).
+
+### 3.4 `inserts` section (per block, present when any read of the block has an inserted sequence)
+
+```
+for each read, for each insertion of the core section, in order:   string bases
+```
+
+### 3.5 `sa` section (per block, present when any read of the block is split)
+
+```
+n × string     the SA tag as the aligner wrote it ("rname,pos,strand,CIGAR,mapQ,NM;" per part), empty otherwise
+```
+
+### 3.6 `reference` section
 
 ```
 u   start                     0-based start of the reference window

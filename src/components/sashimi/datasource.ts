@@ -70,6 +70,11 @@ export interface SashimiDataSource {
    * scan (no alignment file behind the sample).
    */
   getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  /**
+   * The primary record of a read (the one carrying the whole sequence, soft-clipped) at a known 0-based start, for
+   * the bases a supplementary record hard-clipped; null when not found. Absent when the source has no alignment file.
+   */
+  getPrimaryRecord?(sampleId: number, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null>;
   /** Library type of a sample from what the source knows before any read is decoded (the aligner named in the header); absent when it cannot tell. */
   getLibraryType?(sampleId: number): Promise<LibraryEvidence>;
   /** Variants previously identified in a sample (clinical indication, diagnostic, chromosome map); absent when the source has no such record. */

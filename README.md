@@ -183,6 +183,26 @@ insert size. Reads of a **discordant pair** are amber: mate on another chromosom
 as proper by the aligner, or, on genomic DNA, an insert above five times the median of the window.
 The pairs are kept in exported pages.
 
+**Clipped, inserted and split-read sequences.** The reads keep the bases their alignment leaves
+out: the soft-clipped bases at each end, the inserted bases, the lengths of the hard clips and the
+SA tag of a split read, in the live viewer, in exported pages (sections `clips`, `inserts` and `sa`
+of the reads stream, `docs/embedded-format.md`) and, once the converter writes them, in containers.
+Two options next to *Pairs*, off by default and saved with the session: **Clipped** draws the
+soft-clipped bases beyond the ends of the reads, as letters when the zoom allows and as
+base-coloured bars otherwise, dimmed where they match the reference continuing past the
+alignment, so a real breakpoint sequence stands out from a run of errors or an adapter; hard clips
+are dashed grey stubs of the right length, and the parts of a split read that fall in the window
+share one row, joined by a dashed purple line, as mates do. **Inserted** writes the inserted bases
+inside the insertion marks when there is room; they are always in the tooltip. Both work on RNA
+and DNA tracks, on the raw reads only (not on the consensus or haplotype rows). **Click a read**
+for its sequence panel: the clipped and inserted sequences with a copy button, the positions of the
+other parts of a split read, and, for a supplementary record, a *Fetch from the primary record*
+button that reads the read's primary record (the one that carries the whole sequence, soft-clipped)
+from the BAM/CRAM and shows the hard-clipped bases, reverse-complemented when the two records are on
+opposite strands. **Click a soft-clip cluster pill** (⇤ n, ⇥ n on a DNA coverage track) for the
+consensus of the clipped sequences of its reads, anchored at the breakpoint and ready to paste into
+BLAT to place the other side of the junction.
+
 **Consensus reads.** *Consensus* (on by default) draws mismatches and indels only where a variant
 site is called (at least 3 reads and *Min VAF*), so sequencing errors do not paint every read. It
 is offered for every genomic DNA reads track, short reads included, and for long reads whatever

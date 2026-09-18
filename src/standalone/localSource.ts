@@ -337,6 +337,11 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   // ---- SashimiDataSource ----
+  async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null> {
+    const { kept } = await this.scan(sampleId, chrom, start, start + 1, false, Number.MAX_SAFE_INTEGER, false, true);
+    const r = kept.find(x => x.start === start && x.name === name && !(x.flags & 2048) && x.seq);
+    return r ? { seq: r.seq, flags: r.flags, cigar: r.cigar } : null;
+  }
   /** Every site above the thresholds from every read of the window, one tile at a time (no read cap, any window width). */
   async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
     const s = this.samples.get(sampleId);

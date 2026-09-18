@@ -93,6 +93,14 @@ export interface AlignedRead {
   b: [number, number][]; d: [number, number][]; i: [number, number][]; m: [number, string, number][]; c: [number, number];
   /** mate: 0-based start (`mp`), chromosome when not the read's own (`mc`), template length as the aligner set it (`tl`); absent when unpaired or unknown */
   mp?: number; mc?: string; tl?: number;
+  /** soft-clipped bases at the left and right ends of the alignment (read orientation as stored, i.e. the reference strand); absent when the sequence was not available */
+  cs?: [string, string];
+  /** hard-clipped lengths at the left and right ends (bases the record does not carry: they sit in the read's primary record) */
+  h?: [number, number];
+  /** inserted bases, one string per entry of `i`; absent when the sequence was not available */
+  is?: string[];
+  /** SA tag of a split read: "rname,pos,strand,CIGAR,mapQ,NM;" per other part */
+  sa?: string;
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {

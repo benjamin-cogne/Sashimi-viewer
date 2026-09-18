@@ -259,6 +259,41 @@ function decodePairBlock(bytes: Uint8Array, reads: AlignedRead[]) {
   });
 }
 
+/** Clip fields of a block: soft-clipped bases at each end and hard-clipped lengths. */
+function encodeClipBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) { w.str(r.cs?.[0] ?? ''); w.str(r.cs?.[1] ?? ''); w.u(r.h?.[0] ?? 0); w.u(r.h?.[1] ?? 0); }
+  return w.done();
+}
+function decodeClipBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) {
+    const l = rd.str(), rt = rd.str(), hl = rd.u(), hr = rd.u();
+    if (l || rt) r.cs = [l, rt];
+    if (hl || hr) r.h = [hl, hr];
+  }
+}
+/** Inserted bases of a block: one string per insertion of each read, in the order of the core section's insertions. */
+function encodeInsertBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) for (let k = 0; k < r.i.length; k++) w.str(r.is?.[k] ?? '');
+  return w.done();
+}
+function decodeInsertBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) { if (!r.i.length) continue; const list = r.i.map(() => rd.str()); if (list.some(x => x)) r.is = list; }
+}
+/** SA tags of a block: one string per read (empty when the read is not split). */
+function encodeSaBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) w.str(r.sa ?? '');
+  return w.done();
+}
+function decodeSaBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) { const v = rd.str(); if (v) r.sa = v; }
+}
+
 /** Encodes the reads of a window: blocks of READS_PER_BLOCK, a pairs section per block when any read has a mate, the reference bases. */
 export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
   const sorted = [...p.reads].sort((a, b) => a.s - b.s || a.e - b.e);
@@ -272,6 +307,18 @@ export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
     if (anyPair) {
       const pairs = await deflate(encodePairBlock(block));
       sections.push({ name: 'pairs', block: b, bytes: pairs.length }); parts.push(pairs);
+    }
+    if (block.some(r => r.cs || r.h)) {
+      const clips = await deflate(encodeClipBlock(block));
+      sections.push({ name: 'clips', block: b, bytes: clips.length }); parts.push(clips);
+    }
+    if (block.some(r => r.is)) {
+      const ins = await deflate(encodeInsertBlock(block));
+      sections.push({ name: 'inserts', block: b, bytes: ins.length }); parts.push(ins);
+    }
+    if (block.some(r => r.sa)) {
+      const sa = await deflate(encodeSaBlock(block));
+      sections.push({ name: 'sa', block: b, bytes: sa.length }); parts.push(sa);
     }
   }
   if (p.reference) {
@@ -307,8 +354,15 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
       const base = counted; counted += s.n ?? 0;
       if (range && (s.end! <= range.start || s.start! >= range.end)) continue;
       const block = decodeReadBlock(await inflate(bytes()), k => `read ${base + k + 1}`);
-      const pairs = dir.sections[i + 1];
-      if (pairs && pairs.name === 'pairs' && pairs.block === s.block) decodePairBlock(await inflate(stream.subarray(offsets[i + 1], offsets[i + 1] + pairs.bytes)), block);
+      // the block's companion sections follow it: pairs, clips, inserts, sa (any order; unknown names skipped)
+      for (let j = i + 1; j < dir.sections.length && dir.sections[j].name !== 'core' && dir.sections[j].block === s.block; j++) {
+        const c = dir.sections[j];
+        const data = () => inflate(stream.subarray(offsets[j], offsets[j] + c.bytes));
+        if (c.name === 'pairs') decodePairBlock(await data(), block);
+        else if (c.name === 'clips') decodeClipBlock(await data(), block);
+        else if (c.name === 'inserts') decodeInsertBlock(await data(), block);
+        else if (c.name === 'sa') decodeSaBlock(await data(), block);
+      }
       reads.push(...block);
     } else if (s.name === 'reference') {
       const rd = new Reader(await inflate(bytes()));

@@ -59,8 +59,8 @@ export function parseCigar(cigar: string): [number, string][] {
 export function encodeRead(r: RawRead, ref: string | null, refStart: number): AlignedRead {
   const blocks: [number, number][] = [], dels: [number, number][] = [], ins: [number, number][] = [];
   const mism: [number, string, number][] = [];
-  const clips: [number, number] = [0, 0];
-  let rpos = r.start, qpos = 0, first = true;
+  const clips: [number, number] = [0, 0], hard: [number, number] = [0, 0], clipSeq: [string, string] = ['', ''], insSeq: string[] = [];
+  let rpos = r.start, qpos = 0, first = true;   // `first`: no aligned base seen yet (leading clips, whatever their order, are the left ones)
   const refEnd = ref ? refStart + ref.length : 0;
   for (const [len, op] of parseCigar(r.cigar)) {
     if (op === 'M' || op === '=' || op === 'X') {
@@ -81,22 +81,57 @@ export function encodeRead(r: RawRead, ref: string | null, refStart: number): Al
           }
         }
       }
-      rpos += len; qpos += len;
-    } else if (op === 'I') { ins.push([rpos, len]); qpos += len; }
-    else if (op === 'D') { dels.push([rpos, rpos + len]); rpos += len; }
-    else if (op === 'N') { rpos += len; }
-    else if (op === 'S') { clips[first ? 0 : 1] = len; qpos += len; }
-    first = false;
+      rpos += len; qpos += len; first = false;
+    } else if (op === 'I') { ins.push([rpos, len]); insSeq.push(r.seq ? r.seq.substring(qpos, qpos + len) : ''); qpos += len; first = false; }
+    else if (op === 'D') { dels.push([rpos, rpos + len]); rpos += len; first = false; }
+    else if (op === 'N') { rpos += len; first = false; }
+    else if (op === 'S') { const side = first ? 0 : 1; clips[side] += len; if (r.seq) clipSeq[side] += r.seq.substring(qpos, qpos + len); qpos += len; }
+    else if (op === 'H') { hard[first ? 0 : 1] += len; }
   }
   if (!r.seq && r.mismatches && ref) {
     for (const m of r.mismatches) if (m[0] >= refStart && m[0] < refEnd && ref[m[0] - refStart] !== m[1] && ref[m[0] - refStart] !== 'N') mism.push(m);
   }
-  return {
+  const out: AlignedRead = {
     n: r.name, s: r.start, e: rpos, r: (r.flags & FLAG_REVERSE) ? 1 : 0, q: r.mapq, f: r.flags, nh: r.nh,
     b: blocks, d: dels, i: ins,
     m: mism,
     c: clips,
   };
+  if (r.seq && (clips[0] || clips[1])) out.cs = clipSeq;
+  if (hard[0] || hard[1]) out.h = hard;
+  if (r.seq && ins.length) out.is = insSeq;
+  if (r.sa) out.sa = r.sa;
+  return out;
+}
+
+/** The SA tag parsed: the other parts of a split read (0-based starts). */
+export function parseSa(sa: string | undefined): { chrom: string; start: number; strand: '+' | '-'; cigar: string; mapq: number }[] {
+  if (!sa) return [];
+  const out: { chrom: string; start: number; strand: '+' | '-'; cigar: string; mapq: number }[] = [];
+  for (const part of sa.split(';')) {
+    const f = part.split(',');
+    if (f.length < 4) continue;
+    const start = parseInt(f[1]) - 1;
+    if (!(start >= 0)) continue;
+    out.push({ chrom: f[0], start, strand: f[2] === '-' ? '-' : '+', cigar: f[3], mapq: parseInt(f[4]) || 0 });
+  }
+  return out;
+}
+
+const COMP: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N', a: 't', c: 'g', g: 'c', t: 'a', n: 'n' };
+export function reverseComplement(seq: string): string { let out = ''; for (let i = seq.length - 1; i >= 0; i--) out += COMP[seq[i]] ?? 'N'; return out; }
+
+/**
+ * The bases a supplementary record hard-clipped, taken from the read's primary record (which carries the whole
+ * sequence, soft-clipped): the part's read-coordinate interval is cut out of the primary sequence, reverse-complemented
+ * first when the two records are on opposite strands.
+ */
+export function hardClippedBases(part: { h?: [number, number]; c: [number, number]; cigar?: string; r: 0 | 1; queryLen: number }, primary: { seq: string; flags: number }): [string, string] | null {
+  if (!primary.seq || !part.h) return null;
+  const seq = ((primary.flags & FLAG_REVERSE) ? 1 : 0) === part.r ? primary.seq : reverseComplement(primary.seq);
+  const total = part.h[0] + part.queryLen + part.h[1];
+  if (seq.length !== total) return null;
+  return [seq.substring(0, part.h[0]), seq.substring(total - part.h[1])];
 }
 
 /** Run-length coverage of [start, end) from the aligned blocks of encoded reads. */

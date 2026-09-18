@@ -15,7 +15,7 @@ import type { ExonPhase } from './sashimi/geometry';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
-import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR } from '../standalone/alignments';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
@@ -95,6 +95,10 @@ export interface ViewerSettings {
   pairs?: boolean;
   /** collapsed reads: two haplotypes per phase block from read-based phasing (default), or any number of consensus groups (haplotype × splice pattern) */
   haplotypes?: 2 | 'any';
+  /** reads track: soft-clipped bases drawn beyond the read ends, hard clips as stubs, the parts of a split read joined (default off) */
+  clippedBases?: boolean;
+  /** reads track: inserted bases written inside the insertion marks (default off) */
+  insertedBases?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -104,7 +108,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true, haplotypes: 2,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -277,6 +281,27 @@ const READ_FILL = '#c8cdd6';
 /** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
 const READ_DISCORDANT_FILL = '#fcd34d';
 const PAIR_LINK_COLOR = '#9ca3af';
+const CLIP_FILL = '#0f766e';          // soft-clipped bases when too small for letters
+const HARD_CLIP_FILL = '#9ca3af';     // hard-clipped stub (bases in the primary record)
+const SPLIT_LINK_COLOR = '#7c3aed';   // line joining the parts of a split read
+/** Same chromosome whatever the "chr" prefix. */
+const sameChromName = (a: string, b: string) => a === b || a.replace(/^chr/i, '') === b.replace(/^chr/i, '');
+/** Majority consensus of clipped sequences anchored at the breakpoint: `right` clips start there, `left` clips end there. */
+function clipConsensus(seqs: string[], side: 'left' | 'right'): { seq: string; depth: number[] } {
+  const rows = side === 'left' ? seqs.map(x => x.split('').reverse().join('')) : seqs;
+  const need = Math.min(2, rows.length);
+  const out: string[] = [], depth: number[] = [];
+  for (let k = 0; ; k++) {
+    const counts: Record<string, number> = {}; let covering = 0;
+    for (const r of rows) if (r.length > k) { covering++; counts[r[k]] = (counts[r[k]] ?? 0) + 1; }
+    if (covering < need || covering === 0) break;
+    const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    out.push(best[1] / covering >= 0.6 ? best[0] : 'N'); depth.push(covering);
+  }
+  return side === 'left' ? { seq: out.reverse().join(''), depth: depth.reverse() } : { seq: out.join(''), depth };
+}
+/** Query bases a record consumes (aligned, inserted and soft-clipped): the whole read minus its hard clips. */
+const queryLength = (r: AlignedRead) => r.c[0] + r.c[1] + r.b.reduce((n, [a, b]) => n + (b - a), 0) + r.i.reduce((n, [, l]) => n + l, 0);
 const INSERTION_COLOR = '#7c3aed';
 const STAR_COLOR = '#f59e0b';
 const SNP_SNV_COLOR = '#2563eb';
@@ -449,6 +474,8 @@ export default function SashimiViewer({
   const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
   const [showPairs, setShowPairs] = useState(init.pairs ?? true);
   const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
+  const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
+  const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
@@ -1136,10 +1163,74 @@ export default function SashimiViewer({
     return { x: rect ? e.clientX - rect.left : 0, y: rect ? e.clientY - rect.top : 0 };
   };
 
+  /** Sequence panel (HTML, never exported): the clipped, inserted and hard-clipped bases of a read, or the consensus of a soft-clip cluster. */
+  type SeqItem = { label: string; seq?: string; note?: string; action?: { label: string; run: () => void } };
+  const [seqPanel, setSeqPanel] = useState<{ title: string; subtitle?: string; x: number; y: number; items: SeqItem[]; busy?: string; error?: string } | null>(null);
+  const copyText = (text: string) => { try { void navigator.clipboard?.writeText(text); } catch { /* no clipboard */ } };
+  const fetchHardClips = useCallback(async (sid: number, r: AlignedRead) => {
+    if (!ds.getPrimaryRecord || !r.h) return;
+    setSeqPanel(p => p && { ...p, busy: 'reading the primary record…', error: undefined });
+    try {
+      let found: { seq: string; flags: number; cigar: string } | null = null, where = '';
+      for (const part of parseSa(r.sa)) {
+        found = await ds.getPrimaryRecord(sid, part.chrom, part.start, r.n);
+        if (found) { where = `${part.chrom}:${(part.start + 1).toLocaleString()}`; break; }
+      }
+      if (!found) throw new Error('the primary record was not found at the positions the SA tag names');
+      const hc = hardClippedBases({ h: r.h, c: r.c, r: r.r, queryLen: queryLength(r) }, found);
+      if (!hc) throw new Error(`the primary record at ${where} (${found.cigar}) does not have the length the clips imply`);
+      setSeqPanel(p => p && { ...p, busy: undefined, items: [
+        ...p.items.filter(it => !it.label.startsWith('hard clips')),
+        ...(hc[0] ? [{ label: `left hard clip · ${hc[0].length} bp`, seq: hc[0], note: `from the primary record at ${where}` }] : []),
+        ...(hc[1] ? [{ label: `right hard clip · ${hc[1].length} bp`, seq: hc[1], note: `from the primary record at ${where}` }] : []),
+      ] });
+    } catch (err: any) {
+      setSeqPanel(p => p && { ...p, busy: undefined, error: err.message });
+    }
+  }, [ds]);
+  const openReadPanel = useCallback((sid: number, r: AlignedRead, e: { clientX: number; clientY: number }) => {
+    const { x, y } = svgPoint(e);
+    const chrom = viewRef.current.chrom;
+    const items: SeqItem[] = [];
+    (['left', 'right'] as const).forEach((side, k) => {
+      if (!r.c[k]) return;
+      const seq = r.cs?.[k];
+      items.push({ label: `${side} soft clip · ${r.c[k]} bp`, seq: seq || undefined, note: seq ? undefined : 'sequence not available' });
+    });
+    r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString()}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
+    const sa = parseSa(r.sa);
+    for (const p of sa) items.push({ label: 'other part of this read', note: `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand}) · ${p.cigar} · MAPQ ${p.mapq}` });
+    if (r.h && (r.h[0] || r.h[1])) {
+      const reachable = !!ds.getPrimaryRecord && sa.length > 0 && !/^read \d+$/.test(r.n);
+      items.push({ label: `hard clips · ${r.h[0]} / ${r.h[1]} bp`, note: reachable ? 'the bases sit in the primary record' : 'the bases sit in the primary record, which this page cannot reach',
+        action: reachable ? { label: 'Fetch from the primary record', run: () => void fetchHardClips(sid, r) } : undefined });
+    }
+    setSeqPanel({ title: r.n, subtitle: `${chrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${r.r ? '−' : '+'} strand · MAPQ ${r.q}${r.f & 2048 ? ' · supplementary record' : ''}`, x, y, items });
+  }, [ds, fetchHardClips]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const openClipConsensus = useCallback((sid: number, pos: number, side: 'left' | 'right', count: number, x: number, y: number) => {
+    const v = viewRef.current;
+    const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString()}`;
+    setSeqPanel({ title, subtitle: `${count.toLocaleString()} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
+    ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.uniqueOnly, 5000, 'reads', 1, 0.05, {})
+      .then(res => {
+        const k = side === 'left' ? 0 : 1;
+        const reads = res.reads.filter(r => (side === 'left' ? r.s === pos : r.e === pos) && r.c[k] >= SV_MIN_CLIP);
+        const seqs = reads.map(r => r.cs?.[k] ?? '').filter(Boolean);
+        if (!seqs.length) throw new Error(reads.length ? 'the clipped sequences are not available for these reads' : 'no read clipped at this position among the reads read back');
+        const cons = clipConsensus(seqs, side);
+        const longest = [...seqs].sort((a, b) => b.length - a.length)[0];
+        setSeqPanel(p => p && { ...p, busy: undefined, items: [
+          { label: `consensus of ${seqs.length} clipped sequences · ${cons.seq.length} bp`, seq: cons.seq, note: `${side === 'left' ? 'ends at the breakpoint' : 'starts at the breakpoint'}, reference strand, N where fewer than 60 % agree · paste into BLAT to place the other side` },
+          { label: `longest clipped sequence · ${longest.length} bp`, seq: longest },
+        ] });
+      })
+      .catch((err: any) => setSeqPanel(p => p && { ...p, busy: undefined, error: err.message }));
+  }, [ds]);
+
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const { x } = svgPoint(e);
-    setPopover(null);
+    setPopover(null); setSeqPanel(null);
     if (e.ctrlKey || e.metaKey) {
       setRegionSelect({ startX: x, currentX: x });
     } else {
@@ -1775,34 +1866,58 @@ export default function SashimiViewer({
     }
 
     // ======================= Raw mode: packed alignments =======================
-    const visible = current.reads.filter(r => r.e > viewStart && r.s < viewEnd);
+    // With clipped bases shown, a read extends beyond its alignment by its soft and hard clips
+    const ext = (r: AlignedRead): { s: number; e: number } => showClipped
+      ? { s: r.s - r.c[0] - (r.h?.[0] ?? 0), e: r.e + r.c[1] + (r.h?.[1] ?? 0) }
+      : { s: r.s, e: r.e };
+    const visible = current.reads.filter(r => { const x = ext(r); return x.e > viewStart && x.s < viewEnd; });
     // Pairs: two mates both in the window share one row (their span packed as one unit) and are joined by a line
     const pairMode = showPairs && visible.some(r => r.mp != null);
+    // Split reads: the parts of one read (SA tag) in the window share a row too, joined by a line
+    const splitMode = showClipped && visible.some(r => r.sa);
     const mateOf = new Int32Array(visible.length).fill(-1);
+    const partsOf: number[][] = visible.map(() => []);
     let rows: Int32Array, nRows: number, hidden: number;
-    if (pairMode) {
+    if (pairMode || splitMode) {
       const byStart = new Map<number, number[]>();
       visible.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
-      visible.forEach((r, i) => {
+      // union-find over the reads: mates and split parts end up in one unit
+      const parent = new Int32Array(visible.length); for (let i = 0; i < parent.length; i++) parent[i] = i;
+      const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+      const union = (a: number, b: number) => { const x = find(a), y = find(b); if (x !== y) parent[x] = y; };
+      if (pairMode) visible.forEach((r, i) => {
         if (mateOf[i] >= 0 || r.mp == null || r.mc) return;
         for (const j of byStart.get(r.mp) ?? []) {
-          if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; break; }
+          if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; union(i, j); break; }
         }
       });
+      if (splitMode) visible.forEach((r, i) => {
+        if (!r.sa) return;
+        for (const part of parseSa(r.sa)) {
+          if (!sameChromName(part.chrom, currentChrom)) continue;
+          for (const j of byStart.get(part.start) ?? []) {
+            // the other record must point back at this one (same read, whatever the names say)
+            if (j !== i && visible[j].sa && parseSa(visible[j].sa).some(q => q.start === r.s && sameChromName(q.chrom, currentChrom)) && !partsOf[i].includes(j)) { partsOf[i].push(j); union(i, j); }
+          }
+        }
+      });
+      const unitIndex = new Map<number, number>();
       const units: { s: number; e: number }[] = [];
       const unitOf = new Int32Array(visible.length);
       visible.forEach((r, i) => {
-        const j = mateOf[i];
-        if (j >= 0 && j < i) { unitOf[i] = unitOf[j]; return; }
-        unitOf[i] = units.length;
-        units.push(j >= 0 ? { s: Math.min(r.s, visible[j].s), e: Math.max(r.e, visible[j].e) } : { s: r.s, e: r.e });
+        const root = find(i);
+        let u = unitIndex.get(root);
+        const x = ext(r);
+        if (u == null) { u = units.length; unitIndex.set(root, u); units.push({ s: x.s, e: x.e }); }
+        else { units[u].s = Math.min(units[u].s, x.s); units[u].e = Math.max(units[u].e, x.e); }
+        unitOf[i] = u;
       });
       const packed = packReads(units, READS_MAX_ROWS);
       rows = new Int32Array(visible.length); hidden = 0;
       visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
       nRows = packed.nRows;
     } else {
-      ({ rows, nRows, hidden } = packReads(visible, READS_MAX_ROWS));
+      ({ rows, nRows, hidden } = packReads(visible.map(ext), READS_MAX_ROWS));
     }
     // discordance: mate elsewhere, not flagged as a proper pair, or (genomic DNA) an insert far above the median
     const inserts = visible.map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
@@ -1849,6 +1964,45 @@ export default function SashimiViewer({
         const a = scale.x(Math.min(r.e, mate.e)), b = scale.x(Math.max(r.s, mate.s));
         if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? SV_COLORS.discordant : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
       }
+      // the line to the other parts of a split read, drawn once from the left part (parts that overlap on the reference get none)
+      for (const j of partsOf[idx]) {
+        const o = visible[j];
+        if (o.s < r.s || (o.s === r.s && j < idx)) continue;
+        const xr = ext(r), xo = ext(o);
+        if (xo.s <= xr.e) continue;
+        parts.push(<line key={`split${j}`} x1={scale.x(xr.e)} y1={mid} x2={scale.x(xo.s)} y2={mid} stroke={SPLIT_LINK_COLOR} strokeWidth={1.2} strokeDasharray="4 2" />);
+      }
+      // clipped bases beyond the alignment: letters or base-coloured bars when the zoom allows, one bar otherwise; hard clips as stubs
+      const clipTxt: string[] = [];
+      if (showClipped && (r.c[0] || r.c[1] || r.h)) {
+        const pxb = Math.abs(scale.x(r.s + 1) - scale.x(r.s));
+        ([0, 1] as const).forEach(side => {
+          const len = r.c[side], seq = r.cs?.[side] ?? '';
+          const hard = r.h?.[side] ?? 0;
+          const from = side === 0 ? r.s - len : r.e;   // genomic start of the soft clip
+          if (len) {
+            if (seq && pxb >= 2.5) {
+              for (let k = 0; k < len; k++) {
+                const pos = from + k, base = seq[k] ?? 'N';
+                const { left, w } = basePx(pos);
+                const same = !!ref && ref.seq[pos - ref.start] === base;
+                parts.push(<rect key={`c${side}${k}`} x={left} y={top} width={Math.max(1, w - (w > 3 ? 0.5 : 0))} height={rowH} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={same ? 0.28 : 0.95} rx={0.5} />);
+                if (showLetters && w >= 7) parts.push(<text key={`ct${side}${k}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+              }
+            } else {
+              const xa = scale.x(from), xb = scale.x(from + len);
+              parts.push(<rect key={`c${side}`} x={Math.min(xa, xb)} y={top + 1} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 2)} fill={seq ? CLIP_FILL : HARD_CLIP_FILL} opacity={seq ? 0.6 : 0.45} rx={1} />);
+            }
+            clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len} bp${seq ? `: ${seq.length > 40 ? `${seq.slice(0, 40)}…` : seq}` : ''}`);
+          }
+          if (hard) {
+            const hs = side === 0 ? r.s - len - hard : r.e + len;
+            const xa = scale.x(hs), xb = scale.x(hs + hard);
+            parts.push(<rect key={`h${side}`} x={Math.min(xa, xb)} y={top + 1.5} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 3)} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#6b7280" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />);
+            clipTxt.push(`${side === 0 ? 'left' : 'right'} hard clip ${hard} bp (bases in the primary record)`);
+          }
+        });
+      }
       r.b.forEach(([bs, be], k) => {
         const xa = scale.x(bs), xb = scale.x(be);
         const left = Math.min(xa, xb), right = Math.max(xa, xb), w = Math.max(1, right - left);
@@ -1881,24 +2035,44 @@ export default function SashimiViewer({
         parts.push(<rect key={`m${pos}`} x={left} y={top} width={w} height={rowH} fill={color} opacity={alpha} />);
         if (showLetters && w >= 7) parts.push(<text key={`mt${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
       }
-      for (const [pos, len] of r.i) {
-        if (len < indelMin || (consensus && !insSites.has(pos))) continue;
+      r.i.forEach(([pos, len], k) => {
+        if (len < indelMin || (consensus && !insSites.has(pos))) return;
         const x = scale.x(pos);
+        const seq = r.is?.[k] ?? '';
+        const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString()}${seq ? `: ${seq}` : ''}`;
+        const pxb = Math.abs(scale.x(pos + 1) - scale.x(pos));
+        if (showInserted && seq && showLetters && pxb >= 4) {
+          // the inserted bases written in a box over the insertion point (they have no width on the reference)
+          const shown = seq.length > 14 ? `${seq.slice(0, 13)}…` : seq;
+          const bw = shown.length * 5.6 + 6;
+          parts.push(
+            <g key={`i${pos}`}>
+              <title>{label}</title>
+              <rect x={x - 1} y={top} width={2} height={rowH} fill={INSERTION_COLOR} />
+              <rect x={x - bw / 2} y={top - 1} width={bw} height={rowH + 2} rx={2} fill={INSERTION_COLOR} stroke={INK.bg} strokeWidth={0.8} />
+              <text x={x} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={8} fontWeight={700} fontFamily="ui-monospace, monospace">{shown}</text>
+            </g>,
+          );
+          return;
+        }
         parts.push(
           <g key={`i${pos}`}>
-            <title>{`insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString()}`}</title>
+            <title>{label}</title>
             <rect x={x - 1} y={top} width={2} height={rowH} fill={INSERTION_COLOR} />
             <rect x={x - 2.5} y={top} width={5} height={1.5} fill={INSERTION_COLOR} />
             <rect x={x - 2.5} y={top + rowH - 1.5} width={5} height={1.5} fill={INSERTION_COLOR} />
           </g>,
         );
-      }
+      });
       const title = `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
         (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant}` : ''}` : '') +
-        (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '');
-      return <g key={r.n + r.s + r.f}><title>{title}</title>{parts}</g>;
+        (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '') +
+        (clipTxt.length ? `\n${clipTxt.join(' · ')}` : '') +
+        (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
+        `\nclick for the sequences (clipped, inserted, hard-clipped from the primary record)`;
+      return <g key={r.n + r.s + r.f} onClick={e => { e.stopPropagation(); openReadPanel(sid, r, e); }} style={{ cursor: 'pointer' }}><title>{title}</title>{parts}</g>;
     });
 
     const info = `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads` +
@@ -1906,16 +2080,21 @@ export default function SashimiViewer({
       (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
       (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
+      (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter(r => discordantOf(r)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, haplotypes, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs]);
+  }, [showReads, readsSampleIds, collapseReads, haplotypes, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
   /** Some loaded reads carry a mate: the Pairs option applies. */
   const anyPairs = useMemo(() => Object.values(readsData).some(e => e.data.reads.some(r => r.mp != null)), [readsData]);
+  /** Some loaded reads are clipped or split: the Clipped option applies. */
+  const anyClips = useMemo(() => Object.values(readsData).some(e => e.data.reads.some(r => r.c[0] || r.c[1] || r.h || r.sa)), [readsData]);
+  /** Some loaded reads carry an inserted sequence: the Inserted option applies. */
+  const anyInserts = useMemo(() => Object.values(readsData).some(e => e.data.reads.some(r => r.is)), [readsData]);
 
   // ---- Screenshot to the basket (PNG + the viewer state and effect it documents) ----
   const takeSnapshot = useCallback(async () => {
@@ -1984,7 +2163,7 @@ export default function SashimiViewer({
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
-    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string }[];
+    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void }[];
     /** variant sites drawn in the strip and as allele bars: from the reads track, or from the "variants" chip scan of a DNA track (none when the Variants toggle is off) */
     sites: VariantSite[];
     /** allele balance of the heterozygous common SNPs of a DNA track */
@@ -2241,6 +2420,7 @@ export default function SashimiViewer({
         for (const c of track.structural.clips) {
           if (c.count < minJunctionCount || c.pos < viewStart || c.pos > viewEnd) continue;
           retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString()}`, deltas: [], color: SV_COLORS.clip,
+            onClick: e => { const pt = svgPoint(e); openClipConsensus(track.sampleId, c.pos, c.side, c.count, pt.x, pt.y); },
             title: `soft-clip cluster: ${approx}${c.count.toLocaleString()} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString()} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
         for (const x of track.structural.insertions ?? []) {
@@ -2260,7 +2440,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp]);
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2382,6 +2562,20 @@ export default function SashimiViewer({
             <circle cx={7} cy={y} r={4} fill={FRAME_OUT_COLOR} stroke="#ffffff" strokeWidth={1} />
             <rect x={7 - 4 * 0.62} y={y - 1} width={4 * 1.24} height={2} rx={1} fill="#ffffff" />
             <text x={16} y={y + 3.5} fill={INK.muted} fontSize={9.5}>exon whose skipping shifts the frame</text>
+          </g>
+        ),
+      });
+    }
+    if (showReads && showClipped && anyClips) {
+      items.push({
+        w: 330, el: (
+          <g key="lclip">
+            {(['A', 'C', 'G', 'T'] as const).map((b, i) => <rect key={b} x={i * 7} y={y - 5} width={6} height={10} fill={BASE_COLORS[b]} opacity={i < 2 ? 0.95 : 0.28} rx={0.5} />)}
+            <text x={32} y={y + 3.5} fill={INK.muted} fontSize={9.5}>clipped bases (dim: same as the reference)</text>
+            <rect x={228} y={y - 4} width={14} height={8} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#6b7280" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />
+            <text x={246} y={y + 3.5} fill={INK.muted} fontSize={9.5}>hard clip</text>
+            <line x1={296} y1={y} x2={312} y2={y} stroke={SPLIT_LINK_COLOR} strokeWidth={1.2} strokeDasharray="4 2" />
+            <text x={315} y={y + 3.5} fill={INK.muted} fontSize={9.5}>split</text>
           </g>
         ),
       });
@@ -2667,8 +2861,8 @@ export default function SashimiViewer({
           {L.retention.map((r, i) => {
             const w = pillWidth(r);
             return (
-              <g key={`ir-${i}`}>
-                <title>{r.title}</title>
+              <g key={`ir-${i}`} onClick={r.onClick ? e => { e.stopPropagation(); r.onClick!(e); } : undefined} style={r.onClick ? { cursor: 'pointer' } : undefined}>
+                <title>{r.title}{r.onClick ? '\nclick for the consensus of the clipped sequences' : ''}</title>
                 <rect x={r.x - w / 2} y={r.y - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={r.color ?? RETENTION_COLOR} strokeWidth={1} />
                 <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={r.color ?? RETENTION_COLOR} fontSize={9.5} fontWeight={700}>
                   {r.text}
@@ -3319,7 +3513,7 @@ export default function SashimiViewer({
 
   useEffect(() => {
     if (!popover) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setPopover(null); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setPopover(null); setSeqPanel(null); } };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [popover]);
@@ -3344,13 +3538,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs, haplotypes,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs, haplotypes, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3483,6 +3677,14 @@ export default function SashimiViewer({
               {showReads && anyPairs && (
                 <Toggle checked={showPairs} onChange={setShowPairs} label="Pairs"
                   title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair (mate on another chromosome, not a proper pair, or on genomic DNA an insert above 5 times the median) are amber. Off: every read on its own row." />
+              )}
+              {showReads && !collapseReads && anyClips && (
+                <Toggle checked={showClipped} onChange={setShowClipped} label="Clipped"
+                  title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; hard clips as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); the parts of a split read (SA tag) on one row joined by a dashed line. Off: the alignment only." />
+              )}
+              {showReads && !collapseReads && anyInserts && (
+                <Toggle checked={showInserted} onChange={setShowInserted} label="Inserted"
+                  title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
               )}
               {showReads && (anyLongReads || anyDna) && (
                 <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
@@ -3798,6 +4000,39 @@ export default function SashimiViewer({
         {cartoon && (
           <SpliceCartoon story={cartoonState.story} loading={cartoonState.loading} error={cartoonState.error} tx={cartoon.model}
             sampleName={cartoon.sample} sampleColor={cartoon.color} junctionLabel={cartoon.label} onClose={() => setCartoon(null)} />
+        )}
+        {seqPanel && (
+          <div className="absolute z-30 w-[560px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-seq-panel
+            style={{ left: Math.min(seqPanel.x + 12, Math.max(8, svgWidth - 572)), top: Math.max(RULER_H, seqPanel.y + 12) }}
+            onMouseDown={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-2 px-3 pt-2">
+              <div className="min-w-0">
+                <div className="font-semibold text-gray-900 font-mono truncate">{seqPanel.title}</div>
+                {seqPanel.subtitle && <div className="text-gray-500">{seqPanel.subtitle}</div>}
+              </div>
+              <button onClick={() => setSeqPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close (Esc)">×</button>
+            </div>
+            {seqPanel.busy && <div className="px-3 py-1.5 text-indigo-700 flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />{seqPanel.busy}</div>}
+            {seqPanel.error && <div className="px-3 py-1.5 text-red-700">{seqPanel.error}</div>}
+            <div className="px-3 pb-2 pt-1 space-y-1.5">
+              {seqPanel.items.map((it, i) => (
+                <div key={i}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-gray-800">{it.label}</span>
+                    {it.note && <span className="text-gray-500">{it.note}</span>}
+                    {it.seq && <button onClick={() => copyText(it.seq!)} className={`${t.btn} px-1.5 py-0 text-[10px]`} title="Copy the sequence to the clipboard">copy</button>}
+                    {it.action && <button onClick={it.action.run} className={`${t.btn} px-1.5 py-0 text-[10px]`}>{it.action.label}</button>}
+                  </div>
+                  {it.seq && (
+                    <div className="font-mono text-[11px] break-all leading-4 bg-gray-50 rounded px-1.5 py-1 max-h-28 overflow-auto select-all">
+                      {it.seq.match(/(.)\1*/g)?.map((run, k) => <span key={k} style={{ color: BASE_COLORS[run[0]] || BASE_COLORS.N }}>{run}</span>)}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {!seqPanel.items.length && !seqPanel.busy && !seqPanel.error && <div className="text-gray-500">nothing clipped, inserted or split in this read</div>}
+            </div>
+          </div>
         )}
         {popover && popoverContent && (
           <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs"

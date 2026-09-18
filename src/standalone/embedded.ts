@@ -231,6 +231,10 @@ export class EmbeddedDataSource extends LocalDataSource {
     opts?.onProgress?.(1);
     return { sites: r.sites, total: r.total, long_reads: !!r.long_reads };
   }
+  override async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string) {
+    if (this.names.has(sampleId)) return null;   // embedded reads carry no names and no file to go back to
+    return super.getPrimaryRecord(sampleId, chrom, start, name);
+  }
   override async getLibraryType(id: number): Promise<LibraryEvidence> {
     if (!this.names.has(id)) return super.getLibraryType(id);
     return this.payload.samples.find(s => s.id === id)?.library ?? { type: 'unknown', source: 'none', note: 'not recorded in the exported file' };
