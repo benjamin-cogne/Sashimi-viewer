@@ -255,11 +255,10 @@ every view on one SVG page, stacked vertically under their titles (gene, locus a
 drawn with its own options: each tab is shown in turn while its plot is captured, then the current
 view comes back. The *SVG* button inside the plot still saves the current view alone.
 
-**Hide panel** (next to *+ Files…*) folds the whole upper panel away: title, search, files,
-session buttons and known variants disappear and only the *Views* row stays, with a **Show panel**
-button to bring everything back, so the plot gets the full window height on a laptop screen. The
-choice is remembered by the browser. The plot's own locus box, zoom and options remain available
-while the panel is hidden.
+**Hide panel** (next to *+ Files…*) folds the upper panel away: the notes, build, files, sample
+chips, session buttons and known variants disappear and one bar stays, with the logo, a **Show
+panel** button, the *Views* tabs and the search box, so a new gene or locus can still be opened
+while the plot gets the rest of the window height. The choice is remembered by the browser.
 
 ## Sharing a view without the alignments
 

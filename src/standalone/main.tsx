@@ -643,6 +643,14 @@ function App() {
   /** Drops are accepted anywhere on the page: files, a folder, or a session .json. */
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); void onDropFiles(e.dataTransfer); };
 
+  /** The gene / locus search: in the title row of the panel, or on the folded bar. */
+  const searchForm = (
+    <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1">
+      <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
+      <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+    </form>
+  );
+
   return (
     <div className="min-h-screen bg-gray-100 text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
       {DEV && (
@@ -672,10 +680,7 @@ function App() {
             <option value="GRCh37">GRCh37 / hg19</option>
           </select>
         </label>
-        <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1">
-          <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
-          <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
-        </form>
+        {searchForm}
         </div>
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
@@ -687,7 +692,7 @@ function App() {
         <button onClick={chooseFiles} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium" title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)">
           + Files…
         </button>
-        <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Hide this panel (title, search, files, session, known variants) so the views take the whole window; a button on the remaining bar brings it back" aria-label="Hide the upper panel">
+        <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Fold this panel away (notes, build, files, session, known variants): only the logo, the search box and the views stay, so the plot takes the rest of the window; Show panel brings it back" aria-label="Hide the upper panel">
           ▲ Hide panel
         </button>
         <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
@@ -767,15 +772,33 @@ function App() {
           ))}
         </div>
         </>}
-        {(views.length > 1 || panelHidden) && (
-          <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
-            {panelHidden && (
-              <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600 mr-1" title="Show the upper panel again (title, search, files, session, known variants)" aria-label="Show the upper panel">
+        {panelHidden && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <div className="flex items-center gap-2 shrink-0">
+              <Logo size={24} />
+              <span className="text-sm font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></span>
+              <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Show the upper panel again (files, session, known variants)" aria-label="Show the upper panel">
                 ▼ Show panel
               </button>
-            )}
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
+              <span className="text-xs text-gray-600">Views</span>
+              {views.length === 0 && <span className="text-xs text-gray-400">none yet: open a gene or a locus</span>}
+              {views.map(v => (
+                <span key={v.id} onClick={() => activateTab(v.id)}
+                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400'}`}
+                  title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
+                  {v.label}
+                  <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
+                </span>
+              ))}
+            </div>
+            <div className="ml-auto shrink-0">{searchForm}</div>
+          </div>
+        )}
+        {!panelHidden && views.length > 1 && (
+          <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
             <span className="text-xs text-gray-600">Views</span>
-            {views.length === 0 && <span className="text-xs text-gray-400">none yet: show the panel to open a gene</span>}
             {views.map(v => (
               <span key={v.id} onClick={() => activateTab(v.id)}
                 className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400 hover:bg-indigo-50'}`}
