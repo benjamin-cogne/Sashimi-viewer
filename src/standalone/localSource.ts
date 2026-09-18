@@ -13,6 +13,7 @@ import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, 
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
+import { phaseReads } from './phasing';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
 import { getCommonSnps } from './snps';
@@ -459,6 +460,10 @@ export class LocalDataSource implements SashimiDataSource {
     const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length, long_reads: longReads,
       reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null };
     if (collapsed) {
+      if (opts?.haplotypes !== 'any') {
+        const phase = phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+        return { ...base, reads: [], sites: phase.sites, groups: [], phase };
+      }
       const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
     }

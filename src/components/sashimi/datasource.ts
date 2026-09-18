@@ -13,6 +13,8 @@ export interface ReadsOptions {
   longReadMinIndel?: number;
   /** for long reads: floor of the alternate-allele fraction a site needs (their error rate makes the short-read threshold too low) */
   longReadMinVaf?: number;
+  /** collapsed mode: two haplotypes per block by read-based phasing (default), or any number of consensus groups */
+  haplotypes?: 2 | 'any';
 }
 /** A full variant scan of a window (every read, tile by tile). */
 export interface VariantScanOptions extends ReadsOptions {

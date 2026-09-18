@@ -51,7 +51,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 |---|---|
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
-| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse** into consensus groups (local haplotype × splicing pattern): the alternate allele seen only in exon-skipping reads is explicit. |
+| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -197,6 +197,29 @@ Deletions of 50 bp or more inside reads remain structural evidence whatever the 
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
 
+**Haplotypes (phasing).** *Collapse* on a reads track phases the window from the reads
+themselves, in the spirit of WhatsHap and HapCUT2 but in the browser, in milliseconds: every
+heterozygous site (25–75 % alternate allele among the called sites, so at least 3 reads and *Min
+VAF*) is linked to the others through the **fragments** that cover both, a read and its mate
+counting as one fragment. Two sites are linked when at least 2 fragments cover both and at most
+20 % of them disagree on the phase; the sites are then walked in order and each joins the current
+**phase block** when its trusted links agree, or starts a new one (the tooltip says why: no linking
+fragment, or contradicting links, which is what a third haplotype, mosaic alleles or errors look
+like). The track shows two rows per block, *H1* and *H2*, the allele of each site drawn as in the
+reads (coloured for the alternate base, outlined for the reference), with the number and share of
+the fragments assigned to each haplotype; hover a row for the block's span, the fragments fitting
+both haplotypes equally, those disagreeing with their haplotype at some site, and the linking
+fragments between neighbouring sites. Homozygous sites (above 75 %) sit on a *both haplotypes*
+row; sites below 25 % (mosaic, subclonal, errors), sites no fragment links to another, and sites
+with contradicting links are listed on an *unphased* row with the reason in their tooltip. Nothing
+is invented: two sites never covered by one fragment stay in separate blocks, and the numbering of
+H1/H2 restarts at each block. Short-read pairs phase sites within an insert of each other; long
+reads phase whole windows; RNA-seq phases too, with the fewer heterozygous sites its exons carry.
+*Haplotypes: any* switches the track to the **consensus groups** of the earlier collapse: one row
+per local haplotype × splice pattern with its read count, groups below *Min reads* folded into a
+minor bucket. The choice is saved with the session and kept in exported pages, which phase their
+embedded reads on the spot.
+
 **Variants and allele balance.** A DNA track opens as a plain coverage histogram: no read is
 decoded until asked. Its variant sites are drawn as allele-fraction bars on the coverage (no star
 strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), from the reads track
@@ -246,8 +269,8 @@ exact where you had it exact and marked ≈ where the source had sampled it.
 
 **Reads.** For every view whose reads track is on, the export also embeds the reads of every loaded
 sample, with the reference bases, the mismatches and the mate positions, so the recipient sees the
-same pile-up with its pairs, can switch between reads and the collapsed haplotype view and change
-*Min VAF*. Read names are replaced by numbers.
+same pile-up with its pairs, can switch between reads, phased haplotypes and consensus groups and
+change *Min VAF*. Read names are replaced by numbers.
 
 **Size.** Reads and coverage are stored in a compact binary form (columns of small integers,
 compressed with the browser's own deflate, written in base64): about 6 bytes per read with its
@@ -467,6 +490,7 @@ src/standalone/
   localSource.ts                 SashimiDataSource over local files (@gmod/bam, @gmod/cram, @gmod/indexedfasta)
   alignments.ts                  coverage runs, junction counts, CIGAR/mismatch decoding, strandness
   collapse.ts                    variant-site calling and consensus-group collapsing of reads
+  phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)

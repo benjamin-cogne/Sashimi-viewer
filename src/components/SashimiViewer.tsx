@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint } from './sashimi/types';
+import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
@@ -16,6 +16,7 @@ import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR } from '../standalone/alignments';
+import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
@@ -92,6 +93,8 @@ export interface ViewerSettings {
   coverageVariants?: boolean;
   /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
   pairs?: boolean;
+  /** collapsed reads: two haplotypes per phase block from read-based phasing (default), or any number of consensus groups (haplotype × splice pattern) */
+  haplotypes?: 2 | 'any';
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
 }
@@ -101,7 +104,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true, haplotypes: 2,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -445,6 +448,7 @@ export default function SashimiViewer({
   // long reads (ONT, PacBio): their sequencing errors would paint every read with mismatches and small indels
   const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
   const [showPairs, setShowPairs] = useState(init.pairs ?? true);
+  const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
@@ -462,7 +466,7 @@ export default function SashimiViewer({
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse };
   // Per sample, so that "all samples" keeps one reads track under each coverage track
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
@@ -1043,7 +1047,7 @@ export default function SashimiViewer({
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || cur.minSupport === minJunctionCount) && covers(cur.fetched, v));
+      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes)) && covers(cur.fetched, v));
     });
     if (!stale.length) return;
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
@@ -1055,14 +1059,14 @@ export default function SashimiViewer({
         readsSeq.current.set(sid, seq);
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100 })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data } })); })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => { if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false })); });
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Forgets the variants of a sample: its running scan is stopped and its sites dropped (plain coverage again until the chip is clicked). */
   const forgetVariants = useCallback((sid: number) => {
@@ -1466,7 +1470,7 @@ export default function SashimiViewer({
     const frame = (h: number) => <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />;
     const header = (text: string, color = INK.muted) => (
       <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
-        <tspan fill={INK.text} fontWeight={700}>{collapseReads ? 'Consensus reads' : 'Reads'}</tspan>
+        <tspan fill={INK.text} fontWeight={700}>{collapseReads ? (haplotypes === 'any' ? 'Consensus reads' : 'Haplotypes') : 'Reads'}</tspan>
         <tspan fill={color}>{'  '}{name}{name ? ' · ' : ''}{text}</tspan>
       </text>
     );
@@ -1477,7 +1481,7 @@ export default function SashimiViewer({
     const entry = readsData[sid];
     const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
     if (readsError[sid] && !current) return message(readsError[sid]!, UNIQUE_COLOR);
-    if (!current) return message(collapseReads ? 'collapsing reads…' : 'loading reads…');
+    if (!current) return message(collapseReads ? (haplotypes === 'any' ? 'collapsing reads…' : 'phasing reads…') : 'loading reads…');
 
     const ref = current.reference;
     const sites: VariantSite[] = (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd);
@@ -1578,6 +1582,100 @@ export default function SashimiViewer({
         </g>
       ),
     });
+
+    // ======================= Collapsed mode, two haplotypes: phase blocks =======================
+    if (collapseReads && current.phase) {
+      const ph = current.phase;
+      const allSites = ph.sites;
+      const rowStep = GROUP_ROW_H + 4;
+      const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString()}`;
+      const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
+      /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
+      const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
+        const st = allSites[si];
+        const { left, w } = basePx(st.pos);
+        const ww = Math.max(w, 9), cx = left + w / 2;
+        const isAlt = al === 'alt';
+        const letter = st.kind === 'snv' ? (isAlt ? st.alt : st.ref) : (isAlt ? st.alt : '=');
+        const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
+        return (
+          <g key={`al${si}`} opacity={muted ? 0.55 : 1}>
+            {title && <title>{title}</title>}
+            <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} strokeDasharray={dashed ? '2 1.5' : undefined} />
+            <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
+          </g>
+        );
+      };
+      const labelEl = (label: string, mid: number, strong: boolean) => {
+        const lw = label.length * 5.6 + 8;
+        return (
+          <g key="label">
+            <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
+            <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={strong ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
+          </g>
+        );
+      };
+      const badgeEl = (text: string, xRight: number, mid: number, strong: boolean) => {
+        const bw = text.length * 5.6 + 10;
+        const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
+        return (
+          <g key="badge">
+            <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+            <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
+          </g>
+        );
+      };
+      const blocks = ph.blocks.filter(b => b.end > viewStart && b.start < viewEnd);
+      const homIn = ph.hom.filter(si => allSites[si].pos >= viewStart && allSites[si].pos < viewEnd);
+      const unphasedIn = ph.unphased.filter(u => allSites[u.site].pos >= viewStart && allSites[u.site].pos < viewEnd);
+      const rows: JSX.Element[] = [];
+      let ri = 0;
+      const reasonTxt: Record<'no link' | 'conflict', string> = { 'no link': 'no fragment links it to the previous block', conflict: 'the links to the previous block contradict each other (a third haplotype, mosaic alleles or errors)' };
+      for (const b of blocks) {
+        const nFrag = b.support[0] + b.support[1];
+        const a = scale.x(b.start), z = scale.x(b.end);
+        const left = Math.min(a, z), right = Math.max(a, z);
+        const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
+        const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString()}-${b.end.toLocaleString()} · ${b.sites.length} heterozygous sites` +
+          `\nfragments (read + mate): ${b.support[0].toLocaleString()} on H1, ${b.support[1].toLocaleString()} on H2` +
+          (b.ambiguous ? `, ${b.ambiguous.toLocaleString()} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString()} disagreeing with their haplotype at one site or more` : '') +
+          (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
+          (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
+        ([b.h1, b.h2] as const).forEach((hap, hi) => {
+          const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+          ri++;
+          const parts: JSX.Element[] = [];
+          parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
+          b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
+          const share = nFrag ? b.support[hi] / nFrag : 0;
+          parts.push(badgeEl(`${b.support[hi].toLocaleString()} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
+          parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
+          const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
+          rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
+        });
+      }
+      if (homIn.length) {
+        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+        ri++;
+        const parts: JSX.Element[] = homIn.map(si => glyph(si, 'alt', top, true, false, `${posTxt(si)} ${alleleTxt(si, 'alt')}: homozygous (${(allSites[si].vaf * 100).toFixed(0)} % of ${allSites[si].depth} reads), on both haplotypes`));
+        parts.push(labelEl(`both haplotypes · ${homIn.length} homozygous`, mid, false));
+        rows.push(<g key="hom">{parts}</g>);
+      }
+      if (unphasedIn.length) {
+        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+        ri++;
+        const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
+        const parts: JSX.Element[] = unphasedIn.map(u => glyph(u.site, 'alt', top, true, true, `${posTxt(u.site)} ${alleleTxt(u.site, 'alt')} (${(allSites[u.site].vaf * 100).toFixed(0)} % of ${allSites[u.site].depth} reads): unphased, ${why[u.reason]}`));
+        parts.push(labelEl(`unphased · ${unphasedIn.length}`, mid, false));
+        rows.push(<g key="unphased">{parts}</g>);
+      }
+      if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
+      const bodyHeight = Math.max(1, ri) * rowStep + 6;
+      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
+      const info = `${current.total.toLocaleString()} reads · ${ph.fragments.toLocaleString()} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
+        (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + commonInfo;
+      return wrap(height, info, rows, bodyHeight);
+    }
 
     // ======================= Collapsed mode: consensus rows =======================
     if (collapseReads) {
@@ -1808,7 +1906,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs]);
+  }, [showReads, readsSampleIds, collapseReads, haplotypes, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
   /** Some loaded reads carry a mate: the Pairs option applies. */
@@ -3241,13 +3339,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs, haplotypes,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3401,7 +3499,16 @@ export default function SashimiViewer({
               )}
               {showReads && (
                 <Toggle checked={collapseReads} onChange={setCollapseReads} label="Collapse"
-                  title={`Collapse the reads into consensus groups: one row per local haplotype × splice pattern with its number of supporting reads. Variable sites (★) need at least 3 alternate reads and the Min VAF fraction of the depth; groups below "Min reads" fold into a minor bucket. Sites never co-covered by a read stay in separate groups (no invented phase).`} />
+                  title={`Collapse the reads of the window. Haplotypes 2: read-based phasing, the heterozygous sites (★, 25–75 % alternate allele) linked by the reads and their mates into phase blocks of two haplotypes, with the fragments supporting each. Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`} />
+              )}
+              {showReads && collapseReads && (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern).">
+                  Haplotypes
+                  <select value={haplotypes} onChange={e => setHaplotypes(e.target.value === 'any' ? 'any' : 2)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
+                    <option value={2}>2 (phased)</option>
+                    <option value="any">any (consensus groups)</option>
+                  </select>
+                </label>
               )}
             </span>
             {anyRna && <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}

@@ -105,10 +105,44 @@ export interface ReadGroup {
   chain: [number, number][]; alleles: string[]; blocks: [number, number][]; dense: [number, number][];
   absorbed: number; compatible?: string[]; patterns?: number;
 }
+/** One haplotype block of the read-based phasing: the heterozygous sites the reads tie together, and the two haplotypes over them. */
+export interface PhaseBlock {
+  id: string;
+  /** genomic span of the block's sites, 0-based half-open */
+  start: number; end: number;
+  /** indices into PhaseResult.sites, in position order */
+  sites: number[];
+  /** allele of each site on haplotype 1 / 2 */
+  h1: ('ref' | 'alt')[]; h2: ('ref' | 'alt')[];
+  /** fragments (read + mate) assigned to haplotype 1 / 2 */
+  support: [number, number];
+  /** fragments matching both haplotypes equally */
+  ambiguous: number;
+  /** fragments assigned to a haplotype but disagreeing with it at one site or more (errors, mosaic alleles, a third haplotype) */
+  conflicting: number;
+  /** fragments linking two sites of the block: seeing the same phase (ref–ref or alt–alt) or the opposite */
+  links: { a: number; b: number; same: number; diff: number }[];
+  /** why the previous block ended before this one */
+  breakBefore?: 'no link' | 'conflict';
+}
+export interface UnphasedSite { site: number; reason: 'low' | 'unlinked' | 'conflict' }
+export interface PhaseResult {
+  sites: VariantSite[];
+  /** indices of the homozygous sites (on both haplotypes) */
+  hom: number[];
+  blocks: PhaseBlock[];
+  unphased: UnphasedSite[];
+  /** fragments (reads with their mates) examined */
+  fragments: number;
+  /** heterozygous sites considered */
+  het: number;
+}
 export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
   sites: VariantSite[]; groups: ReadGroup[];
+  /** read-based phasing of the window (collapsed mode with two haplotypes) */
+  phase?: PhaseResult;
   /** the reads are long (median aligned length above 1 kb): noise filters apply */
   long_reads?: boolean;
   /** Reference sequence covering the window (plus margin), or null when no source is available. */
