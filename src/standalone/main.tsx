@@ -138,6 +138,8 @@ function App() {
   const [knownLabel, setKnownLabel] = useState('');
   const [knownError, setKnownError] = useState<string | null>(null);
   const [exportDialog, setExportDialog] = useState<ExportOptions | null>(null);
+  /** A running export (HTML or SVG): what it is doing and how far it is, shown in a blocking overlay. */
+  const [exportProgress, setExportProgress] = useState<{ title: string; step: string; done: number; total: number } | null>(null);
   // ---- Sessions: the viewer's latest state (options + navigation), a loaded session waiting for its files ----
   const viewerStateRef = useRef<ViewerState | null>(null);
   const [sessionName, setSessionName] = useState(() => defaultSessionName());
@@ -393,14 +395,20 @@ function App() {
     setBusy(true); setError(null);
     let nReads = 0, nReadSets = 0;
     const skipped: string[] = [];
+    let done = 0, total = 1;
+    const progress = (step: string) => setExportProgress({ title: 'Exporting HTML…', step, done, total });
     try {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
+      // one step per view (annotation), per sample coverage, per sample reads when exported, plus the file itself
+      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= READS_MAX_VIEW_BP ? samples.length : 0), 0);
+      progress('Preparing…');
       const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
       for (const t of tabs) {
         const st = t.state!;
         setNotes([`Exporting ${t.label}…`]);
+        progress(`${t.label}: gene models`);
         const vs = st.view.start - 1, ve = st.view.end, span = ve - vs;
         // the window exported around the view: as shown, with a half-width margin, or what the viewer itself fetched
         const margin = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
@@ -414,13 +422,16 @@ function App() {
         const exonSets = [toTxModel(transcript).exons.map(e => ({ start: e.start, end: e.end })), ...(allTranscripts?.transcripts ?? []).map(m => m.exons.map(e => ({ start: e.start - 1, end: e.end })))];
         for (const ex of exonSets) { const sorted = [...ex].sort((a, b) => a.start - b.start); for (let i = 0; i + 1 < sorted.length; i++) { intronStarts.add(sorted[i].end); intronEnds.add(sorted[i + 1].start); } }
         const coverage: Record<string, EncodedCoverage> = {};
+        done++;
         for (const smp of samples) {
+          progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
             const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000 });
             coverage[String(smp.id)] = encodeCoverage(c, { start: ws, end: we });
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
+          done++;
         }
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReads> | undefined;
@@ -432,11 +443,13 @@ function App() {
             reads = {};
             for (const smp of samples) {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
+              progress(`${t.label}: reads of ${smp.name}`);
               try {
                 const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05);
                 reads[String(smp.id)] = { window: { start: rs, end: re }, total: r.total, reads: r.reads.map((x, i) => ({ ...x, n: `read ${i + 1}` })), reference: r.reference, reference_source: r.reference_source };
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
+              done++;
             }
           }
         }
@@ -447,7 +460,9 @@ function App() {
         samples: samples.map(s => ({ id: s.id, name: s.name, kind: s.kind, file: s.file.name, index: s.index.name, library: s.lib })),
         session, views: evs, knownVariants: knownVars,
       };
+      progress('Writing the file…');
       const html = await buildExportHtml(payload);
+      done = total; progress('Starting the download…');
       const name = (sessionName.trim() || defaultSessionName(tabs[activeIndex].state!.gene.name)).replace(/\.json$/i, '').replace(/\.html$/i, '') + '.html';
       const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
@@ -459,6 +474,7 @@ function App() {
     } catch (e: any) {
       setError(`Export failed: ${e?.message || String(e)}`);
     }
+    setExportProgress(null);
     setBusy(false);
   }, [build, samples, fasta, sessionName, ds, currentViews]);
   const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : stateOfTab(v).reads)).length;
@@ -488,6 +504,7 @@ function App() {
       for (let i = 0; i < views.length; i++) {
         const v = views[i];
         setNotes([`SVG of ${v.label} (${i + 1}/${views.length})…`]);
+        setExportProgress({ title: 'Exporting SVG…', step: `${v.label}: showing the view and capturing its plot`, done: i, total: views.length + 1 });
         if (v.id !== activeIdRef.current) { activateTab(v.id); await sleep(50); }
         const el = await settled(v.id === original && i === 0 ? null : prev);
         if (!el) { setError(`No plot for ${v.label}`); continue; }
@@ -499,6 +516,7 @@ function App() {
       if (original != null && original !== activeIdRef.current) activateTab(original);
       const stem = (sessionName.trim() || defaultSessionName(opened?.geneName)).replace(/\.(json|html)$/i, '');
       if (!plots.length) throw new Error('no plot captured');
+      setExportProgress({ title: 'Exporting SVG…', step: 'Writing the file…', done: views.length, total: views.length + 1 });
       const blob = new Blob([stackSvgs(plots)], { type: 'image/svg+xml;charset=utf-8' });
       const name = `${safeFileName(stem)}-views.svg`;
       const url = URL.createObjectURL(blob);
@@ -508,6 +526,7 @@ function App() {
     } catch (e: any) {
       setError(`SVG export failed: ${e?.message || String(e)}`);
     }
+    setExportProgress(null);
     setBusy(false);
   }, [views, activateTab, sessionName, opened]);
 
@@ -810,6 +829,26 @@ function App() {
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
             sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
+        </div>
+      )}
+      {exportProgress && (
+        <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
+          <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
+            <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200">
+              <span className="inline-block w-5 h-5 rounded-full border-[3px] border-indigo-500 border-t-transparent animate-spin shrink-0" />
+              <div>
+                <div className="font-bold text-sm">{exportProgress.title}</div>
+                <div className="text-[11px] text-gray-500 mt-0.5">The data of every registered view is read from the files and written into one page. The download starts when it is finished: keep this tab open.</div>
+              </div>
+            </div>
+            <div className="px-4 py-3 space-y-2">
+              <div className="text-gray-700 truncate" title={exportProgress.step}>{exportProgress.step}</div>
+              <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
+                <div className="h-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${Math.round(100 * Math.min(1, exportProgress.done / Math.max(1, exportProgress.total)))}%` }} />
+              </div>
+              <div className="text-[11px] text-gray-500">{Math.min(exportProgress.done, exportProgress.total)} of {exportProgress.total} step{exportProgress.total === 1 ? '' : 's'}</div>
+            </div>
+          </div>
         </div>
       )}
       {exportDialog && (

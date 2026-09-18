@@ -241,7 +241,9 @@ exact where you had it exact and marked ≈ where the source had sampled it.
 **Reads.** For every view whose reads track is on, the export also embeds the reads of every loaded
 sample, with the reference bases and the mismatches, so the recipient sees the same pile-up, can
 switch between reads and the collapsed haplotype view and change *Min VAF*. Read names are
-replaced by numbers. The dialog that opens on *Export HTML* chooses the window exported around each view, for the
+replaced by numbers. While an export runs (HTML or SVG), a progress window names the step in progress (view, sample,
+coverage or reads) with a bar over the total number of steps; the download starts when it
+closes, so the tab should stay open. The dialog that opens on *Export HTML* chooses the window exported around each view, for the
 coverage, junctions and retention counts as much as for the reads (the view as shown; the view with
 a half-width margin on each side, the default; or the widest window the viewer itself loads, up to
 2 Mb for coverage and 100 kb for reads) and the number of reads per sample (up to 2,500 as displayed, about 300 kB per sample and view; up to 20,000 for
