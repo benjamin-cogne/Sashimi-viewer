@@ -61,12 +61,20 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
   const hom = sites.map((s, i) => i).filter(i => sites[i].vaf > HET_MAX);
   const unphased: UnphasedSite[] = sites.map((s, i) => i).filter(i => sites[i].vaf < HET_MIN).map(i => ({ site: i, reason: 'low' as const }));
   const frags = fragmentsOf(reads);
-  // allele matrix: fragment × heterozygous site
-  const alleles: Allele[][] = frags.map(fr => het.map(si => {
-    let a: Allele = -1;
-    for (const r of fr) { const x = alleleAt(r, sites[si], minBq); if (x < 0) continue; if (a < 0) a = x; else if (a !== x) return -1; }
-    return a;
-  }));
+  // allele matrix: fragment × heterozygous site, evaluated only at the sites inside the fragment's span
+  const hetPos = het.map(si => sites[si].pos);
+  const lowerBound = (pos: number) => { let lo = 0, hi = hetPos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (hetPos[mid] < pos) lo = mid + 1; else hi = mid; } return lo; };
+  const alleles: Allele[][] = frags.map(fr => {
+    const row: Allele[] = new Array(het.length).fill(-1);
+    let lo = Infinity, hi = -Infinity;
+    for (const r of fr) { if (r.s < lo) lo = r.s; if (r.e > hi) hi = r.e; }
+    for (let k = lowerBound(lo); k < het.length && hetPos[k] < hi; k++) {
+      let a: Allele = -1;
+      for (const r of fr) { const x = alleleAt(r, sites[het[k]], minBq); if (x < 0) continue; if (a < 0) a = x; else if (a !== x) { a = -1; break; } }
+      row[k] = a;
+    }
+    return row;
+  });
   // links between pairs of heterozygous sites (indices into `het`)
   const same = new Map<string, number>(), diff = new Map<string, number>();
   const key = (a: number, b: number) => `${a},${b}`;

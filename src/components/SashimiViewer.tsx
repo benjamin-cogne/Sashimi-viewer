@@ -1482,9 +1482,14 @@ export default function SashimiViewer({
     const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
     if (readsError[sid] && !current) return message(readsError[sid]!, UNIQUE_COLOR);
     if (!current) return message(collapseReads ? (haplotypes === 'any' ? 'collapsing reads…' : 'phasing reads…') : 'loading reads…');
+    // The entry answers the window and the options in force; an older one (a request still running, or one that failed)
+    // keeps its reads on screen while the new answer comes, but its variant sites are not the window's: none go to the coverage.
+    const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly }) &&
+      entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
+      (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes));
 
     const ref = current.reference;
-    const sites: VariantSite[] = (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd);
+    const sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
     const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
     const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
 
@@ -1563,7 +1568,7 @@ export default function SashimiViewer({
 
     const refSourceLabel: Record<string, string> = { fasta: 'REFERENCE_FASTA', ensembl: 'Ensembl (server)', browser: 'UCSC API (browser)' };
     const commonInfo = (ref ? ` · reference: ${refSourceLabel[current.reference_source ?? ''] ?? current.reference_source}` : ' · no reference genome (no REFERENCE_FASTA on the server, and the browser could not fetch bases from the UCSC / Ensembl APIs); mismatches only from MD tags') +
-      (sites.length ? ` · ${sites.length} variant site${sites.length > 1 ? 's' : ''} ★` : '') + (readsLoading[sid] ? ' · updating…' : '');
+      (sites.length ? ` · ${sites.length} variant site${sites.length > 1 ? 's' : ''} ★` : '') + (readsLoading[sid] ? ' · updating…' : !fresh && readsError[sid] ? ` · could not update: ${readsError[sid]}` : !fresh ? ' · updating…' : '');
 
     const wrap = (height: number, info: string, body: JSX.Element[], _bodyHeight: number) => ({
       height,
@@ -1573,7 +1578,7 @@ export default function SashimiViewer({
         <g key={`reads${sid}`} fontFamily={FONT}>
           <defs><clipPath id={clipId}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} /></clipPath></defs>
           {frame(height)}
-          {header(info)}
+          {header(info, !fresh && readsError[sid] ? UNIQUE_COLOR : undefined)}
           {aaRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>aa</text>}
           {revRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}><title>transcript strand (−): complement of the genomic bases, 5′→3′ left to right</title>ref −</text>}
           {ref && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>{revRowH > 0 ? 'ref +' : 'ref'}</text>}
