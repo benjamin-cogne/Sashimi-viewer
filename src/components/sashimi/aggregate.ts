@@ -10,7 +10,9 @@
  *   reads through the two boundaries, weighted by their mean). Each event is labelled with its
  *   weight over the sum of every weight at that intron, so the labels of one intron add up to 100 %.
  * - An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
- *   rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns.
+ *   rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns; the two inclusion
+ *   junctions then show the inclusion level (I₁ + I₂) / (I₁ + I₂ + 2·S), the same on both sides and
+ *   the complement of the skipping label, instead of their own per-intron shares.
  * - Tooltips also give the rMATS-style value of each event against the canonical form alone.
  */
 import type { BoundarySpanning, CoverageRun, JunctionArc, StructuralEvidence } from './types';
@@ -286,6 +288,24 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     if (cj) {
       const ev = out.get(junctionKey(cj))!;
       ev.eventCount = C;
+      // an inclusion junction whose only competitor is one skipping arc, on both sides of the skipped exon, carries the
+      // inclusion level of that event pooled over the two flanking introns (rMATS ψ): the same value on both inclusion
+      // junctions, the complement of the skipping arc's label
+      const pure = (q: Pool | null, sk: { j: JunctionArc }) => !!q && q.skips.length === 1 && q.skips[0].j === sk.j && !q.alts.length && !q.pairs.length && q.R === 0;
+      const sk = pool.skips.length === 1 ? pool.skips[0] : null;
+      const other = sk ? pools[sk.k1 === k ? sk.k2 : sk.k1] : null;
+      if (sk && other && pure(pool, sk) && pure(other, sk)) {
+        const S = sk.j.count, Cs = C + other.C, den = Cs + 2 * S;
+        const skipped = sk.k2 - sk.k1 > 1 ? `exons ${exonLabel(sk.k1 + 1, sk.k2)}` : `exon ${tx.exons[sk.k1 + 1].rank}`;
+        ev.shares.push({
+          pct: den > 0 ? Cs / den : 0, total: den,
+          note: `inclusion of ${skipped} = (${C.toLocaleString()} + ${other.C.toLocaleString()} reads of the two inclusion junctions) / (${C.toLocaleString()} + ${other.C.toLocaleString()} + 2 × ${S.toLocaleString()} skipping reads) = ${pctTxt(Cs, den)}` +
+            `\nthe same value on both inclusion junctions (rMATS ψ), the complement of the skipping arc's ${pctTxt(2 * S, den)}` +
+            `\nthis junction alone at intron ${label}: ${C.toLocaleString()} / ${totalTxt} = ${pctTxt(C, total)}`,
+        });
+        continue;
+      }
+      const inclusion = pool.skips.map(x => { const o = pools[x.k1 === k ? x.k2 : x.k1]; if (!o) return ''; const S = x.j.count, Cs = C + o.C; return `\ninclusion level of the skipping ${(x.j.start + 1).toLocaleString()}-${x.j.end.toLocaleString()}, pooled over its two introns (rMATS ψ): (${C.toLocaleString()} + ${o.C.toLocaleString()}) / (${C.toLocaleString()} + ${o.C.toLocaleString()} + 2 × ${S.toLocaleString()}) = ${pctTxt(Cs, Cs + 2 * S)}`; }).join('');
       const others = [
         ...(R > 0 ? [`intron retention (${pool.sideNote}; counted as their mean)`] : []),
         ...pool.pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads, counted as their mean)`),
@@ -295,7 +315,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
       ev.shares.push({
         pct: C / total, total,
         note: `= ${C.toLocaleString()} canonical reads / ${totalTxt}` +
-          (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : ''),
+          (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : '') + inclusion,
       });
     }
   }

@@ -117,7 +117,12 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   least 6 bases on the exon side and 10 on the intron side), shown as a teal *IR* pill on the intron
   baseline. An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
   rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns; its tooltip gives
-  its share at each intron. Every tooltip also gives the event against the canonical junction
+  its share at each intron. When that skipping arc is the only competitor on both sides of the
+  skipped exon, the two inclusion junctions show the inclusion level of the event pooled over the
+  two introns, (I₁ + I₂) / (I₁ + I₂ + 2·S): the same value on both, the complement of the skipping
+  label, rather than their own per-intron shares (which the tooltip still gives). As soon as
+  something else competes at one of the two introns, the per-intron shares come back on the labels
+  and the pooled inclusion level moves to the tooltip. Every tooltip also gives the event against the canonical junction
   alone, rMATS-style (n / (n + C), (A + B) / (A + B + 2·C), 2·S / (I₁ + I₂ + 2·S),
   (R5 + R3) / (R5 + R3 + 2·C)). The *Intron retention* box next to *Min %* removes retention from
   the shares. Junctions touching no annotated splice site show their pooled read count (`n=…`) and
