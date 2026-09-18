@@ -1120,6 +1120,8 @@ export default function SashimiViewer({
     dnaSitesSeq.current.set(sid, seq);
     setDnaSitesLoading(p => ({ ...p, [sid]: true }));
     setDnaSitesProgress(p => ({ ...p, [sid]: 0 }));
+    // a scan that starts over (other chromosome, other thresholds, window elsewhere) drops the old sites at once; an extension keeps them
+    if (!extend) setDnaSites(p => { if (!p[sid]) return p; const { [sid]: _, ...rest } = p; return rest; });
     const live = () => dnaSitesSeq.current.get(sid) === seq;
     const span = ranges.reduce((t, r) => t + (r.end - r.start), 0);
     const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
@@ -1148,6 +1150,11 @@ export default function SashimiViewer({
       .finally(() => { if (live()) { setDnaSitesLoading(p => ({ ...p, [sid]: false })); if (dnaSitesAbort.current.get(sid) === ctl) dnaSitesAbort.current.delete(sid); } });
   }, [minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // the sites of a sample no longer shown are forgotten (its scan stopped), so a sample added later under the same id starts clean
+  useEffect(() => {
+    const shown = new Set(tracks.map(t => t.sampleId));
+    for (const k of Object.keys(dnaSites)) { const sid = Number(k); if (!shown.has(sid)) forgetVariants(sid); }
+  }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The "variants" chip of a DNA track: scans the whole current window. */
   const loadAllVariants = useCallback((sid: number) => {
     const v = viewRef.current;
@@ -2240,10 +2247,14 @@ export default function SashimiViewer({
       const maxLevel = Math.max(1, ...levels.values());
       const readsBelow = readsTracks.get(track.sampleId);
       // sites of the coverage: the reads track's when its reads are shown, else the chip scan of a DNA track (same chromosome, thresholds not lowered since; a raised Min VAF filters at once)
+      // the same rule as the chip's ✓: a full scan, same chromosome and thresholds, covering the window (or being extended to it);
+      // a scan that no longer covers the window draws nothing, so the bars and the chip never disagree
       const chipSites = (): VariantSite[] => {
         const e = dnaSites[track.sampleId];
         const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-        if (!e || e.error || e.fetched.chrom !== currentChrom || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
+        if (!e || !e.full || e.error || e.fetched.chrom !== currentChrom || e.fetched.uniqueOnly !== uniqueOnly || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
+        const covers = e.fetched.start <= viewStart && e.fetched.end >= viewEnd;
+        if (!covers && !dnaSitesLoading[track.sampleId]) return [];
         return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
       };
       const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.loaded ? readsBelow.sites : dnaTrack ? chipSites() : [];
@@ -2440,7 +2451,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
