@@ -1873,21 +1873,36 @@ export default function SashimiViewer({
     }
 
     // ======================= Raw mode: packed alignments =======================
-    // With clipped bases shown, a read extends beyond its alignment by its soft and hard clips
-    const ext = (r: AlignedRead): { s: number; e: number } => showClipped
+    // With clipped bases shown, a read extends beyond its alignment by its soft clips, and by its hard clips when
+    // another part of the read is in the window (the stub then leads to it; alone, a hard clip is only in the tooltip)
+    const extAll = (r: AlignedRead): { s: number; e: number } => showClipped
       ? { s: r.s - r.c[0] - (r.h?.[0] ?? 0), e: r.e + r.c[1] + (r.h?.[1] ?? 0) }
       : { s: r.s, e: r.e };
-    const visible = current.reads.filter(r => { const x = ext(r); return x.e > viewStart && x.s < viewEnd; });
+    const visible = current.reads.filter(r => { const x = extAll(r); return x.e > viewStart && x.s < viewEnd; });
     // Pairs: two mates both in the window share one row (their span packed as one unit) and are joined by a line
     const pairMode = showPairs && visible.some(r => r.mp != null);
     // Split reads: the parts of one read (SA tag) in the window share a row too, joined by a line
     const splitMode = showClipped && visible.some(r => r.sa);
     const mateOf = new Int32Array(visible.length).fill(-1);
     const partsOf: number[][] = visible.map(() => []);
+    const byStart = new Map<number, number[]>();
+    visible.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
+    if (splitMode) visible.forEach((r, i) => {
+      if (!r.sa) return;
+      for (const part of parseSa(r.sa)) {
+        if (!sameChromName(part.chrom, currentChrom)) continue;
+        for (const j of byStart.get(part.start) ?? []) {
+          // the other record must point back at this one (same read, whatever the names say)
+          if (j !== i && visible[j].sa && parseSa(visible[j].sa).some(q => q.start === r.s && sameChromName(q.chrom, currentChrom)) && !partsOf[i].includes(j)) partsOf[i].push(j);
+        }
+      }
+    });
+    /** drawn extent of each visible read: soft clips always (when shown), hard clips only next to another part of the read */
+    const extOf = visible.map((r, i) => showClipped
+      ? { s: r.s - r.c[0] - (partsOf[i].length ? r.h?.[0] ?? 0 : 0), e: r.e + r.c[1] + (partsOf[i].length ? r.h?.[1] ?? 0 : 0) }
+      : { s: r.s, e: r.e });
     let rows: Int32Array, nRows: number, hidden: number;
     if (pairMode || splitMode) {
-      const byStart = new Map<number, number[]>();
-      visible.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
       // union-find over the reads: mates and split parts end up in one unit
       const parent = new Int32Array(visible.length); for (let i = 0; i < parent.length; i++) parent[i] = i;
       const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
@@ -1898,23 +1913,14 @@ export default function SashimiViewer({
           if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; union(i, j); break; }
         }
       });
-      if (splitMode) visible.forEach((r, i) => {
-        if (!r.sa) return;
-        for (const part of parseSa(r.sa)) {
-          if (!sameChromName(part.chrom, currentChrom)) continue;
-          for (const j of byStart.get(part.start) ?? []) {
-            // the other record must point back at this one (same read, whatever the names say)
-            if (j !== i && visible[j].sa && parseSa(visible[j].sa).some(q => q.start === r.s && sameChromName(q.chrom, currentChrom)) && !partsOf[i].includes(j)) { partsOf[i].push(j); union(i, j); }
-          }
-        }
-      });
+      if (splitMode) partsOf.forEach((list, i) => { for (const j of list) union(i, j); });
       const unitIndex = new Map<number, number>();
       const units: { s: number; e: number }[] = [];
       const unitOf = new Int32Array(visible.length);
       visible.forEach((r, i) => {
         const root = find(i);
         let u = unitIndex.get(root);
-        const x = ext(r);
+        const x = extOf[i];
         if (u == null) { u = units.length; unitIndex.set(root, u); units.push({ s: x.s, e: x.e }); }
         else { units[u].s = Math.min(units[u].s, x.s); units[u].e = Math.max(units[u].e, x.e); }
         unitOf[i] = u;
@@ -1924,7 +1930,7 @@ export default function SashimiViewer({
       visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
       nRows = packed.nRows;
     } else {
-      ({ rows, nRows, hidden } = packReads(visible.map(ext), READS_MAX_ROWS));
+      ({ rows, nRows, hidden } = packReads(extOf, READS_MAX_ROWS));
     }
     // discordance: mate elsewhere, not flagged as a proper pair, or (genomic DNA) an insert far above the median
     const inserts = visible.map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
@@ -1975,7 +1981,7 @@ export default function SashimiViewer({
       for (const j of partsOf[idx]) {
         const o = visible[j];
         if (o.s < r.s || (o.s === r.s && j < idx)) continue;
-        const xr = ext(r), xo = ext(o);
+        const xr = extOf[idx], xo = extOf[j];
         if (xo.s <= xr.e) continue;
         parts.push(<line key={`split${j}`} x1={scale.x(xr.e)} y1={mid} x2={scale.x(xo.s)} y2={mid} stroke={SPLIT_LINK_COLOR} strokeWidth={1.2} strokeDasharray="4 2" />);
       }
@@ -2002,12 +2008,12 @@ export default function SashimiViewer({
             }
             clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len} bp${seq ? `: ${seq.length > 40 ? `${seq.slice(0, 40)}…` : seq}` : ''}`);
           }
-          if (hard) {
+          if (hard && partsOf[idx].length) {
             const hs = side === 0 ? r.s - len - hard : r.e + len;
             const xa = scale.x(hs), xb = scale.x(hs + hard);
             parts.push(<rect key={`h${side}`} x={Math.min(xa, xb)} y={top + 1.5} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 3)} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#6b7280" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />);
             clipTxt.push(`${side === 0 ? 'left' : 'right'} hard clip ${hard} bp (bases in the primary record)`);
-          }
+          } else if (hard) clipTxt.push(`${side === 0 ? 'left' : 'right'} hard clip ${hard} bp (bases in the primary record, outside the window)`);
         });
       }
       r.b.forEach(([bs, be], k) => {
@@ -3691,7 +3697,7 @@ export default function SashimiViewer({
               )}
               {showReads && !collapseReads && anyClips && (
                 <Toggle checked={showClipped} onChange={setShowClipped} label="Clipped"
-                  title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; hard clips as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); the parts of a split read (SA tag) on one row joined by a dashed line. Off: the alignment only." />
+                  title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; the parts of a split read (SA tag) on one row joined by a dashed line, with the hard clips of each part as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); a hard clip whose other part is outside the window is only in the tooltip. Off: the alignment only." />
               )}
               {showReads && !collapseReads && anyInserts && (
                 <Toggle checked={showInserted} onChange={setShowInserted} label="Inserted"

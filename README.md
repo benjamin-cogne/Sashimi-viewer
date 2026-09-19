@@ -195,9 +195,11 @@ of the reads stream, `docs/embedded-format.md`) and, once the converter writes t
 Two options next to *Pairs*, off by default and saved with the session: **Clipped** draws the
 soft-clipped bases beyond the ends of the reads, as letters when the zoom allows and as
 base-coloured bars otherwise, dimmed where they match the reference continuing past the
-alignment, so a real breakpoint sequence stands out from a run of errors or an adapter; hard clips
-are dashed grey stubs of the right length, and the parts of a split read that fall in the window
-share one row, joined by a dashed purple line, as mates do. **Inserted** writes the inserted bases
+alignment, so a real breakpoint sequence stands out from a run of errors or an adapter; the parts
+of a split read that fall in the window share one row, joined by a dashed purple line, as mates do,
+each part's hard clip drawn as a dashed grey stub of the right length (a hard clip whose other
+part is outside the window is only in the tooltip, so a lone supplementary record looks like any
+read). **Inserted** writes the inserted bases
 inside the insertion marks when there is room; they are always in the tooltip. Both work on RNA
 and DNA tracks, on the raw reads only (not on the consensus or haplotype rows). **Click a read**
 for its sequence panel: the clipped and inserted sequences with a copy button, the positions of the
