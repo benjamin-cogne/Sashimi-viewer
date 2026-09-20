@@ -547,7 +547,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
     // discordant pairs, counted once from the leftmost mate
     if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
-      if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', r.start, r.mateChrom);
+      if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
       else if (r.start <= r.matePos) {
         const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
         const span = Math.abs(r.tlen ?? (r.matePos + (alnEnd - r.start) - r.start));

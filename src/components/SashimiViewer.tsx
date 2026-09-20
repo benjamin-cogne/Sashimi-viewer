@@ -2466,7 +2466,7 @@ export default function SashimiViewer({
         for (const e of track.structural.elsewhere) {
           if (e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
           retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString()}`, deltas: [], color: SV_COLORS.elsewhere,
-            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads at ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
+            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
       const height = juncH + COVERAGE_H;
