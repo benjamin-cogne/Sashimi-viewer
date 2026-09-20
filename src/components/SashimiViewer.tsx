@@ -15,7 +15,7 @@ import type { ExonPhase } from './sashimi/geometry';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
-import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, parseSa, hardClippedBases } from '../standalone/alignments';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
@@ -286,20 +286,6 @@ const HARD_CLIP_FILL = '#9ca3af';     // hard-clipped stub (bases in the primary
 const SPLIT_LINK_COLOR = '#7c3aed';   // line joining the parts of a split read
 /** Same chromosome whatever the "chr" prefix. */
 const sameChromName = (a: string, b: string) => a === b || a.replace(/^chr/i, '') === b.replace(/^chr/i, '');
-/** Majority consensus of clipped sequences anchored at the breakpoint: `right` clips start there, `left` clips end there. */
-function clipConsensus(seqs: string[], side: 'left' | 'right'): { seq: string; depth: number[] } {
-  const rows = side === 'left' ? seqs.map(x => x.split('').reverse().join('')) : seqs;
-  const need = Math.min(2, rows.length);
-  const out: string[] = [], depth: number[] = [];
-  for (let k = 0; ; k++) {
-    const counts: Record<string, number> = {}; let covering = 0;
-    for (const r of rows) if (r.length > k) { covering++; counts[r[k]] = (counts[r[k]] ?? 0) + 1; }
-    if (covering < need || covering === 0) break;
-    const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-    out.push(best[1] / covering >= 0.6 ? best[0] : 'N'); depth.push(covering);
-  }
-  return side === 'left' ? { seq: out.reverse().join(''), depth: depth.reverse() } : { seq: out.join(''), depth };
-}
 /** Query bases a record consumes (aligned, inserted and soft-clipped): the whole read minus its hard clips. */
 const queryLength = (r: AlignedRead) => r.c[0] + r.c[1] + r.b.reduce((n, [a, b]) => n + (b - a), 0) + r.i.reduce((n, [, l]) => n + l, 0);
 const INSERTION_COLOR = '#7c3aed';
@@ -2372,7 +2358,10 @@ export default function SashimiViewer({
           if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString()}` };
           else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString()}` };
           const size = kind === 'discordant' ? `mates about ${formatBp(j.end - j.start)} apart (ends binned to 500 bp)` : formatBp(j.end - j.start);
+          const placed = (sv.realigned ?? []).filter(x => x.arc.kind === kind && x.arc.start === j.start && x.arc.end === j.end);
+          const nPlaced = placed.reduce((n, x) => n + x.count, 0), nHard = placed.reduce((n, x) => n + x.hard, 0);
           const title = `${SV_LABEL[kind]}: ${approx}${j.count.toLocaleString()} read${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
+            (nPlaced ? `\n${approx}${(j.count - nPlaced).toLocaleString()} split read${j.count - nPlaced === 1 ? '' : 's'} (SA tag) + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
             (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
             '\nevidence, not a call: open the reads to check it';
           arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: kind !== 'deletion', unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
@@ -3450,7 +3439,8 @@ export default function SashimiViewer({
       const rows = displayTracks.filter(t => t.structural).map(t => {
         const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
         const mine = list.find(x => x.start === j.start && x.end === j.end);
-        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
+        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === j.start && x.arc.end === j.end).reduce((n, x) => n + x.count, 0);
+        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
       });
       const size = j.end - j.start;
       return {
@@ -3458,7 +3448,7 @@ export default function SashimiViewer({
         subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${sv === 'split' ? ' · breakpoints rounded to 5 bp' : ''}`,
         cartoon: null,
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (one breakpoint pair; an inversion has two)`] : [],
-        tables: [{ head: ['sample', 'supporting reads', 'median insert'], rows }],
+        tables: [{ head: ['sample', 'supporting reads', 'of which clipped reads placed by realignment', 'median insert'], rows }],
         strip: null,
         note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more; split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };

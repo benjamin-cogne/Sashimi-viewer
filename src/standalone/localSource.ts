@@ -11,7 +11,7 @@ import { BlobFile } from 'generic-filehandle2';
 import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
-import { boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { SV_MIN_CLIP, boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
 import type { GenomeBuild } from './ensembl';
@@ -61,6 +61,8 @@ const DEFAULT_MAX_READS = 250_000;
 /** Reads decoded per exon for the exon-usage statistics (fractions and medians only need a sample). */
 const EXON_USAGE_MAX_READS = 100_000;
 /** A window is scanned in tiles so that one tile's decoded records can be released before the next is read. */
+/** widest window whose reference is fetched from the web APIs to place clipped sequences (a local FASTA has no limit) */
+const REALIGN_MAX_BP = 500_000;
 const TILE_BP = 250_000;
 /** Compressed bytes per record assumed before a file has been scanned once (a scan then calibrates it). */
 const BYTES_PER_READ: Record<'bam' | 'cram', number> = { bam: 60, cram: 30 };
@@ -85,12 +87,16 @@ interface RecordView<R> {
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
+/** A CIGAR with a soft clip of SV_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment. */
+const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
+const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= SV_MIN_CLIP) return true; return false; };
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
+    const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
     // the name is what ties the parts of a split read together: kept for reads with an SA tag even in the light scan
-    return { name: light && typeof sa !== 'string' ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: light ? '' : r.seq, qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
+    return { name: light && typeof sa !== 'string' ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
   },
 };
@@ -101,7 +107,8 @@ const CRAM_VIEW: RecordView<any> = {
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
-    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: light ? '' : (r.readBases ?? ''), qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
+    const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
+    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? (r.readBases ?? '') : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, (r.nextStart ?? 0) - 1, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
@@ -429,7 +436,12 @@ export class LocalDataSource implements SashimiDataSource {
     const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true, !!opts?.structural);
     const reads = kept.map(r => encodeRead(r, null, 0));
     const loc = await this.locate(sampleId, chrom);
-    const structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate) : undefined;
+    // the reference of the window lets clip clusters be placed by realignment: always with a FASTA, up to REALIGN_MAX_BP through the web APIs
+    let ref: { start: number; seq: string } | null = null;
+    if (opts?.structural && hasRealignableClips(kept) && (this.reference.fasta || win.end - win.start <= REALIGN_MAX_BP)) {
+      try { const seq = await this.getReferenceSeq(chrom, win.start, win.end); if (seq) ref = { start: win.start, seq }; } catch (e) { console.warn('reference for clip realignment not available:', e); }
+    }
+    const structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, ref) : undefined;
     const splicedReads = kept.reduce((n, r) => n + (/\d+N/.test(r.cigar) ? 1 : 0), 0);
     const junctions = junctionCounts(reads, win.start, win.end);
     // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)

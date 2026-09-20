@@ -38,7 +38,15 @@ export type LibraryType = 'rna' | 'dna' | 'unknown';
 export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
 
 /** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
-export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number }
+export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number; /** hard-clipped records without SA tag among the count (no sequence of their own) */ hard?: number }
+/** A clip cluster whose clipped consensus was placed on the reference of the window by realignment: it counts in the arc named here. */
+export interface RealignedClip {
+  pos: number; side: 'left' | 'right'; count: number; hard: number;
+  /** where the clipped sequence was placed (0-based start) and on which strand, and the length matched */
+  target: number; strand: '+' | '-'; matched: number;
+  /** the arc it joined */
+  arc: { start: number; end: number; kind: 'split' | 'duplication' | 'inversion' };
+}
 /** Mates or split alignments on another chromosome, by position in the window and target chromosome. */
 export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
 /**
@@ -60,8 +68,10 @@ export interface StructuralEvidence {
   discordant: JunctionArc[];
   /** split alignments and mates on other chromosomes */
   elsewhere: ElsewhereLink[];
-  /** soft-clip clusters of at least 3 reads clipped by 20 bases or more */
+  /** soft-clip clusters of at least 3 reads clipped by 20 bases or more, whose clipped sequence could not be placed in the window */
   clips: ClipCluster[];
+  /** clip clusters placed by realignment of their clipped consensus: their reads count in the split-read arcs */
+  realigned?: RealignedClip[];
   /** median insert size of the proper pairs of the window (paired libraries) */
   insertMedian: number | null;
   /** reads scanned for this evidence (after sampling) */

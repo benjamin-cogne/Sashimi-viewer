@@ -429,7 +429,8 @@ function App() {
         for (const smp of samples) {
           progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
-            const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000 });
+            // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does
+            const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural: smp.lib?.type === 'dna' });
             coverage[String(smp.id)] = await encodeCoverageV2(c, { start: ws, end: we });
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };

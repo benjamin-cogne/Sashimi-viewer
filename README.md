@@ -175,7 +175,16 @@ adjacent on the reference, a purple `ins` pill with its size. Breakpoints are ro
 **Discordant pairs** (insert size above five times the window's median, at least 1 kb, or both
 mates on the same strand) are dashed amber arcs between 500 bp bins, and **soft-clip clusters**
 (at least 3 reads clipped by 20 bases or more at one position, split reads excluded) teal pills on
-the baseline (⇤ clipped before, ⇥ clipped after). *Min supporting reads* sets the support needed to draw a
+the baseline (⇤ clipped before, ⇥ clipped after). **Clipped reads without an SA tag are placed by
+realignment**: the clipped consensus of each cluster is searched on both strands of the window's
+reference (its 20 bases next to the breakpoint must occur once, and up to 60 bases must agree with
+at most one mismatch per 20); a placed cluster becomes the arc a split read would give between the
+clip and the placed sequence, deletion-type, duplication-type or inversion, merged with the
+split-read arc at the same breakpoints. The arc shows one count; its tooltip and its panel give the
+split reads and the placed clipped reads apart. Hard-clipped records without SA tag, which carry no
+sequence, count in the cluster at their clip position and follow it into the arc. Clusters that
+find no unique place stay pills. The reference comes from the FASTA at any width, or from the web
+APIs for windows up to 500 kb. *Min supporting reads* sets the support needed to draw a
 hint. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
 the count in every DNA sample shown, the median insert size, and a g. notation for a deletion.
 Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool the evidence of

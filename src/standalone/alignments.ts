@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
+import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, RealignedClip, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -309,6 +309,63 @@ function segment(chrom: string, start: number, rev: boolean, cigar: string): Seg
   return { chrom, start, end: start + refLen, rev, qs, qe };
 }
 
+/** Majority consensus of clipped sequences anchored at the breakpoint: `right` clips start there, `left` clips end there. */
+export function clipConsensus(seqs: string[], side: 'left' | 'right'): { seq: string; depth: number[] } {
+  const rows = side === 'left' ? seqs.map(x => x.split('').reverse().join('')) : seqs;
+  const need = Math.min(2, rows.length);
+  const out: string[] = [], depth: number[] = [];
+  for (let k = 0; ; k++) {
+    const counts: Record<string, number> = {}; let covering = 0;
+    for (const r of rows) if (r.length > k) { covering++; counts[r[k]] = (counts[r[k]] ?? 0) + 1; }
+    if (covering < need || covering === 0) break;
+    const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    out.push(best[1] / covering >= 0.6 ? best[0] : 'N'); depth.push(covering);
+  }
+  return side === 'left' ? { seq: out.reverse().join(''), depth: depth.reverse() } : { seq: out.join(''), depth };
+}
+
+/** Longest window the clipped consensus is checked over once its seed is found; mismatches allowed: one per 20 bases. */
+const REALIGN_CHECK_BP = 60;
+/**
+ * Places a clipped consensus on the reference of the window: its 20 bases next to the breakpoint (the first ones of
+ * a right clip, the last ones of a left clip) must occur exactly once over both strands, and the consensus must
+ * then agree with the reference over up to 60 bases with at most one mismatch per 20. Returns the 0-based interval
+ * covered on the forward strand, the strand, and the length matched; null when not placed.
+ */
+export function placeClip(consensus: string, side: 'left' | 'right', ref: { start: number; seq: string; rc?: string }): { start: number; end: number; strand: '+' | '-'; matched: number } | null {
+  const seq = consensus.replace(/N+$/, '').replace(/^N+/, '');
+  if (seq.length < SV_MIN_CLIP || seq.includes('N')) return null;
+  const check = Math.min(seq.length, REALIGN_CHECK_BP);
+  // the part checked is the one next to the breakpoint
+  const probe = side === 'right' ? seq.slice(0, check) : seq.slice(seq.length - check);
+  const seed = side === 'right' ? probe.slice(0, SV_MIN_CLIP) : probe.slice(probe.length - SV_MIN_CLIP);
+  const rc = ref.rc ?? (ref.rc = reverseComplement(ref.seq));
+  const hits: { strand: '+' | '-'; at: number }[] = [];
+  for (const [strand, text] of [['+', ref.seq], ['-', rc]] as const) {
+    let from = 0;
+    while (hits.length < 2) { const at = text.indexOf(seed, from); if (at < 0) break; hits.push({ strand, at }); from = at + 1; }
+    if (hits.length >= 2) return null;
+  }
+  if (hits.length !== 1) return null;
+  const h = hits[0];
+  const text = h.strand === '+' ? ref.seq : rc;
+  // the probe starts `probeOff` bases before the seed (0 for a right clip, check - 20 for a left one)
+  const probeOff = side === 'right' ? 0 : check - SV_MIN_CLIP;
+  const at = h.at - probeOff;
+  if (at < 0 || at + check > text.length) return null;
+  let mism = 0;
+  for (let k = 0; k < check; k++) if (text[at + k] !== probe[k]) mism++;
+  if (mism > Math.floor(check / 20)) return null;
+  // forward-strand interval of the matched probe
+  const fwdStart = h.strand === '+' ? at : text.length - (at + check);
+  return { start: ref.start + fwdStart, end: ref.start + fwdStart + check, strand: h.strand, matched: check };
+}
+
+/** True when some read of the scan is soft-clipped by 20 bases or more without an SA tag and carries its sequence: the window is worth a reference for realignment. */
+export function hasRealignableClips(reads: RawRead[]): boolean {
+  return reads.some(r => !r.sa && r.seq && /(^|\D)(\d+)S/.test(r.cigar) && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
+}
+
 /**
  * Deletions inside reads, split reads, soft-clip clusters and discordant pairs of a window (0-based half-open),
  * from the light records of the scan. `rate` scales every count back when the window was sampled; support
@@ -320,12 +377,18 @@ function segment(chrom: string, start: number, rev: boolean, cigar: string): Seg
  * the same strand (deletion-type), backwards (duplication-type), on the other strand (inversion), on another
  * chromosome (translocation), or after an unaligned stretch of the read (insertion). Each read counts once,
  * whichever of its parts fall in the window.
+ *
+ * Clipped reads without an SA tag form clip clusters. With the reference of the window (`ref`), the clipped
+ * consensus of each cluster is placed by realignment (`placeClip`) and the cluster joins the arc a split read
+ * would give between its clip position and the placed sequence; hard-clipped records without SA tag, which carry
+ * no sequence, count in the cluster at their clip position and follow it into the arc.
  */
-export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number): StructuralEvidence {
+export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null): StructuralEvidence {
   const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), dups = new Map<string, JunctionArc>(), invs = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
+  const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
-  const add = (m: Map<string, JunctionArc>, s: number, e: number) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count++; else m.set(k, { start: s, end: e, count: 1 }); };
+  const add = (m: Map<string, JunctionArc>, s: number, e: number, n = 1) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count += n; else m.set(k, { start: s, end: e, count: n }); };
   const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
   const r5 = (x: number) => Math.round(x / 5) * 5;
   const inWindow = (a: number, b: number) => b > start && a < end;
@@ -335,18 +398,31 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
+  const cluster = (key: string, pos: number, side: 'left' | 'right', hard: boolean, seq?: string) => {
+    const c = clips.get(key);
+    if (c) { c.count++; if (hard) c.hard = (c.hard ?? 0) + 1; } else clips.set(key, { pos, side, count: 1, hard: hard ? 1 : 0 });
+    if (seq) { const l = clipSeqs.get(key); if (l) l.push(seq); else clipSeqs.set(key, [seq]); }
+  };
   for (const r of reads) {
     const ops = parseCigar(r.cigar);
-    let pos = r.start, leftClip = 0, rightClip = 0;
-    ops.forEach(([len, op], i) => {
-      if (op === 'S') { if (i === 0 || (i === 1 && ops[0][1] === 'H')) leftClip = len; else rightClip = len; }
+    let pos = r.start, leftClip = 0, rightClip = 0, leftHard = 0, rightHard = 0, seenAligned = false, qLen = 0;
+    ops.forEach(([len, op]) => {
+      if (op === 'S') { if (!seenAligned) leftClip += len; else rightClip += len; qLen += len; }
+      else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
+      else if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
       if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len);
-      if ('MDN=X'.includes(op)) pos += len;
+      if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
     });
     const alnEnd = pos;
-    // clip clusters: reads whose clipped part is placed elsewhere (SA tag) are split reads, drawn from their chain instead
-    if (!r.sa && leftClip >= SV_MIN_CLIP && r.start >= start && r.start < end) { const k = `L${r.start}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: r.start, side: 'left', count: 1 }); }
-    if (!r.sa && rightClip >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) { const k = `R${alnEnd}`; const c = clips.get(k); if (c) c.count++; else clips.set(k, { pos: alnEnd, side: 'right', count: 1 }); }
+    // clip clusters: reads whose clipped part is placed elsewhere (SA tag) are split reads, drawn from their chain instead;
+    // soft clips bring their sequence when the scan decoded it, hard clips without SA tag only their position
+    if (!r.sa) {
+      const seqOk = r.seq && r.seq.length === qLen;
+      if (leftClip >= SV_MIN_CLIP && r.start >= start && r.start < end) cluster(`L${r.start}`, r.start, 'left', false, seqOk ? r.seq.substring(0, leftClip) : undefined);
+      else if (leftHard >= SV_MIN_CLIP && r.start >= start && r.start < end) cluster(`L${r.start}`, r.start, 'left', true);
+      if (rightClip >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) cluster(`R${alnEnd}`, alnEnd, 'right', false, seqOk ? r.seq.substring(qLen - rightClip) : undefined);
+      else if (rightHard >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) cluster(`R${alnEnd}`, alnEnd, 'right', true);
+    }
     if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
     // discordant pairs, counted once from the leftmost mate
     if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
@@ -361,6 +437,22 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       }
     }
   }
+  /** One breakpoint between two adjacent parts of a read: classified and counted `n` times; returns the arc it joined, if any. */
+  const breakpoint = (a: Segment, b: Segment, n = 1): RealignedClip['arc'] | null => {
+    const aOut = a.rev ? a.start : a.end;          // where the read leaves part a on the reference
+    const bIn = b.rev ? b.end : b.start;           // where it enters part b
+    const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
+    if (!aHere && !bHere) return null;
+    if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); return null; }
+    const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
+    if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
+    const refGap = a.rev ? a.start - b.end : b.start - a.end;
+    const qGap = b.qs - a.qe;
+    if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) { add(splits, lo, hi, n); return { start: lo, end: hi, kind: 'split' }; } }
+    else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) { add(dups, lo, hi, n); return { start: lo, end: hi, kind: 'duplication' }; } }
+    else if (qGap >= SV_MIN_DELETION && aOut >= start && aOut < end) { const k = r5(aOut); const x = insertions.get(k); if (x) { x.count += n; x.len = Math.round((x.len * (x.count - n) + qGap * n) / x.count); } else insertions.set(k, { pos: k, len: qGap, count: n }); }
+    return null;
+  };
   // split reads: the chain of every part of the read, ordered along the read
   for (const r of chains.values()) {
     const segs: Segment[] = [segment(chrom, r.start, (r.flags & FLAG_REVERSE) !== 0, r.cigar)];
@@ -372,20 +464,26 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       segs.push(segment(f[0], saStart, f[2] === '-', f[3]));
     }
     segs.sort((a, b) => a.qs - b.qs);
-    for (let i = 0; i + 1 < segs.length; i++) {
-      const a = segs[i], b = segs[i + 1];
-      const aOut = a.rev ? a.start : a.end;          // where the read leaves part a on the reference
-      const bIn = b.rev ? b.end : b.start;           // where it enters part b
-      const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
-      if (!aHere && !bHere) continue;
-      if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); continue; }
-      const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
-      if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) add(invs, lo, hi); continue; }
-      const refGap = a.rev ? a.start - b.end : b.start - a.end;
-      const qGap = b.qs - a.qe;
-      if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) add(splits, lo, hi); }
-      else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) add(dups, lo, hi); }
-      else if (qGap >= SV_MIN_DELETION && aOut >= start && aOut < end) { const k = r5(aOut); const x = insertions.get(k); if (x) { x.count++; x.len = Math.round((x.len * (x.count - 1) + qGap) / x.count); } else insertions.set(k, { pos: k, len: qGap, count: 1 }); }
+    for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1]);
+  }
+  // clip clusters placed by realignment of their clipped consensus: the cluster becomes a breakpoint like a split read's
+  const realigned: RealignedClip[] = [];
+  if (ref && ref.seq) {
+    const refWin = { start: ref.start, seq: ref.seq, rc: undefined as string | undefined };
+    for (const [key, c] of [...clips]) {
+      const seqs = clipSeqs.get(key);
+      if (!seqs || c.count * rate < SV_MIN_SUPPORT) continue;
+      const cons = clipConsensus(seqs, c.side).seq;
+      const hit = placeClip(cons, c.side, refWin);
+      if (!hit) continue;
+      const L = hit.matched;
+      // the aligned side as a one-base anchor at the clip position, the placed clip as the other part, in read order
+      const anchor: Segment = c.side === 'right' ? { chrom, start: c.pos - 1, end: c.pos, rev: false, qs: 0, qe: 1 } : { chrom, start: c.pos, end: c.pos + 1, rev: false, qs: L, qe: L + 1 };
+      const placed: Segment = { chrom, start: hit.start, end: hit.end, rev: hit.strand === '-', qs: c.side === 'right' ? 1 : 0, qe: c.side === 'right' ? 1 + L : L };
+      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count) : breakpoint(placed, anchor, c.count);
+      if (!arc) continue;
+      realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc });
+      clips.delete(key);
     }
   }
   const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
@@ -393,7 +491,8 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     deletions: scaled(dels), splits: scaled(splits), duplications: scaled(dups), inversions: scaled(invs), discordant: scaled(disc),
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
-    clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    realigned: realigned.length ? realigned.sort((a, b) => a.pos - b.pos) : undefined,
     insertMedian: median, reads: reads.length,
   };
 }
