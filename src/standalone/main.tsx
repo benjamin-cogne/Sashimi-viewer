@@ -13,7 +13,8 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseLocus, toTxModel } from '../components/sashimi/geometry';
-import type { KnownVariant, LibraryEvidence, LibraryType } from '../components/sashimi/types';
+import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from '../components/sashimi/types';
+import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
 import '../index.css';
@@ -426,17 +427,27 @@ function App() {
         for (const ex of exonSets) { const sorted = [...ex].sort((a, b) => a.start - b.start); for (let i = 0; i + 1 < sorted.length; i++) { intronStarts.add(sorted[i].end); intronEnds.add(sorted[i + 1].start); } }
         const coverage: Record<string, EncodedCoverage | EncodedCoverageV2> = {};
         done++;
+        const raw = new Map<number, SampleCoverage>();
         for (const smp of samples) {
           progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does
-            const c = await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural: smp.lib?.type === 'dna' });
-            coverage[String(smp.id)] = await encodeCoverageV2(c, { start: ws, end: we });
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural: smp.lib?.type === 'dna' }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
           done++;
         }
+        // clipped reads of each DNA sample rescued at the breakpoints of the others, as the live page does
+        if (ds.rescueClips) for (const [sid, c] of raw) {
+          if (!c.structural) continue;
+          const others = [...raw].filter(([o, oc]) => o !== sid && oc.structural).flatMap(([, oc]) => breakpointsOf(oc.structural!));
+          const mine = new Set(breakpointsOf(c.structural).map(b => `${b.kind}:${b.start}-${b.end}`));
+          const cand = others.filter(b => !mine.has(`${b.kind}:${b.start}-${b.end}`));
+          if (!cand.length) continue;
+          try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.uniqueOnly); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
+        }
+        for (const [sid, c] of raw) coverage[String(sid)] = await encodeCoverageV2(c, { start: ws, end: we });
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
         if (st.reads) {

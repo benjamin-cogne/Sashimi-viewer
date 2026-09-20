@@ -11,7 +11,8 @@ import { BlobFile } from 'generic-filehandle2';
 import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
-import { SV_MIN_CLIP, boundarySpanning, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, junctionCounts, keepFlags, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
+import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, boundarySpanning, clipEnds, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, junctionCounts, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
 import type { GenomeBuild } from './ensembl';
@@ -63,6 +64,8 @@ const EXON_USAGE_MAX_READS = 100_000;
 /** A window is scanned in tiles so that one tile's decoded records can be released before the next is read. */
 /** widest window whose reference is fetched from the web APIs to place clipped sequences (a local FASTA has no limit) */
 const REALIGN_MAX_BP = 500_000;
+/** bases read on each side of a breakpoint end when rescuing another sample's clipped reads (longer than a short read, shorter than most long-read clips matter) */
+const RESCUE_SPAN_BP = 400;
 const TILE_BP = 250_000;
 /** Compressed bytes per record assumed before a file has been scanned once (a scan then calibrates it). */
 const BYTES_PER_READ: Record<'bam' | 'cram', number> = { bam: 60, cram: 30 };
@@ -87,9 +90,9 @@ interface RecordView<R> {
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
-/** A CIGAR with a soft clip of SV_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment. */
+/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
-const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= SV_MIN_CLIP) return true; return false; };
+const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
   raw: (r, light, structural, refNames) => {
@@ -344,6 +347,29 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   // ---- SashimiDataSource ----
+  /** Clipped reads of this sample rescued at breakpoints seen in other samples: only the reads around the breakpoint ends are read. */
+  async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]> {
+    if (!breakpoints.length) return [];
+    const loc = await this.locate(sampleId, chrom);
+    if (!loc) return [];
+    const ends = [...new Set(breakpoints.flatMap(b => [b.start, b.end]))].sort((a, b) => a - b);
+    const lo = Math.max(0, ends[0] - RESCUE_SPAN_BP), hi = ends[ends.length - 1] + RESCUE_SPAN_BP;
+    if (!this.reference.fasta && hi - lo > REALIGN_MAX_BP) return [];
+    // reads clipped at an end: those overlapping a short stretch around each end (merged when close)
+    const ranges: { start: number; end: number }[] = [];
+    for (const e of ends) { const a = Math.max(0, e - RESCUE_SPAN_BP), b = e + RESCUE_SPAN_BP; const last = ranges[ranges.length - 1]; if (last && a <= last.end) last.end = b; else ranges.push({ start: a, end: b }); }
+    // full records (names included) over short stretches: a read overlapping two stretches is kept once
+    const seen = new Set<string>(); const reads: RawRead[] = [];
+    for (const r of ranges) {
+      const { kept } = await this.scan(sampleId, chrom, r.start, r.end, uniqueOnly, Number.MAX_SAFE_INTEGER, false, true);
+      for (const x of kept) { const k = `${x.name}:${x.start}:${x.flags}:${x.cigar}`; if (!seen.has(k)) { seen.add(k); reads.push(x); } }
+    }
+    const clipped = clipEnds(reads).filter(e => ends.some(p => Math.abs(p - e.pos) <= RESCUE_TOLERANCE_BP));
+    if (!clipped.length) return [];
+    const seq = await this.getReferenceSeq(chrom, lo, hi);
+    const found = rescueClipEnds(clipped, breakpoints, seq ? { start: lo, seq } : null);
+    return [...found].map(([k, n]) => { const [kind, span] = k.split(':'); const [a, b] = span.split('-').map(Number); return { start: a, end: b, kind: kind as Breakpoint['kind'], count: n.count, hard: n.hard, own: false }; });
+  }
   async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null> {
     const { kept } = await this.scan(sampleId, chrom, start, start + 1, false, Number.MAX_SAFE_INTEGER, false, true);
     const r = kept.find(x => x.start === start && x.name === name && !(x.flags & 2048) && x.seq);
@@ -436,12 +462,19 @@ export class LocalDataSource implements SashimiDataSource {
     const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true, !!opts?.structural);
     const reads = kept.map(r => encodeRead(r, null, 0));
     const loc = await this.locate(sampleId, chrom);
-    // the reference of the window lets clip clusters be placed by realignment: always with a FASTA, up to REALIGN_MAX_BP through the web APIs
-    let ref: { start: number; seq: string } | null = null;
-    if (opts?.structural && hasRealignableClips(kept) && (this.reference.fasta || win.end - win.start <= REALIGN_MAX_BP)) {
-      try { const seq = await this.getReferenceSeq(chrom, win.start, win.end); if (seq) ref = { start: win.start, seq }; } catch (e) { console.warn('reference for clip realignment not available:', e); }
+    // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
+    // breakpoints seen: fetched when the window has something to place or rescue, always with a FASTA, up to
+    // REALIGN_MAX_BP through the web APIs
+    let structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, null) : undefined;
+    if (structural && (this.reference.fasta || win.end - win.start <= REALIGN_MAX_BP)) {
+      const hasArcs = structural.splits.length + structural.deletions.length + (structural.duplications?.length ?? 0) + (structural.inversions?.length ?? 0) > 0;
+      if (hasRealignableClips(kept) || (hasArcs && hasRescuableClips(kept))) {
+        try {
+          const seq = await this.getReferenceSeq(chrom, win.start, win.end);
+          if (seq) structural = structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, { start: win.start, seq });
+        } catch (e) { console.warn('reference for clip realignment not available:', e); }
+      }
     }
-    const structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, ref) : undefined;
     const splicedReads = kept.reduce((n, r) => n + (/\d+N/.test(r.cigar) ? 1 : 0), 0);
     const junctions = junctionCounts(reads, win.start, win.end);
     // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)

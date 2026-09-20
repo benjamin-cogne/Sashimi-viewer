@@ -183,8 +183,17 @@ clip and the placed sequence, deletion-type, duplication-type or inversion, merg
 split-read arc at the same breakpoints. The arc shows one count; its tooltip and its panel give the
 split reads and the placed clipped reads apart. Hard-clipped records without SA tag, which carry no
 sequence, count in the cluster at their clip position and follow it into the arc. Clusters that
-find no unique place stay pills. The reference comes from the FASTA at any width, or from the web
-APIs for windows up to 500 kb. *Min supporting reads* sets the support needed to draw a
+find no unique place stay pills. **Clipped reads are then rescued at the breakpoints already
+seen**, the way a two-pass aligner uses the junctions of its first pass: a read soft-clipped at an
+end of an arc (chain, deletion or placed cluster, within the 5 bp rounding) whose clipped bases,
+8 or more (12 when several breakpoints share the position), match the reference at the other end
+in the arc's orientation joins the arc; a hard clip without SA tag at an end is attached by
+position. Rescued reads never make an arc on their own: the sample needs an aligned split read, a
+deletion or a placed cluster there first. The breakpoints of the other DNA samples shown are used
+as targets too; a sample's reads rescued at a breakpoint it does not carry itself are listed in the
+arc's panel ("no arc") without being drawn, which is how a parent's short clips show up under a
+child's breakpoint. The arc tooltip and panel give the aligned, placed and rescued reads apart.
+The reference comes from the FASTA at any width, or from the web APIs for windows up to 500 kb. *Min supporting reads* sets the support needed to draw a
 hint. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
 the count in every DNA sample shown, the median insert size, and a g. notation for a deletion.
 Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool the evidence of

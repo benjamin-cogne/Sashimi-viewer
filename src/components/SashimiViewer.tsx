@@ -15,7 +15,7 @@ import type { ExonPhase } from './sashimi/geometry';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
-import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
@@ -2086,6 +2086,30 @@ export default function SashimiViewer({
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
   }, [showReads, readsSampleIds, collapseReads, haplotypes, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel]);
+  // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
+  // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
+  const rescueAsked = useRef(new Map<number, string>());
+  useEffect(() => {
+    if (!ds.rescueClips) return;
+    const dna = tracks.filter(t => !t.gtex && !t.group && t.structural && isDnaSample(t.sampleId));
+    if (dna.length < 2) return;
+    const timer = setTimeout(() => {
+      for (const t of dna) {
+        const mine = new Set(breakpointsOf(t.structural!).map(b => `${b.kind}:${b.start}-${b.end}`));
+        const cand = dna.filter(o => o !== t).flatMap(o => breakpointsOf(o.structural!)).filter(b => !mine.has(`${b.kind}:${b.start}-${b.end}`));
+        const uniq = new Map(cand.map(b => [`${b.kind}:${b.start}-${b.end}`, b]));
+        const sig = `${currentChrom}:${t.fetched?.start}-${t.fetched?.end}|${[...uniq.keys()].sort().join(',')}`;
+        if (!uniq.size || rescueAsked.current.get(t.sampleId) === sig) continue;
+        rescueAsked.current.set(t.sampleId, sig);
+        const sid = t.sampleId;
+        ds.rescueClips!(sid, currentChrom, [...uniq.values()], uniqueOnly).then(found => {
+          if (!found.length || rescueAsked.current.get(sid) !== sig) return;
+          setTracks(prev => prev.map(x => x.sampleId === sid && x.structural ? { ...x, structural: { ...x.structural, rescued: [...(x.structural.rescued ?? []).filter(r => r.own), ...found] } } : x));
+        }).catch(() => { /* optional */ });
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [tracks, currentChrom, uniqueOnly, isDnaSample, ds]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
   /** Some loaded reads carry a mate: the Pairs option applies. */
@@ -2360,8 +2384,13 @@ export default function SashimiViewer({
           const size = kind === 'discordant' ? `mates about ${formatBp(j.end - j.start)} apart (ends binned to 500 bp)` : formatBp(j.end - j.start);
           const placed = (sv.realigned ?? []).filter(x => x.arc.kind === kind && x.arc.start === j.start && x.arc.end === j.end);
           const nPlaced = placed.reduce((n, x) => n + x.count, 0), nHard = placed.reduce((n, x) => n + x.hard, 0);
+          const resc = (sv.rescued ?? []).filter(x => x.own && x.kind === kind && x.start === j.start && x.end === j.end);
+          const nResc = resc.reduce((n, x) => n + x.count, 0), nRescHard = resc.reduce((n, x) => n + x.hard, 0);
+          const nAligned = j.count - nPlaced - nResc;
           const title = `${SV_LABEL[kind]}: ${approx}${j.count.toLocaleString()} read${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
-            (nPlaced ? `\n${approx}${(j.count - nPlaced).toLocaleString()} split read${j.count - nPlaced === 1 ? '' : 's'} (SA tag) + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
+            (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString()} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
+              (nPlaced ? ` + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
+              (nResc ? ` + ${approx}${nResc.toLocaleString()} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString()} hard-clipped, attached by position` : ''})` : '') : '') +
             (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
             '\nevidence, not a call: open the reads to check it';
           arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: kind !== 'deletion', unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
@@ -3440,7 +3469,9 @@ export default function SashimiViewer({
         const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
         const mine = list.find(x => x.start === j.start && x.end === j.end);
         const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === j.start && x.arc.end === j.end).reduce((n, x) => n + x.count, 0);
-        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
+        const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && x.start === j.start && x.end === j.end);
+        const own = resc.filter(x => x.own).reduce((n, x) => n + x.count, 0), borrowed = resc.filter(x => !x.own).reduce((n, x) => n + x.count, 0);
+        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', own ? own.toLocaleString() : borrowed ? `${borrowed.toLocaleString()} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
       });
       const size = j.end - j.start;
       return {
@@ -3448,7 +3479,7 @@ export default function SashimiViewer({
         subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${sv === 'split' ? ' · breakpoints rounded to 5 bp' : ''}`,
         cartoon: null,
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (one breakpoint pair; an inversion has two)`] : [],
-        tables: [{ head: ['sample', 'supporting reads', 'of which clipped reads placed by realignment', 'median insert'], rows }],
+        tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
         strip: null,
         note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more; split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };

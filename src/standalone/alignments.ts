@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, RealignedClip, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
+import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -363,7 +363,128 @@ export function placeClip(consensus: string, side: 'left' | 'right', ref: { star
 
 /** True when some read of the scan is soft-clipped by 20 bases or more without an SA tag and carries its sequence: the window is worth a reference for realignment. */
 export function hasRealignableClips(reads: RawRead[]): boolean {
-  return reads.some(r => !r.sa && r.seq && /(^|\D)(\d+)S/.test(r.cigar) && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
+  return reads.some(r => !r.sa && r.seq && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
+}
+/** True when some read is soft-clipped by RESCUE_MIN_CLIP bases or more without an SA tag and carries its sequence: a known breakpoint could rescue it. */
+export function hasRescuableClips(reads: RawRead[]): boolean {
+  return reads.some(r => !r.sa && r.seq && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= RESCUE_MIN_CLIP));
+}
+
+/** The breakpoints of a sample's evidence, as rescue targets: every arc of the four kinds. */
+export function breakpointsOf(sv: StructuralEvidence): Breakpoint[] {
+  return [
+    ...sv.deletions.map(j => ({ start: j.start, end: j.end, kind: 'deletion' as const })),
+    ...sv.splits.map(j => ({ start: j.start, end: j.end, kind: 'split' as const })),
+    ...(sv.duplications ?? []).map(j => ({ start: j.start, end: j.end, kind: 'duplication' as const })),
+    ...(sv.inversions ?? []).map(j => ({ start: j.start, end: j.end, kind: 'inversion' as const })),
+  ];
+}
+/** Shortest soft clip a known breakpoint can rescue: 8 bases with one candidate at the position, 12 with several. */
+export const RESCUE_MIN_CLIP = 8, RESCUE_MIN_CLIP_MULTI = 12;
+/** Arc ends are rounded to 5 bp: a clip within this distance of an end belongs to it. */
+export const RESCUE_TOLERANCE_BP = 2;
+const RESCUE_TOLERANCE = RESCUE_TOLERANCE_BP;
+
+/** One soft- or hard-clipped read end without SA tag: where it is clipped, on which side, and the clipped bases (empty for a hard clip). */
+interface ClipEnd { pos: number; side: 'left' | 'right'; seq: string; hard: boolean }
+/** The clipped ends of the reads (both sides when both are clipped), soft clips of RESCUE_MIN_CLIP bases or more with their sequence, hard clips of SV_MIN_CLIP or more without. */
+export function clipEnds(reads: RawRead[]): ClipEnd[] {
+  const out: ClipEnd[] = [];
+  for (const r of reads) {
+    if (r.sa) continue;
+    const ops = parseCigar(r.cigar);
+    let pos = r.start, leftClip = 0, rightClip = 0, leftHard = 0, rightHard = 0, seenAligned = false, qLen = 0;
+    for (const [len, op] of ops) {
+      if (op === 'S') { if (!seenAligned) leftClip += len; else rightClip += len; qLen += len; }
+      else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
+      else if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
+      if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
+    }
+    const seqOk = !!r.seq && r.seq.length === qLen;
+    if (leftClip >= RESCUE_MIN_CLIP && seqOk) out.push({ pos: r.start, side: 'left', seq: r.seq.substring(0, leftClip), hard: false });
+    else if (!leftClip && leftHard >= SV_MIN_CLIP) out.push({ pos: r.start, side: 'left', seq: '', hard: true });
+    if (rightClip >= RESCUE_MIN_CLIP && seqOk) out.push({ pos, side: 'right', seq: r.seq.substring(qLen - rightClip), hard: false });
+    else if (!rightClip && rightHard >= SV_MIN_CLIP) out.push({ pos, side: 'right', seq: '', hard: true });
+  }
+  return out;
+}
+
+/** Bases of the forward reference from `from` (0-based) over `len`, or null when outside the reference window. */
+const refSlice = (ref: { start: number; seq: string }, from: number, len: number): string | null => {
+  if (from < ref.start || from + len > ref.start + ref.seq.length || len <= 0) return null;
+  return ref.seq.substring(from - ref.start, from - ref.start + len);
+};
+/** A clipped sequence against the reference bases it should equal: no mismatch under 20 bases, one per 20 above. */
+const clipMatches = (clip: string, target: string | null): boolean => {
+  if (!target || target.length !== clip.length) return false;
+  let mism = 0;
+  for (let k = 0; k < clip.length; k++) if (clip[k] !== target[k]) { mism++; if (mism > Math.floor(clip.length / 20)) return false; }
+  return true;
+};
+/**
+ * What the clipped bases of a read clipped at `pos` on `side` should read if the read crossed breakpoint `b`,
+ * for the end of `b` the clip sits at (`atStart`: the clip is at b.start, else at b.end). The offset of the clip from
+ * the rounded end is carried to the other end (breakpoints shift together along a microhomology). Null when this side
+ * of the read cannot cross `b` that way.
+ *  deletion-type / CIGAR deletion (lo, hi): right clip at lo reads ref[hi…]; left clip at hi reads ref[…lo]
+ *  duplication (lo, hi): right clip at hi reads ref[lo…]; left clip at lo reads ref[…hi]
+ *  inversion (lo, hi): right clip at lo reads rc(ref[…hi]); right clip at hi reads rc(ref[…lo]);
+ *                      left clip at hi reads rc(ref[lo…]); left clip at lo reads rc(ref[hi…])
+ */
+function expectedClip(b: Breakpoint, atStart: boolean, pos: number, side: 'left' | 'right', len: number, ref: { start: number; seq: string }): string | null {
+  const d = pos - (atStart ? b.start : b.end);
+  const lo = b.start + d, hi = b.end + d;
+  const fwd = (from: number) => refSlice(ref, from, len);
+  const rc = (from: number) => { const x = refSlice(ref, from, len); return x == null ? null : reverseComplement(x); };
+  if (b.kind === 'deletion' || b.kind === 'split') {
+    if (atStart && side === 'right') return fwd(hi);
+    if (!atStart && side === 'left') return fwd(lo - len);
+    return null;
+  }
+  if (b.kind === 'duplication') {
+    if (!atStart && side === 'right') return fwd(lo);
+    if (atStart && side === 'left') return fwd(hi - len);
+    return null;
+  }
+  // inversion
+  if (atStart && side === 'right') return rc(hi - len);
+  if (!atStart && side === 'right') return rc(lo - len);
+  if (!atStart && side === 'left') return rc(lo);
+  if (atStart && side === 'left') return rc(hi);
+  return null;
+}
+/**
+ * Rescues clipped read ends at known breakpoints: a soft clip whose bases match the reference at the other end of a
+ * breakpoint whose end it sits at (within the 5 bp rounding), a hard clip by position alone. A clip that fits several
+ * breakpoints is dropped. Returns the counts per breakpoint, keyed `${kind}:${start}-${end}`.
+ */
+export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: { start: number; seq: string } | null): Map<string, { count: number; hard: number; /** rescued ends that were members of a clip cluster (hard, or soft of SV_MIN_CLIP bases or more) */ long: number }> {
+  const out = new Map<string, { count: number; hard: number; long: number }>();
+  if (!breakpoints.length) return out;
+  const bump = (b: Breakpoint, e: ClipEnd) => { const k = `${b.kind}:${b.start}-${b.end}`; const long = e.hard || e.seq.length >= SV_MIN_CLIP ? 1 : 0; const x = out.get(k); if (x) { x.count++; x.long += long; if (e.hard) x.hard++; } else out.set(k, { count: 1, hard: e.hard ? 1 : 0, long }); };
+  for (const e of ends) {
+    // the breakpoints an end of which the clip sits at
+    const near = breakpoints.flatMap(b => {
+      const tol = b.kind === 'deletion' ? 0 : RESCUE_TOLERANCE;
+      const at: { b: Breakpoint; atStart: boolean }[] = [];
+      if (Math.abs(e.pos - b.start) <= tol) at.push({ b, atStart: true });
+      if (Math.abs(e.pos - b.end) <= tol) at.push({ b, atStart: false });
+      return at;
+    }).filter(x => e.hard || expectedClip(x.b, x.atStart, e.pos, e.side, 1, ref ?? { start: 0, seq: 'N' }) !== undefined);
+    if (!near.length) continue;
+    if (e.hard) {
+      // no sequence: attached by position when exactly one breakpoint has an end there, on a side that can hold a clip
+      const fits = near.filter(x => (x.b.kind === 'deletion' || x.b.kind === 'split') ? (x.atStart ? e.side === 'right' : e.side === 'left')
+        : x.b.kind === 'duplication' ? (x.atStart ? e.side === 'left' : e.side === 'right') : true);
+      if (fits.length === 1) bump(fits[0].b, e);
+      continue;
+    }
+    if (!ref) continue;
+    if (e.seq.length < (near.length > 1 ? RESCUE_MIN_CLIP_MULTI : RESCUE_MIN_CLIP)) continue;
+    const hits = near.filter(x => clipMatches(e.seq, expectedClip(x.b, x.atStart, e.pos, e.side, e.seq.length, ref)));
+    if (hits.length === 1) bump(hits[0].b, e);
+  }
+  return out;
 }
 
 /**
@@ -468,6 +589,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   }
   // clip clusters placed by realignment of their clipped consensus: the cluster becomes a breakpoint like a split read's
   const realigned: RealignedClip[] = [];
+  const placedKeys = new Set<string>();
   if (ref && ref.seq) {
     const refWin = { start: ref.start, seq: ref.seq, rc: undefined as string | undefined };
     for (const [key, c] of [...clips]) {
@@ -483,7 +605,33 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count) : breakpoint(placed, anchor, c.count);
       if (!arc) continue;
       realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc });
+      placedKeys.add(key);
       clips.delete(key);
+    }
+  }
+  // clipped reads rescued at the sample's own breakpoints (arcs from chains, deletions and placed clusters): their clipped
+  // bases must match the reference at the other end; reads of a placed cluster are already counted and stay out
+  const rescued: RescuedClips[] = [];
+  const own: Breakpoint[] = [
+    ...[...dels.values()].map(j => ({ start: j.start, end: j.end, kind: 'deletion' as const })),
+    ...[...splits.values()].map(j => ({ start: j.start, end: j.end, kind: 'split' as const })),
+    ...[...dups.values()].map(j => ({ start: j.start, end: j.end, kind: 'duplication' as const })),
+    ...[...invs.values()].map(j => ({ start: j.start, end: j.end, kind: 'inversion' as const })),
+  ];
+  if (own.length) {
+    // members of a placed cluster (hard, or soft clips of 20 bases or more at its position) are already counted with it
+    const ends = clipEnds(reads).filter(e => e.pos >= start && e.pos <= end && !(placedKeys.has(`${e.side === 'left' ? 'L' : 'R'}${e.pos}`) && (e.hard || e.seq.length >= SV_MIN_CLIP)));
+    for (const [k, n] of rescueClipEnds(ends, own, ref ?? null)) {
+      const [kind, span] = k.split(':'); const [a, b] = span.split('-').map(Number);
+      const m = kind === 'deletion' ? dels : kind === 'split' ? splits : kind === 'duplication' ? dups : invs;
+      add(m, a, b, n.count);
+      rescued.push({ start: a, end: b, kind: kind as Breakpoint['kind'], count: n.count * rate, hard: n.hard * rate, own: true });
+      // rescued members of an unplaced cluster leave it (short clips were never in one)
+      let left = n.long;
+      for (const side of ['L', 'R'] as const) for (const pos of [a, b]) for (let d = -RESCUE_TOLERANCE; d <= RESCUE_TOLERANCE && left > 0; d++) {
+        const c = clips.get(`${side}${pos + d}`);
+        if (c) { const take = Math.min(c.count, left); c.count -= take; left -= take; if (!c.count) clips.delete(`${side}${pos + d}`); }
+      }
     }
   }
   const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
@@ -493,6 +641,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     realigned: realigned.length ? realigned.sort((a, b) => a.pos - b.pos) : undefined,
+    rescued: rescued.length ? rescued.sort((a, b) => a.start - b.start || a.end - b.end) : undefined,
     insertMedian: median, reads: reads.length,
   };
 }

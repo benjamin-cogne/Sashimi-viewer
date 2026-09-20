@@ -3,7 +3,7 @@
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
  * browser on top of local BAM/CRAM files and the UCSC / Ensembl REST APIs (src/standalone).
  */
-import type { TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant, LibraryEvidence, VariantSite } from './types';
+import type { Breakpoint, RescuedClips, TranscriptData, SampleCoverage, BoundaryHint, ReadsResponse, AllTranscripts, GeneModel, ExonUsageResponse, ProteinDomain, CommonSnp, GtexTissue, GtexProfile, RegionHint, ProteinModelRef, KnownVariant, LibraryEvidence, VariantSite } from './types';
 
 export interface SampleRef { id: number; name: string }
 
@@ -70,6 +70,11 @@ export interface SashimiDataSource {
    * scan (no alignment file behind the sample).
    */
   getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  /**
+   * Clipped reads of a sample rescued at breakpoints seen in other samples (their clipped bases matching the reference
+   * at the other end): scanned around the breakpoint ends only. Absent when the source has no alignment file.
+   */
+  rescueClips?(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]>;
   /**
    * The primary record of a read (the one carrying the whole sequence, soft-clipped) at a known 0-based start, for
    * the bases a supplementary record hard-clipped; null when not found. Absent when the source has no alignment file.

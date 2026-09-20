@@ -10,7 +10,7 @@
  * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
-import type { AlignedRead, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
@@ -230,6 +230,10 @@ export class EmbeddedDataSource extends LocalDataSource {
     const r = await this.getReads(sampleId, chrom, start, end, uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
     opts?.onProgress?.(1);
     return { sites: r.sites, total: r.total, long_reads: !!r.long_reads };
+  }
+  override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean) {
+    if (this.names.has(sampleId)) return [];   // an embedded sample has no reads to go back to
+    return super.rescueClips(sampleId, chrom, breakpoints, uniqueOnly);
   }
   override async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string) {
     if (this.names.has(sampleId)) return null;   // embedded reads carry no names and no file to go back to

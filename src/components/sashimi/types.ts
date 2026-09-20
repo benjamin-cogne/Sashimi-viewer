@@ -39,6 +39,14 @@ export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads'
 
 /** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
 export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number; /** hard-clipped records without SA tag among the count (no sequence of their own) */ hard?: number }
+/** A breakpoint used as a target for rescuing clipped reads: the ends of an arc and its kind. */
+export interface Breakpoint { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' }
+/**
+ * Clipped reads whose clipped bases match the reference at the other end of a known breakpoint (second-pass style).
+ * `own` breakpoints are this sample's arcs (the reads are added to the arc); borrowed ones come from another sample
+ * shown next to it and are reported without an arc of their own.
+ */
+export interface RescuedClips extends Breakpoint { count: number; /** hard-clipped records without SA tag at the breakpoint end, attached by position only */ hard: number; own: boolean }
 /** A clip cluster whose clipped consensus was placed on the reference of the window by realignment: it counts in the arc named here. */
 export interface RealignedClip {
   pos: number; side: 'left' | 'right'; count: number; hard: number;
@@ -72,6 +80,8 @@ export interface StructuralEvidence {
   clips: ClipCluster[];
   /** clip clusters placed by realignment of their clipped consensus: their reads count in the split-read arcs */
   realigned?: RealignedClip[];
+  /** clipped reads rescued at a known breakpoint: their clipped bases match the reference at the other end of an arc */
+  rescued?: RescuedClips[];
   /** median insert size of the proper pairs of the window (paired libraries) */
   insertMedian: number | null;
   /** reads scanned for this evidence (after sampling) */
