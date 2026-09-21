@@ -9,3 +9,6 @@ interface ImportMetaEnv {
   /** URL of the stable build, linked from the DEV MODE banner. */
   readonly VITE_STABLE_URL?: string;
 }
+
+/** version from package.json, injected by the build */
+declare const __APP_VERSION__: string;

@@ -3,7 +3,7 @@
  * a database export) can open the viewer on a variant or a locus. The parameters travel in the URL
  * fragment (`#variant=…`), which never reaches a server log, or in the query string.
  *
- *   #variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100&reads=1
+ *   #variant=NC_000017.11:g.43094464G>A&label=BRCA1%20c.5266dupC&pad=100
  *
  *   variant   HGVS g. with an NC_ accession (its version gives the build), `chr17:g.43094464G>A`,
  *             a pseudo-VCF `17-43094464-G-A` / `chr17:43094464:G:A`, or a bare `chr17:43094464`.
@@ -14,7 +14,7 @@
  *   label     Text drawn next to the marker (c. / p. notation); one per variant, separated by commas.
  *   gene      Symbol used when no RefSeq gene covers the locus (fallback lookup).
  *   build     GRCh38 (default) or GRCh37; only needed when no variant carries an accession.
- *   reads     `1` opens with the reads track on.
+ *   reads     `1` opens with the reads track on (off by default).
  *
  * The alignments still come from the user's files: a browser page cannot fetch a BAM by itself, so
  * the page waits for the first file and then opens the view on the requested window.
@@ -77,6 +77,16 @@ function variantOf(text: string, index: number, label: string | undefined, fallb
     return { id: `link${index}`, kind: point ? 'snv' : 'other', chrom: locus.chrom, start: locus.start - 1, end: locus.end, label: label || `${locus.chrom}:${locus.start.toLocaleString()}${point ? '' : `-${locus.end.toLocaleString()}`}`, text: t, source: 'indication', build: null };
   }
   return null;
+}
+
+/**
+ * A variant of interest typed by the user: a locus (chr17:43,094,464 or chr17:43,094,464-43,094,470), an HGVS
+ * genomic notation (NC_000017.11:g.43094464A>G, chr17:g.43094464A>G) or a VCF-like line (chr17 43094464 A G).
+ * `label` is the text drawn next to it (a gene and protein change, say); null when nothing parses.
+ */
+export function variantOfInterest(text: string, label: string, id: string): KnownVariant | null {
+  const v = variantOf(text, 0, label.trim() || undefined, '');
+  return v ? { ...v, id } : null;
 }
 
 /** The request carried by the page URL, or null when there is none (or nothing parses). */

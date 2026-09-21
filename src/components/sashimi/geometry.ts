@@ -24,7 +24,7 @@ export interface TxModel {
   transcriptId: string;
   translationId?: string | null;
   isMane: boolean;
-  modelKind: 'mane' | 'canonical' | 'longest';
+  modelKind: 'mane' | 'canonical' | 'longest' | 'chosen';
   biotype?: string;
   chrom: string;
   strand: 1 | -1;
@@ -101,10 +101,15 @@ export function median(xs: number[]): number {
  * like one more exon-sized block; the flanks outside the transcript are
  * compressed at the median intron's factor so they do not dwarf the gene.
  */
-export function equalIntronAxis(tx: TxModel): VirtualAxis {
+/** Default virtual intron width: the median exon length, clamped to [80, 300] bp-equivalents. */
+export function defaultIntronV(tx: TxModel): number {
+  return Math.min(300, Math.max(80, Math.round(median(tx.exons.map(e => e.end - e.start)))));
+}
+
+export function equalIntronAxis(tx: TxModel, intronWidth?: number | null): VirtualAxis {
   const introns = intronsOf(tx);
   if (introns.length === 0) return LINEAR_AXIS;
-  const intronV = Math.min(300, Math.max(80, Math.round(median(tx.exons.map(e => e.end - e.start)))));
+  const intronV = intronWidth && intronWidth > 0 ? Math.round(intronWidth) : defaultIntronV(tx);
   const flankFactor = Math.min(1, intronV / median(introns.map(i => i.end - i.start)));
 
   // Segments in genomic order; each maps [gStart, next.gStart) linearly with `factor`.
@@ -242,24 +247,29 @@ export function buildCoveragePaths(
 ): CoveragePaths {
   if (runs.length === 0) return { fill: '', stroke: '' };
   // Traversal is in genomic order; on the reverse strand that is right→left in pixels.
-  const segs: { a: number; b: number; d: number }[] = [];
-  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0;
+  // A run that does not start where the previous one ended (a source that omits zero-depth
+  // stretches) is a gap: the profile drops to the baseline there instead of ramping across.
+  const segs: { a: number; b: number; d: number; gap: boolean }[] = [];
+  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0, bucketGap = false;
   const flush = () => {
-    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax }); bucketCol = null; }
+    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax, gap: bucketGap }); bucketCol = null; }
   };
+  let prevEnd: number | null = null;
   for (let i = firstRunFrom(runs, viewStart); i < runs.length && runs[i].start < viewEnd; i++) {
     const r = runs[i];
     const gs = Math.max(r.start, viewStart), ge = Math.min(r.end, viewEnd);
+    const gap = prevEnd !== null && r.start > prevEnd;
+    prevEnd = r.end;
     const pa = scale.x(gs), pb = scale.x(ge);
     const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
     if (hi - lo >= 1) {
       flush();
-      segs.push({ a: pa, b: pb, d: r.depth });
+      segs.push({ a: pa, b: pb, d: r.depth, gap });
     } else {
       const col = Math.floor((lo + hi) / 2);
       if (col !== bucketCol) {
         flush();
-        bucketCol = col; bucketMax = r.depth;
+        bucketCol = col; bucketMax = r.depth; bucketGap = gap;
         bucketA = scale.reverse ? col + 1 : col;
         bucketB = scale.reverse ? col : col + 1;
       } else if (r.depth > bucketMax) bucketMax = r.depth;
@@ -270,12 +280,17 @@ export function buildCoveragePaths(
   const f = (n: number) => n.toFixed(1);
   let fill = `M${f(segs[0].a)},${f(baseline)}`;
   let stroke = `M${f(segs[0].a)},${f(depthToY(segs[0].d))}`;
-  let lastY = NaN;
+  let lastY = NaN, lastB = segs[0].a;
   for (const s of segs) {
     const y = depthToY(s.d);
+    if (s.gap && lastY !== baseline) {
+      fill += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
+      stroke += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
+      lastY = baseline;
+    }
     if (y !== lastY) { fill += `L${f(s.a)},${f(y)}`; stroke += `L${f(s.a)},${f(y)}`; }
     fill += `L${f(s.b)},${f(y)}`; stroke += `L${f(s.b)},${f(y)}`;
-    lastY = y;
+    lastY = y; lastB = s.b;
   }
   fill += `L${f(segs[segs.length - 1].b)},${f(baseline)}Z`;
   return { fill, stroke };
@@ -723,6 +738,47 @@ export function junctionPsi(j: JunctionArc, junctions: JunctionArc[], strand: nu
 // ======================== Reading frame of a splicing anomaly ========================
 
 export type FrameEffect = 'in' | 'out' | 'utr' | 'unknown';
+
+/** Codon phases of one coding exon: where the codon is cut at its 5′ and 3′ ends (Ensembl convention). */
+export interface ExonPhase {
+  rank: number;
+  /** coding bases of the exon */
+  cds: number;
+  /** bases of the codon already read when the exon starts (0 = the exon opens on a codon start) */
+  phaseIn: 0 | 1 | 2;
+  /** bases of the last codon read when the exon ends (0 = the exon closes a codon) */
+  phaseOut: 0 | 1 | 2;
+  /** the exon holds the start codon / the stop codon: skipping it is more than a frame question */
+  hasStart: boolean; hasStop: boolean;
+  /** coding length is a multiple of three: skipping the exon alone keeps the frame (phaseIn === phaseOut) */
+  symmetric: boolean;
+}
+
+/**
+ * Codon phase at both ends of every coding exon, in transcript order (5′→3′), from the CDS coordinates alone.
+ * Phase p means p bases of a codon are already read when the exon starts; an exon of coding length L ends in
+ * phase (p + L) mod 3. Two exon ends of the same phase join in frame; an exon with phaseIn === phaseOut can be
+ * skipped without shifting the frame. Empty for a non-coding model.
+ */
+export function exonPhases(tx: TxModel): ExonPhase[] {
+  if (tx.cdsStart == null || tx.cdsEnd == null) return [];
+  const plus = tx.strand > 0;
+  const order = plus ? [...tx.exons] : [...tx.exons].reverse();
+  const out: ExonPhase[] = [];
+  let read = 0;
+  for (const e of order) {
+    const cs = Math.max(e.start, tx.cdsStart), ce = Math.min(e.end, tx.cdsEnd);
+    if (ce <= cs) continue;
+    const cds = ce - cs;
+    const phaseIn = (read % 3) as 0 | 1 | 2;
+    read += cds;
+    const phaseOut = (read % 3) as 0 | 1 | 2;
+    const hasStart = plus ? e.start <= tx.cdsStart && tx.cdsStart < e.end : e.start < tx.cdsEnd && tx.cdsEnd <= e.end;
+    const hasStop = plus ? e.start < tx.cdsEnd && tx.cdsEnd <= e.end : e.start <= tx.cdsStart && tx.cdsStart < e.end;
+    out.push({ rank: e.rank, cds, phaseIn, phaseOut, hasStart, hasStop, symmetric: cds % 3 === 0 });
+  }
+  return out;
+}
 
 export interface FrameInfo {
   frame: FrameEffect;

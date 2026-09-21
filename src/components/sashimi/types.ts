@@ -6,7 +6,7 @@
 export interface TranscriptData {
   gene_name: string; transcript_id: string; translation_id?: string | null; is_mane_select?: boolean;
   /** how the displayed model was chosen: MANE Select, RefSeq Select / Ensembl canonical, or the longest CDS / transcript */
-  model_kind?: 'mane' | 'canonical' | 'longest'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
+  model_kind?: 'mane' | 'canonical' | 'longest' | 'chosen'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
   start: number; end: number; exons: { start: number; end: number; rank: number }[];
   /** Genomic CDS bounds (1-based inclusive); null/undefined for non-coding transcripts. */
   cds_start?: number | null; cds_end?: number | null;
@@ -23,9 +23,84 @@ export interface AllTranscripts { gene_name: string; chrom: string; strand: numb
 export interface CoverageRun { start: number; end: number; depth: number; }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
 export interface JunctionArc { start: number; end: number; count: number; }
+/**
+ * Reads that continue through an exon–intron boundary unspliced (intron retention / pre-mRNA):
+ * one aligned block covering at least 6 bases on the exon side and 10 on the intron side.
+ * Keyed by the boundary position: an intron start is the first intronic base (= exon end,
+ * 0-based half-open), an intron end the first exonic base after the intron.
+ */
+export interface BoundarySpanning { intronStart: Record<number, number>; intronEnd: Record<number, number> }
+/** Boundaries a coverage request wants spanning counts for (the displayed model's exons); junction ends are always included. */
+export interface BoundaryHint { intronStarts: number[]; intronEnds: number[] }
+/** What a library is: RNA-seq (spliced reads, junction arcs) or genomic DNA (exome, genome, long reads). */
+export type LibraryType = 'rna' | 'dna' | 'unknown';
+/** How a sample's library type was decided. */
+export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
+
+/** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
+export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number; /** hard-clipped records without SA tag among the count (no sequence of their own) */ hard?: number }
+/** A breakpoint used as a target for rescuing clipped reads: the ends of an arc and its kind. */
+export interface Breakpoint { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' }
+/**
+ * Clipped reads whose clipped bases match the reference at the other end of a known breakpoint (second-pass style).
+ * `own` breakpoints are this sample's arcs (the reads are added to the arc); borrowed ones come from another sample
+ * shown next to it and are reported without an arc of their own.
+ */
+export interface RescuedClips extends Breakpoint { count: number; /** hard-clipped records without SA tag at the breakpoint end, attached by position only */ hard: number; own: boolean }
+/** A clip cluster whose clipped consensus was placed on the reference of the window by realignment: it counts in the arc named here. */
+export interface RealignedClip {
+  pos: number; side: 'left' | 'right'; count: number; hard: number;
+  /** where the clipped sequence was placed (0-based start) and on which strand, and the length matched */
+  target: number; strand: '+' | '-'; matched: number;
+  /** the arc it joined */
+  arc: { start: number; end: number; kind: 'split' | 'duplication' | 'inversion' };
+}
+/** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
+export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
+/**
+ * Structural evidence of a genomic window (DNA libraries), 0-based half-open positions, counts scaled like
+ * the junctions when the window was sampled.
+ */
+export interface StructuralEvidence {
+  /** deletions of at least 50 bp inside reads (CIGAR D), by span */
+  deletions: JunctionArc[];
+  /** split reads whose next part continues further along the chromosome on the same strand (deletion-type), from the chain of alignments of each read (primary + SA parts ordered along the read), breakpoints rounded to 5 bp */
+  splits: JunctionArc[];
+  /** split reads whose next part goes back (tandem duplication-type) */
+  duplications: JunctionArc[];
+  /** split reads whose next part is on the other strand (inversion breakpoints) */
+  inversions: JunctionArc[];
+  /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
+  insertions: { pos: number; len: number; count: number }[];
+  /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
+  discordant: JunctionArc[];
+  /** split alignments and mates on other chromosomes */
+  elsewhere: ElsewhereLink[];
+  /** soft-clip clusters of at least 3 reads clipped by 20 bases or more, whose clipped sequence could not be placed in the window */
+  clips: ClipCluster[];
+  /** clip clusters placed by realignment of their clipped consensus: their reads count in the split-read arcs */
+  realigned?: RealignedClip[];
+  /** clipped reads rescued at a known breakpoint: their clipped bases match the reference at the other end of an arc */
+  rescued?: RescuedClips[];
+  /** median insert size of the proper pairs of the window (paired libraries) */
+  insertMedian: number | null;
+  /** reads scanned for this evidence (after sampling) */
+  reads: number;
+}
+
 export interface SampleCoverage {
   sample_id: number; sample_name: string;
   coverage: CoverageRun[]; junctions: JunctionArc[];
+  /** unspliced reads through the exon–intron boundaries (absent from sources that do not compute it) */
+  spanning?: BoundarySpanning;
+  /** the window actually read (0-based half-open) when the source shrank the requested margins to stay within its read budget */
+  window?: { start: number; end: number };
+  /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
+  sampled?: { rate: number; total: number; decoded: number };
+  /** reads decoded and the fraction of them carrying a splice gap (CIGAR N): the library-type evidence of this window */
+  spliced?: { reads: number; fraction: number };
+  /** structural evidence, when the caller asked for it (DNA samples) */
+  structural?: StructuralEvidence;
   error?: string;
 }
 
@@ -36,6 +111,16 @@ export interface SampleCoverage {
 export interface AlignedRead {
   n: string; s: number; e: number; r: 0 | 1; q: number; f: number; nh: number | null;
   b: [number, number][]; d: [number, number][]; i: [number, number][]; m: [number, string, number][]; c: [number, number];
+  /** mate: 0-based start (`mp`), chromosome when not the read's own (`mc`), template length as the aligner set it (`tl`); absent when unpaired or unknown */
+  mp?: number; mc?: string; tl?: number;
+  /** soft-clipped bases at the left and right ends of the alignment (read orientation as stored, i.e. the reference strand); absent when the sequence was not available */
+  cs?: [string, string];
+  /** hard-clipped lengths at the left and right ends (bases the record does not carry: they sit in the read's primary record) */
+  h?: [number, number];
+  /** inserted bases, one string per entry of `i`; absent when the sequence was not available */
+  is?: string[];
+  /** SA tag of a split read: "rname,pos,strand,CIGAR,mapQ,NM;" per other part */
+  sa?: string;
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {
@@ -48,10 +133,46 @@ export interface ReadGroup {
   chain: [number, number][]; alleles: string[]; blocks: [number, number][]; dense: [number, number][];
   absorbed: number; compatible?: string[]; patterns?: number;
 }
+/** One haplotype block of the read-based phasing: the heterozygous sites the reads tie together, and the two haplotypes over them. */
+export interface PhaseBlock {
+  id: string;
+  /** genomic span of the block's sites, 0-based half-open */
+  start: number; end: number;
+  /** indices into PhaseResult.sites, in position order */
+  sites: number[];
+  /** allele of each site on haplotype 1 / 2 */
+  h1: ('ref' | 'alt')[]; h2: ('ref' | 'alt')[];
+  /** fragments (read + mate) assigned to haplotype 1 / 2 */
+  support: [number, number];
+  /** fragments matching both haplotypes equally */
+  ambiguous: number;
+  /** fragments assigned to a haplotype but disagreeing with it at one site or more (errors, mosaic alleles, a third haplotype) */
+  conflicting: number;
+  /** fragments linking two sites of the block: seeing the same phase (ref–ref or alt–alt) or the opposite */
+  links: { a: number; b: number; same: number; diff: number }[];
+  /** why the previous block ended before this one */
+  breakBefore?: 'no link' | 'conflict';
+}
+export interface UnphasedSite { site: number; reason: 'low' | 'unlinked' | 'conflict' }
+export interface PhaseResult {
+  sites: VariantSite[];
+  /** indices of the homozygous sites (on both haplotypes) */
+  hom: number[];
+  blocks: PhaseBlock[];
+  unphased: UnphasedSite[];
+  /** fragments (reads with their mates) examined */
+  fragments: number;
+  /** heterozygous sites considered */
+  het: number;
+}
 export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
   sites: VariantSite[]; groups: ReadGroup[];
+  /** read-based phasing of the window (collapsed mode with two haplotypes) */
+  phase?: PhaseResult;
+  /** the reads are long (median aligned length above 1 kb): noise filters apply */
+  long_reads?: boolean;
   /** Reference sequence covering the window (plus margin), or null when no source is available. */
   reference: { start: number; seq: string } | null;
   reference_source: 'fasta' | 'ensembl' | 'browser' | null;

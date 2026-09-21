@@ -1,11 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { viteSingleFile } from 'vite-plugin-singlefile'
+import { readFileSync } from 'node:fs'
+
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string }
 
 // Builds the viewer as ONE self-contained HTML file: dist/index.html, then copied by
 // scripts/finish.mjs to dist/sashimi-viewer.html and to ./sashimi-viewer.html (tracked in git).
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   server: { port: 3000 },
   build: {
     outDir: 'dist',
