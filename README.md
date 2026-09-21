@@ -89,7 +89,7 @@ Tests and the layout of the sources are in the [manual](docs/manual.md#build-fro
 
 ## Cite
 
-Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.2, 2026.
+Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.1, 2026.
 https://github.com/benjamin-cogne/Sashimi-viewer — see [`CITATION.cff`](CITATION.cff).
 
 ## Licence

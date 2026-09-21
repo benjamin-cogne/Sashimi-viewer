@@ -21,7 +21,7 @@ import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
 const VERSION = __APP_VERSION__;
-/** short version for the badge: v1.2 */
+/** short version for the badge: v1.1 */
 const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
 /** structural-variant hints on DNA tracks: shown on dev builds and with ?sv=1, hidden on the release until they mature */
 const SV_HINTS = import.meta.env.VITE_DEV_MODE === '1' || new URLSearchParams(location.search).get('sv') === '1';
