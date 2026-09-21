@@ -167,8 +167,8 @@ no arc space is needed. Options that only concern splicing (*Reads | Usage*, *Mi
 away when every shown sample is DNA. RNA and DNA samples can share a page and a view (a proband's
 RNA next to the parents' genomes), but not a group.
 
-**Structural hints** (development builds only in 1.1: shown on the dev page and with `?sv=1` on the
-URL, hidden on the release until they mature). Where an RNA track shows junction arcs, a DNA track shows the structural
+**Structural hints** (hidden in 1.1 until they mature, on the release and on the dev page alike;
+`?sv=1` on the URL shows them on any build, and the dev branch can switch them back on for its builds). Where an RNA track shows junction arcs, a DNA track shows the structural
 evidence of its reads, drawn as evidence and never as calls: **deletions inside reads** (a CIGAR `D`
 run of 50 bp or more) as solid red arcs; **split reads**, read as chains: every part of a read (the
 primary alignment and its supplementary alignments, from the SA tag, whichever of them fall in
