@@ -28,7 +28,7 @@ const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
  * the dev page. Set SV_HINTS_IN_DEV to true on the dev branch after the 1.1 merge to show them on dev builds again;
  * ?sv=1 on the URL shows them on any build.
  */
-const SV_HINTS_IN_DEV = false;
+const SV_HINTS_IN_DEV = true;
 const SV_HINTS = (import.meta.env.VITE_DEV_MODE === '1' && SV_HINTS_IN_DEV) || new URLSearchParams(location.search).get('sv') === '1';
 const DEV = import.meta.env.VITE_DEV_MODE === '1'
   ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
