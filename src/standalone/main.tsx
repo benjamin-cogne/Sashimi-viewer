@@ -20,6 +20,11 @@ import { describeLink, parseLink, variantOfInterest } from './link';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
+const VERSION = __APP_VERSION__;
+/** short version for the badge: v1.2 */
+const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
+/** structural-variant hints on DNA tracks: shown on dev builds and with ?sv=1, hidden on the release until they mature */
+const SV_HINTS = import.meta.env.VITE_DEV_MODE === '1' || new URLSearchParams(location.search).get('sv') === '1';
 const DEV = import.meta.env.VITE_DEV_MODE === '1'
   ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
   : null;
@@ -680,7 +685,9 @@ function App() {
         <div className="flex items-center gap-2.5 flex-1 min-w-[320px]">
           <Logo size={34} />
           <div className="min-w-0">
-            <h1 className="text-lg font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></h1>
+            <h1 className="text-lg font-bold leading-tight flex items-center gap-2">Sashimi <span className="font-normal">viewer</span>
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
+            </h1>
             <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
             <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
@@ -789,6 +796,7 @@ function App() {
             <div className="flex items-center gap-2 shrink-0">
               <Logo size={24} />
               <span className="text-sm font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></span>
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
               <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Show the upper panel again (files, session, known variants)" aria-label="Show the upper panel">
                 ▼ Show panel
               </button>
@@ -847,7 +855,7 @@ function App() {
       })()}
       {EMBEDDED && (
         <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900">
-          <b>Exported viewer</b> · {EMBEDDED.views.length} view{EMBEDDED.views.length === 1 ? '' : 's'} and {EMBEDDED.samples.length} sample{EMBEDDED.samples.length === 1 ? '' : 's'} embedded{EMBEDDED.saved ? ` on ${EMBEDDED.saved.slice(0, 10)}` : ''}: coverage, junctions and retention counts of each view's window are in this file, the alignment files are not needed for them.
+          <b>Exported viewer</b> ({VERSION_SHORT}) · {EMBEDDED.views.length} view{EMBEDDED.views.length === 1 ? '' : 's'} and {EMBEDDED.samples.length} sample{EMBEDDED.samples.length === 1 ? '' : 's'} embedded{EMBEDDED.saved ? ` on ${EMBEDDED.saved.slice(0, 10)}` : ''}: coverage, junctions and retention counts of each view's window are in this file, the alignment files are not needed for them.
           Other genes, the reads track and exon depths need the original BAM/CRAM files (add them with the buttons above); gene lookups, common SNPs and GTEx use the network when it is available.
         </div>
       )}
@@ -880,7 +888,7 @@ function App() {
       ) : (
         <div className="p-3">
           <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div>
       )}
@@ -941,6 +949,8 @@ function App() {
         </div>
       )}
       <footer className="px-5 py-3 text-[11px] text-gray-500 flex flex-wrap gap-x-3 gap-y-1">
+        <span>Sashimi viewer {VERSION}</span>
+        <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
         <span>·</span>
         <span>made with Claude Opus 5 and Fable 5.1</span>

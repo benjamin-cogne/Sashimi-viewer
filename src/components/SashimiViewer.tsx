@@ -59,6 +59,8 @@ interface SashimiViewerProps {
   knownVariantsVersion?: number;
   /** Library type of each sample (RNA-seq or genomic DNA), by sample id: DNA tracks show no junction arcs and no usage. */
   sampleTypes?: Record<number, LibraryType>;
+  /** structural-variant hints on DNA tracks (arcs, pills, panel): computed and drawn only when true (development builds, ?sv=1) */
+  svHints?: boolean;
   /** Called after each coverage load with the spliced-read fraction of the window, the host's evidence for the library type. */
   onLibraryEvidence?: (sampleId: number, evidence: { reads: number; fraction: number; multiExon: boolean }) => void;
   /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
@@ -390,7 +392,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, onLibraryEvidence, initialSettings, onStateChange,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, onLibraryEvidence, initialSettings, onStateChange, svHints = false,
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   const ds = dataSource;
@@ -933,7 +935,7 @@ export default function SashimiViewer({
     });
     try {
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: isDnaRef.current(sid) });
+        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: svHints && isDnaRef.current(sid) });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
@@ -2091,6 +2093,7 @@ export default function SashimiViewer({
   const rescueAsked = useRef(new Map<number, string>());
   useEffect(() => {
     if (!ds.rescueClips) return;
+    if (!svHints) return;
     const dna = tracks.filter(t => !t.gtex && !t.group && t.structural && isDnaSample(t.sampleId));
     if (dna.length < 2) return;
     const timer = setTimeout(() => {
@@ -2109,7 +2112,7 @@ export default function SashimiViewer({
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [tracks, currentChrom, uniqueOnly, isDnaSample, ds]);
+  }, [tracks, currentChrom, uniqueOnly, isDnaSample, ds, svHints]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
   /** Some loaded reads carry a mate: the Pairs option applies. */
@@ -2361,7 +2364,7 @@ export default function SashimiViewer({
         };
       });
       // Structural evidence of a DNA track, drawn with the same arcs: deletions, split reads, discordant pairs
-      if (dnaTrack && track.structural) {
+      if (dnaTrack && track.structural && svHints) {
         const sv = track.structural;
         const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
         const all = kinds.flatMap(k => k.list.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
@@ -2450,7 +2453,7 @@ export default function SashimiViewer({
               deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join(''),
           };
         });
-      if (dnaTrack && track.structural) {
+      if (dnaTrack && track.structural && svHints) {
         const approx = track.sampled ? '≈' : '';
         for (const c of track.structural.clips) {
           if (c.count < minJunctionCount || c.pos < viewStart || c.pos > viewEnd) continue;
@@ -2475,7 +2478,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -2538,7 +2541,7 @@ export default function SashimiViewer({
       g(SAME_SENSE_COLOR, 'neighbouring gene, same strand', 'ln1');
       g(ANTISENSE_COLOR, 'neighbouring gene, antisense', 'ln2');
     }
-    if (anyDna) {
+    if (anyDna && svHints) {
       line(SV_COLORS.deletion, false, 'deletion inside reads (≥ 50 bp, CIGAR)', 'lsv1');
       line(SV_COLORS.split, true, 'split reads, deletion-type', 'lsv2');
       line(SV_COLORS.duplication, true, 'split reads, duplication-type', 'lsv2b');

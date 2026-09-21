@@ -1,6 +1,6 @@
 {
   "name": "sashimi-viewer",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Standalone Sashimi viewer for RNA-seq: one HTML file that reads BAM/CRAM files in the browser and draws coverage, splice-junction arcs, reads, exon usage and a splicing cartoon. No server, no upload.",
