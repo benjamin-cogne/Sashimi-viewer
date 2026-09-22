@@ -6,6 +6,7 @@ import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, Bounda
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
+  parseCdna, cdnaGenomicRange, parseExonQuery, exonGenomicRange,
   classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
   niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus, exonPhases,
   usageIntervals, referenceExons, exonUsage, usageCohort, usageZ, exonSiteUsage,
@@ -1482,6 +1483,32 @@ export default function SashimiViewer({
         setGeneSearchLoading(false);
         return;
       }
+      // On the model in view: a c./n. position or range (c.234, c.*30, c.234+5, c.123_125del),
+      // or an exon by its number (12, exon 12, exons 3-5). Both are read on the transcript that is
+      // drawn, so they only mean anything while one is open; neither can be confused with a gene
+      // symbol or with chr:pos, which is why they are tried here and not before parseLocus.
+      const cdna = parseCdna(query);
+      const exonQ = cdna ? null : parseExonQuery(query);
+      if (cdna || exonQ) {
+        const model = txRef.current;
+        if (!model) {
+          setSearchError(cdna
+            ? 'a c. position is read on a transcript: open a gene first'
+            : 'an exon number is read on a transcript: open a gene first');
+          setGeneSearchLoading(false);
+          return;
+        }
+        const r = cdna ? cdnaGenomicRange(cdna, model) : exonGenomicRange(exonQ!, model);
+        if ('error' in r) { setSearchError(r.error); setGeneSearchLoading(false); return; }
+        // a single base opens the 1 kb window goToLocus gives a point; an exon or a range gets
+        // enough flanking intron to show both of its splice sites
+        const pad = r.end - r.start > 1 ? Math.max(100, Math.round((r.end - r.start) * 0.25)) : 0;
+        await goToLocus({ chrom: model.chrom, start: r.start + 1, end: r.end }, pad);
+        setGeneSearch('');
+        setGeneSearchLoading(false);
+        return;
+      }
+
       const isEnsg = query.toUpperCase().startsWith('ENSG');
       const txData = await ds.getTranscript(query, isEnsg ? query : undefined);
       const model = toTxModel(txData);
@@ -3666,7 +3693,9 @@ export default function SashimiViewer({
           </div>
           <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1">
             <input type="text" value={geneSearch} onChange={e => { setGeneSearch(e.target.value); setSearchError(null); }}
-              placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or genomic coordinates: chr17:43,094,464 (1 kb window) or chr17:43,000,000-43,100,000; on another chromosome the gene at the locus is opened"
+              placeholder="Gene, chr:pos, c.234, exon 12…" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
+                + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
+                + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.`}
               className={`${t.inp} w-40 px-2 py-0.5 text-xs rounded border ${searchError ? 'border-red-400' : ''}`} />
             <button type="submit" disabled={geneSearchLoading} className={t.btn}>{geneSearchLoading ? '…' : 'Go'}</button>
             {searchError && <span className="text-[10px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}

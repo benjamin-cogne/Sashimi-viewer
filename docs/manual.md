@@ -293,6 +293,34 @@ change, loss of heterozygosity, contamination), and a window with at least 8 hom
 and none heterozygous is flagged *no heterozygous SNP (LOH / UPD?)*. Fractions come from the drawn
 reads, up to 2,500 in the window, so they are approximate on very deep data.
 
+## Moving inside a view
+
+The search box next to the gene name moves the window without leaving the view. It takes, in
+this order:
+
+- **Coordinates** — `chr17:43,094,464` (a 1 kb window) or `chr17:43,000,000-43,100,000`. On
+  another chromosome the gene at the locus is opened.
+- **A c. or n. position** on the transcript drawn — `c.234`, `c.-12` (5′ UTR), `c.*30` (3′ UTR),
+  `c.288+1` and `c.289-2` (intronic, counted from the splice site), `n.412` for a non-coding
+  model. A range is written HGVS-style with an underscore: `c.234_267`. A whole variant
+  description works too — `c.234A>G`, `c.123_125del`, `c.2033dup` — the window moves to the
+  position and the change itself is ignored, so a c. copied from a report or from this viewer's
+  own arc tooltips can be pasted straight in.
+- **An exon number** — `12`, `exon 12`, or `exons 3-5` for a run. Exons are numbered in
+  transcription order, as they are drawn, so exon 1 is the 5′ one on either strand. The window
+  frames the exon with enough intron on each side to show both splice sites.
+- **A gene symbol or an ENSG id**, which opens that gene in the view.
+
+c. positions and exon numbers are read on the model currently displayed, so they follow the
+transcript you chose in *All transcripts*, and a number that does not exist on it is refused with
+the reason: a c. past the stop codon, an intronic offset on a base that is not a splice site
+(usually the sign that the number was written against another transcript), an exon number the
+model does not have. The position reached is highlighted like a searched locus — a dashed line
+with its coordinates pinned above the ruler — and right-clicking the highlight removes it.
+
+The header box above the panel opens genes and loci into **views** and does not take c. positions
+or exon numbers; typing one there says which box to use.
+
 ## Views
 
 Every gene or locus opened from the search box in the header becomes a **view**. Opening a second

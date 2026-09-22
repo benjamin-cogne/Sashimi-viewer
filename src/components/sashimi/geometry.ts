@@ -458,6 +458,154 @@ export function parseLocus(text: string): { chrom: string; start: number; end: n
   return { chrom: `chr${c}`, start: Math.min(a, b), end: Math.max(a, b) };
 }
 
+/** One c./n. position as typed: which numbering it belongs to, the number, and the intronic offset. */
+export interface CdnaPoint {
+  region: 'cds' | 'utr5' | 'utr3' | 'noncoding';
+  /**
+   * The number itself. Positive under c., where the region carries the − or the *; plainly signed
+   * under n., whose numbering is the transcript coordinate itself and runs negative upstream of it
+   * (`cdnaPosition` writes n.-299 for a base 299 before a non-coding transcript starts).
+   */
+  n: number;
+  /** +m counted from the donor of the following intron, −m from the acceptor of the preceding one; 0 on an exonic base */
+  offset: number;
+}
+/** A c./n. query typed in the search box: one position, or a range written HGVS-style with an underscore. */
+export interface CdnaQuery { from: CdnaPoint; to: CdnaPoint | null; noncoding: boolean }
+
+const CDNA_POINT = /^([-*]?)(\d+)([+-]\d+)?/;
+/** What a position may carry when it was pasted from a whole variant description; navigating ignores it. */
+const CDNA_TAIL = /^(?:[acgtu]+>[acgtu]+|delins[a-z0-9]*|del[a-z0-9]*|dup[a-z0-9]*|ins[a-z0-9]*|inv[a-z0-9]*|=)?$/i;
+
+/**
+ * A c. / n. position or range typed in the search box, HGVS-style
+ * (https://hgvs-nomenclature.org): `c.234`, `c.-12`, `c.*30`, `c.234+5`, `c.235-10`, `n.412`,
+ * ranges `c.234_267`, and any of those carrying the rest of a variant description
+ * (`c.234A>G`, `c.123_125del`) — the description is ignored, the position is what the view
+ * moves to. Returns null when the text is not a c./n. position, so the caller can try
+ * something else.
+ */
+export function parseCdna(text: string): CdnaQuery | null {
+  const m = /^([cn])\s*\.\s*(.+)$/i.exec(text.trim());
+  if (!m) return null;
+  const noncoding = m[1].toLowerCase() === 'n';
+  const point = (str: string): { p: CdnaPoint; rest: string } | null => {
+    const q = CDNA_POINT.exec(str);
+    if (!q) return null;
+    const n = Number(q[2]);
+    // c. numbering has no zero (c.-1 is followed by c.1); n. does, one base before the transcript starts
+    if (!Number.isSafeInteger(n) || n < (noncoding ? 0 : 1)) return null;
+    if (noncoding && q[1] === '*') return null;   // n. has no 3′ UTR numbering: it counts the transcript itself
+    const region = noncoding ? 'noncoding' : q[1] === '-' ? 'utr5' : q[1] === '*' ? 'utr3' : 'cds';
+    return { p: { region, n: noncoding && q[1] === '-' ? -n : n, offset: q[3] ? Number(q[3]) : 0 }, rest: str.slice(q[0].length) };
+  };
+  const a = point(m[2].replace(/\s+/g, ''));
+  if (!a) return null;
+  let to: CdnaPoint | null = null, tail = a.rest;
+  if (tail.startsWith('_')) {
+    const b = point(tail.slice(1));
+    if (!b) return null;
+    to = b.p; tail = b.rest;
+  }
+  return CDNA_TAIL.test(tail) ? { from: a.p, to, noncoding } : null;
+}
+
+/** How a c./n. point reads back, for an error message about it. */
+const cdnaText = (p: CdnaPoint): string =>
+  `${p.region === 'noncoding' ? 'n.' : 'c.'}${p.region === 'utr5' ? '-' : p.region === 'utr3' ? '*' : ''}${p.n}${p.offset > 0 ? `+${p.offset}` : p.offset < 0 ? p.offset : ''}`;
+
+/** Genomic position of a 1-based transcript coordinate; outside the transcript the numbering continues from the nearer end, as `cdnaPosition` reads it back. */
+function genomicOfT(t: number, L: TxLayout): number {
+  const { order, plus } = L;
+  const step = plus ? 1 : -1;
+  const first = order[0], last = order[order.length - 1];
+  if (t < 1) return (plus ? first.start : first.end - 1) + step * (t - 1);
+  for (const e of order) {
+    const len = e.end - e.start;
+    if (t < e.tStart + len) return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
+  }
+  return (plus ? last.end - 1 : last.start) + step * (t - L.tLength);
+}
+
+/**
+ * Genomic 0-based position of a c./n. coordinate on a model: the inverse of `cdnaPosition`.
+ * Returns why instead when the coordinate does not exist on this model — a c. number past the
+ * stop codon, or an intronic offset on a base that is not a splice site, which is usually the
+ * sign that the number was written against another transcript.
+ */
+export function cdnaToGenomic(p: CdnaPoint, tx: TxModel): { pos: number } | { error: string } {
+  const L = txLayout(tx);
+  const coding = L.tCdsStart != null && L.tCdsEnd != null;
+  const what = cdnaText(p);
+  let t: number;
+  if (p.region === 'noncoding') {
+    // the transcript coordinate itself; outside the transcript it keeps counting, as c.-N and c.*N do
+    t = p.n;
+  } else if (!coding) {
+    return { error: `${tx.transcriptId} is non-coding: write n.${p.n} rather than ${what}` };
+  } else if (p.region === 'cds') {
+    const cdsLen = L.tCdsEnd! - L.tCdsStart! + 1;
+    if (p.n > cdsLen) return { error: `${what} is past the stop codon of ${tx.transcriptId} (${cdsLen} coding bases); the 3′ UTR is c.*1 onwards` };
+    t = L.tCdsStart! + p.n - 1;
+  } else if (p.region === 'utr5') {
+    t = L.tCdsStart! - p.n;
+  } else {
+    t = L.tCdsEnd! + p.n;
+  }
+  const pos = genomicOfT(t, L);
+  if (!p.offset) return { pos };
+  // an intronic offset is counted from a splice site: the base it hangs on must be one
+  const { order, plus } = L;
+  const i = order.findIndex(e => t >= e.tStart && t < e.tStart + (e.end - e.start));
+  if (i < 0) return { error: `${what}: an intronic offset counts from a splice site, and ${cdnaText({ ...p, offset: 0 })} is outside ${tx.transcriptId}` };
+  const e = order[i], len = e.end - e.start;
+  const last = t === e.tStart + len - 1, first = t === e.tStart;
+  if (p.offset > 0 && !(last && i < order.length - 1))
+    return { error: `${what}: ${cdnaText({ ...p, offset: 0 })} is not the last base of an exon of ${tx.transcriptId}, so it has no +${p.offset}` };
+  if (p.offset < 0 && !(first && i > 0))
+    return { error: `${what}: ${cdnaText({ ...p, offset: 0 })} is not the first base of an exon of ${tx.transcriptId}, so it has no ${p.offset}` };
+  // the offset must stay inside its own intron, or the position belongs to the next exon
+  const gap = p.offset > 0
+    ? (plus ? order[i + 1].start - e.end : e.start - order[i + 1].end)
+    : (plus ? e.start - order[i - 1].end : order[i - 1].start - e.end);
+  if (Math.abs(p.offset) > gap) return { error: `${what}: that intron of ${tx.transcriptId} is only ${gap} bp long` };
+  return { pos: pos + (plus ? p.offset : -p.offset) };
+}
+
+/** Genomic 0-based half-open span a c./n. query points at (a single base for a position). */
+export function cdnaGenomicRange(q: CdnaQuery, tx: TxModel): { start: number; end: number } | { error: string } {
+  const a = cdnaToGenomic(q.from, tx);
+  if ('error' in a) return a;
+  if (!q.to) return { start: a.pos, end: a.pos + 1 };
+  const b = cdnaToGenomic(q.to, tx);
+  if ('error' in b) return b;
+  return { start: Math.min(a.pos, b.pos), end: Math.max(a.pos, b.pos) + 1 };
+}
+
+/**
+ * An exon typed in the search box: a bare number (`12`), the word spelled out (`exon 12`,
+ * `exons 3-5`), or a range (`3-5`). Exons are numbered in transcription order, as they are
+ * drawn, so exon 1 is the 5′ one on either strand. Returns null when the text is something else.
+ */
+export function parseExonQuery(text: string): { from: number; to: number } | null {
+  const m = /^(?:exons?\s*)?(\d{1,4})(?:\s*(?:-|–|—|\.\.|_)\s*(\d{1,4}))?$/i.exec(text.trim());
+  if (!m) return null;
+  const a = Number(m[1]), b = m[2] ? Number(m[2]) : a;
+  if (!a || !b) return null;
+  return { from: Math.min(a, b), to: Math.max(a, b) };
+}
+
+/** Genomic 0-based half-open span of an exon, or of a run of exons by rank. */
+export function exonGenomicRange(q: { from: number; to: number }, tx: TxModel): { start: number; end: number } | { error: string } {
+  const hit = tx.exons.filter(e => e.rank >= q.from && e.rank <= q.to);
+  if (!hit.length) {
+    const n = tx.exons.length;
+    const which = q.from === q.to ? `Exon ${q.from}` : `Exons ${q.from}-${q.to}`;
+    return { error: `${which}: ${tx.transcriptId} has ${n} exon${n === 1 ? '' : 's'}` };
+  }
+  return { start: Math.min(...hit.map(e => e.start)), end: Math.max(...hit.map(e => e.end)) };
+}
+
 export function formatBp(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 2)} Mb`;
   if (n >= 1000) return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)} kb`;

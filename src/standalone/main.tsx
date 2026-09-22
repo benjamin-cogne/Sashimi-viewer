@@ -12,7 +12,7 @@ import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFi
 import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
-import { parseLocus, toTxModel } from '../components/sashimi/geometry';
+import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
@@ -355,6 +355,12 @@ function App() {
     const q = gene.trim();
     if (!q) return;
     if (LINK && q === LINK_TEXT) return openLink();
+    // c. positions and exon numbers are read on the transcript of a view: this box opens genes, so
+    // it says where they work rather than sending them to a gene lookup that cannot resolve them
+    if (parseCdna(q) || parseExonQuery(q)) {
+      setError(`"${q}" moves the view on its transcript: type it in the search box inside the view (next to the gene name), not here.`);
+      return;
+    }
     setBusy(true); setError(null);
     try {
       const locus = parseLocus(q);
