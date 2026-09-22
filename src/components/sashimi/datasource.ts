@@ -15,20 +15,22 @@ export interface ReadsOptions {
   longReadMinVaf?: number;
   /** collapsed mode: two haplotypes per block by read-based phasing (default), or any number of consensus groups */
   haplotypes?: 2 | 'any';
+  /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
+  signal?: AbortSignal;
 }
 /** A full variant scan of a window (every read, tile by tile). */
 export interface VariantScanOptions extends ReadsOptions {
   /** called after each tile with the fraction of the window scanned (0–1) */
   onProgress?: (fraction: number) => void;
-  /** aborts between tiles; the promise then rejects with an AbortError */
-  signal?: AbortSignal;
 }
 /** Result of a full variant scan. */
 export interface VariantScan {
   sites: VariantSite[];
-  /** reads scanned (each counted once) */
+  /** reads scanned (each counted once), scaled back up when the scan sampled */
   total: number;
   long_reads: boolean;
+  /** set when a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */
+  sampled?: { rate: number };
 }
 /** Budget of a coverage request. */
 export interface CoverageOptions {
@@ -38,6 +40,8 @@ export interface CoverageOptions {
   maxReads?: number;
   /** also collect the structural evidence of a genomic library (deletions, split reads, soft clips, discordant pairs) */
   structural?: boolean;
+  /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
+  signal?: AbortSignal;
 }
 
 export interface SashimiDataSource {
@@ -65,9 +69,10 @@ export interface SashimiDataSource {
   /** Protein domains (UniProt / Pfam) of a coding model, amino-acid coordinates. */
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]>;
   /**
-   * Every variant site above `minVaf` in a 0-based half-open window, from every read of the window: scanned tile
-   * by tile so the window can be as wide as the coverage window, with no read cap. Absent when the source cannot
-   * scan (no alignment file behind the sample).
+   * Every variant site above `minVaf` in a 0-based half-open window, from the reads of the window: scanned tile
+   * by tile so the window can be as wide as the coverage window. A tile deeper than the source's budget is
+   * sampled systematically (VAFs are unchanged, counts scaled back) and `sampled` says so. Absent when the
+   * source cannot scan (no alignment file behind the sample).
    */
   getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
   /**

@@ -486,8 +486,8 @@ export default function SashimiViewer({
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
-  /** Variant sites of DNA tracks without a reads track, from the "variants" chip (every read of the window); nothing is read until the user asks. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** every read of the window was scanned (the "variants" chip) */ full?: boolean };
+  /** Variant sites of DNA tracks without a reads track, from the "variants" chip (the reads of the window, sampled only past the scan's budget); nothing is read until the user asks. */
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   /** Fraction of the window the running full scan has covered, per sample. */
@@ -907,6 +907,13 @@ export default function SashimiViewer({
   const viewRef = useRef({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly });
   viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly };
   const reqSeq = useRef<Map<number, number>>(new Map());
+  /**
+   * The request in flight per sample. A pan that moves on supersedes it: dropping the answer is not enough,
+   * because the decoding it started keeps the thread for as long as the window is deep. It is aborted instead.
+   */
+  const covAbort = useRef<Map<number, AbortController>>(new Map());
+  const readsAbort = useRef<Map<number, AbortController>>(new Map());
+  const isAbort = (err: unknown) => (err as { name?: string })?.name === 'AbortError';
 
   const fetchWindowFor = (v: { chrom: string; start: number; end: number; uniqueOnly: boolean }): FetchWindow => {
     const span = v.end - v.start;
@@ -928,6 +935,9 @@ export default function SashimiViewer({
     const win = fetchWindowFor(view);
     const seq = (reqSeq.current.get(sid) || 0) + 1;
     reqSeq.current.set(sid, seq);
+    covAbort.current.get(sid)?.abort();
+    const ctl = new AbortController();
+    covAbort.current.set(sid, ctl);
     setTracks(prev => {
       const existing = prev.find(t => t.sampleId === sid);
       if (existing) return prev.map(t => t.sampleId === sid ? { ...t, loading: true, error: undefined } : t);
@@ -935,7 +945,7 @@ export default function SashimiViewer({
     });
     try {
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: svHints && isDnaRef.current(sid) });
+        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: svHints && isDnaRef.current(sid), signal: ctl.signal });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
@@ -944,8 +954,10 @@ export default function SashimiViewer({
         ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched,
       } : t));
     } catch (err: any) {
-      if (reqSeq.current.get(sid) !== seq) return;
+      if (reqSeq.current.get(sid) !== seq || isAbort(err)) return;
       setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, error: err.message } : t));
+    } finally {
+      if (covAbort.current.get(sid) === ctl) covAbort.current.delete(sid);
     }
   }, []);
 
@@ -1072,12 +1084,18 @@ export default function SashimiViewer({
       for (const sid of stale) {
         const seq = (readsSeq.current.get(sid) ?? 0) + 1;
         readsSeq.current.set(sid, seq);
+        readsAbort.current.get(sid)?.abort();
+        const ctl = new AbortController();
+        readsAbort.current.set(sid, ctl);
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, signal: ctl.signal })
           .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data } })); })
-          .catch((err: any) => { if (readsSeq.current.get(sid) === seq) setReadsError(p => ({ ...p, [sid]: err.message })); })
-          .finally(() => { if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false })); });
+          .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
+          .finally(() => {
+            if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
+            if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false }));
+          });
       }
     }, 250);
     return () => clearTimeout(timer);
@@ -1093,7 +1111,7 @@ export default function SashimiViewer({
   }, []);
 
   /**
-   * Scans every read of one or more ranges of the current chromosome for a sample (tile by tile, no read cap, whatever
+   * Scans the reads of one or more ranges of the current chromosome for a sample (tile by tile, sampled only where a tile is deeper than the scan's budget, whatever
    * the width) and stores the sites: replacing what the sample had, or merged into it (`extend`) when the ranges are the
    * parts of the window not scanned yet. The thresholds of the call are the current ones.
    */
@@ -1115,13 +1133,14 @@ export default function SashimiViewer({
     const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
     (async () => {
       const sites: VariantSite[] = [];
-      let total = 0, done = 0;
+      let total = 0, done = 0, rate = 1;
       for (const r of ranges) {
         const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.uniqueOnly, minVaf,
           { ...opts, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: (done + f * (r.end - r.start)) / span })); } });
         sites.push(...res.sites); total += res.total; done += r.end - r.start;
+        rate = Math.max(rate, res.sampled?.rate ?? 1);
       }
-      return { sites, total };
+      return { sites, total, rate };
     })()
       .then(data => {
         if (!live()) return;
@@ -1131,7 +1150,8 @@ export default function SashimiViewer({
           const keep = extend && old && !old.error && old.fetched.chrom === v.chrom;
           const fetched: FetchWindow = { chrom: v.chrom, uniqueOnly: v.uniqueOnly, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
           const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
-          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true } };
+          const rate = Math.max(data.rate, keep ? old.rate ?? 1 : 1);
+          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined } };
         });
       })
       .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
@@ -1149,8 +1169,10 @@ export default function SashimiViewer({
     scanVariants(sid, [{ start: v.start, end: v.end }], false);
   }, [scanVariants]);
 
-  // a scan still running when the viewer unmounts is stopped
-  useEffect(() => () => { for (const c of dnaSitesAbort.current.values()) c.abort(); }, []);
+  // a request still running when the viewer unmounts is stopped, whatever started it
+  useEffect(() => () => {
+    for (const m of [dnaSitesAbort.current, covAbort.current, readsAbort.current]) { for (const c of m.values()) c.abort(); m.clear(); }
+  }, []);
 
   // ---- Mouse interaction ----
   const svgPoint = (e: { clientX: number; clientY: number }) => {
@@ -2065,7 +2087,10 @@ export default function SashimiViewer({
           </g>,
         );
       });
-      const title = `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
+      // Built on hover, not here: this runs for every drawn read on every pan frame, and the string costs
+      // more than the rectangles around it (a dozen toLocaleString calls and two parseSa passes per read).
+      // The <title> below is empty until the pointer enters the group, well before the browser's tooltip delay.
+      const titleText = () => `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
         (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant}` : ''}` : '') +
@@ -2073,7 +2098,14 @@ export default function SashimiViewer({
         (clipTxt.length ? `\n${clipTxt.join(' · ')}` : '') +
         (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
         `\nclick for the sequences (clipped, inserted, hard-clipped from the primary record)`;
-      return <g key={r.n + r.s + r.f} onClick={e => { e.stopPropagation(); openReadPanel(sid, r, e); }} style={{ cursor: 'pointer' }}><title>{title}</title>{parts}</g>;
+      return (
+        <g key={r.n + r.s + r.f} style={{ cursor: 'pointer' }}
+          onClick={e => { e.stopPropagation(); openReadPanel(sid, r, e); }}
+          onMouseEnter={e => { const t = e.currentTarget.firstChild as SVGTitleElement | null; if (t) t.textContent = titleText(); }}
+          onMouseLeave={e => { const t = e.currentTarget.firstChild as SVGTitleElement | null; if (t) t.textContent = ''; }}>
+          <title />{parts}
+        </g>
+      );
     });
 
     const info = `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads` +
@@ -2292,7 +2324,7 @@ export default function SashimiViewer({
           balance = {
             text: `  ·  ${het.length} het SNP${het.length === 1 ? '' : 's'}${medDev != null ? `, VAF ${(0.5 - medDev).toFixed(2)}–${(0.5 + medDev).toFixed(2)}` : ''}${imbalance ? ' · allele imbalance?' : noHet ? ' · no heterozygous SNP (LOH / UPD?)' : ''}`,
             warn: imbalance || noHet,
-            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString()} in the window)` : 'every read of the window (variants chip)'}.`,
+            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString()} in the window)` : 'the whole window (variants chip)'}.`,
           };
         }
       }
@@ -2963,7 +2995,7 @@ export default function SashimiViewer({
               </g>
             );
           })()}
-          {/* Variants chip (DNA track without its reads track): scan every read of the window and call every site */}
+          {/* Variants chip (DNA track without its reads track): scan the whole window and call every site */}
           {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsTracks.get(track.sampleId)?.loaded && !!ds.getVariantSites && (() => {
             const span = viewEnd - viewStart;
             const entry = dnaSites[track.sampleId];
@@ -2976,9 +3008,10 @@ export default function SashimiViewer({
             const text = loading ? `variants… ${pct} %` : done ? `variants ✓ ${nHere.toLocaleString()}` : 'variants';
             const w = text.length * 5.6 + 14;
             const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
-            const title = loading ? `Scanning every read of the window (${formatBp(span)}), ${pct} % done. Click to stop and forget the variants.`
-              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). The variants follow the window: moving or widening it scans the new part. Click to forget them (plain coverage).`
-              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage; the variants then follow the window. Nothing is read until you ask; the scan runs tile by tile with no read cap, so a wide deep window takes a while and can be stopped.`;
+            const sampled = done && !!entry.rate && entry.rate > 1;
+            const title = loading ? `Scanning the reads of the window (${formatBp(span)}), ${pct} % done. Click to stop and forget the variants.`
+              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window (${sampled ? '≈' : ''}${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %).${sampled ? ` The window was deeper than the scan's budget, so one read in ${entry.rate} was read and the counts scaled back: the allele fractions are unchanged, the read counts are estimates.` : ''} The variants follow the window: moving or widening it scans the new part. Click to forget them (plain coverage).`
+              : `Scan the reads of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage; the variants then follow the window. Nothing is read until you ask; the scan runs tile by tile and can be stopped, and a tile deeper than its budget is sampled (same allele fractions, estimated counts).`;
             return (
               <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: 'pointer' }}
                 onClick={e => { e.stopPropagation(); if (loading || done) forgetVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>

@@ -2,10 +2,13 @@
  * The plot's SVG element as a standalone document: interactive helpers marked data-export="skip" removed,
  * namespace declared, an explicit white background, and colours written the way every renderer accepts:
  * rgba() (undefined in SVG 1.1, refused by Inkscape, Office and librsvg) becomes rgb() + opacity.
+ * Empty <title> elements go too: the reads track fills its tooltips on hover, so what is left of them
+ * depends on where the pointer happened to be, and an export must not.
  */
 export function serializePlotSvg(svg: SVGSVGElement): string {
   const clone = svg.cloneNode(true) as SVGSVGElement;
   clone.querySelectorAll('[data-export="skip"]').forEach(n => n.remove());
+  clone.querySelectorAll('title').forEach(n => { if (!n.textContent) n.remove(); });
   clone.removeAttribute('data-sashimi-plot'); clone.removeAttribute('data-loading'); clone.removeAttribute('style');
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   const w = clone.getAttribute('width') ?? '1200', h = clone.getAttribute('height') ?? '600';
