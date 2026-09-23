@@ -255,7 +255,10 @@ BLAT to place the other side of the junction.
 **Consensus reads.** *Consensus* (on by default) draws mismatches and indels only where a variant
 site is called (at least 3 reads and *Min VAF*), so sequencing errors do not paint every read. It
 is offered for every genomic DNA reads track, short reads included, and for long reads whatever
-the library; off, every mismatch and indel of every read is drawn.
+the library; off, every mismatch and indel of every read is drawn. Deletions and insertions of
+50 bp or more are always drawn (a deletion as a black line across the gap), called or not: they
+are structural evidence, not sequencing noise, and the reads of one large deletion often place
+its breakpoint a few bases apart, so no single site would gather them.
 
 **Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets two
 more noise controls: *Min VAF (long)* (20 %) is the allele fraction a site needs on long reads,

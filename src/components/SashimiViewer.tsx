@@ -16,7 +16,7 @@ import type { ExonPhase } from './sashimi/geometry';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
-import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
@@ -2157,8 +2157,10 @@ export default function SashimiViewer({
           const gs = be, ge = r.b[k + 1][0];
           const isDel = r.d.some(dd => dd[0] === gs);
           const g1 = scale.x(gs), g2 = scale.x(ge);
-          // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body
-          const quiet = isDel && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
+          // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body;
+          // one of SV_MIN_DELETION bases or more never is: it is structural evidence, not sequencing noise, and each read of
+          // a large deletion often places its breakpoint a few bases apart (long reads, repeats), so no site gathers them
+          const quiet = isDel && ge - gs < SV_MIN_DELETION && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
           if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
           else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
         }
@@ -2172,7 +2174,7 @@ export default function SashimiViewer({
         if (showLetters && w >= 7) parts.push(<text key={`mt${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
       }
       r.i.forEach(([pos, len], k) => {
-        if (len < indelMin || (consensus && !insSites.has(pos))) return;
+        if (len < SV_MIN_DELETION && (len < indelMin || (consensus && !insSites.has(pos)))) return;   // large ones always, as deletions
         const x = scale.x(pos);
         const seq = r.is?.[k] ?? '';
         const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString()}${seq ? `: ${seq}` : ''}`;
