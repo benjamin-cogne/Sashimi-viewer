@@ -24,6 +24,7 @@
  */
 import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc } from '../components/sashimi/types';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, type RawRead } from './alignments';
+import { buildDepthIndexDense, registerDepthIndex } from '../components/sashimi/geometry';
 
 const CHUNK_BITS = 12, CHUNK = 1 << CHUNK_BITS, CHUNK_MASK = CHUNK - 1;
 /** Blocks this short or shorter can sit strictly inside a boundary's anchor window (16 bases) and are kept in a list. */
@@ -209,15 +210,21 @@ export function readSlice(layers: Layer[], uniqueOnly: boolean, start: number, e
   const startsTo = (x: number) => (x < lo ? baseS : cS[Math.min(n - 1, x - lo)]);
   const endsTo = (x: number) => (x < lo ? baseE : cE[Math.min(n - 1, x - lo)]);
 
-  // depth runs over [start, end): one run per stretch of equal depth, from start to end
+  // depth over [start, end), as a dense array (a tight loop, no per-position call) and as runs: one run per stretch
+  // of equal depth. The dense array also gives the viewer its min/max pyramid, attached to the runs, so drawing
+  // and the axis maximum cost the same at any zoom without the viewer walking the runs to build it.
   const coverage: CoverageRun[] = [];
   if (end > start) {
-    let runStart = start, depth = startsTo(start) - endsTo(start);
-    for (let x = start + 1; x < end; x++) {
-      const d = startsTo(x) - endsTo(x);
-      if (d !== depth) { coverage.push({ start: runStart, end: x, depth }); runStart = x; depth = d; }
+    const w = end - start, off = start - lo;
+    const depthArr = new Int32Array(w);
+    for (let i = 0; i < w; i++) depthArr[i] = cS[off + i] - cE[off + i];
+    let runStart = 0, depth = depthArr[0];
+    for (let i = 1; i < w; i++) {
+      const d = depthArr[i];
+      if (d !== depth) { coverage.push({ start: start + runStart, end: start + i, depth }); runStart = i; depth = d; }
     }
-    coverage.push({ start: runStart, end, depth });
+    coverage.push({ start: start + runStart, end, depth });
+    registerDepthIndex(coverage, buildDepthIndexDense(depthArr, start));
   }
 
   // junctions overlapping the window

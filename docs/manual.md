@@ -97,6 +97,12 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   the least recently used are dropped first). A junction is the `N` operation of a read's CIGAR, as
   STAR's `SJ.out.tab`, regtools or pysam count it. The reads track and the exon-usage statistics still
   decode reads, on their own budget (every 2nd, 4th, 8th… read past it, drawn as *downsampled*).
+- **Coverage drawing at any zoom**: when a pixel stands for more than one base (a whole gene on
+  screen), the track draws, for each pixel, the **highest** depth of its bases (the upper outline and
+  the light area) and the **lowest** (the thinner lower outline and the darker area), from a
+  pyramid of per-bin minima and maxima, never an average. A dropout narrower than a pixel is
+  therefore a line down to its depth even on the whole gene, and drawing costs the same whatever
+  the zoom, the depth or the number of samples. Zoomed in to the base, the two outlines coincide.
 - **Equal introns** draws every intron at the same width so exons and junctions dominate; the
   *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
   model's median exon length, kept between 80 and 300; clear the box to go back to it).
@@ -273,16 +279,19 @@ minor bucket. The choice is saved with the session and kept in exported pages, w
 embedded reads on the spot.
 
 **Variants and allele balance.** A DNA track opens as a plain coverage histogram: no read is
-decoded until asked. Its variant sites are drawn as allele-fraction bars on the coverage (no star
-strip on DNA tracks; the bar's label gives the fraction, its tooltip the site), from the reads track
-when it is shown, or from the **variants** chip next to the sample name otherwise: the chip scans
-every read of the current window, whatever its width (tile by tile, so memory stays bounded, with
-the progress shown on the chip and a click to stop), calls every site above *Min VAF*, and then reads
-*variants ✓ N*. From then on the variants follow the window: moving or widening it scans only the
-part not scanned yet and merges it, so the bars are always those of the frame shown; another
-chromosome, the unique-reads switch, a lower *Min VAF* or a changed long-read threshold start the
-window over (a raised *Min VAF* filters at once). A click on the ✓ chip forgets the variants (plain
-coverage until the next click). The **Variants** toggle of the options panel removes the bars (and the
+decoded until asked, and the **Variants** option of the options panel is off. Switch it on to get
+the **variants** chip next to each DNA sample name. Variant sites are drawn as allele-fraction bars
+on the coverage (no star strip on DNA tracks; the bar's label gives the fraction, its tooltip the
+site), from the reads track when it is shown, or from the chip otherwise: the chip counts every
+read of the current window, whatever its width and depth, calls every site above *Min VAF*
+(at least 3 supporting reads, bases of quality 20 or more), and then reads *variants ✓ N*. The
+counts are exact (no read is left out) and are made **in the background** (a Web Worker): the page
+stays fluid while a deep window is read, the progress shows on the chip, and a click stops it.
+From then on the variants follow the window: moving or widening it counts only the part not
+counted yet, and what has been counted is kept, so zooming back in, going back, the unique-reads
+switch or another *Min VAF* are answered at once; another chromosome starts over. A click on the
+✓ chip forgets the variants (plain coverage until the next click). Switching the **Variants** option
+off removes the bars (and the
 chip) for a plain coverage. When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
 for a minus-strand gene. *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch

@@ -13,6 +13,7 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
+import { attachVariantWorker } from './variantClient';
 import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
@@ -166,7 +167,12 @@ function App() {
   const [reopenState, setReopenState] = useState<{ folder: string; ready: boolean; note?: string } | null>(null);
   const nextId = useRef(EMBEDDED ? Math.max(0, ...EMBEDDED.samples.map(s => s.id)) + 1 : 1);
   const dsRef = useRef<LocalDataSource>();
-  if (!dsRef.current) { dsRef.current = EMBEDDED ? new EmbeddedDataSource(EMBEDDED, { build }) : new LocalDataSource({ build }); if (LINK && !EMBEDDED) dsRef.current.knownVariants = LINK.variants; }
+  if (!dsRef.current) {
+    dsRef.current = EMBEDDED ? new EmbeddedDataSource(EMBEDDED, { build }) : new LocalDataSource({ build });
+    if (LINK && !EMBEDDED) dsRef.current.knownVariants = LINK.variants;
+    // full variant scans in a Web Worker, so that no scan, however deep the window, holds the page's thread
+    attachVariantWorker(dsRef.current);
+  }
   const ds = dsRef.current;
 
   /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */

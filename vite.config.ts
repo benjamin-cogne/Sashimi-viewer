@@ -19,5 +19,8 @@ export default defineConfig({
     chunkSizeWarningLimit: 100_000,
     sourcemap: false,
   },
+  // the variant worker (src/standalone/variantWorker.ts) is inlined in the page as a classic script, the widest
+  // browser support; its libraries' dynamic imports are folded into that one script, which cannot load chunks
+  worker: { format: 'iife', rollupOptions: { output: { inlineDynamicImports: true } } },
   esbuild: { drop: ['debugger'] },
 })

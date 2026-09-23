@@ -5,7 +5,7 @@ import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
-  buildCoveragePaths, depthAt, maxDepthIn,
+  buildCoveragePaths, depthAt, maxDepthIn, type CoveragePaths,
   parseCdna, cdnaGenomicRange, parseExonQuery, exonGenomicRange,
   classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
   niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus, exonPhases,
@@ -111,7 +111,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -472,7 +472,7 @@ export default function SashimiViewer({
   const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
-  const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
+  const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
@@ -2260,7 +2260,7 @@ export default function SashimiViewer({
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
-    paths: { fill: string; stroke: string }; arcs: ArcRender[]; height: number;
+    paths: CoveragePaths; arcs: ArcRender[]; height: number;
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
@@ -2905,7 +2905,11 @@ export default function SashimiViewer({
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
-          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.26)} stroke="none" />}
+          {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
+              usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
+          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.10)} stroke="none" />}
+          {paths.floor && <path d={paths.floor} fill={withAlpha(color, 0.18)} stroke="none" />}
+          {paths.floorStroke && <path d={paths.floorStroke} fill="none" stroke={color} strokeWidth={0.8} strokeOpacity={0.6} strokeLinejoin="round" />}
           {paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
 
           {/* Junction arcs */}

@@ -226,74 +226,224 @@ function firstRunFrom(runs: CoverageRun[], pos: number): number {
   return lo;
 }
 
-export function maxDepthIn(runs: CoverageRun[], start: number, end: number): number {
-  let m = 0;
-  for (let i = firstRunFrom(runs, start); i < runs.length && runs[i].start < end; i++) {
-    if (runs[i].depth > m) m = runs[i].depth;
+// ======================== Coverage: min/max pyramid ========================
+//
+// A deep library changes depth at almost every base, so a gene-wide window holds one run per base
+// (190 000 for a 190 kb capture at 1 000×). Drawing, or finding the axis maximum, by walking those
+// runs costs O(bases in view) per frame and per track. Worse, a pixel then stands for ~160 bases and
+// keeping only their maximum hides any narrow dropout: a 50 bp hole at 30× in 1 000× coverage drew
+// as 1 045×.
+//
+// The pyramid keeps, for bins of 2^k bases (k ≥ PYR_K0), the minimum and the maximum depth over the
+// bin — the extremes, never an average, so nothing is smoothed away (the idea behind bigWig zoom
+// levels, and behind M4, Jugel et al., PVLDB 7(10), 2014: a pixel-perfect line chart only needs the
+// extremes of each pixel). Any [a, b) then decomposes into O(log n) whole bins plus two edges read
+// from the runs, so the exact min and max of every pixel column cost the same whatever the zoom or
+// the depth. Positions inside the data that no run covers are depth 0, as the paths draw them.
+
+/** Finest pyramid level: bins of 16 bases. Narrower edges of a range are read from the runs. */
+const PYR_K0 = 4;
+interface PyrLevel { first: number; min: Int32Array; max: Int32Array }
+export interface DepthIndex {
+  /** extent of the data: from the first run's start to the last run's end */
+  start: number;
+  end: number;
+  /** levels[i] has bins of 2^(PYR_K0 + i) bases, bin j covering [j << k, (j + 1) << k), stored from `first` */
+  levels: PyrLevel[];
+}
+const depthIndexes = new WeakMap<CoverageRun[], DepthIndex>();
+
+function pyramidUp(levels: PyrLevel[]): void {
+  for (;;) {
+    const lv = levels[levels.length - 1];
+    if (lv.min.length <= 2) return;
+    const first = lv.first >> 1, last = (lv.first + lv.min.length - 1) >> 1;
+    const min = new Int32Array(last - first + 1).fill(0x7fffffff), max = new Int32Array(last - first + 1);
+    for (let i = 0; i < lv.min.length; i++) {
+      const j = ((lv.first + i) >> 1) - first;
+      if (lv.min[i] < min[j]) min[j] = lv.min[i];
+      if (lv.max[i] > max[j]) max[j] = lv.max[i];
+    }
+    levels.push({ first, min, max });
   }
-  return m;
 }
 
-export interface CoveragePaths { fill: string; stroke: string }
+/** Pyramid of a run list; O(runs + bins). */
+export function buildDepthIndex(runs: CoverageRun[]): DepthIndex | null {
+  if (!runs.length) return null;
+  const start = runs[0].start, end = runs[runs.length - 1].end;
+  if (end <= start) return null;
+  const first = start >> PYR_K0, n = ((end - 1) >> PYR_K0) - first + 1;
+  const min = new Int32Array(n).fill(0x7fffffff), max = new Int32Array(n);
+  const touch = (a: number, b: number, d: number) => {
+    for (let j = (a >> PYR_K0) - first, last = ((b - 1) >> PYR_K0) - first; j <= last; j++) {
+      if (d < min[j]) min[j] = d;
+      if (d > max[j]) max[j] = d;
+    }
+  };
+  let prev = start;
+  for (const r of runs) {
+    if (r.start > prev) touch(prev, r.start, 0);
+    if (r.end > r.start) touch(r.start, r.end, r.depth);
+    if (r.end > prev) prev = r.end;
+  }
+  const levels: PyrLevel[] = [{ first, min, max }];
+  pyramidUp(levels);
+  return { start, end, levels };
+}
 
 /**
- * Step-function coverage paths, decimated to pixel resolution: runs narrower than
- * one pixel are pooled into a per-column maximum, so the path length is bounded
- * by the plot width whatever the data size, and narrow high peaks are never lost.
+ * Pyramid of a window's depth given per base (`depth[i]` is the depth at `start + i`), for a source that
+ * has the dense array at hand: attached to the runs it returns, so the viewer does not build it again.
+ */
+export function buildDepthIndexDense(depth: Int32Array, start: number): DepthIndex | null {
+  const end = start + depth.length;
+  if (end <= start) return null;
+  const first = start >> PYR_K0, n = ((end - 1) >> PYR_K0) - first + 1;
+  const min = new Int32Array(n).fill(0x7fffffff), max = new Int32Array(n);
+  for (let i = 0; i < depth.length; i++) {
+    const j = ((start + i) >> PYR_K0) - first, d = depth[i];
+    if (d < min[j]) min[j] = d;
+    if (d > max[j]) max[j] = d;
+  }
+  const levels: PyrLevel[] = [{ first, min, max }];
+  pyramidUp(levels);
+  return { start, end, levels };
+}
+
+export function registerDepthIndex(runs: CoverageRun[], index: DepthIndex | null): void {
+  if (index) depthIndexes.set(runs, index);
+}
+/** The pyramid of a run list, built on first use and kept for as long as the list lives. */
+export function depthIndexOf(runs: CoverageRun[]): DepthIndex | null {
+  let idx = depthIndexes.get(runs);
+  if (!idx) { const b = buildDepthIndex(runs); if (!b) return null; idx = b; depthIndexes.set(runs, idx); }
+  return idx;
+}
+
+/**
+ * Exact minimum and maximum depth over [a, b), clipped to the data (null when the range misses it). The
+ * whole 16-base bins come from the pyramid, O(log n); the ragged edges from the runs.
+ */
+export function depthRange(runs: CoverageRun[], a: number, b: number, idx: DepthIndex | null = depthIndexOf(runs)): { min: number; max: number } | null {
+  const out = { min: 0, max: 0 };
+  return depthRangeInto(runs, a, b, idx, out) ? out : null;
+}
+
+/** depthRange without allocation (it runs once per pixel column per track per frame); false when the range misses the data. */
+function depthRangeInto(runs: CoverageRun[], a: number, b: number, idx: DepthIndex | null, out: { min: number; max: number }): boolean {
+  const n = runs.length;
+  if (!n) return false;
+  const lo = a > runs[0].start ? a : runs[0].start, hi = b < runs[n - 1].end ? b : runs[n - 1].end;
+  if (hi <= lo) return false;
+  let mn = 0x7fffffff, mx = -1;
+  const size = 1 << PYR_K0;
+  let L = Math.ceil(lo / size), R = Math.floor(hi / size);   // whole bins [L, R)
+  // ragged edges (or the whole range, when it holds fewer than two whole bins) from the runs, gaps counting as 0
+  let spans = 1, x1 = lo, y1 = hi, x2 = 0, y2 = 0;
+  if (idx && R - L >= 2) { spans = 2; y1 = L * size; x2 = R * size; y2 = hi; } else { L = R = 0; }
+  for (let s = 0; s < spans; s++) {
+    const x = s ? x2 : x1, y = s ? y2 : y1;
+    if (y <= x) continue;
+    let l = 0, h = n;
+    while (l < h) { const m = (l + h) >> 1; if (runs[m].end <= x) l = m + 1; else h = m; }
+    let cur = x;
+    for (let i = l; i < n && runs[i].start < y; i++) {
+      const r = runs[i];
+      if (r.start > cur) { if (mn > 0) mn = 0; if (mx < 0) mx = 0; }
+      if (r.depth < mn) mn = r.depth;
+      if (r.depth > mx) mx = r.depth;
+      if (r.end > cur) cur = r.end;
+    }
+    if (cur < y) { if (mn > 0) mn = 0; if (mx < 0) mx = 0; }
+  }
+  if (idx && R > L) {
+    let l = L, r = R;
+    const levels = idx.levels;
+    for (let i = 0; i < levels.length && l < r; i++) {
+      const lv = levels[i], lmin = lv.min, lmax = lv.max, f = lv.first, len = lmin.length;
+      // the top level has no parent to climb to: what is left of the range is read there, bin by bin (two at most)
+      const top = i === levels.length - 1;
+      while (l < r && (top || (l & 1))) { const j = l - f; if (j >= 0 && j < len) { if (lmin[j] < mn) mn = lmin[j]; if (lmax[j] > mx) mx = lmax[j]; } l++; if (!top) break; }
+      if (top) break;
+      if (r & 1) { r--; const j = r - f; if (j >= 0 && j < len) { if (lmin[j] < mn) mn = lmin[j]; if (lmax[j] > mx) mx = lmax[j]; } }
+      l >>= 1; r >>= 1;
+    }
+  }
+  if (mx < 0) return false;
+  out.min = mn; out.max = mx;
+  return true;
+}
+
+export function maxDepthIn(runs: CoverageRun[], start: number, end: number): number {
+  return depthRange(runs, start, end)?.max ?? 0;
+}
+
+export interface CoveragePaths {
+  /** area under the highest depth of each pixel column */
+  fill: string;
+  /** outline of that highest depth */
+  stroke: string;
+  /** area under the lowest depth of each pixel column: where it falls below `fill`, bases of that column are shallower */
+  floor: string;
+  /** outline of that lowest depth: a dropout narrower than a pixel is a line down to its depth */
+  floorStroke: string;
+}
+
+/**
+ * Coverage paths at pixel resolution: for each pixel column, the exact lowest and highest depth of the
+ * bases it covers (see depthRange), so the path length is bounded by the plot width whatever the data,
+ * narrow high peaks are never lost, and neither are narrow dropouts — they show where `floor` falls away
+ * from `fill`. Works on any axis (linear, equal introns, reversed): columns are mapped back to genomic
+ * ranges through the scale. Positions between runs are depth 0.
  */
 export function buildCoveragePaths(
   runs: CoverageRun[], scale: Scale, viewStart: number, viewEnd: number,
   baseline: number, depthToY: (d: number) => number,
 ): CoveragePaths {
-  if (runs.length === 0) return { fill: '', stroke: '' };
-  // Traversal is in genomic order; on the reverse strand that is right→left in pixels.
-  // A run that does not start where the previous one ended (a source that omits zero-depth
-  // stretches) is a gap: the profile drops to the baseline there instead of ramping across.
-  const segs: { a: number; b: number; d: number; gap: boolean }[] = [];
-  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0, bucketGap = false;
-  const flush = () => {
-    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax, gap: bucketGap }); bucketCol = null; }
+  const empty = { fill: '', stroke: '', floor: '', floorStroke: '' };
+  if (runs.length === 0) return empty;
+  const dataStart = Math.max(viewStart, runs[0].start), dataEnd = Math.min(viewEnd, runs[runs.length - 1].end);
+  if (dataEnd <= dataStart) return empty;
+  const idx = depthIndexOf(runs);
+  // pixel span of the data, then one column per pixel (the first and last may be partial)
+  const pa = scale.x(dataStart), pb = scale.x(dataEnd);
+  const x0 = Math.min(pa, pb), x1 = Math.max(pa, pb);
+  const cap = Math.ceil(x1 - x0) + 2;
+  const ca = new Float64Array(cap), cb = new Float64Array(cap), clo = new Int32Array(cap), chi = new Int32Array(cap);
+  const m = { min: 0, max: 0 };
+  let n = 0;
+  for (let x = x0; x < x1; ) {
+    const nx = Math.min(x1, Math.floor(x) + 1);
+    const g1 = scale.invert(x), g2 = scale.invert(nx);
+    const ga = Math.max(dataStart, Math.floor(g1 < g2 ? g1 : g2));
+    const gb = Math.min(dataEnd, Math.max(ga + 1, Math.ceil(g1 < g2 ? g2 : g1)));
+    if (depthRangeInto(runs, ga, gb, idx, m)) {
+      // neighbouring columns with the same extremes make one step
+      if (n && clo[n - 1] === m.min && chi[n - 1] === m.max && cb[n - 1] === x) cb[n - 1] = nx;
+      else { ca[n] = x; cb[n] = nx; clo[n] = m.min; chi[n] = m.max; n++; }
+    }
+    x = nx;
+  }
+  if (!n) return empty;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const B = r1(baseline);
+  const area = (vals: Int32Array, withLine: boolean) => {
+    const d: string[] = [`M${r1(ca[0])},${B}`], line: string[] = [];
+    let lastY = NaN, lastB = ca[0];
+    for (let i = 0; i < n; i++) {
+      const y = r1(depthToY(vals[i])), a = r1(ca[i]), b = r1(cb[i]);
+      if (ca[i] !== lastB) { d.push(`L${r1(lastB)},${B}L${a},${B}`); if (withLine) line.push(`M${a},${y}`); lastY = NaN; }
+      else if (withLine && i === 0) line.push(`M${a},${y}`);
+      if (y !== lastY) { d.push(`L${a},${y}`); if (withLine && i) line.push(`L${a},${y}`); }
+      d.push(`L${b},${y}`); if (withLine) line.push(`L${b},${y}`);
+      lastY = y; lastB = cb[i];
+    }
+    d.push(`L${r1(lastB)},${B}Z`);
+    return { d: d.join(''), line: line.join('') };
   };
-  let prevEnd: number | null = null;
-  for (let i = firstRunFrom(runs, viewStart); i < runs.length && runs[i].start < viewEnd; i++) {
-    const r = runs[i];
-    const gs = Math.max(r.start, viewStart), ge = Math.min(r.end, viewEnd);
-    const gap = prevEnd !== null && r.start > prevEnd;
-    prevEnd = r.end;
-    const pa = scale.x(gs), pb = scale.x(ge);
-    const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
-    if (hi - lo >= 1) {
-      flush();
-      segs.push({ a: pa, b: pb, d: r.depth, gap });
-    } else {
-      const col = Math.floor((lo + hi) / 2);
-      if (col !== bucketCol) {
-        flush();
-        bucketCol = col; bucketMax = r.depth; bucketGap = gap;
-        bucketA = scale.reverse ? col + 1 : col;
-        bucketB = scale.reverse ? col : col + 1;
-      } else if (r.depth > bucketMax) bucketMax = r.depth;
-    }
-  }
-  flush();
-  if (segs.length === 0) return { fill: '', stroke: '' };
-  const f = (n: number) => n.toFixed(1);
-  let fill = `M${f(segs[0].a)},${f(baseline)}`;
-  let stroke = `M${f(segs[0].a)},${f(depthToY(segs[0].d))}`;
-  let lastY = NaN, lastB = segs[0].a;
-  for (const s of segs) {
-    const y = depthToY(s.d);
-    if (s.gap && lastY !== baseline) {
-      fill += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
-      stroke += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
-      lastY = baseline;
-    }
-    if (y !== lastY) { fill += `L${f(s.a)},${f(y)}`; stroke += `L${f(s.a)},${f(y)}`; }
-    fill += `L${f(s.b)},${f(y)}`; stroke += `L${f(s.b)},${f(y)}`;
-    lastY = y; lastB = s.b;
-  }
-  fill += `L${f(segs[segs.length - 1].b)},${f(baseline)}Z`;
-  return { fill, stroke };
+  const top = area(chi, true), bottom = area(clo, true);
+  return { fill: top.d, stroke: top.line, floor: bottom.d, floorStroke: bottom.line };
 }
 
 // ======================== Junctions ========================

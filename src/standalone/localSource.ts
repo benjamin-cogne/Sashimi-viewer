@@ -14,6 +14,7 @@ import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, Varia
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice } from './coverage';
+import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
 import type { GenomeBuild } from './ensembl';
@@ -50,8 +51,6 @@ const pgName = (pg: string[]): string => {
 
 const MAX_REGION_BP = 5_000_000;
 const MAX_READS_REGION_BP = 250_000;
-/** Tile of the full variant scan: the reads of one tile are decoded, called and dropped before the next, so memory stays bounded on any window. */
-const VARIANT_TILE_BP = 100_000;
 
 // ---------------- Deep regions ----------------
 // A very deep library (targeted RNA-seq, a highly expressed gene) can hold millions of records over one gene,
@@ -60,8 +59,6 @@ const VARIANT_TILE_BP = 100_000;
 // a cap every k-th read is kept (k = 2, 4, 8…) with the counts scaled back by k.
 /** Reads decoded per exon for the exon-usage statistics (fractions and medians only need a sample). */
 const EXON_USAGE_MAX_READS = 100_000;
-/** Reads decoded per tile of the full variant scan; sampled systematically past it, like every other scan. */
-const VARIANT_MAX_READS = 200_000;
 /** widest window whose reference is fetched from the web APIs to place clipped sequences (a local FASTA has no limit) */
 const REALIGN_MAX_BP = 500_000;
 /** bases read on each side of a breakpoint end when rescuing another sample's clipped reads (longer than a short read, shorter than most long-read clips matter) */
@@ -97,6 +94,10 @@ const COVERAGE_MAX_SPAN = 8_000_000;
 const COVERAGE_CACHE_BYTES = 256 * 1024 * 1024;
 /** A request this close to what a sample has counted extends it (the gap is decoded) rather than starting over. */
 const COVERAGE_MIN_GAP = 100_000;
+/** Longest stretch of one chromosome whose allele counts a sample keeps (they weigh ~9× the coverage counts per base). */
+const ALLELE_MAX_SPAN = 4_000_000;
+/** Allele counts kept across all samples; the least recently used samples' are dropped past it. */
+const ALLELE_CACHE_BYTES = 384 * 1024 * 1024;
 /** Partial coverage is handed to the caller at most this often while a deep view fills. */
 const PROGRESS_MS = 200;
 /** Records looked at for an NH tag before a file without one is taken as having none (uniqueness then from MAPQ). */
@@ -120,6 +121,10 @@ interface RecordView<R> {
   mateRef(r: R): number;
   tlen(r: R): number;
   sa(r: R): unknown;
+  /** the read's bases as character codes into `buf.a` (grown when too short); returns their number, 0 without a sequence */
+  seqCodes(r: R, buf: { a: Uint8Array }): number;
+  /** base qualities, null when the record has none */
+  quals(r: R): ArrayLike<number> | null;
   /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
   raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
@@ -129,9 +134,20 @@ const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: nu
 /** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
+/** BAM 4-bit base codes (SAM spec: =ACMGRSVTWYHKDBN) as character codes. */
+const NIBBLE_CODES = Uint8Array.from('=ACMGRSVTWYHKDBN', c => c.charCodeAt(0));
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => r.NUMERIC_CIGAR, mateRef: r => r.next_refid, tlen: r => r.template_length, sa: r => r.getTag('SA'),
+  seqCodes: (r, buf) => {
+    const n = r.seq_length ?? 0;
+    if (!n) return 0;
+    if (buf.a.length < n) buf.a = new Uint8Array(n * 2);
+    const packed: Uint8Array = r.NUMERIC_SEQ, a = buf.a;
+    for (let i = 0; i < n; i++) { const b = packed[i >> 1]; a[i] = NIBBLE_CODES[i & 1 ? b & 15 : b >> 4]; }
+    return n;
+  },
+  quals: r => r.qual ?? null,
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
@@ -144,6 +160,14 @@ const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => packCigar(cramCigar(r.readFeatures, r.readLength, r.lengthOnRef ?? 0)),
   mateRef: r => r.nextSequenceId ?? -1, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
+  seqCodes: (r, buf) => {
+    // @gmod/cram gives the bases through getReadBases(); its `readBases` property is left undefined
+    const seq: string = (typeof r.getReadBases === 'function' ? r.getReadBases() : r.readBases) ?? '';
+    if (buf.a.length < seq.length) buf.a = new Uint8Array(seq.length * 2);
+    for (let i = 0; i < seq.length; i++) buf.a[i] = seq.charCodeAt(i);
+    return seq.length;
+  },
+  quals: r => r.qualityScores ?? null,
   raw: (r, light, structural, refNames) => {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
@@ -198,6 +222,15 @@ export function isLongRead(reads: { s: number; e: number }[]): boolean {
   return lens[lens.length >> 1] > 1000;
 }
 
+/** Runs full variant scans away from the page's thread (see variantClient.ts); the data source hands them over. */
+export interface VariantScanner {
+  scan(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  /** the sample's files changed or it was removed: what was counted for it no longer holds */
+  forget(sampleId: number): void;
+  /** the reference changed: mismatches are read against it */
+  reference(reference: ReferenceChoice): void;
+}
+
 export class LocalDataSource implements SashimiDataSource {
   private samples = new Map<number, LocalSample>();
   private opened = new Map<number, Promise<Opened>>();
@@ -215,15 +248,20 @@ export class LocalDataSource implements SashimiDataSource {
     this.fasta = null;
     // CRAM decoding depends on the reference: reopen files, and forget what was counted from them
     for (const [id, s] of this.samples) if (s.kind === 'cram') { this.opened.delete(id); this.coverage.delete(id); }
+    // mismatches are read against the reference: every sample's allele counts depend on it
+    this.alleleStates.clear();
+    this.variantScanner?.reference(reference);
   }
 
   /** Variants handed over by the page URL (deep link), drawn on every sample. */
   knownVariants: KnownVariant[] = [];
   async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
-  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.nhMode.delete(s.id); }
+  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.nhMode.delete(id); }
+  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
+  /** The files behind a sample, for a variant scanner that reads them elsewhere (a worker). */
+  sampleFiles(id: number): LocalSample | undefined { return this.samples.get(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }
 
   // ---- reference ----
@@ -463,38 +501,105 @@ export class LocalDataSource implements SashimiDataSource {
     const r = kept.find(x => x.start === start && x.name === name && !(x.flags & 2048) && x.seq);
     return r ? { seq: r.seq, flags: r.flags, cigar: r.cigar } : null;
   }
+  // ---------------- Variant sites: allele counts, streamed and kept (see alleles.ts) ----------------
+
   /**
-   * Every site above the thresholds from the reads of the window, one tile at a time (any window width).
-   * A tile deeper than VARIANT_MAX_READS is sampled systematically and its read count scaled back: the
-   * alternate-allele fraction of a site is unchanged by taking one read in k, and a fraction measured on
-   * 200 000 reads has a standard error below 0.2 %, so the sites and their VAFs stay the same while the
-   * memory and the time stop growing with the depth.
+   * Where full variant scans run. The shell points this at a Web Worker that hosts its own LocalDataSource (see
+   * variantWorker.ts): the scan then never holds the page's thread, however deep the window. Unset (and inside
+   * the worker), scans run here, tile by tile.
    */
-  async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+  variantScanner?: VariantScanner;
+  /** What each sample has counted for its variants, one chromosome stretch per sample. */
+  private alleleStates = new Map<number, AlleleState>();
+  private alleleLocks = new Map<number, Promise<unknown>>();
+
+  /**
+   * Every variant site above the thresholds in [start, end), from every read of the window: exact counts, no
+   * sampling. Handed to the variant scanner when one is set, counted here otherwise.
+   */
+  getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
     const s = this.samples.get(sampleId);
-    if (!s) throw new Error('Sample not found');
-    const sites: VariantSite[] = [];
-    let total = 0, longReads: boolean | null = null, maxRate = 1;
-    for (let ts = start; ts < end; ts += VARIANT_TILE_BP) {
-      throwIfAborted(opts?.signal);
-      const te = Math.min(end, ts + VARIANT_TILE_BP);
-      // every read overlapping the tile (those starting before it too: they cover its first positions), decoded in full
-      const { kept, rate } = await this.scan(sampleId, chrom, ts, te, uniqueOnly, VARIANT_MAX_READS, false, { signal: opts?.signal });
-      maxRate = Math.max(maxRate, rate);
-      for (const r of kept) if (ts === start || r.start >= ts) total += rate;   // a read spanning two tiles is counted once
-      if (kept.length) {
-        const refStart = Math.max(0, ts - 500);
-        const ref = await this.getReferenceSeq(chrom, refStart, te + 500);
-        const reads = kept.map(r => encodeRead(r, ref, refStart));
-        if (longReads == null) longReads = isLongRead(reads);   // decided on the first tile holding reads, kept for the whole window
-        const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
-        const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-        sites.push(...callSites(reads, ts, te, ref, refStart, 3, vaf, 20, minIndel));
-      }
-      opts?.onProgress?.((te - start) / (end - start));
-    }
-    return { sites, total, long_reads: longReads ?? false, sampled: maxRate > 1 ? { rate: maxRate } : undefined };
+    if (!s) return Promise.reject(new Error('Sample not found'));
+    if (this.variantScanner && !s.embedded) return this.variantScanner.scan(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
+    return this.countVariants(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
   }
+
+  /** The sample's allele state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
+  private alleleState(id: number, chrom: string, start: number, end: number): AlleleState {
+    let st = this.alleleStates.get(id);
+    const gap = Math.max(end - start, COVERAGE_MIN_GAP);
+    if (!st || st.chrom !== chrom || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+      || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > ALLELE_MAX_SPAN)) {
+      st = new AlleleState(chrom);
+      this.alleleStates.set(id, st);
+    }
+    st.lastUsed = Date.now();
+    let total = 0;
+    for (const x of this.alleleStates.values()) total += x.bytes;
+    for (const [k, x] of [...this.alleleStates.entries()].filter(([k]) => k !== id).sort((p, q) => p[1].lastUsed - q[1].lastUsed)) {
+      if (total <= ALLELE_CACHE_BYTES) break;
+      total -= x.bytes; this.alleleStates.delete(k);
+    }
+    return st;
+  }
+
+  /** The allele counting itself: grows the sample's allele state over [start, end), then reads the sites back. */
+  countVariants(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    const signal = opts?.signal;
+    return this.locked(this.alleleLocks, sampleId, async () => {
+      throwIfAborted(signal);
+      const loc = await this.locate(sampleId, chrom);
+      if (!loc) return { sites: [], total: 0, long_reads: false };
+      const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
+      const st = this.alleleState(sampleId, loc.name, start, end);
+      const scratch = { a: new Uint8Array(512) };
+      // the reference over the records of the tile about to be counted, fetched before the (synchronous) counting
+      let ref: RefWindow | null = null;
+      const prepare = async (recs: any[]) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const r of recs) {
+          const rs = view.start(r);
+          if (rs < lo) lo = rs;
+          const ops = view.ops(r);
+          let e = rs;
+          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) e += ops[k] >>> 4; }
+          if (e > hi) hi = e;
+        }
+        ref = hi > lo ? refWindow(lo, await this.getReferenceSeq(chrom, lo, hi)) : null;
+      };
+      const count = (layer: AlleleLayer, r: any) => {
+        const flags = view.flags(r);
+        if (!keepFlags(flags)) return;
+        // every read is counted, unique or not ("unique only" is read back from the counts, not scanned again)
+        const unique = this.isUnique(sampleId, view, r);
+        const ops = view.ops(r);
+        const n = view.seqCodes(r, scratch);
+        const start0 = view.start(r);
+        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique);
+        if (st.longReads == null) {
+          let span = 0;
+          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) span += ops[k] >>> 4; }
+          st.spans.push(span);
+        }
+      };
+      const span = Math.max(1, end - start);
+      const progress = () => {
+        const done = Math.max(0, Math.min(end, st.pe) - Math.max(start, st.ps));
+        opts?.onProgress?.(Math.min(1, done / span));
+        if (st.longReads == null && st.spans.length) { const sp = [...st.spans].sort((x, y) => x - y); st.longReads = sp[sp.length >> 1] > 1000; st.spans = []; }
+      };
+      await this.fillStretch(sampleId, st, loc, start, end, () => new AlleleLayer(), count, signal, progress, prepare);
+      progress();
+      const longReads = st.longReads ?? false;
+      const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
+      const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
+      const siteRef = refWindow(start, await this.getReferenceSeq(chrom, start, end));
+      throwIfAborted(signal);
+      const { sites, reads } = sitesFromCounts([st.owned, st.spill], uniqueOnly, start, end, siteRef, vaf, minIndel);
+      return { sites, total: reads, long_reads: longReads };
+    });
+  }
+
   async getLibraryType(sampleId: number): Promise<LibraryEvidence> {
     if (!this.samples.has(sampleId)) return { type: 'unknown', source: 'none', note: 'sample not found' };
     return classifyHeader(await this.headerText(sampleId));
@@ -561,9 +666,9 @@ export class LocalDataSource implements SashimiDataSource {
   /** Whether a file's records carry NH (uniqueness from it) or not (from MAPQ), or how many were probed so far. */
   private nhMode = new Map<number, 'tag' | 'mapq' | number>();
 
-  private locked<T>(id: number, job: () => Promise<T>): Promise<T> {
-    const run = (this.coverageLocks.get(id) ?? Promise.resolve()).catch(() => undefined).then(job);
-    this.coverageLocks.set(id, run.catch(() => undefined));
+  private locked<T>(locks: Map<number, Promise<unknown>>, id: number, job: () => Promise<T>): Promise<T> {
+    const run = (locks.get(id) ?? Promise.resolve()).catch(() => undefined).then(job);
+    locks.set(id, run.catch(() => undefined));
     return run;
   }
 
@@ -614,12 +719,29 @@ export class LocalDataSource implements SashimiDataSource {
    * one synchronous step after they arrive: an abort between tiles leaves the state whole. Growing right
    * adds the reads starting in the new tiles; growing left also rebuilds the spill (see CoverageState).
    */
-  private async fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void): Promise<void> {
+  private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-    const refNames = loc.o.refNames;
-    const records = async (a: number, b: number): Promise<any[]> => loc.o.kind === 'bam'
-      ? loc.o.bam.getRecordsForRange(loc.name, a, b, { signal })
-      : loc.o.cram.getRecordsForRange(loc.seqId, a, b, { signal });
+    return this.fillStretch(id, st, loc, from, to, () => new Layer(),
+      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural), signal, onTile);
+  }
+
+  /**
+   * Grows a counted stretch (coverage, or allele counts) to cover [from, to), tile by tile. Each tile's records are
+   * counted in one synchronous step after they arrive (and after `prepare`, when given, has fetched what the counting
+   * needs), so an abort between tiles leaves the state whole. Growing right adds the reads starting in the new tiles;
+   * growing left also rebuilds the spill (see CoverageState).
+   */
+  private async fillStretch<L>(id: number, st: { owned: L; spill: L; ps: number; pe: number; readonly empty: boolean }, loc: { o: Opened; name: string; seqId: number },
+    from: number, to: number, newLayer: () => L, count: (layer: L, r: any) => void, signal?: AbortSignal, onTile?: () => void,
+    prepare?: (recs: any[]) => Promise<void>): Promise<void> {
+    const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
+    const records = async (a: number, b: number): Promise<any[]> => {
+      const recs: any[] = loc.o.kind === 'bam'
+        ? await loc.o.bam.getRecordsForRange(loc.name, a, b, { signal })
+        : await loc.o.cram.getRecordsForRange(loc.seqId, a, b, { signal });
+      if (prepare) { await prepare(recs); throwIfAborted(signal); }
+      return recs;
+    };
     let seen = 0;
     const calibrate = (bytes: number) => { if (seen >= 1000 && bytes > 0) this.bytesPerRead.set(id, bytes / seen); };
     if (st.empty) { st.ps = from; st.pe = from; }
@@ -634,9 +756,9 @@ export class LocalDataSource implements SashimiDataSource {
         const first = st.pe === st.ps;   // nothing owned yet: the reads reaching in from the left are the spill
         for (const r of recs) {
           const rs = view.start(r);
-          if (rs < a) { if (first) this.countRecord(id, st.spill, view, r, loc.seqId, refNames, st.structural); continue; }
+          if (rs < a) { if (first) count(st.spill, r); continue; }
           seen++;
-          this.countRecord(id, st.owned, view, r, loc.seqId, refNames, st.structural);
+          count(st.owned, r);
         }
         st.pe = b;
         if (b < to) { onTile?.(); await yieldToUi(); }
@@ -651,11 +773,11 @@ export class LocalDataSource implements SashimiDataSource {
         throwIfAborted(signal);
         const b = st.ps, a = Math.max(from, b - tile);
         const recs = await records(a, b);
-        const spill = new Layer();
+        const spill = newLayer();
         for (const r of recs) {
           const rs = view.start(r);
           if (rs >= a) seen++;
-          this.countRecord(id, rs < a ? spill : st.owned, view, r, loc.seqId, refNames, st.structural);
+          count(rs < a ? spill : st.owned, r);
         }
         st.spill = spill;
         st.ps = a;
@@ -703,7 +825,7 @@ export class LocalDataSource implements SashimiDataSource {
       sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced,
     });
     if (!loc) return result({ start, end }, readSlice([], uniqueOnly, start, end, boundaries));
-    return this.locked(sampleId, async () => {
+    return this.locked(this.coverageLocks, sampleId, async () => {
       throwIfAborted(signal);
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
