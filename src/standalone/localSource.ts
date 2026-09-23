@@ -74,7 +74,14 @@ const RESCUE_SPAN_BP = 400;
  * 250 kb tile over a capture panel at a few thousand × materialises millions of records at once.
  */
 const TILE_RECORDS = 50_000;
-const MAX_TILE_BP = 250_000, MIN_TILE_BP = 2_000;
+/**
+ * The floor is the BAI linear-index interval, 16 kb. A query cannot start reading later than the first
+ * record that may overlap its 16 kb bin, so a narrower tile re-inflates (and copies out of the inflater)
+ * up to 16 kb of data it has no use for, once per tile. Measured on a 1.5 M-read RNA gene at ~100 000×:
+ * 2 kb tiles took 19.6 s against 3.2 s for 16 kb ones — the extra time all in BGZF chunk inflation
+ * and buffer copies, not in the records.
+ */
+const MAX_TILE_BP = 250_000, MIN_TILE_BP = 16_384;
 /** Compressed bytes per record assumed before a file has been scanned once (a scan then calibrates it). */
 const BYTES_PER_READ: Record<'bam' | 'cram', number> = { bam: 60, cram: 30 };
 /** Margins are halved while the window looks too deep; below this they are dropped altogether. */
@@ -330,11 +337,11 @@ export class LocalDataSource implements SashimiDataSource {
    * Tile width for a scan of [start, end): the window narrowed so that about TILE_RECORDS records are
    * decoded (and released) at a time, from the compressed bytes the index reports for the whole window.
    *
-   * A tile is read with every record overlapping it, so a read on a boundary is decoded once per tile it
-   * spans and narrow tiles waste work. That only bites long reads, and a long-read library never gets
-   * narrow tiles: the width falls only when the window holds many records, which at that density means
-   * short ones (MIN_TILE_BP is ~13 short reads deep, ~7 % overlap; a 20 kb ONT read never reaches the
-   * record count that shrinks anything).
+   * Narrow tiles cost twice. Each is read with every record overlapping it, so a read on a boundary is
+   * decoded once per tile it spans (spliced reads with long N gaps span several); and each starts at the
+   * index's 16 kb granularity, so the bytes before it are inflated again (see MIN_TILE_BP). The floor
+   * keeps both small; a long-read library never gets near it, the width falling only when the window
+   * holds many records.
    */
   private tileSize(id: number, start: number, end: number, bytes: number): number {
     const s = this.samples.get(id);
