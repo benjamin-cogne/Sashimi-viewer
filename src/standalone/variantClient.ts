@@ -49,7 +49,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
         pending.set(id, { resolve, reject, onProgress: opts?.onProgress });
         opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
         worker.postMessage({ type: 'scan', req: id, sampleId, chrom, start, end, uniqueOnly, minVaf,
-          opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes } });
+          opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes, phaseSource: opts?.phaseSource } });
       });
     },
     forget(sampleId: number) { if (sent.delete(sampleId)) worker.postMessage({ type: 'forget', id: sampleId }); },

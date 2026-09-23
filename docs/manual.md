@@ -272,28 +272,52 @@ Deletions of 50 bp or more inside reads remain structural evidence whatever the 
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
 
-**Haplotypes (phasing).** *Collapse* on a reads track phases the window from the reads
-themselves, in the spirit of WhatsHap and HapCUT2 but in the browser, in milliseconds: every
-heterozygous site (25–75 % alternate allele among the called sites, so at least 3 reads and *Min
-VAF*) is linked to the others through the **fragments** that cover both, a read and its mate
-counting as one fragment. Two sites are linked when at least 2 fragments cover both and at most
-20 % of them disagree on the phase; the sites are then walked in order and each joins the current
-**phase block** when its trusted links agree, or starts a new one (the tooltip says why: no linking
-fragment, or contradicting links, which is what a third haplotype, mosaic alleles or errors look
-like). The track shows two rows per block, *H1* and *H2*, the allele of each site drawn as in the
-reads (coloured for the alternate base, outlined for the reference), with the number and share of
-the fragments assigned to each haplotype; hover a row for the block's span, the fragments fitting
-both haplotypes equally, those disagreeing with their haplotype at some site, and the linking
-fragments between neighbouring sites. Homozygous sites (above 75 %) sit on a *both haplotypes*
-row; sites below 25 % (mosaic, subclonal, errors), sites no fragment links to another, and sites
-with contradicting links are listed on an *unphased* row with the reason in their tooltip. Nothing
-is invented: two sites never covered by one fragment stay in separate blocks, and the numbering of
-H1/H2 restarts at each block. Short-read pairs phase sites within an insert of each other; long
-reads phase whole windows; RNA-seq phases too, with the fewer heterozygous sites its exons carry.
-*Haplotypes: any* switches the track to the **consensus groups** of the earlier collapse: one row
-per local haplotype × splice pattern with its read count, groups below *Min reads* folded into a
-minor bucket. The choice is saved with the session and kept in exported pages, which phase their
-embedded reads on the spot.
+**Haplotypes (phasing).** *Collapse* with *Haplotypes: 2* shows the **consensus of each of the
+two haplotypes**: one row per haplotype and phase set, drawn like a read. Grey marks the stretches
+covered by at least 3 of the haplotype's reads (blank where fewer). Coloured bases, deletion lines
+(large ones included) and insertion marks are the variants at least half of its reads carry, so a
+heterozygous variant lands on one row and a homozygous one on both. Phase sets side by side share a
+pair of rows, separated by a dashed line: the haplotypes are linked within a set, not across it
+(H1 of one set is unrelated to H1 of the next). Hover a row for its reads, the median assignment
+confidence and its variants.
+
+The haplotypes come from one of two sources, chosen with *Phase*:
+
+- **The file's haplotags** (default, used whenever the window has tagged reads). A phasing tool
+  wrote them on each read it could place: `HP` (haplotype 1 or 2), `PS` (phase set) and sometimes
+  `PC` (Phred-scaled confidence). Tools that write them: WhatsHap or LongPhase `haplotag` (the ONT
+  wf-human-variation outputs), PacBio HiPhase, Illumina DRAGEN (TruPath, where `HP` is a "copy
+  label" and may go above 2). That phasing comes from the genome's variants, so it reaches across
+  what a window's reads cannot link. Untagged reads (no phased variant under them, or fitting both
+  haplotypes) are left out and counted.
+- **The reads (in-page)**. The window is phased from its own reads, in the spirit of WhatsHap and
+  HapCUT2 but in the browser, in milliseconds. Every heterozygous site (25–75 % alternate allele
+  among the called sites, so at least 3 reads and *Min VAF*) is linked to the others through the
+  **fragments** that cover both, a read and its mate counting as one fragment. Two sites are linked
+  when at least 2 fragments cover both and at most 20 % of them disagree. The sites are walked in
+  order, and each joins the current **phase block** when its trusted links agree, or starts a new
+  one (no linking fragment, or contradicting links, which is what a third haplotype, mosaic alleles
+  or errors look like). Each fragment then goes to the haplotype of its block that it matches at
+  more sites, and the blocks act as phase sets. Short-read pairs phase sites within an insert of
+  each other; long reads phase whole windows; RNA-seq phases too, with the fewer heterozygous sites
+  its exons carry.
+
+With either source, the heterozygous sites of the window are checked. The two haplotypes of a set
+should split them (at least 80 % of one haplotype's reads carrying the alternate allele, at most
+20 % of the other's). Sites that do not split are listed on a *not split* row: a mis-phased or
+mosaic site, a third haplotype, or a collapsed duplication. Reads whose allele contradicts their
+haplotype's are counted in the header (tagging errors, chimeras). With the in-page source, the
+sites it could not phase are listed on that row too, with the reason.
+
+**Group by haplotype.** When the reads carry haplotags, *Group: haplotype (HP)* on the raw reads
+track packs them per haplotag, like IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher
+copy labels), then the untagged reads. Each group has a label row and a coloured band. Mates and the
+parts of a split read stay together. A read's tooltip gives its HP, PS and PC.
+
+*Haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
+one row per local haplotype × splice pattern with its read count, groups below *Min reads* folded
+into a minor bucket. These choices are saved with the session. Exported pages keep the haplotags of
+their embedded reads and compute the haplotypes on the spot.
 
 **Variants and allele balance.** A DNA track opens as a plain coverage histogram: no read is
 decoded until asked, and the **Variants** option of the options panel is off. Switch it on to get
@@ -602,6 +626,7 @@ src/standalone/
   alignments.ts                  coverage runs, junction counts, CIGAR/mismatch decoding, strandness
   collapse.ts                    variant-site calling and consensus-group collapsing of reads
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
+  haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)

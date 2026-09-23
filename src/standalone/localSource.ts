@@ -17,6 +17,7 @@ import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from '
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
+import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
 import { getCommonSnps } from './snps';
@@ -132,6 +133,13 @@ interface RecordView<R> {
   /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
   raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
+/** The haplotag of a record of a phased file: HP (haplotype), PS (phase set), PC (confidence); nothing when untagged. */
+const haplotag = (get: (tag: string) => unknown): { hp?: number; ps?: number; pc?: number } => {
+  const hp = tagNumber(get('HP'));
+  if (hp == null || hp <= 0) return {};
+  const ps = tagNumber(get('PS')), pc = tagNumber(get('PC'));
+  return { hp, ...(ps != null ? { ps } : {}), ...(pc != null ? { pc } : {}) };
+};
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
@@ -157,6 +165,7 @@ const BAM_VIEW: RecordView<any> = {
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
+      ...(light ? {} : haplotag(tag => r.getTag(tag))),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
   },
 };
@@ -184,6 +193,7 @@ const CRAM_VIEW: RecordView<any> = {
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
+      ...(light ? {} : haplotag(tag => r.getTag(tag))),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, r.nextStart ?? 0, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
 };
@@ -913,11 +923,12 @@ export class LocalDataSource implements SashimiDataSource {
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
     const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length, long_reads: longReads,
-      reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null };
+      reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {
-        const phase = phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        return { ...base, reads: [], sites: phase.sites, groups: [], phase };
+        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf);
+        return { ...base, reads: [], sites: phase?.sites ?? callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [], phase, haplotypes };
       }
       const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };

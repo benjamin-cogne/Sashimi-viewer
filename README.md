@@ -62,7 +62,9 @@ from a FASTA you add. Nothing is kept when the tab closes.
   from an exact scan of the window run in the background; allele balance of the common SNPs.
 - Coverage drawn as the exact mean depth of every pixel, with a tick down to any base below half of
   it: a narrow dropout stays visible on a whole-gene view.
-- Reads, pairs, read-based phasing, split reads joined on one row, clipped sequences on a click,
+- Reads, pairs, the **two haplotypes as consensus rows**, from the file's haplotags (HP/PS from
+  WhatsHap, LongPhase, HiPhase or DRAGEN) or from read-based phasing; reads grouped by haplotype;
+  split reads joined on one row, clipped sequences on a click,
   consensus of a clip cluster ready for BLAT.
 
 **Organising the work**

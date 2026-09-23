@@ -15,6 +15,7 @@ import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScan
 import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
+import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
 import type { GenomeBuild } from './ensembl';
@@ -308,11 +309,12 @@ export class EmbeddedDataSource extends LocalDataSource {
     const longReads = isLongRead(reads);
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source };
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {
-        const phase = phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        return { ...base, reads: [], sites: phase.sites, groups: [], phase };
+        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf);
+        return { ...base, reads: [], sites: phase?.sites ?? callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [], phase, haplotypes };
       }
       const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };

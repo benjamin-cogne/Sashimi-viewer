@@ -23,6 +23,8 @@ export interface RawRead {
   mateChrom?: string; matePos?: number;
   /** SA tag: supplementary alignments "rname,pos,strand,CIGAR,mapQ,NM;" */
   sa?: string | null;
+  /** haplotag of a phased file (WhatsHap / LongPhase haplotag, HiPhase, DRAGEN): HP haplotype, PS phase set, PC confidence */
+  hp?: number | null; ps?: number | null; pc?: number | null;
 }
 
 const FLAG_PAIRED = 1, FLAG_UNMAPPED = 4, FLAG_REVERSE = 16, FLAG_READ2 = 128, FLAG_SECONDARY = 256, FLAG_QCFAIL = 512, FLAG_DUP = 1024;
@@ -101,6 +103,7 @@ export function encodeRead(r: RawRead, ref: string | null, refStart: number): Al
   if (hard[0] || hard[1]) out.h = hard;
   if (r.seq && ins.length) out.is = insSeq;
   if (r.sa) out.sa = r.sa;
+  if (r.hp != null && r.hp > 0) { out.hp = r.hp; if (r.ps != null) out.ps = r.ps; if (r.pc != null) out.pc = r.pc; }
   return out;
 }
 

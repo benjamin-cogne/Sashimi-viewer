@@ -21,10 +21,10 @@ import { callSites } from './collapse';
 export const HET_MIN = 0.25, HET_MAX = 0.75;
 export const MIN_LINK = 2, MAX_CONFLICT = 0.2;
 
-type Allele = 0 | 1 | -1;   // 0 ref, 1 alt, -1 unknown
+export type Allele = 0 | 1 | -1;   // 0 ref, 1 alt, -1 unknown
 
 /** Allele of one read at one site (unknown when not covered, low quality, or another allele). */
-function alleleAt(r: AlignedRead, s: VariantSite, minBq: number): Allele {
+export function alleleAt(r: AlignedRead, s: VariantSite, minBq: number): Allele {
   if (s.kind === 'snv') {
     if (!r.b.some(([bs, be]) => bs <= s.pos && s.pos < be)) return -1;
     for (const [pos, base, qual] of r.m) if (pos === s.pos) return qual < minBq ? -1 : base === s.alt ? 1 : -1;

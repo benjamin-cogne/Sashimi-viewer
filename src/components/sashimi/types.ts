@@ -124,6 +124,11 @@ export interface AlignedRead {
   is?: string[];
   /** SA tag of a split read: "rname,pos,strand,CIGAR,mapQ,NM;" per other part */
   sa?: string;
+  /**
+   * haplotag written by a phasing tool (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN): HP the haplotype (1, 2;
+   * DRAGEN's "copy label" may go higher), PS the phase set it belongs to, PC the Phred-scaled confidence; absent when untagged
+   */
+  hp?: number; ps?: number; pc?: number;
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {
@@ -168,12 +173,42 @@ export interface PhaseResult {
   /** heterozygous sites considered */
   het: number;
 }
+/** One haplotype's consensus over a phase set: where at least HAP_MIN_DEPTH of its reads cover, and what most of them carry. */
+export interface HaplotypeConsensus {
+  /** 1, 2 (HP tag, or the block's haplotype); higher for DRAGEN copy labels */
+  hap: number;
+  /** reads (tags) or fragments (in-page phasing) of this haplotype */
+  reads: number;
+  /** stretches the haplotype's reads cover, deletions included, 0-based half-open */
+  covered: [number, number][];
+  /** variants carried by at least half of the haplotype's reads over them */
+  sites: VariantSite[];
+  /** median PC (assignment confidence) of its tagged reads, when the file gives one */
+  pc?: number;
+}
+/** A phase set: haplotypes linked within it, not across (H1 here is unrelated to H1 of the next set). */
+export interface HaplotypeSet { id: string; ps: number | null; start: number; end: number; haps: HaplotypeConsensus[] }
+/** The haplotypes of a reads window, from the file's haplotags or from the in-page read-based phasing. */
+export interface HaplotypeView {
+  source: 'tags' | 'reads';
+  sets: HaplotypeSet[];
+  /** reads (tags) or fragments (reads) given a haplotype, and not */
+  assigned: number; unassigned: number;
+  /** heterozygous sites of the window that the two haplotypes of their set do not split (both, or neither, carry the alt) */
+  notSplit: { pos: number; kind: VariantSite['kind']; alt: string; fractions: number[]; set: string }[];
+  /** heterozygous sites checked, and the reads whose allele at one of them contradicts their haplotype */
+  checked: number; conflicting: number;
+}
 export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
   sites: VariantSite[]; groups: ReadGroup[];
   /** read-based phasing of the window (collapsed mode with two haplotypes) */
   phase?: PhaseResult;
+  /** the two haplotypes of the window as consensus rows (collapsed mode with two haplotypes) */
+  haplotypes?: HaplotypeView;
+  /** reads of the window carrying a haplotag (HP), and the phase sets (PS) among them: the file is phased */
+  haplotags?: { tagged: number; sets: number };
   /** the reads are long (median aligned length above 1 kb): noise filters apply */
   long_reads?: boolean;
   /** Reference sequence covering the window (plus margin), or null when no source is available. */

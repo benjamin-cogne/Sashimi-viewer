@@ -294,6 +294,24 @@ function decodeSaBlock(bytes: Uint8Array, reads: AlignedRead[]) {
   for (const r of reads) { const v = rd.str(); if (v) r.sa = v; }
 }
 
+/** Haplotags of a block: per read HP (0 when untagged), then for a tagged read PS + 1 and PC + 1 (0 when absent). */
+function encodeHapBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) { w.u(r.hp ?? 0); if (r.hp) { w.u(r.ps != null ? r.ps + 1 : 0); w.u(r.pc != null ? r.pc + 1 : 0); } }
+  return w.done();
+}
+function decodeHapBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) {
+    const hp = rd.u();
+    if (!hp) continue;
+    r.hp = hp;
+    const ps = rd.u(), pc = rd.u();
+    if (ps) r.ps = ps - 1;
+    if (pc) r.pc = pc - 1;
+  }
+}
+
 /** Encodes the reads of a window: blocks of READS_PER_BLOCK, a pairs section per block when any read has a mate, the reference bases. */
 export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
   const sorted = [...p.reads].sort((a, b) => a.s - b.s || a.e - b.e);
@@ -319,6 +337,10 @@ export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
     if (block.some(r => r.sa)) {
       const sa = await deflate(encodeSaBlock(block));
       sections.push({ name: 'sa', block: b, bytes: sa.length }); parts.push(sa);
+    }
+    if (block.some(r => r.hp)) {
+      const hap = await deflate(encodeHapBlock(block));
+      sections.push({ name: 'hap', block: b, bytes: hap.length }); parts.push(hap);
     }
   }
   if (p.reference) {
@@ -354,7 +376,7 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
       const base = counted; counted += s.n ?? 0;
       if (range && (s.end! <= range.start || s.start! >= range.end)) continue;
       const block = decodeReadBlock(await inflate(bytes()), k => `read ${base + k + 1}`);
-      // the block's companion sections follow it: pairs, clips, inserts, sa (any order; unknown names skipped)
+      // the block's companion sections follow it: pairs, clips, inserts, sa, hap (any order; unknown names skipped)
       for (let j = i + 1; j < dir.sections.length && dir.sections[j].name !== 'core' && dir.sections[j].block === s.block; j++) {
         const c = dir.sections[j];
         const data = () => inflate(stream.subarray(offsets[j], offsets[j] + c.bytes));
@@ -362,6 +384,7 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
         else if (c.name === 'clips') decodeClipBlock(await data(), block);
         else if (c.name === 'inserts') decodeInsertBlock(await data(), block);
         else if (c.name === 'sa') decodeSaBlock(await data(), block);
+        else if (c.name === 'hap') decodeHapBlock(await data(), block);
       }
       reads.push(...block);
     } else if (s.name === 'reference') {

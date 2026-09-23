@@ -15,6 +15,8 @@ export interface ReadsOptions {
   longReadMinVaf?: number;
   /** collapsed mode: two haplotypes per block by read-based phasing (default), or any number of consensus groups */
   haplotypes?: 2 | 'any';
+  /** two haplotypes: from the file's haplotags (HP/PS) when the window has tagged reads ('auto', default), or always from the reads' own phasing */
+  phaseSource?: 'auto' | 'reads';
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
 }

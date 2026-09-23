@@ -59,7 +59,7 @@ Directory:
 Reads are sorted by start, then end, and cut into **blocks** of at most 1,000 reads. Each block
 has a `core` section followed by its companion sections, each present only when the block needs
 it: `pairs` (any read has a mate), `clips` (soft-clipped bases, hard-clipped lengths), `inserts`
-(inserted bases) and `sa` (SA tags of split reads). A reader takes every section that follows a
+(inserted bases), `sa` (SA tags of split reads) and `hap` (haplotags of a phased file). A reader takes every section that follows a
 `core` section with the same block index, in any order, and skips the names it does not know. Block sections carry `block` (index), `start` and `end` (genomic span covered by the block's
 reads, 0-based half-open) and `n` (reads in the block), so a reader can decode only the blocks
 overlapping a window. Read names are not stored: a reader numbers the reads `read 1`,
@@ -122,6 +122,14 @@ for each read, for each insertion of the core section, in order:   string bases
 
 ```
 n × string     the SA tag as the aligner wrote it ("rname,pos,strand,CIGAR,mapQ,NM;" per part), empty otherwise
+```
+
+### 3.5b `hap` section (per block, present when any read of the block carries a haplotag)
+
+```
+per read:  varint  HP     haplotype (1, 2, …) written by the phasing tool; 0 = untagged, nothing follows
+           varint  PS+1   phase set + 1, 0 when the record has no PS tag        (tagged reads only)
+           varint  PC+1   assignment confidence (Phred) + 1, 0 when absent       (tagged reads only)
 ```
 
 ### 3.6 `reference` section
