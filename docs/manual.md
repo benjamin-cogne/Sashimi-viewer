@@ -84,18 +84,19 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   ignored. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or MAPQ ≥ 30 when no `NH` tag is present.
 - **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
   usage statistics.
-- **Very deep libraries** (targeted RNA-seq, highly expressed genes) are read on a budget so the page
-  never freezes: each track decodes at most 250,000 reads per request. The window is first sized from
-  the index (the margins around the visible region shrink, the visible region is always read in
-  full); if that region alone holds more reads, every 2nd, 4th, 8th… read is kept (a systematic
-  sample in file order) and depths, junction and boundary counts are scaled back by that factor.
-  Such a track shows **≈ 1 read in k** next to its name and its read counts start with ≈: they are
-  estimates, exact to within a few reads for anything with hundreds of reads but coarse for rare
-  junctions (a junction seen once in the sample shows k reads, one seen in none shows nothing).
-  Zooming in reduces the window until the counts are exact again. Percentages (Groups view,
-  *Arc labels: % usage*) are unaffected in expectation. The reads track and the exon-usage
-  statistics use the same filter-then-sample order, so names and sequences are decoded only for
-  the reads actually drawn.
+- **Very deep libraries** (capture panels at thousands of ×, targeted RNA-seq, highly expressed
+  genes): coverage, junctions and intron-retention counts are **exact at any depth**. Every read of
+  the window is counted straight from its alignment into per-position tallies, without building a
+  read in memory, and nothing is sampled. The visible region is counted first and drawn as it fills
+  (*reading the view… N %* next to the sample), then the margins around it (*reading the margins…*),
+  as far as about 2 million reads of margin; past that they shrink, and panning out of them costs a
+  new read. What has been counted stays with the sample while you stay in that part of the chromosome (a jump
+  further than a window away starts over): panning
+  back, *Unique reads*, another transcript model or its exon boundaries are answered from the
+  tallies at once, without reading the file again (up to 8 Mb per sample and 256 MB for all samples;
+  the least recently used are dropped first). A junction is the `N` operation of a read's CIGAR, as
+  STAR's `SJ.out.tab`, regtools or pysam count it. The reads track and the exon-usage statistics still
+  decode reads, on their own budget (every 2nd, 4th, 8th… read past it, drawn as *downsampled*).
 - **Equal introns** draws every intron at the same width so exons and junctions dominate; the
   *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
   model's median exon length, kept between 80 and 300; clear the box to go back to it).

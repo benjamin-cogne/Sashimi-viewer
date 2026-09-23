@@ -84,7 +84,7 @@ export interface StructuralEvidence {
   rescued?: RescuedClips[];
   /** median insert size of the proper pairs of the window (paired libraries) */
   insertMedian: number | null;
-  /** reads scanned for this evidence (after sampling) */
+  /** reads the evidence was gathered from (after sampling, for a source that samples) */
   reads: number;
 }
 
@@ -97,7 +97,10 @@ export interface SampleCoverage {
   window?: { start: number; end: number };
   /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
   sampled?: { rate: number; total: number; decoded: number };
-  /** reads decoded and the fraction of them carrying a splice gap (CIGAR N): the library-type evidence of this window */
+  /**
+   * Reads counted and the fraction of them carrying a splice gap (CIGAR N): library-type evidence. A source that keeps its
+   * counts between requests gives it over everything it has counted for the sample on this chromosome, not just the window.
+   */
   spliced?: { reads: number; fraction: number };
   /** structural evidence, when the caller asked for it (DNA samples) */
   structural?: StructuralEvidence;

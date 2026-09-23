@@ -12,7 +12,8 @@ import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
-import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, boundarySpanning, clipEnds, coverageRuns, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, junctionCounts, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { CoverageState, Layer, packCigar, readSlice } from './coverage';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
 import type { GenomeBuild } from './ensembl';
@@ -57,8 +58,6 @@ const VARIANT_TILE_BP = 100_000;
 // and decoding them all froze the page. Requests are therefore budgeted: the window is sized from the index
 // before anything is decoded, records are scanned tile by tile with only the fields the filter needs, and past
 // a cap every k-th read is kept (k = 2, 4, 8…) with the counts scaled back by k.
-/** Reads decoded per coverage request unless the caller says otherwise. */
-const DEFAULT_MAX_READS = 250_000;
 /** Reads decoded per exon for the exon-usage statistics (fractions and medians only need a sample). */
 const EXON_USAGE_MAX_READS = 100_000;
 /** Reads decoded per tile of the full variant scan; sampled systematically past it, like every other scan. */
@@ -86,6 +85,22 @@ const MAX_TILE_BP = 250_000, MIN_TILE_BP = 16_384;
 const BYTES_PER_READ: Record<'bam' | 'cram', number> = { bam: 60, cram: 30 };
 /** Margins are halved while the window looks too deep; below this they are dropped altogether. */
 const MIN_MARGIN_BP = 2_000;
+/**
+ * Reads the margins of a coverage request may cost, by the index's estimate, unless the caller says
+ * otherwise. The view itself is always read in full and exactly; margins only make panning free, so
+ * past this they shrink (about 5–10 s of decoding on one thread, measured at 200–400 k reads/s).
+ */
+const DEFAULT_MARGIN_READS = 2_000_000;
+/** Longest stretch of one chromosome whose counts a sample keeps; a request further away starts over. */
+const COVERAGE_MAX_SPAN = 8_000_000;
+/** Counts kept across all samples; the least recently used samples' are dropped past it. */
+const COVERAGE_CACHE_BYTES = 256 * 1024 * 1024;
+/** A request this close to what a sample has counted extends it (the gap is decoded) rather than starting over. */
+const COVERAGE_MIN_GAP = 100_000;
+/** Partial coverage is handed to the caller at most this often while a deep view fills. */
+const PROGRESS_MS = 200;
+/** Records looked at for an NH tag before a file without one is taken as having none (uniqueness then from MAPQ). */
+const NH_PROBE = 2_000;
 /** Decoded BAM chunks the library keeps in memory (its default is 1 GB, too much for a browser tab). */
 const BAM_CACHE_BYTES = 256 * 1024 * 1024;
 
@@ -99,6 +114,12 @@ interface RecordView<R> {
   flags(r: R): number;
   mapq(r: R): number;
   nh(r: R): number | null;
+  /** the CIGAR packed as BAM stores it (length << 4 | op) */
+  ops(r: R): ArrayLike<number>;
+  /** reference id of the mate, −1 when none */
+  mateRef(r: R): number;
+  tlen(r: R): number;
+  sa(r: R): unknown;
   /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
   raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
@@ -110,6 +131,7 @@ const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  ops: r => r.NUMERIC_CIGAR, mateRef: r => r.next_refid, tlen: r => r.template_length, sa: r => r.getTag('SA'),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
@@ -120,6 +142,8 @@ const BAM_VIEW: RecordView<any> = {
 };
 const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  ops: r => packCigar(cramCigar(r.readFeatures, r.readLength, r.lengthOnRef ?? 0)),
+  mateRef: r => r.nextSequenceId ?? -1, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
   raw: (r, light, structural, refNames) => {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
@@ -149,10 +173,6 @@ const yieldToUi = (): Promise<void> => {
   const s = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
   return s?.yield ? s.yield() : new Promise<void>(resolve => { setTimeout(resolve, 0); });
 };
-const scaleRuns = <T extends { depth: number }>(runs: T[], k: number): T[] => (k === 1 ? runs : runs.map(r => ({ ...r, depth: r.depth * k })));
-const scaleCounts = <T extends { count: number }>(xs: T[], k: number): T[] => (k === 1 ? xs : xs.map(x => ({ ...x, count: x.count * k })));
-const scaleRecord = (o: Record<number, number>, k: number): Record<number, number> => (k === 1 ? o : Object.fromEntries(Object.entries(o).map(([p, n]) => [p, n * k])));
-const scaleSpanning = (sp: BoundarySpanning, k: number): BoundarySpanning => ({ intronStart: scaleRecord(sp.intronStart, k), intronEnd: scaleRecord(sp.intronEnd, k) });
 
 function resolveName(names: string[], chrom: string): string | null {
   if (names.includes(chrom)) return chrom;
@@ -193,17 +213,17 @@ export class LocalDataSource implements SashimiDataSource {
   setReference(reference: ReferenceChoice) {
     this.reference = reference;
     this.fasta = null;
-    // CRAM decoding depends on the reference: reopen files
-    for (const [id, s] of this.samples) if (s.kind === 'cram') this.opened.delete(id);
+    // CRAM decoding depends on the reference: reopen files, and forget what was counted from them
+    for (const [id, s] of this.samples) if (s.kind === 'cram') { this.opened.delete(id); this.coverage.delete(id); }
   }
 
   /** Variants handed over by the page URL (deep link), drawn on every sample. */
   knownVariants: KnownVariant[] = [];
   async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
-  addSample(s: LocalSample) { this.samples.set(s.id, s); }
+  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.nhMode.delete(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); }
+  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.nhMode.delete(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }
 
   // ---- reference ----
@@ -394,7 +414,8 @@ export class LocalDataSource implements SashimiDataSource {
 
   /**
    * The window to read for a request: the core is always read; the margins around it are halved while the
-   * index suggests more reads than the budget, and dropped once they get small.
+   * index suggests they hold more reads than the budget, and dropped once they get small. Only the margins
+   * count against it: around a capture target at thousands of ×, margins that hold next to nothing stay.
    */
   private async budgetWindow(id: number, chrom: string, start: number, end: number, core: { start: number; end: number }, cap: number, signal?: AbortSignal): Promise<{ start: number; end: number }> {
     const loc = await this.locate(id, chrom);
@@ -404,7 +425,8 @@ export class LocalDataSource implements SashimiDataSource {
     const coreStart = Math.max(start, Math.min(end, core.start)), coreEnd = Math.max(coreStart, Math.min(end, core.end));
     let left = coreStart - start, right = end - coreEnd;
     let win = { start, end };
-    while ((left > 0 || right > 0) && (await this.indexBytes(loc, win.start, win.end, signal)) / bpr > cap) {
+    const coreBytes = await this.indexBytes(loc, coreStart, coreEnd, signal);
+    while ((left > 0 || right > 0) && ((await this.indexBytes(loc, win.start, win.end, signal)) - coreBytes) / bpr > cap) {
       left = left >= 2 * MIN_MARGIN_BP ? Math.floor(left / 2) : 0;
       right = right >= 2 * MIN_MARGIN_BP ? Math.floor(right / 2) : 0;
       win = { start: coreStart - left, end: coreEnd + right };
@@ -526,44 +548,214 @@ export class LocalDataSource implements SashimiDataSource {
     return { run_id: 0, chrom, exons, samples };
   }
 
+  // ---------------- Coverage: exact, streamed, kept ----------------
+  // Coverage requests count every read of their window straight from its packed CIGAR into a per-sample
+  // CoverageState (see coverage.ts): no read object, no sampling, and what was counted once is not decoded
+  // again — panning back, a later request inside the same stretch, another gene model's boundaries, or
+  // "unique only" toggled are answered from the counts.
+
+  /** What each sample has counted, one chromosome stretch per sample. */
+  private coverage = new Map<number, CoverageState>();
+  /** Requests of one sample run one after the other: they grow the same state. */
+  private coverageLocks = new Map<number, Promise<unknown>>();
+  /** Whether a file's records carry NH (uniqueness from it) or not (from MAPQ), or how many were probed so far. */
+  private nhMode = new Map<number, 'tag' | 'mapq' | number>();
+
+  private locked<T>(id: number, job: () => Promise<T>): Promise<T> {
+    const run = (this.coverageLocks.get(id) ?? Promise.resolve()).catch(() => undefined).then(job);
+    this.coverageLocks.set(id, run.catch(() => undefined));
+    return run;
+  }
+
+  /** Uniquely mapped, as uniqueFrom decides; NH is not looked for in files that do not carry it (a tag lookup per record costs). */
+  private isUnique(id: number, view: RecordView<any>, r: any): boolean {
+    const mode = this.nhMode.get(id);
+    if (mode === 'mapq') return view.mapq(r) >= 30;
+    const nh = view.nh(r);
+    if (mode !== 'tag') {
+      if (nh != null) this.nhMode.set(id, 'tag');
+      else { const seen = (typeof mode === 'number' ? mode : 0) + 1; this.nhMode.set(id, seen >= NH_PROBE ? 'mapq' : seen); }
+    }
+    return uniqueFrom(nh, view.mapq(r));
+  }
+
+  /**
+   * Counts one record into a layer. With `structural`, the records the structural evidence reads
+   * (SA tag, a clip of RESCUE_MIN_CLIP bases or more, a deletion of SV_MIN_DELETION or more, a mate
+   * elsewhere, on the same strand or far away) are kept whole; the others would add nothing to it
+   * but their insert size, which the layer histograms instead.
+   */
+  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean): void {
+    const flags = view.flags(r);
+    if (!keepFlags(flags)) return;
+    const unique = this.isUnique(id, view, r);
+    const ops = view.ops(r);
+    const start = view.start(r);
+    const insert = (flags & 1) && (flags & 2) ? Math.abs(view.tlen(r)) : 0;
+    layer.add(start, ops, unique, insert);
+    if (!structural) return;
+    let keep = false, refLen = 0;
+    for (let k = 0; k < ops.length; k++) {
+      const len = ops[k] >>> 4, op = ops[k] & 15;
+      if ((op === 4 || op === 5) && len >= RESCUE_MIN_CLIP) keep = true;
+      else if (op === 2 && len >= SV_MIN_DELETION) keep = true;
+      if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) refLen += len;
+    }
+    if (!keep && (flags & 1) && !(flags & 8)) {
+      const mate = view.mateRef(r);
+      keep = mate >= 0 && (mate !== seqId || ((flags & 16) !== 0) === ((flags & 32) !== 0) || Math.abs(view.tlen(r)) > 1000);
+    }
+    if (!keep) keep = typeof view.sa(r) === 'string';
+    if (keep) layer.sv.push({ r: view.raw(r, true, true, refNames), unique, end: start + refLen });
+  }
+
+  /**
+   * Grows a sample's counted stretch to cover [from, to), tile by tile, each tile's records counted in
+   * one synchronous step after they arrive: an abort between tiles leaves the state whole. Growing right
+   * adds the reads starting in the new tiles; growing left also rebuilds the spill (see CoverageState).
+   */
+  private async fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void): Promise<void> {
+    const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
+    const refNames = loc.o.refNames;
+    const records = async (a: number, b: number): Promise<any[]> => loc.o.kind === 'bam'
+      ? loc.o.bam.getRecordsForRange(loc.name, a, b, { signal })
+      : loc.o.cram.getRecordsForRange(loc.seqId, a, b, { signal });
+    let seen = 0;
+    const calibrate = (bytes: number) => { if (seen >= 1000 && bytes > 0) this.bytesPerRead.set(id, bytes / seen); };
+    if (st.empty) { st.ps = from; st.pe = from; }
+    if (to > st.pe) {
+      const a0 = st.pe, bytes = await this.indexBytes(loc, a0, to, signal);
+      const tile = this.tileSize(id, a0, to, bytes);
+      seen = 0;
+      while (st.pe < to) {
+        throwIfAborted(signal);
+        const a = st.pe, b = Math.min(to, a + tile);
+        const recs = await records(a, b);
+        const first = st.pe === st.ps;   // nothing owned yet: the reads reaching in from the left are the spill
+        for (const r of recs) {
+          const rs = view.start(r);
+          if (rs < a) { if (first) this.countRecord(id, st.spill, view, r, loc.seqId, refNames, st.structural); continue; }
+          seen++;
+          this.countRecord(id, st.owned, view, r, loc.seqId, refNames, st.structural);
+        }
+        st.pe = b;
+        if (b < to) { onTile?.(); await yieldToUi(); }
+      }
+      calibrate(bytes);
+    }
+    if (from < st.ps) {
+      const b0 = st.ps, bytes = await this.indexBytes(loc, from, b0, signal);
+      const tile = this.tileSize(id, from, b0, bytes);
+      seen = 0;
+      while (st.ps > from) {
+        throwIfAborted(signal);
+        const b = st.ps, a = Math.max(from, b - tile);
+        const recs = await records(a, b);
+        const spill = new Layer();
+        for (const r of recs) {
+          const rs = view.start(r);
+          if (rs >= a) seen++;
+          this.countRecord(id, rs < a ? spill : st.owned, view, r, loc.seqId, refNames, st.structural);
+        }
+        st.spill = spill;
+        st.ps = a;
+        if (a > from) { onTile?.(); await yieldToUi(); }
+      }
+      calibrate(bytes);
+    }
+  }
+
+  /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean): CoverageState {
+    let st = this.coverage.get(id);
+    const gap = Math.max(end - start, COVERAGE_MIN_GAP);
+    if (!st || st.chrom !== chrom || (structural && !st.structural)
+      || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+      || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
+      st = new CoverageState(chrom, structural);
+      this.coverage.set(id, st);
+    }
+    st.lastUsed = Date.now();
+    return st;
+  }
+
+  /** Drops the least recently used samples' counts while all of them together are over COVERAGE_CACHE_BYTES. */
+  private trimCoverage(keep: number): void {
+    let total = 0;
+    for (const st of this.coverage.values()) total += st.bytes;
+    const others = [...this.coverage.entries()].filter(([id]) => id !== keep).sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    for (const [id, st] of others) { if (total <= COVERAGE_CACHE_BYTES) break; total -= st.bytes; this.coverage.delete(id); }
+  }
+
+  /**
+   * Exact coverage, junctions and boundary-spanning counts of [start, end). The core (the view) is
+   * counted first, in full whatever its depth, and handed to `opts.onProgress` as it fills; the
+   * margins follow within `opts.maxReads` (an index estimate of what they cost) and the returned
+   * `window` says how far they went. Everything counted stays with the sample for later requests.
+   */
   async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
     const signal = opts?.signal;
-    const cap = Math.max(1000, opts?.maxReads ?? DEFAULT_MAX_READS);
-    const win = await this.budgetWindow(sampleId, chrom, start, end, opts?.core ?? { start, end }, cap, signal);
-    const { total, rate, kept } = await this.scan(sampleId, chrom, win.start, win.end, uniqueOnly, cap, true, { structural: !!opts?.structural, signal });
-    const reads = kept.map(r => encodeRead(r, null, 0));
     const loc = await this.locate(sampleId, chrom);
-    // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
-    // breakpoints seen: fetched when the window has something to place or rescue, always with a FASTA, up to
-    // REALIGN_MAX_BP through the web APIs
-    let structural = opts?.structural ? structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, null) : undefined;
-    if (structural && (this.reference.fasta || win.end - win.start <= REALIGN_MAX_BP)) {
-      const hasArcs = structural.splits.length + structural.deletions.length + (structural.duplications?.length ?? 0) + (structural.inversions?.length ?? 0) > 0;
-      if (hasRealignableClips(kept) || (hasArcs && hasRescuableClips(kept))) {
-        try {
-          const seq = await this.getReferenceSeq(chrom, win.start, win.end);
-          if (seq) structural = structuralEvidence(kept, loc?.name ?? chrom, win.start, win.end, rate, { start: win.start, seq });
-        } catch (e) { console.warn('reference for clip realignment not available:', e); }
-        // outside the catch: a reference that cannot be fetched is not fatal, a caller that gave up is
-        throwIfAborted(signal);
+    const result = (w: { start: number; end: number }, sl: ReturnType<typeof readSlice>): SampleCoverage => ({
+      sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced,
+    });
+    if (!loc) return result({ start, end }, readSlice([], uniqueOnly, start, end, boundaries));
+    return this.locked(sampleId, async () => {
+      throwIfAborted(signal);
+      const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
+      if (core.end <= core.start) { core.start = start; core.end = end; }
+      const structural = !!opts?.structural;
+      const st = this.coverageState(sampleId, loc.name, start, end, structural);
+      const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
+      let last = 0;
+      const progress = (force: boolean) => {
+        if (!opts?.onProgress) return;
+        const now = performance.now();
+        if (!force && now - last < PROGRESS_MS) return;
+        const w = exact();
+        if (w.end <= w.start) return;
+        last = now;
+        opts.onProgress(result(w, st.slice(uniqueOnly, w.start, w.end, boundaries)));
+      };
+      // 1. the view, whatever its depth
+      await this.fill(sampleId, st, loc, core.start, core.end, signal, () => progress(false));
+      // 2. the margins, within their budget; what was already counted costs nothing and is not trimmed
+      if (!st.covers(start, end)) {
+        const cap = Math.max(1000, opts?.maxReads ?? DEFAULT_MARGIN_READS);
+        const win = await this.budgetWindow(sampleId, chrom, start, end, core, cap, signal);
+        if (!st.covers(win.start, win.end)) {
+          progress(true);
+          await this.fill(sampleId, st, loc, win.start, win.end, signal, () => progress(false));
+        }
       }
-    }
-    const splicedReads = kept.reduce((n, r) => n + (/\d+N/.test(r.cigar) ? 1 : 0), 0);
-    const junctions = junctionCounts(reads, win.start, win.end);
-    // unspliced reads through every splice site seen in the reads, plus the boundaries the caller asked for (annotated exons)
-    const spanning = boundarySpanning(reads,
-      [...junctions.map(j => j.start), ...(boundaries?.intronStarts ?? [])].filter(p => p >= win.start && p < win.end),
-      [...junctions.map(j => j.end), ...(boundaries?.intronEnds ?? [])].filter(p => p > win.start && p <= win.end));
-    return {
-      sample_id: sampleId, sample_name: s.name,
-      coverage: scaleRuns(coverageRuns(reads, win.start, win.end), rate), junctions: scaleCounts(junctions, rate), spanning: scaleSpanning(spanning, rate),
-      window: win, sampled: rate > 1 ? { rate, total, decoded: kept.length } : undefined,
-      spliced: { reads: kept.length, fraction: kept.length ? splicedReads / kept.length : 0 },
-      structural,
-    };
+      this.trimCoverage(sampleId);
+      const w = exact();
+      const sl = st.slice(uniqueOnly, w.start, w.end, boundaries);
+      const out = result(w, sl);
+      if (structural) {
+        // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
+        // breakpoints seen: fetched when the window has something to place or rescue, always with a FASTA, up to
+        // REALIGN_MAX_BP through the web APIs
+        let ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, null, sl.insertMedian);
+        if (this.reference.fasta || w.end - w.start <= REALIGN_MAX_BP) {
+          const hasArcs = ev.splits.length + ev.deletions.length + (ev.duplications?.length ?? 0) + (ev.inversions?.length ?? 0) > 0;
+          if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv))) {
+            try {
+              const seq = await this.getReferenceSeq(chrom, w.start, w.end);
+              if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: w.start, seq }, sl.insertMedian);
+            } catch (e) { console.warn('reference for clip realignment not available:', e); }
+            // outside the catch: a reference that cannot be fetched is not fatal, a caller that gave up is
+            throwIfAborted(signal);
+          }
+        }
+        // only the records carrying evidence went in; the reads the evidence was gathered from are all those counted
+        out.structural = { ...ev, reads: sl.spliced.reads };
+      }
+      return out;
+    });
   }
 
   async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,

@@ -36,12 +36,20 @@ export interface VariantScan {
 export interface CoverageOptions {
   /** the part of the window that must be read whatever its depth (the visible view); the rest is margin the source may shrink */
   core?: { start: number; end: number };
-  /** reads decoded at most; a deeper window is sampled systematically (1 read in 2, 4, 8…) and its counts scaled back */
+  /**
+   * What the margins may cost, in reads by the source's estimate: past it they shrink and `window` says how far they
+   * went. The core is read in full whatever its depth. (A source that samples instead says so in `sampled`.)
+   */
   maxReads?: number;
   /** also collect the structural evidence of a genomic library (deletions, split reads, soft clips, discordant pairs) */
   structural?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
+  /**
+   * Called with exact partial results while a deep window fills: coverage, junctions and spanning counts of the part
+   * counted so far (`window`), the core first. The promise still resolves with the whole answer.
+   */
+  onProgress?: (partial: SampleCoverage) => void;
 }
 
 export interface SashimiDataSource {

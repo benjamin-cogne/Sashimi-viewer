@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
+import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn,
@@ -62,7 +62,7 @@ interface SashimiViewerProps {
   sampleTypes?: Record<number, LibraryType>;
   /** structural-variant hints on DNA tracks (arcs, pills, panel): computed and drawn only when true (development builds, ?sv=1) */
   svHints?: boolean;
-  /** Called after each coverage load with the spliced-read fraction of the window, the host's evidence for the library type. */
+  /** Called after each coverage load with the spliced-read fraction of the reads counted (the window or more), the host's evidence for the library type. */
   onLibraryEvidence?: (sampleId: number, evidence: { reads: number; fraction: number; multiExon: boolean }) => void;
   /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
   initialSettings?: Partial<ViewerSettings>;
@@ -189,6 +189,8 @@ interface TrackData {
   error?: string;
   /** Window the current coverage/junctions were fetched for (with margin). */
   fetched?: FetchWindow;
+  /** the coverage shown is what a running request has counted so far (`fetched` says how far it got) */
+  partial?: boolean;
   /** Unspliced reads through the exon–intron boundaries (intron retention), when the source counts them. */
   spanning?: BoundarySpanning;
   /** The source decoded one read in `rate` of this window: depths and counts are scaled estimates. */
@@ -253,7 +255,12 @@ const LEGEND_ROW_H = 22;
 const MIN_V_SPAN = 40;            // smallest zoom window, in virtual (bp-equivalent) units
 const MAX_VIEW_BP = 4_000_000;    // largest zoom-out window
 const MAX_FETCH_BP = 2_000_000;   // largest window fetched at once (view + margins)
-const MAX_READS_PER_TRACK = 250_000; // reads decoded per coverage request; the source shrinks the margins and then samples 1 in 2, 4, 8… past it
+/**
+ * What the margins of a coverage request may cost, in reads (the source's index estimate). The view itself is read in
+ * full and exactly whatever its depth, and drawn as it fills; past this the margins shrink, which only makes panning
+ * out of the view cost a new request. ~2 M reads is 5–10 s of background decoding on one thread.
+ */
+const COVERAGE_MARGIN_READS = 2_000_000;
 
 // Reads track (IGV-like alignment view)
 const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
@@ -945,18 +952,24 @@ export default function SashimiViewer({
       return [...prev, { sampleId: sid, sampleName: sname, coverage: [], junctions: [], loading: true }];
     });
     try {
+      // a deep view is drawn as it fills: each partial answer is exact over the part it covers
+      const onProgress = (p: SampleCoverage) => {
+        if (reqSeq.current.get(sid) !== seq || !p.window) return;
+        const part: FetchWindow = { ...win, start: p.window.start, end: p.window.end };
+        setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, fetched: part, partial: true } : t));
+      };
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: svHints && isDnaRef.current(sid), signal: ctl.signal });
+        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && isDnaRef.current(sid), signal: ctl.signal, onProgress });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
       if (data.spliced) onLibraryEvidenceRef.current?.(sid, { ...data.spliced, multiExon: (txRef.current?.exons.length ?? 0) > 1 });
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched, partial: false,
       } : t));
     } catch (err: any) {
       if (reqSeq.current.get(sid) !== seq || isAbort(err)) return;
-      setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, error: err.message } : t));
+      setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, partial: false, error: err.message } : t));
     } finally {
       if (covAbort.current.get(sid) === ctl) covAbort.current.delete(sid);
     }
@@ -2857,9 +2870,15 @@ export default function SashimiViewer({
       ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
       : '';
     const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2 + (L.balance?.text.length ?? 0) * 5.2;
+    /** a request still running: how much of the view it has counted, or that only the margins are left */
+    const loadingText = (t: TrackData): string => {
+      if (!t.partial || !t.fetched) return t.coverage.length ? 'updating…' : 'loading…';
+      const done = Math.max(0, Math.min(viewEnd, t.fetched.end) - Math.max(viewStart, t.fetched.start)) / Math.max(1, viewEnd - viewStart);
+      return done >= 1 ? 'reading the margins…' : `reading the view… ${Math.floor(done * 100)} %`;
+    };
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
-      : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
+      : track.loading ? { text: loadingText(track), color: INK.faint } : null;
 
     return (
       <g key={track.sampleId} fontFamily={FONT}>

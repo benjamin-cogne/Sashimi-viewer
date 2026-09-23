@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
+import type { AlignedRead, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -134,64 +134,11 @@ export function hardClippedBases(part: { h?: [number, number]; c: [number, numbe
   return [seq.substring(0, part.h[0]), seq.substring(total - part.h[1])];
 }
 
-/** Run-length coverage of [start, end) from the aligned blocks of encoded reads. */
-export function coverageRuns(reads: AlignedRead[], start: number, end: number): CoverageRun[] {
-  const n = end - start;
-  if (n <= 0) return [];
-  const diff = new Int32Array(n + 1);
-  for (const r of reads) for (const [bs, be] of r.b) {
-    const lo = Math.max(bs, start), hi = Math.min(be, end);
-    if (hi > lo) { diff[lo - start] += 1; diff[hi - start] -= 1; }
-  }
-  const runs: CoverageRun[] = [];
-  let depth = 0, runStart = 0;
-  for (let i = 0; i < n; i++) {
-    const d = depth + diff[i];
-    if (i > 0 && d !== depth) { runs.push({ start: start + runStart, end: start + i, depth }); runStart = i; }
-    depth = d;
-  }
-  runs.push({ start: start + runStart, end, depth });
-  return runs;
-}
 
 /** Anchors of a boundary-spanning read: aligned bases required on the exon side and on the intron side of the boundary. */
 export const SPAN_EXON_ANCHOR = 6, SPAN_INTRON_ANCHOR = 10;
 
-/**
- * Unspliced reads through exon–intron boundaries: one aligned block covering SPAN_EXON_ANCHOR bases
- * on the exon side and SPAN_INTRON_ANCHOR on the intron side. `intronStarts` are boundaries with the
- * intron to the right (exon ends), `intronEnds` with the intron to the left (exon starts).
- */
-export function boundarySpanning(reads: AlignedRead[], intronStarts: Iterable<number>, intronEnds: Iterable<number>): BoundarySpanning {
-  const starts = [...new Set(intronStarts)].sort((a, b) => a - b), ends = [...new Set(intronEnds)].sort((a, b) => a - b);
-  const startCount = new Map<number, number>(starts.map(p => [p, 0])), endCount = new Map<number, number>(ends.map(p => [p, 0]));
-  const lowerBound = (arr: number[], v: number) => { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid + 1; else hi = mid; } return lo; };
-  for (const r of reads) for (const [bs, be] of r.b) {
-    // intron start p: block must cover [p - exonAnchor, p + intronAnchor)
-    for (let i = lowerBound(starts, bs + SPAN_EXON_ANCHOR); i < starts.length && starts[i] + SPAN_INTRON_ANCHOR <= be; i++) startCount.set(starts[i], (startCount.get(starts[i]) || 0) + 1);
-    // intron end q: block must cover [q - intronAnchor, q + exonAnchor)
-    for (let i = lowerBound(ends, bs + SPAN_INTRON_ANCHOR); i < ends.length && ends[i] + SPAN_EXON_ANCHOR <= be; i++) endCount.set(ends[i], (endCount.get(ends[i]) || 0) + 1);
-  }
-  return { intronStart: Object.fromEntries(startCount), intronEnd: Object.fromEntries(endCount) };
-}
 
-/** Junctions (CIGAR N gaps) overlapping [start, end). */
-export function junctionCounts(reads: AlignedRead[], start: number, end: number): JunctionArc[] {
-  const counts = new Map<string, JunctionArc>();
-  for (const r of reads) {
-    const dels = new Set(r.d.map(([s, e]) => `${s}-${e}`));
-    for (let k = 0; k + 1 < r.b.length; k++) {
-      const s = r.b[k][1], e = r.b[k + 1][0];
-      if (e <= s || dels.has(`${s}-${e}`)) continue;
-      if (e > start && s < end) {
-        const key = `${s}-${e}`;
-        const j = counts.get(key);
-        if (j) j.count++; else counts.set(key, { start: s, end: e, count: 1 });
-      }
-    }
-  }
-  return [...counts.values()].sort((a, b) => a.start - b.start || a.end - b.end);
-}
 
 /** Depth at a position from encoded reads (for site calling). */
 export function depthArray(reads: AlignedRead[], start: number, end: number): Int32Array {
@@ -504,7 +451,11 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
  * would give between its clip position and the placed sequence; hard-clipped records without SA tag, which carry
  * no sequence, count in the cluster at their clip position and follow it into the arc.
  */
-export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null): StructuralEvidence {
+/**
+ * `insertMedian`, when given, is the median |template length| of the proper pairs of the window, for callers that
+ * pass only the records carrying structural evidence (the others would count for that median alone).
+ */
+export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null): StructuralEvidence {
   const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), dups = new Map<string, JunctionArc>(), invs = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
@@ -513,9 +464,12 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
   const r5 = (x: number) => Math.round(x / 5) * 5;
   const inWindow = (a: number, b: number) => b > start && a < end;
-  const inserts: number[] = [];
-  for (const r of reads) if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
-  const median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
+  let median = insertMedian;
+  if (median === undefined) {
+    const inserts: number[] = [];
+    for (const r of reads) if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
+    median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
+  }
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
