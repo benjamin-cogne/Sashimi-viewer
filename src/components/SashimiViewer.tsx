@@ -1138,14 +1138,26 @@ export default function SashimiViewer({
     if (span > READS_MAX_VIEW_BP) return;
     const mode = collapseReads ? 'collapsed' : 'reads';
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    const stale = readsSampleIds.filter(sid => {
-      const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes)) && covers(cur.fetched, v));
-    });
-    if (!stale.length) return;
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
     const margin = collapseReads ? 0 : Math.floor(span * 0.25);
     const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
+    /**
+     * A window read wider than this one was downsampled to READS_MAX over its whole width: after zooming out and back
+     * in, the view holds only its share of that sample. Reading the new window again gives the view about
+     * min(total / shown, old width / new width) times as many reads; worth it from 1.5×, so a small zoom step or a
+     * window that was not downsampled reads nothing again.
+     */
+    const thin = (cur: ReadsEntry) => {
+      const { shown, total } = cur.data;
+      if (!(shown > 0 && total > shown)) return false;
+      const gain = Math.min(total / shown, (cur.fetched.end - cur.fetched.start) / Math.max(1, want.end - want.start));
+      return gain >= 1.5;
+    };
+    const stale = readsSampleIds.filter(sid => {
+      const cur = readsData[sid];
+      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes)) && covers(cur.fetched, v) && !thin(cur));
+    });
+    if (!stale.length) return;
     const timer = setTimeout(() => {
       for (const sid of stale) {
         const seq = (readsSeq.current.get(sid) ?? 0) + 1;
