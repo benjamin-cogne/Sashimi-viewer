@@ -60,8 +60,8 @@ from a FASTA you add. Nothing is kept when the tab closes.
 **Genomic DNA** (short or long reads)
 - Coverage with **variant sites** as allele bars (option off by default), from the reads track or
   from an exact scan of the window run in the background; allele balance of the common SNPs.
-- Coverage drawn with the lowest and highest depth of every pixel: a narrow dropout stays visible on
-  a whole-gene view.
+- Coverage drawn as the exact mean depth of every pixel, with a tick down to any base below half of
+  it: a narrow dropout stays visible on a whole-gene view.
 - Reads, pairs, read-based phasing, split reads joined on one row, clipped sequences on a click,
   consensus of a clip cluster ready for BLAT.
 

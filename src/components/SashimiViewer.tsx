@@ -3009,9 +3009,9 @@ export default function SashimiViewer({
         <g clipPath={`url(#${clipId})`}>
           {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
               usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
-          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.10)} stroke="none" />}
-          {paths.floor && <path d={paths.floor} fill={withAlpha(color, 0.18)} stroke="none" />}
-          {paths.floorStroke && <path d={paths.floorStroke} fill="none" stroke={color} strokeWidth={0.8} strokeOpacity={0.6} strokeLinejoin="round" />}
+          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
+          {paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
+          {paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
           {paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
 
           {/* Junction arcs */}

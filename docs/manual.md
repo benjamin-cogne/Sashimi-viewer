@@ -98,11 +98,14 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   STAR's `SJ.out.tab`, regtools or pysam count it. The reads track and the exon-usage statistics still
   decode reads, on their own budget (every 2nd, 4th, 8th… read past it, drawn as *downsampled*).
 - **Coverage drawing at any zoom**: when a pixel stands for more than one base (a whole gene on
-  screen), the track draws, for each pixel, the **highest** depth of its bases (the upper outline and
-  the light area) and the **lowest** (the thinner lower outline and the darker area), from a
-  pyramid of per-bin minima and maxima, never an average. A dropout narrower than a pixel is
-  therefore a line down to its depth even on the whole gene, and drawing costs the same whatever
-  the zoom, the depth or the number of samples. Zoomed in to the base, the two outlines coincide.
+  screen), the line is the exact **mean** depth of that pixel's bases (IGV's default windowing
+  function for bigWig tracks; close to UCSC's *mean+whiskers*), over the usual shaded area; a pale
+  band above it reaches the pixel's **highest** base.
+  Where a base of the pixel falls **below half its mean**, a thin tick runs from the line down to
+  that base's depth: a dropout narrower than a pixel stays visible on the whole gene, while the
+  base-to-base noise of a shallow library (±20–40 % at 30×) is not drawn as a second line. All three
+  come from a pyramid of per-bin minima, maxima and sums, so drawing costs the same whatever the
+  zoom, the depth or the number of samples. Zoomed in to the base, the line is the depth itself.
   Reading the tallies back costs what the window holds, not its width: a zoomed-out view where
   only the gene is covered costs about as much as the gene. A wide window that is covered
   everywhere (a genome) is read back in short steps that hand the page back to the browser, and
