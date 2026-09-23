@@ -103,6 +103,11 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   pyramid of per-bin minima and maxima, never an average. A dropout narrower than a pixel is
   therefore a line down to its depth even on the whole gene, and drawing costs the same whatever
   the zoom, the depth or the number of samples. Zoomed in to the base, the two outlines coincide.
+  Reading the tallies back costs what the window holds, not its width: a zoomed-out view where
+  only the gene is covered costs about as much as the gene. A wide window that is covered
+  everywhere (a genome) is read back in short steps that hand the page back to the browser, and
+  the file itself is decoded about 20 000 reads at a time, so zooming out past what has been read
+  keeps the page moving while the new part is read.
 - **Equal introns** draws every intron at the same width so exons and junctions dominate; the
   *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
   model's median exon length, kept between 80 and 300; clear the box to go back to it).
@@ -207,7 +212,13 @@ as targets too; a sample's reads rescued at a breakpoint it does not carry itsel
 arc's panel ("no arc") without being drawn, which is how a parent's short clips show up under a
 child's breakpoint. The arc tooltip and panel give the aligned, placed and rescued reads apart.
 The reference comes from the FASTA at any width, or from the web APIs for windows up to 500 kb. *Min supporting reads* sets the support needed to draw a
-hint. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
+hint. Its default is 3 reads, and **20 on a deep track**: a DNA track whose median depth over the
+covered bases of the model's coding exons is above 200× (measured once per gene, on the first
+complete coverage; over the whole covered window when no model is open). At a few hundred × a handful of reads with a long
+clip, a split alignment or an odd insert turns up at many places (PCR chimeras, adapter
+read-through, capture edges), so 3 would draw arcs everywhere. The box then shows the value in
+effect on the first DNA track, with *auto*; a number typed in it applies to every track, and the
+*auto* link beside it returns to the default. An arc's pill shows the read count (≈ on sampled windows); clicking an arc opens a panel with
 the count in every DNA sample shown, the median insert size, and a g. notation for a deletion.
 Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool the evidence of
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the

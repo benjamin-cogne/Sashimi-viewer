@@ -72,7 +72,7 @@ export function buildSession(args: {
     equalIntrons: state.equalIntrons, intronWidth: state.intronWidth ?? null, allTranscripts: state.allTranscripts, commonSnps: state.commonSnps, snpMinAf: state.snpMinAf,
     depthAxis: state.depthAxis, uniqueOnly: state.uniqueOnly,
     reads: state.reads, readsAll: state.readsAll, readsSample: nameOf(state.readsSample), collapseReads: state.collapseReads, minVafPct: state.minVafPct,
-    minJunctionReads: state.minJunctionReads, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
+    minJunctionReads: state.minJunctionReads, minJunctionReadsSet: state.minJunctionReadsSet, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,

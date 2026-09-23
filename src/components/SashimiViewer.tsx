@@ -78,6 +78,8 @@ export interface ViewerSettings {
   depthAxis: DepthAxis; uniqueOnly: boolean;
   reads: boolean; readsAll: boolean; readsSample: number | null; collapseReads: boolean; minVafPct: number;
   minJunctionReads: number; minUsagePct: number; arcLabels: 'reads' | 'usage'; intronRetention: boolean;
+  /** Min reads was typed by the user and applies as it is everywhere; absent or false = the default, which on a deep DNA track (> 200×) asks 20 reads of structural evidence */
+  minJunctionReadsSet?: boolean;
   viewMode: 'samples' | 'groups'; groups: { name: string; sampleIds: number[]; /** CSS colour chosen by the user; absent = palette */ color?: string }[];
   knownVariants: boolean;
   /** arcs the user hid by clicking them, as "chrom:start-end" (0-based half-open); they still count in the percentages */
@@ -261,6 +263,50 @@ const MAX_FETCH_BP = 2_000_000;   // largest window fetched at once (view + marg
  * out of the view cost a new request. ~2 M reads is 5–10 s of background decoding on one thread.
  */
 const COVERAGE_MARGIN_READS = 2_000_000;
+/**
+ * Structural evidence on deep DNA. At a few hundred × a handful of reads with a long soft clip, a split alignment or an
+ * odd insert turn up at many places (PCR chimeras, adapter read-through, capture edges, mapping artefacts), so while the
+ * user has not typed a number the reads a structural hint needs rise from MIN_READS_DEFAULT to SV_DEEP_MIN_READS on a
+ * DNA track whose median depth over the model's coding exons is above SV_DEEP_X.
+ */
+const MIN_READS_DEFAULT = 3;
+const SV_DEEP_X = 200;
+const SV_DEEP_MIN_READS = 20;
+
+/**
+ * Median depth of a coverage track over the covered bases of the model's coding exons (all exons of a non-coding
+ * model) inside [from, to), weighted by bases: the depth a capture panel or an exome is described by. Bases at 0× are
+ * left out, so a gene targeted in part is measured on the exons the panel holds (a gene outside it, on its off-target
+ * reads). Without 100 such bases (no model, a window inside an intron), the median over the covered bases of the window.
+ * Null when nothing is covered.
+ */
+function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number, to: number): number | null {
+  const median = (parts: { start: number; end: number }[], coveredOnly: boolean) => {
+    const pairs: [number, number][] = [];
+    let n = 0, j = 0;
+    for (const p of parts) {
+      const a = Math.max(p.start, from), b = Math.min(p.end, to);
+      if (b <= a) continue;
+      while (j < runs.length && runs[j].end <= a) j++;
+      for (let k = j; k < runs.length && runs[k].start < b; k++) {
+        const r = runs[k], len = Math.min(b, r.end) - Math.max(a, r.start);
+        if (len > 0 && (!coveredOnly || r.depth > 0)) { pairs.push([r.depth, len]); n += len; }
+      }
+    }
+    if (!n) return { n, depth: null };
+    pairs.sort((x, y) => x[0] - y[0]);
+    let acc = 0;
+    for (const [d, len] of pairs) { acc += len; if (acc * 2 >= n) return { n, depth: d }; }
+    return { n, depth: pairs[pairs.length - 1][0] };
+  };
+  if (tx) {
+    const cs = tx.cdsStart, ce = tx.cdsEnd;
+    const parts = tx.exons.map(e => cs != null && ce != null ? { start: Math.max(e.start, cs), end: Math.min(e.end, ce) } : e).filter(e => e.end > e.start);
+    const m = median(parts, true);
+    if (m.n >= 100) return m.depth;
+  }
+  return median([{ start: from, end: to }], true).depth;
+}
 
 // Reads track (IGV-like alignment view)
 const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
@@ -456,7 +502,10 @@ export default function SashimiViewer({
   const [arcLabel, setArcLabel] = useState<'reads' | 'usage'>(init.arcLabels ?? 'reads');
   const showUsage = viewMode === 'groups' || arcLabel === 'usage';
   const [uniqueOnly, setUniqueOnly] = useState(init.uniqueOnly ?? false);
-  const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? 3);
+  const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? MIN_READS_DEFAULT);
+  /** the user typed Min reads: it applies as it is, deep DNA tracks included (sessions from before the flag: a value other than the default) */
+  const [minReadsSet, setMinReadsSet] = useState(init.minJunctionReadsSet ?? (init.minJunctionReads != null && init.minJunctionReads !== MIN_READS_DEFAULT));
+  const setMinReads = useCallback((v: number) => { setMinJunctionCount(v); setMinReadsSet(true); }, []);
   /** In % usage mode, events below this usage are hidden (junctions without a share fall back to Min reads). */
   const [minUsagePct, setMinUsagePct] = useState(init.minUsagePct ?? 1);
   /** Count intron retention in the usage percentages (IR pills, and retention in the canonical arc's denominator). */
@@ -2287,6 +2336,29 @@ export default function SashimiViewer({
   /** At least one shown sample track is RNA (or of unknown type): the splicing controls and legend apply. */
   const anyRna = useMemo(() => displayTracks.some(t => !t.gtex && !isDnaTrack(t)) || !displayTracks.some(t => !t.gtex), [displayTracks, isDnaTrack]);
   const anyDna = useMemo(() => displayTracks.some(t => isDnaTrack(t)), [displayTracks, isDnaTrack]);
+  /**
+   * Median target depth of each DNA track, measured once per gene on its first complete coverage and kept while the
+   * window moves inside the gene (a window inside an intron would measure something else); until a new gene is
+   * measured, the track keeps the previous one's.
+   */
+  const svDepthRef = useRef(new Map<number, { gene: string; depth: number }>());
+  const svDepth = useMemo(() => {
+    const gene = `${currentChrom}:${currentGeneStart}-${currentGeneEnd}:${tx?.transcriptId ?? ''}`;
+    const out = new Map<number, number>();
+    for (const t of displayTracks) {
+      if (!isDnaTrack(t)) continue;
+      const prev = svDepthRef.current.get(t.sampleId);
+      if (prev?.gene !== gene && !t.loading && !t.partial && t.fetched && t.fetched.chrom === currentChrom && t.coverage.length) {
+        const depth = medianTargetDepth(t.coverage, tx, t.fetched.start, t.fetched.end);
+        if (depth != null) { svDepthRef.current.set(t.sampleId, { gene, depth }); out.set(t.sampleId, depth); continue; }
+      }
+      if (prev) out.set(t.sampleId, prev.depth);
+    }
+    return out;
+  }, [displayTracks, isDnaTrack, tx, currentChrom, currentGeneStart, currentGeneEnd]);
+  /** Reads a structural hint of this DNA track needs: Min reads as typed, or by default 3, and 20 on a track deeper than 200×. */
+  const svMinReads = useCallback((sid: number) => (!minReadsSet && (svDepth.get(sid) ?? 0) > SV_DEEP_X ? SV_DEEP_MIN_READS : minJunctionCount),
+    [minReadsSet, svDepth, minJunctionCount]);
 
   /**
    * A DNA track whose variants were asked for keeps them in step with the window: when the window moves or widens,
@@ -2442,7 +2514,8 @@ export default function SashimiViewer({
       if (dnaTrack && track.structural && svHints) {
         const sv = track.structural;
         const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
-        const all = kinds.flatMap(k => k.list.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
+        const minSv = svMinReads(track.sampleId);
+        const all = kinds.flatMap(k => k.list.filter(j => j.count >= minSv && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
         const svLevels = layerJunctions(all.map(x => x.j));
         const approx = track.sampled ? '≈' : '';
         for (const { j, kind } of all) {
@@ -2530,19 +2603,20 @@ export default function SashimiViewer({
         });
       if (dnaTrack && track.structural && svHints) {
         const approx = track.sampled ? '≈' : '';
+        const minSv = svMinReads(track.sampleId);
         for (const c of track.structural.clips) {
-          if (c.count < minJunctionCount || c.pos < viewStart || c.pos > viewEnd) continue;
+          if (c.count < minSv || c.pos < viewStart || c.pos > viewEnd) continue;
           retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString()}`, deltas: [], color: SV_COLORS.clip,
             onClick: e => { const pt = svgPoint(e); openClipConsensus(track.sampleId, c.pos, c.side, c.count, pt.x, pt.y); },
             title: `soft-clip cluster: ${approx}${c.count.toLocaleString()} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString()} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
         for (const x of track.structural.insertions ?? []) {
-          if (x.count < minJunctionCount || x.pos < viewStart || x.pos > viewEnd) continue;
+          if (x.count < minSv || x.pos < viewStart || x.pos > viewEnd) continue;
           retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString()}`, deltas: [], color: SV_COLORS.insertion,
             title: `insertion: ${approx}${x.count.toLocaleString()} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString()}\nevidence, not a call: open the reads to check it` });
         }
         for (const e of track.structural.elsewhere) {
-          if (e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
+          if (e.count < minSv || e.pos < viewStart || e.pos > viewEnd) continue;
           retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString()}`, deltas: [], color: SV_COLORS.elsewhere,
             title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
@@ -2553,7 +2627,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -3664,14 +3738,14 @@ export default function SashimiViewer({
     onStateChangeRef.current?.({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
-      minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
+      minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
       viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs, haplotypes, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -3853,13 +3927,23 @@ export default function SashimiViewer({
                 { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
                 { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
               ]} />}
-            {!anyRna && (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn.">
-                Min supporting reads
-                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
-                  className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-              </label>
-            )}
+            {!anyRna && (() => {
+              const first = displayTracks.find(isDnaTrack);
+              const deep = displayTracks.filter(tr => isDnaTrack(tr) && (svDepth.get(tr.sampleId) ?? 0) > SV_DEEP_X);
+              const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
+                (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
+              return (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}>
+                  Min supporting reads
+                  <input type="number" min={1} value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={e => setMinReads(Math.max(1, parseInt(e.target.value) || 1))}
+                    className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
+                  {!minReadsSet
+                    ? <span className="text-[10px] text-gray-400">{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
+                    : <button type="button" className="text-[10px] text-indigo-600 hover:underline" title={`Back to the default: ${autoNote}`}
+                        onClick={e => { e.preventDefault(); setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>}
+                </label>
+              );
+            })()}
             {anyRna && (showUsage ? (
               <>
                 <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
@@ -3873,7 +3957,7 @@ export default function SashimiViewer({
             ) : (
               <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
                 Min reads
-                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
+                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinReads(Math.max(1, parseInt(e.target.value) || 1))}
                   className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
               </label>
             ))}

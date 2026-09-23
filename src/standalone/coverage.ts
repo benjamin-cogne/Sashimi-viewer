@@ -24,15 +24,13 @@
  */
 import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc } from '../components/sashimi/types';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, type RawRead } from './alignments';
-import { buildDepthIndexDense, registerDepthIndex } from '../components/sashimi/geometry';
+import { DepthIndexBuilder, registerDepthIndex } from '../components/sashimi/geometry';
 
 const CHUNK_BITS = 12, CHUNK = 1 << CHUNK_BITS, CHUNK_MASK = CHUNK - 1;
 /** Blocks this short or shorter can sit strictly inside a boundary's anchor window (16 bases) and are kept in a list. */
 const SHORT_BLOCK = SPAN_EXON_ANCHOR + SPAN_INTRON_ANCHOR;
 /** Junction key: start and length packed in one safe integer (introns up to 8.4 Mb, starts up to 2^30). */
 const JUNC_LEN = 8_388_608;
-/** Positions read around a window so that boundary anchors near its edges are answered from the same arrays. */
-const PAD = 32;
 
 /** BAM CIGAR operation codes, as packed in NUMERIC_CIGAR (length << 4 | op). */
 export const CIGAR_OP = { M: 0, I: 1, D: 2, N: 3, S: 4, H: 5, P: 6, EQ: 7, X: 8 } as const;
@@ -55,8 +53,10 @@ export class Hist {
   private lastIdx = -1;
   private last: Int32Array | null = null;
   private version = 0;
-  private sums: Map<number, number> | null = null;
-  private sumsVersion = -1;
+  /** chunk indices in order, and the total of the chunks before each: rebuilt after new counts */
+  private order: Int32Array | null = null;
+  private before: Float64Array | null = null;
+  private orderVersion = -1;
 
   add(pos: number): void {
     const idx = pos >> CHUNK_BITS;
@@ -67,19 +67,42 @@ export class Hist {
     this.version++;
   }
   get bytes(): number { return this.chunks.size * CHUNK * 4; }
-  /** Sum of the counts at positions < pos. */
-  below(pos: number): number {
-    if (this.sumsVersion !== this.version || !this.sums) {
-      this.sums = new Map();
-      for (const [idx, a] of this.chunks) { let s = 0; for (let i = 0; i < CHUNK; i++) s += a[i]; this.sums.set(idx, s); }
-      this.sumsVersion = this.version;
+  /** The chunk indices in order (cached until the next count). */
+  private sorted(): Int32Array {
+    if (this.orderVersion !== this.version || !this.order) {
+      const order = Int32Array.from(this.chunks.keys()).sort();
+      const before = new Float64Array(order.length + 1);
+      for (let k = 0; k < order.length; k++) {
+        const a = this.chunks.get(order[k])!;
+        let t = 0;
+        for (let i = 0; i < CHUNK; i++) t += a[i];
+        before[k + 1] = before[k] + t;
+      }
+      this.order = order; this.before = before; this.orderVersion = this.version;
     }
-    const ci = pos >> CHUNK_BITS;
-    let s = 0;
-    for (const [idx, t] of this.sums) if (idx < ci) s += t;
-    const a = this.chunks.get(ci);
+    return this.order;
+  }
+  /** Sum of the counts at positions < pos: the chunks before pos's by a binary search, then part of pos's own. */
+  below(pos: number): number {
+    const order = this.sorted(), ci = pos >> CHUNK_BITS;
+    let l = 0, h = order.length;
+    while (l < h) { const m = (l + h) >> 1; if (order[m] < ci) l = m + 1; else h = m; }
+    let s = this.before![l];
+    const a = l < order.length && order[l] === ci ? this.chunks.get(ci)! : null;
     if (a) for (let i = 0, n = pos & CHUNK_MASK; i < n; i++) s += a[i];
     return s;
+  }
+  /** Adds the indices of the chunks holding counts of [start, end) to `into`. */
+  chunksIn(start: number, end: number, into: Set<number>): void {
+    const order = this.sorted(), c0 = start >> CHUNK_BITS, c1 = (end - 1) >> CHUNK_BITS;
+    let l = 0, h = order.length;
+    while (l < h) { const m = (l + h) >> 1; if (order[m] < c0) l = m + 1; else h = m; }
+    for (let k = l; k < order.length && order[k] <= c1; k++) into.add(order[k]);
+  }
+  /** Adds `sign` × the counts of chunk `ci` into `out` (CHUNK long). */
+  addChunk(ci: number, out: Int32Array, sign: number): void {
+    const a = this.chunks.get(ci);
+    if (a) for (let i = 0; i < CHUNK; i++) out[i] += sign * a[i];
   }
   /** Adds `sign` × the counts of [start, start + out.length) into `out`. */
   addInto(out: Int32Array, start: number, sign: number): void {
@@ -190,41 +213,69 @@ export interface CoverageSlice {
   insertMedian: number | null;
 }
 
+/** A depth sweep of [start, end) under way: the chunks holding counts, the next one, and the run being extended. */
+interface Sweep {
+  parts: [Counts, number][]; start: number; end: number; ids: number[]; next: number;
+  d: number; runStart: number; coverage: CoverageRun[]; pyr: DepthIndexBuilder; delta: Int32Array;
+}
+/**
+ * Sweeps chunks until they are done (false) or `budgetMs` has passed (true: call again). A plain function, not the
+ * async caller: the hot loop then gets the engine's full optimisation.
+ */
+function sweepChunks(sw: Sweep, budgetMs: number): boolean {
+  const { parts, start, end, ids, coverage, pyr, delta } = sw;
+  const t0 = budgetMs < Infinity ? performance.now() : 0;
+  let d = sw.d, runStart = sw.runStart;
+  while (sw.next < ids.length) {
+    if (budgetMs < Infinity && performance.now() - t0 > budgetMs) { sw.d = d; sw.runStart = runStart; return true; }
+    const ci = ids[sw.next++];
+    delta.fill(0);
+    for (const [c, sign] of parts) { c.S.addChunk(ci, delta, sign); c.E.addChunk(ci, delta, -sign); }
+    const base = ci << CHUNK_BITS, lo = Math.max(start, base), hi = Math.min(end, base + CHUNK);
+    for (let p = lo; p < hi; p++) {
+      const x = delta[p - base];
+      if (x === 0) continue;
+      if (p > runStart) { coverage.push({ start: runStart, end: p, depth: d }); pyr.add(runStart, p, d); runStart = p; }
+      d += x;
+    }
+  }
+  sw.d = d; sw.runStart = runStart;
+  return false;
+}
+
+/** Work done between two hand-backs to the browser while a slice is read (a wide, deep window holds ~10⁶ runs). */
+const SLICE_STEP_MS = 8;
+
 /**
  * Coverage, junctions and boundary-spanning counts of [start, end) from the layers that hold the
- * reads overlapping it, each read in exactly one of them (the caller's invariant).
+ * reads overlapping it, each read in exactly one of them (the caller's invariant). `pause`, when
+ * given, is awaited every SLICE_STEP_MS of the depth sweep, so a wide window never holds the page;
+ * the layers must not change meanwhile (the caller holds the sample's lock).
  */
-export function readSlice(layers: Layer[], uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint): CoverageSlice {
+export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint,
+  pause?: () => Promise<void>): Promise<CoverageSlice> {
   const parts: [Counts, number][] = [];
   for (const l of layers) { parts.push([l.all, 1]); if (uniqueOnly) parts.push([l.multi, -1]); }
-  const lo = Math.max(0, start - PAD), hi = end + PAD, n = hi - lo;
-  // cumulative block starts ≤ x and block ends ≤ x, for x in [lo, hi)
-  const cS = new Int32Array(n), cE = new Int32Array(n);
-  let baseS = 0, baseE = 0;
-  for (const [c, sign] of parts) {
-    c.S.addInto(cS, lo, sign); c.E.addInto(cE, lo, sign);
-    baseS += sign * c.S.below(lo); baseE += sign * c.E.below(lo);
-  }
-  let s = baseS, e = baseE;
-  for (let i = 0; i < n; i++) { s += cS[i]; e += cE[i]; cS[i] = s; cE[i] = e; }
-  const startsTo = (x: number) => (x < lo ? baseS : cS[Math.min(n - 1, x - lo)]);
-  const endsTo = (x: number) => (x < lo ? baseE : cE[Math.min(n - 1, x - lo)]);
+  /** block starts ≤ x, block ends ≤ x */
+  const startsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.S.below(x + 1); return n; };
+  const endsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.E.below(x + 1); return n; };
 
-  // depth over [start, end), as a dense array (a tight loop, no per-position call) and as runs: one run per stretch
-  // of equal depth. The dense array also gives the viewer its min/max pyramid, attached to the runs, so drawing
-  // and the axis maximum cost the same at any zoom without the viewer walking the runs to build it.
+  // depth over [start, end) as runs, one per stretch of equal depth: depth(x) = depth(x − 1) + starts at x − ends at x,
+  // swept over the 4 kb chunks that hold counts only. A stretch without any (an intron, the gap between two panel
+  // targets, everything around a gene on a zoomed-out view) is one run whatever its length, so a slice costs what the
+  // window holds, not how wide it is. The min/max pyramid the viewer draws from is built from the runs, flat stretches
+  // included in one step, and attached to them.
   const coverage: CoverageRun[] = [];
   if (end > start) {
-    const w = end - start, off = start - lo;
-    const depthArr = new Int32Array(w);
-    for (let i = 0; i < w; i++) depthArr[i] = cS[off + i] - cE[off + i];
-    let runStart = 0, depth = depthArr[0];
-    for (let i = 1; i < w; i++) {
-      const d = depthArr[i];
-      if (d !== depth) { coverage.push({ start: start + runStart, end: start + i, depth }); runStart = i; depth = d; }
-    }
-    coverage.push({ start: start + runStart, end, depth });
-    registerDepthIndex(coverage, buildDepthIndexDense(depthArr, start));
+    const ids = new Set<number>();
+    for (const [c] of parts) { c.S.chunksIn(start, end, ids); c.E.chunksIn(start, end, ids); }
+    // an integer from the start (the chunk totals are doubles): runs then hold small integers, not boxed numbers
+    const sw: Sweep = { parts, start, end, ids: [...ids].sort((a, b) => a - b), next: 0, d: (startsTo(start - 1) - endsTo(start - 1)) | 0,
+      runStart: start, coverage, pyr: new DepthIndexBuilder(start, end), delta: new Int32Array(CHUNK) };
+    while (sweepChunks(sw, pause ? SLICE_STEP_MS : Infinity)) await pause!();
+    coverage.push({ start: sw.runStart, end, depth: sw.d });
+    sw.pyr.add(sw.runStart, end, sw.d);
+    registerDepthIndex(coverage, sw.pyr.finish());
   }
 
   // junctions overlapping the window
@@ -290,7 +341,7 @@ export class CoverageState {
   get empty(): boolean { return this.pe <= this.ps; }
   get bytes(): number { return this.owned.bytes + this.spill.bytes; }
   covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }
-  slice(uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint): CoverageSlice {
-    return readSlice([this.owned, this.spill], uniqueOnly, start, end, boundaries);
+  slice(uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>): Promise<CoverageSlice> {
+    return readSlice([this.owned, this.spill], uniqueOnly, start, end, boundaries, pause);
   }
 }

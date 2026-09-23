@@ -13,7 +13,7 @@ import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, 
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
-import { CoverageState, Layer, packCigar, readSlice } from './coverage';
+import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
@@ -68,8 +68,12 @@ const RESCUE_SPAN_BP = 400;
  * The tile is sized from the index (see tileSize) so that about TILE_RECORDS records are decoded at a time
  * whatever the depth: the read cap bounds what a scan *keeps*, never what the library decodes, so a fixed
  * 250 kb tile over a capture panel at a few thousand × materialises millions of records at once.
+ * A tile is also decoded in one go on the page's thread, so its size is the longest the page freezes while
+ * a window is read: 20 000 records is ~60 ms of decoding (50 000 left 100–380 ms frames when zooming out
+ * on 120× genome-like data) at the same throughput (1.9 s against 2.0 s for 1.4 Mb). Deep data sit at the
+ * MIN_TILE_BP floor anyway, where this changes nothing.
  */
-const TILE_RECORDS = 50_000;
+const TILE_RECORDS = 20_000;
 /**
  * The floor is the BAI linear-index interval, 16 kb. A query cannot start reading later than the first
  * record that may overlap its 16 kb bin, so a narrower tile re-inflates (and copies out of the inflater)
@@ -156,13 +160,17 @@ const BAM_VIEW: RecordView<any> = {
       ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
   },
 };
+/**
+ * A CRAM record's bases. @gmod/cram stores only the differences from the reference and rebuilds the read in
+ * getReadBases(); its `readBases` property stays undefined until that has been called.
+ */
+const cramBases = (r: any): string => (typeof r.getReadBases === 'function' ? r.getReadBases() : r.readBases) ?? '';
 const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => packCigar(cramCigar(r.readFeatures, r.readLength, r.lengthOnRef ?? 0)),
   mateRef: r => r.nextSequenceId ?? -1, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
   seqCodes: (r, buf) => {
-    // @gmod/cram gives the bases through getReadBases(); its `readBases` property is left undefined
-    const seq: string = (typeof r.getReadBases === 'function' ? r.getReadBases() : r.readBases) ?? '';
+    const seq = cramBases(r);
     if (buf.a.length < seq.length) buf.a = new Uint8Array(seq.length * 2);
     for (let i = 0; i < seq.length; i++) buf.a[i] = seq.charCodeAt(i);
     return seq.length;
@@ -174,9 +182,9 @@ const CRAM_VIEW: RecordView<any> = {
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
-    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? (r.readBases ?? '') : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
+    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
-      ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, (r.nextStart ?? 0) - 1, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
+      ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, r.nextStart ?? 0, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
 };
 
@@ -719,7 +727,7 @@ export class LocalDataSource implements SashimiDataSource {
    * one synchronous step after they arrive: an abort between tiles leaves the state whole. Growing right
    * adds the reads starting in the new tiles; growing left also rebuilds the spill (see CoverageState).
    */
-  private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void): Promise<void> {
+  private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void | Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     return this.fillStretch(id, st, loc, from, to, () => new Layer(),
       (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural), signal, onTile);
@@ -732,7 +740,7 @@ export class LocalDataSource implements SashimiDataSource {
    * growing left also rebuilds the spill (see CoverageState).
    */
   private async fillStretch<L>(id: number, st: { owned: L; spill: L; ps: number; pe: number; readonly empty: boolean }, loc: { o: Opened; name: string; seqId: number },
-    from: number, to: number, newLayer: () => L, count: (layer: L, r: any) => void, signal?: AbortSignal, onTile?: () => void,
+    from: number, to: number, newLayer: () => L, count: (layer: L, r: any) => void, signal?: AbortSignal, onTile?: () => void | Promise<void>,
     prepare?: (recs: any[]) => Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     const records = async (a: number, b: number): Promise<any[]> => {
@@ -761,7 +769,7 @@ export class LocalDataSource implements SashimiDataSource {
           count(st.owned, r);
         }
         st.pe = b;
-        if (b < to) { onTile?.(); await yieldToUi(); }
+        if (b < to) { await onTile?.(); await yieldToUi(); }
       }
       calibrate(bytes);
     }
@@ -781,7 +789,7 @@ export class LocalDataSource implements SashimiDataSource {
         }
         st.spill = spill;
         st.ps = a;
-        if (a > from) { onTile?.(); await yieldToUi(); }
+        if (a > from) { await onTile?.(); await yieldToUi(); }
       }
       calibrate(bytes);
     }
@@ -821,10 +829,10 @@ export class LocalDataSource implements SashimiDataSource {
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
     const signal = opts?.signal;
     const loc = await this.locate(sampleId, chrom);
-    const result = (w: { start: number; end: number }, sl: ReturnType<typeof readSlice>): SampleCoverage => ({
+    const result = (w: { start: number; end: number }, sl: CoverageSlice): SampleCoverage => ({
       sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced,
     });
-    if (!loc) return result({ start, end }, readSlice([], uniqueOnly, start, end, boundaries));
+    if (!loc) return result({ start, end }, await readSlice([], uniqueOnly, start, end, boundaries));
     return this.locked(this.coverageLocks, sampleId, async () => {
       throwIfAborted(signal);
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
@@ -832,15 +840,20 @@ export class LocalDataSource implements SashimiDataSource {
       const structural = !!opts?.structural;
       const st = this.coverageState(sampleId, loc.name, start, end, structural);
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
-      let last = 0;
-      const progress = (force: boolean) => {
+      // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
+      // one waits at least PROGRESS_MS and 4× what the last one took, so the partials never take over the reading
+      let next = 0;
+      const progress = async (force: boolean) => {
         if (!opts?.onProgress) return;
-        const now = performance.now();
-        if (!force && now - last < PROGRESS_MS) return;
+        const t0 = performance.now();
+        if (!force && t0 < next) return;
         const w = exact();
         if (w.end <= w.start) return;
-        last = now;
-        opts.onProgress(result(w, st.slice(uniqueOnly, w.start, w.end, boundaries)));
+        const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+        throwIfAborted(signal);
+        const t1 = performance.now();
+        next = t1 + Math.max(PROGRESS_MS, 4 * (t1 - t0));
+        opts.onProgress(result(w, sl));
       };
       // 1. the view, whatever its depth
       await this.fill(sampleId, st, loc, core.start, core.end, signal, () => progress(false));
@@ -849,13 +862,14 @@ export class LocalDataSource implements SashimiDataSource {
         const cap = Math.max(1000, opts?.maxReads ?? DEFAULT_MARGIN_READS);
         const win = await this.budgetWindow(sampleId, chrom, start, end, core, cap, signal);
         if (!st.covers(win.start, win.end)) {
-          progress(true);
+          await progress(true);
           await this.fill(sampleId, st, loc, win.start, win.end, signal, () => progress(false));
         }
       }
       this.trimCoverage(sampleId);
       const w = exact();
-      const sl = st.slice(uniqueOnly, w.start, w.end, boundaries);
+      const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+      throwIfAborted(signal);
       const out = result(w, sl);
       if (structural) {
         // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the

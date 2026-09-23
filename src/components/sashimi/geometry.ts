@@ -268,47 +268,50 @@ function pyramidUp(levels: PyrLevel[]): void {
   }
 }
 
-/** Pyramid of a run list; O(runs + bins). */
-export function buildDepthIndex(runs: CoverageRun[]): DepthIndex | null {
-  if (!runs.length) return null;
-  const start = runs[0].start, end = runs[runs.length - 1].end;
-  if (end <= start) return null;
-  const first = start >> PYR_K0, n = ((end - 1) >> PYR_K0) - first + 1;
-  const min = new Int32Array(n).fill(0x7fffffff), max = new Int32Array(n);
-  const touch = (a: number, b: number, d: number) => {
-    for (let j = (a >> PYR_K0) - first, last = ((b - 1) >> PYR_K0) - first; j <= last; j++) {
-      if (d < min[j]) min[j] = d;
-      if (d > max[j]) max[j] = d;
-    }
-  };
-  let prev = start;
-  for (const r of runs) {
-    if (r.start > prev) touch(prev, r.start, 0);
-    if (r.end > r.start) touch(r.start, r.end, r.depth);
-    if (r.end > prev) prev = r.end;
+/**
+ * Builds the pyramid of [start, end) from runs handed over left to right (sorted, not overlapping), as a sweep
+ * produces them: O(1) per run, plus one fill for the bins wholly inside a long run. Positions no run covers are 0.
+ */
+export class DepthIndexBuilder {
+  private readonly first: number;
+  private readonly min: Int32Array;
+  private readonly max: Int32Array;
+  private prev: number;
+  constructor(readonly start: number, readonly end: number) {
+    this.first = start >> PYR_K0;
+    const n = end > start ? ((end - 1) >> PYR_K0) - this.first + 1 : 0;
+    this.min = new Int32Array(n).fill(0x7fffffff);
+    this.max = new Int32Array(n);
+    this.prev = start;
   }
-  const levels: PyrLevel[] = [{ first, min, max }];
-  pyramidUp(levels);
-  return { start, end, levels };
+  private span(a: number, b: number, d: number): void {
+    const { min, max, first } = this;
+    const ja = (a >> PYR_K0) - first, jb = ((b - 1) >> PYR_K0) - first;
+    if (d < min[ja]) min[ja] = d;
+    if (d > max[ja]) max[ja] = d;
+    if (jb > ja) { if (d < min[jb]) min[jb] = d; if (d > max[jb]) max[jb] = d; }
+    // the bins wholly inside [a, b) hold this depth only: no other run reaches them
+    if (jb - ja > 1) { min.fill(d, ja + 1, jb); max.fill(d, ja + 1, jb); }
+  }
+  add(start: number, end: number, depth: number): void {
+    if (start > this.prev) this.span(this.prev, start, 0);
+    if (end > start) this.span(start, end, depth);
+    if (end > this.prev) this.prev = end;
+  }
+  finish(): DepthIndex | null {
+    if (this.end <= this.start) return null;
+    const levels: PyrLevel[] = [{ first: this.first, min: this.min, max: this.max }];
+    pyramidUp(levels);
+    return { start: this.start, end: this.end, levels };
+  }
 }
 
-/**
- * Pyramid of a window's depth given per base (`depth[i]` is the depth at `start + i`), for a source that
- * has the dense array at hand: attached to the runs it returns, so the viewer does not build it again.
- */
-export function buildDepthIndexDense(depth: Int32Array, start: number): DepthIndex | null {
-  const end = start + depth.length;
-  if (end <= start) return null;
-  const first = start >> PYR_K0, n = ((end - 1) >> PYR_K0) - first + 1;
-  const min = new Int32Array(n).fill(0x7fffffff), max = new Int32Array(n);
-  for (let i = 0; i < depth.length; i++) {
-    const j = ((start + i) >> PYR_K0) - first, d = depth[i];
-    if (d < min[j]) min[j] = d;
-    if (d > max[j]) max[j] = d;
-  }
-  const levels: PyrLevel[] = [{ first, min, max }];
-  pyramidUp(levels);
-  return { start, end, levels };
+/** Pyramid of a run list (sorted, not overlapping). */
+export function buildDepthIndex(runs: CoverageRun[]): DepthIndex | null {
+  if (!runs.length) return null;
+  const b = new DepthIndexBuilder(runs[0].start, runs[runs.length - 1].end);
+  for (const r of runs) b.add(r.start, r.end, r.depth);
+  return b.finish();
 }
 
 export function registerDepthIndex(runs: CoverageRun[], index: DepthIndex | null): void {
