@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
+import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc } from './sashimi/types';
+import { findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn, type CoveragePaths,
@@ -217,8 +218,20 @@ const PSEUDO_EXON_COLOR = '#7c3aed';
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
+/** the evidence an SV event gathers, as named in its tooltip and panel */
+const SV_SOURCE_LABEL: Record<string, string> = { cigar: 'CIGAR D', split: 'split reads (SA)', clip: 'clipped reads placed by realignment', rescued: 'clipped reads rescued at the breakpoint', '+/-': 'split reads, junction + → −', '-/+': 'split reads, junction − → +', pair: 'discordant pairs' };
+/** "CIGAR D 8 · split reads (SA) 4" for an event, and the spread of the breakpoints it merged */
+const svEvidenceText = (j: SvArc, approx: string): string => {
+  const src = Object.entries(j.sources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${SV_SOURCE_LABEL[k] ?? k} ${approx}${Math.round(n).toLocaleString()}`);
+  const spread = j.spread && j.merged && j.merged > 1
+    ? `
+${j.merged} arcs merged (breakpoints within ${svMergeTolerance(j.end - j.start)} bp): starts ${(j.spread[0] + 1).toLocaleString()}–${(j.spread[1] + 1).toLocaleString()}, ends ${j.spread[2].toLocaleString()}–${j.spread[3].toLocaleString()}`
+    : '';
+  return (src.length ? `
+evidence: ${src.join(' · ')}` : '') + spread;
+};
 const SV_COLORS: Record<SvKind | 'clip' | 'elsewhere' | 'insertion', string> = { deletion: '#b91c1c', split: '#7c3aed', duplication: '#15803d', inversion: '#2563eb', discordant: '#d97706', clip: '#0f766e', elsewhere: '#6d28d9', insertion: '#9333ea' };
-const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion inside reads (CIGAR D)', split: 'split reads, deletion-type (the read continues further on)', duplication: 'split reads, duplication-type (the read goes back)', inversion: 'split reads, inversion (the read continues on the other strand)', discordant: 'discordant pairs' };
+const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion (CIGAR D ≥ 50 bp, split and clipped reads)', split: 'split reads, deletion-type (the read continues further on)', duplication: 'split reads, duplication-type (the read goes back)', inversion: 'split reads, inversion (the read continues on the other strand)', discordant: 'discordant pairs' };
 /** Exon–intron boundaries of a model, for the unspliced-read counts of the coverage request. */
 const boundariesOf = (t: TxModel | null): BoundaryHint | undefined =>
   t && t.exons.length > 1 ? { intronStarts: t.exons.slice(0, -1).map(e => e.end), intronEnds: t.exons.slice(1).map(e => e.start) } : undefined;
@@ -2679,7 +2692,7 @@ export default function SashimiViewer({
       // Structural evidence of a DNA track, drawn with the same arcs: deletions, split reads, discordant pairs
       if (dnaTrack && track.structural && svHints) {
         const sv = track.structural;
-        const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
+        const kinds: { list: SvArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
         const minSv = svMinReads(track.sampleId);
         const all = kinds.flatMap(k => k.list.filter(j => j.count >= minSv && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
         const svLevels = layerJunctions(all.map(x => x.j));
@@ -2709,8 +2722,11 @@ export default function SashimiViewer({
               (nPlaced ? ` + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
               (nResc ? ` + ${approx}${nResc.toLocaleString()} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString()} hard-clipped, attached by position` : ''})` : '') : '') +
             (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
+            (kind !== 'discordant' ? svEvidenceText(j, approx) : '') +
             '\nevidence, not a call: open the reads to check it';
-          arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: kind !== 'deletion', unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+          // a deletion is drawn solid when only CIGARs carry it, dashed as soon as split or clipped reads support it
+          const onlyCigar = kind === 'deletion' && !Object.entries((j as SvArc).sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0);
+          arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
         }
       }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
@@ -2857,8 +2873,8 @@ export default function SashimiViewer({
       g(ANTISENSE_COLOR, 'neighbouring gene, antisense', 'ln2');
     }
     if (anyDna && svHints) {
-      line(SV_COLORS.deletion, false, 'deletion inside reads (≥ 50 bp, CIGAR)', 'lsv1');
-      line(SV_COLORS.split, true, 'split reads, deletion-type', 'lsv2');
+      line(SV_COLORS.deletion, false, 'deletion ≥ 50 bp in CIGARs', 'lsv1');
+      line(SV_COLORS.deletion, true, 'deletion also in split or clipped reads (nearby breakpoints merged)', 'lsv2');
       line(SV_COLORS.duplication, true, 'split reads, duplication-type', 'lsv2b');
       line(SV_COLORS.inversion, true, 'split reads, inversion', 'lsv2c');
       line(SV_COLORS.discordant, true, 'discordant pairs (insert > 5× median or same strand)', 'lsv3');
@@ -3796,21 +3812,23 @@ export default function SashimiViewer({
       const { j, sv } = popover;
       const rows = displayTracks.filter(t => t.structural).map(t => {
         const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
-        const mine = list.find(x => x.start === j.start && x.end === j.end);
-        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === j.start && x.arc.end === j.end).reduce((n, x) => n + x.count, 0);
-        const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && x.start === j.start && x.end === j.end);
+        // the same event in another sample: its breakpoints within the merge tolerance, not to the base
+        const mine = findSvEvent(list, j);
+        const at = mine ?? j;
+        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end).reduce((n, x) => n + x.count, 0);
+        const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && ((x.start === at.start && x.end === at.end) || (!x.own && findSvEvent([x], j))));
         const own = resc.filter(x => x.own).reduce((n, x) => n + x.count, 0), borrowed = resc.filter(x => !x.own).reduce((n, x) => n + x.count, 0);
         return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', own ? own.toLocaleString() : borrowed ? `${borrowed.toLocaleString()} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
       });
       const size = j.end - j.start;
       return {
         title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
-        subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${sv === 'split' ? ' · breakpoints rounded to 5 bp' : ''}`,
+        subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
         cartoon: null,
-        hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (one breakpoint pair; an inversion has two)`] : [],
+        hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
         tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
         strip: null,
-        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more; split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };
     }
     if (popover.kind === 'junction') {

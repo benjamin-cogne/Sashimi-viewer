@@ -17,6 +17,7 @@
  */
 import type { BoundarySpanning, CoverageRun, JunctionArc, StructuralEvidence } from './types';
 import { classifyJunction, junctionKey, type TxModel } from './geometry';
+import { mergeSvArcs } from '../../standalone/svmerge';
 
 /** Longest cryptic exon that two facing alternative-site arcs are paired into a pseudo-exon event. */
 export const PSEUDO_EXON_MAX_BP = 500;
@@ -96,7 +97,8 @@ export function poolStructural(samples: { structural?: StructuralEvidence }[]): 
   }
   const medians = withData.map(s => s.insertMedian).filter((x): x is number => x != null).sort((a, b) => a - b);
   return {
-    deletions: sumArcs(withData.map(s => s.deletions)), splits: sumArcs(withData.map(s => s.splits)), duplications: sumArcs(withData.map(s => s.duplications)), inversions: sumArcs(withData.map(s => s.inversions)), discordant: sumArcs(withData.map(s => s.discordant)),
+    // events of the members pooled with the same breakpoint tolerance as within a sample (svmerge.ts)
+    deletions: mergeSvArcs(withData.map(s => [...s.deletions, ...s.splits])), splits: [], duplications: mergeSvArcs(withData.map(s => s.duplications ?? [])), inversions: mergeSvArcs(withData.map(s => s.inversions ?? [])), discordant: sumArcs(withData.map(s => s.discordant)),
     insertions: [...ins.values()].sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].sort((a, b) => a.pos - b.pos), elsewhere: [...elsewhere.values()].sort((a, b) => a.pos - b.pos),
     insertMedian: medians.length ? medians[medians.length >> 1] : null, reads: withData.reduce((a, s) => a + s.reads, 0),

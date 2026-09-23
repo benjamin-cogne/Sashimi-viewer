@@ -3,7 +3,8 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { AlignedRead, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
+import type { AlignedRead, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc } from '../components/sashimi/types';
+import { clusterSv, type SvMember } from './svmerge';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -459,11 +460,18 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
  * pass only the records carrying structural evidence (the others would count for that median alone).
  */
 export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null): StructuralEvidence {
-  const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), dups = new Map<string, JunctionArc>(), invs = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
+  // every arc before merging, with its evidence units by source and the names of the reads behind them
+  const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>(), disc = new Map<string, SvMember>();
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
-  const add = (m: Map<string, JunctionArc>, s: number, e: number, n = 1) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count += n; else m.set(k, { start: s, end: e, count: n }); };
+  const add = (m: Map<string, SvMember>, s: number, e: number, n = 1, src = 'other', name?: string) => {
+    const k = `${s}-${e}`;
+    let j = m.get(k);
+    if (!j) m.set(k, j = { start: s, end: e, count: 0, src: {}, names: new Set(), anon: 0 });
+    j.count += n; j.src[src] = (j.src[src] ?? 0) + n;
+    if (name) j.names.add(name); else j.anon += n;
+  };
   const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
   const r5 = (x: number) => Math.round(x / 5) * 5;
   const inWindow = (a: number, b: number) => b > start && a < end;
@@ -498,7 +506,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       if (op === 'S') { if (!seenAligned) leftClip += len; else rightClip += len; qLen += len; }
       else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
       else if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
-      if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len);
+      if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len, 1, 'cigar', r.name);
       if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
     });
     const alnEnd = pos;
@@ -525,24 +533,24 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
         const span = mateEnd - r.start - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
         if (sameStrand || span > farInsert) {
           const a = Math.floor(r.start / 500) * 500, b = Math.ceil(mateEnd / 500) * 500;
-          if (b > a) add(disc, a, b);
+          if (b > a) add(disc, a, b, 1, 'pair', r.name);
         }
       }
     }
   }
   /** One breakpoint between two adjacent parts of a read: classified and counted `n` times; returns the arc it joined, if any. */
-  const breakpoint = (a: Segment, b: Segment, n = 1): RealignedClip['arc'] | null => {
+  const breakpoint = (a: Segment, b: Segment, n = 1, src = 'split', name?: string): RealignedClip['arc'] | null => {
     const aOut = a.rev ? a.start : a.end;          // where the read leaves part a on the reference
     const bIn = b.rev ? b.end : b.start;           // where it enters part b
     const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
     if (!aHere && !bHere) return null;
     if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); return null; }
     const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
-    if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
+    if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n, src === 'split' ? (a.rev ? '-/+' : '+/-') : src, name); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
     const refGap = a.rev ? a.start - b.end : b.start - a.end;
     const qGap = b.qs - a.qe;
-    if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) { add(splits, lo, hi, n); return { start: lo, end: hi, kind: 'split' }; } }
-    else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) { add(dups, lo, hi, n); return { start: lo, end: hi, kind: 'duplication' }; } }
+    if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) { add(splits, lo, hi, n, src, name); return { start: lo, end: hi, kind: 'split' }; } }
+    else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) { add(dups, lo, hi, n, src, name); return { start: lo, end: hi, kind: 'duplication' }; } }
     else if (qGap >= SV_MIN_DELETION && aOut >= start && aOut < end) { const k = r5(aOut); const x = insertions.get(k); if (x) { x.count += n; x.len = Math.round((x.len * (x.count - n) + qGap * n) / x.count); } else insertions.set(k, { pos: k, len: qGap, count: n }); }
     return null;
   };
@@ -557,7 +565,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       segs.push(segment(f[0], saStart, f[2] === '-', f[3]));
     }
     segs.sort((a, b) => a.qs - b.qs);
-    for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1]);
+    for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1], 1, 'split', r.name);
   }
   // clip clusters placed by realignment of their clipped consensus: the cluster becomes a breakpoint like a split read's
   const realigned: RealignedClip[] = [];
@@ -574,7 +582,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       // the aligned side as a one-base anchor at the clip position, the placed clip as the other part, in read order
       const anchor: Segment = c.side === 'right' ? { chrom, start: c.pos - 1, end: c.pos, rev: false, qs: 0, qe: 1 } : { chrom, start: c.pos, end: c.pos + 1, rev: false, qs: L, qe: L + 1 };
       const placed: Segment = { chrom, start: hit.start, end: hit.end, rev: hit.strand === '-', qs: c.side === 'right' ? 1 : 0, qe: c.side === 'right' ? 1 + L : L };
-      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count) : breakpoint(placed, anchor, c.count);
+      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count, 'clip') : breakpoint(placed, anchor, c.count, 'clip');
       if (!arc) continue;
       realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc });
       placedKeys.add(key);
@@ -596,7 +604,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     for (const [k, n] of rescueClipEnds(ends, own, ref ?? null)) {
       const [kind, span] = k.split(':'); const [a, b] = span.split('-').map(Number);
       const m = kind === 'deletion' ? dels : kind === 'split' ? splits : kind === 'duplication' ? dups : invs;
-      add(m, a, b, n.count);
+      add(m, a, b, n.count, 'rescued');
       rescued.push({ start: a, end: b, kind: kind as Breakpoint['kind'], count: n.count * rate, hard: n.hard * rate, own: true });
       // rescued members of an unplaced cluster leave it (short clips were never in one)
       let left = n.long;
@@ -606,9 +614,27 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       }
     }
   }
-  const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
+  // one arc per event: arcs of a family whose breakpoints lie within the merge tolerance (svmerge.ts) are merged, the
+  // deletions inside CIGARs with the deletion-type split reads and placed clips; the placed and rescued clips then
+  // name the event they joined
+  const eventOf = new Map<string, SvArc & { kind: Breakpoint['kind'] }>();
+  const family = (kind: Breakpoint['kind'], maps: [string, Map<string, SvMember>][]) => {
+    const members = maps.flatMap(([k, m]) => [...m.values()].map(x => ({ x, k })));
+    const byMember = new Map(members.map(({ x, k }) => [x, k]));
+    return clusterSv(members.map(({ x }) => x)).map(({ event, members: ms }) => {
+      const ev = { ...event, count: event.count * rate };
+      for (const m of ms) eventOf.set(`${byMember.get(m)}:${m.start}-${m.end}`, { ...ev, kind });
+      return ev;
+    }).sort((a, b) => a.start - b.start || a.end - b.end);
+  };
+  const deletionEvents = family('deletion', [['deletion', dels], ['split', splits]]);
+  const duplicationEvents = family('duplication', [['duplication', dups]]);
+  const inversionEvents = family('inversion', [['inversion', invs]]);
+  for (const x of realigned) { const ev = eventOf.get(`${x.arc.kind}:${x.arc.start}-${x.arc.end}`); if (ev) x.arc = { start: ev.start, end: ev.end, kind: ev.kind }; }
+  for (const x of rescued) { const ev = eventOf.get(`${x.kind}:${x.start}-${x.end}`); if (ev) { x.start = ev.start; x.end = ev.end; x.kind = ev.kind; } }
+  const scaled = (m: Map<string, SvMember>): SvArc[] => [...m.values()].map(j => ({ start: j.start, end: j.end, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
   return {
-    deletions: scaled(dels), splits: scaled(splits), duplications: scaled(dups), inversions: scaled(invs), discordant: scaled(disc),
+    deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant: scaled(disc),
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),

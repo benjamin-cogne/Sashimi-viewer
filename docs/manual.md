@@ -189,10 +189,28 @@ run of 50 bp or more) as solid red arcs; **split reads**, read as chains: every 
 primary alignment and its supplementary alignments, from the SA tag, whichever of them fall in
 the window) is placed along the read by its clips, the parts are ordered along the read and each
 pair of adjacent parts is one breakpoint, each read counted once. The breakpoint is typed by where
-the read continues: further along the same strand, a dashed purple *deletion-type* arc; backwards,
-a dashed green *duplication-type* arc; on the other strand, a dashed blue *inversion* arc; on
-another chromosome, a purple `→ chr` pill; and an unaligned stretch of the read between two parts
-adjacent on the reference, a purple `ins` pill with its size. Breakpoints are rounded to 5 bp.
+the read continues: further along the same strand, a *deletion*; backwards, a dashed green
+*duplication*; on the other strand, a dashed blue *inversion*; on another chromosome, a purple
+`→ chr` pill; and an unaligned stretch of the read between two parts adjacent on the reference, a
+purple `ins` pill with its size.
+
+**One arc per event.** The reads of one event rarely agree on its breakpoints to the base: long
+reads scatter them by a few to a few tens of bases (more in repeats), an inversion shows two
+junctions (+ → − and − → +) a few bases apart, and one deletion is a CIGAR `D` in some reads and a
+split alignment (hard- or soft-clipped supplementary part) or a clipped read placed by realignment
+in others. Arcs of one kind (deletion: CIGAR `D` together with deletion-type split reads and placed
+clips; duplication; inversion) are therefore merged when every start and every end of the group
+lies within 5 % of the event's length of each other, at least 20 and at most 100 bp. The ceiling
+follows the long-read SV callers' ONT settings (cuteSV recommends a 100 bp cluster bias for ONT
+deletions; Sniffles2 merges within 150 bp by default). The floor and the relative term keep small
+distinct events apart: two 60 bp deletions 40 bp apart stay two arcs. The event's breakpoints are
+the read-weighted medians of what it merged, and its pill counts distinct reads (a read showing
+both junctions of an inversion counts once), so *Min supporting reads* applies to the event. The
+tooltip and the panel give the evidence (CIGAR D, split reads, placed or rescued clipped reads,
+the two inversion junctions) and the spread of the merged breakpoints. A deletion is a solid red
+arc when only CIGARs carry it, dashed when split or clipped reads support it. The panel matches
+the event in the other samples with the same tolerance, and the Groups view pools the members'
+events the same way.
 **Discordant pairs** (insert size above five times the window's median, at least 1 kb, or both
 mates on the same strand) are dashed amber arcs between 500 bp bins, and **soft-clip clusters**
 (at least 3 reads clipped by 20 bases or more at one position, split reads excluded) teal pills on
@@ -627,6 +645,7 @@ src/standalone/
   collapse.ts                    variant-site calling and consensus-group collapsing of reads
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
+  svmerge.ts                     structural arcs with nearby breakpoints merged into events
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)

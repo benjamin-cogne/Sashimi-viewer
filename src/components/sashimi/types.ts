@@ -24,6 +24,18 @@ export interface CoverageRun { start: number; end: number; depth: number; }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
 export interface JunctionArc { start: number; end: number; count: number; }
 /**
+ * A structural arc: its breakpoints (0-based half-open) and supporting reads. Arcs of one event whose breakpoints lie
+ * within a few tens of bases (svmerge.ts) are merged: the event then says what it was made of.
+ */
+export interface SvArc extends JunctionArc {
+  /** evidence units by source: cigar (CIGAR D), split (SA chain), clip (clip cluster placed by realignment), rescued, pair (discordant), '+/-' and '-/+' (inversion junctions) */
+  sources?: Record<string, number>;
+  /** breakpoints of the merged arcs: first and last start, first and last end */
+  spread?: [number, number, number, number];
+  /** arcs merged into this one */
+  merged?: number;
+}
+/**
  * Reads that continue through an exon–intron boundary unspliced (intron retention / pre-mRNA):
  * one aligned block covering at least 6 bases on the exon side and 10 on the intron side.
  * Keyed by the boundary position: an intron start is the first intronic base (= exon end,
@@ -53,7 +65,7 @@ export interface RealignedClip {
   /** where the clipped sequence was placed (0-based start) and on which strand, and the length matched */
   target: number; strand: '+' | '-'; matched: number;
   /** the arc it joined */
-  arc: { start: number; end: number; kind: 'split' | 'duplication' | 'inversion' };
+  arc: { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' };
 }
 /** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
 export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
@@ -63,13 +75,13 @@ export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: str
  */
 export interface StructuralEvidence {
   /** deletions of at least 50 bp inside reads (CIGAR D), by span */
-  deletions: JunctionArc[];
+  deletions: SvArc[];
   /** split reads whose next part continues further along the chromosome on the same strand (deletion-type), from the chain of alignments of each read (primary + SA parts ordered along the read), breakpoints rounded to 5 bp */
-  splits: JunctionArc[];
+  splits: SvArc[];
   /** split reads whose next part goes back (tandem duplication-type) */
-  duplications: JunctionArc[];
+  duplications: SvArc[];
   /** split reads whose next part is on the other strand (inversion breakpoints) */
-  inversions: JunctionArc[];
+  inversions: SvArc[];
   /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
   insertions: { pos: number; len: number; count: number }[];
   /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
