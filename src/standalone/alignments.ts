@@ -473,6 +473,16 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
+  // Deleted and skipped bases (CIGAR D, N) inside the primary records of each pair, by read name. The template length
+  // runs from one mate's outer end to the other's, across them: a pair whose gap is a deletion one of its reads already
+  // carries has a long TLEN but is not a discordant pair (it is the same event as that D, counted with the deletions).
+  const innerGap = (cigar: string) => { let g = 0; for (const [len, op] of parseCigar(cigar)) if (op === 'D' || op === 'N') g += len; return g; };
+  const pairGap = new Map<string, number>();
+  for (const r of reads) {
+    if (!r.name || r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY) || !(r.flags & FLAG_PAIRED)) continue;
+    const g = innerGap(r.cigar);
+    if (g) pairGap.set(r.name, (pairGap.get(r.name) ?? 0) + g);
+  }
   const cluster = (key: string, pos: number, side: 'left' | 'right', hard: boolean, seq?: string) => {
     const c = clips.get(key);
     if (c) { c.count++; if (hard) c.hard = (c.hard ?? 0) + 1; } else clips.set(key, { pos, side, count: 1, hard: hard ? 1 : 0 });
@@ -499,14 +509,19 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       else if (rightHard >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) cluster(`R${alnEnd}`, alnEnd, 'right', true);
     }
     if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
-    // discordant pairs, counted once from the leftmost mate
-    if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
+    // discordant pairs, counted once per pair: from the leftmost mate (the first of the pair when both start at the same
+    // base), and from primary records only (a supplementary record repeats its primary's mate fields)
+    if (r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
-      else if (r.start <= r.matePos) {
+      else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2))) {
         const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
-        const span = Math.abs(r.tlen ?? (r.matePos + (alnEnd - r.start) - r.start));
+        // where the mate ends: the template's far end, from TLEN (leftmost to rightmost aligned base, SAM spec); without
+        // one, the mate's start plus this read's aligned length (its own deletions and introns left out)
+        const readLen = alnEnd - r.start - innerGap(r.cigar);
+        const mateEnd = r.tlen ? r.start + Math.abs(r.tlen) : r.matePos + readLen;
+        const span = mateEnd - r.start - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
         if (sameStrand || span > farInsert) {
-          const a = Math.floor(r.start / 500) * 500, b = Math.ceil((r.matePos + (alnEnd - r.start)) / 500) * 500;
+          const a = Math.floor(r.start / 500) * 500, b = Math.ceil(mateEnd / 500) * 500;
           if (b > a) add(disc, a, b);
         }
       }

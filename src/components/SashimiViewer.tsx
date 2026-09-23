@@ -2059,11 +2059,16 @@ export default function SashimiViewer({
     const inserts = visible.map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
     const medianInsert = inserts.length ? inserts[inserts.length >> 1] : 0;
     const dnaTrack = isDnaSample(sid);
-    const discordantOf = (r: AlignedRead): string | null => {
+    /** bases a read skips on the reference inside its alignment (CIGAR D and N): its span minus its aligned blocks */
+    const innerGap = (r: AlignedRead) => { let g = r.e - r.s; for (const [bs, be] of r.b) g -= be - bs; return Math.max(0, g); };
+    const discordantOf = (r: AlignedRead, idx: number): string | null => {
       if (r.mp == null) return null;
       if (r.mc) return `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`;
       if (!(r.f & 2)) return 'not a proper pair';
-      if (dnaTrack && medianInsert > 0 && Math.abs(r.tl ?? 0) > Math.max(1000, 5 * medianInsert)) return `insert ${Math.abs(r.tl!).toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp)`;
+      // the template length runs across the deletions and introns the two reads carry: those are not a long insert
+      const mate = mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
+      const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
+      if (dnaTrack && medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return `insert ${insert.toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp)`;
       return null;
     };
     const rowH = nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode
@@ -2092,7 +2097,7 @@ export default function SashimiViewer({
       const parts: JSX.Element[] = [];
       const lowMapq = r.q === 0;
       const spans = readSpansBoundary(r, modelBoundaries);
-      const discordant = pairMode ? discordantOf(r) : null;
+      const discordant = pairMode ? discordantOf(r, idx) : null;
       const fill = discordant ? READ_DISCORDANT_FILL : READ_FILL;
       // the line to the mate, drawn once per pair from the left mate
       const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
@@ -2229,7 +2234,7 @@ export default function SashimiViewer({
       (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
       (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
-      (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter(r => discordantOf(r)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
+      (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter((r, i) => discordantOf(r, i)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
     return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));

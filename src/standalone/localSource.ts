@@ -155,8 +155,8 @@ const BAM_VIEW: RecordView<any> = {
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
-    // the name is what ties the parts of a split read together: kept for reads with an SA tag even in the light scan
-    return { name: light && typeof sa !== 'string' ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
+    // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
+    return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
   },
 };
@@ -182,7 +182,7 @@ const CRAM_VIEW: RecordView<any> = {
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
-    return { name: light && typeof sa !== 'string' ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
+    return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, r.nextStart ?? 0, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
