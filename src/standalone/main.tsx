@@ -297,7 +297,11 @@ function App() {
     const type: LibraryType | null = ev.fraction >= 0.02 ? 'rna' : ev.fraction < 0.002 ? 'dna' : null;
     if (!type) return;
     const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString()} reads spliced`;
-    setSamples(prev => prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s)));
+    // unchanged samples keep the same array: a new one re-derives the sample types, which the viewer reacts to
+    setSamples(prev => {
+      const next: LocalSample[] = prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s));
+      return next.some((s, i) => s !== prev[i]) ? next : prev;
+    });
   }, []);
   /** The user decides the type of a sample (a click on its badge): RNA ↔ DNA, an undetermined sample becomes RNA. */
   const cycleLibrary = useCallback((sid: number) => setSamples(prev => prev.map(s => {

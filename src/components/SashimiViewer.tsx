@@ -1045,10 +1045,13 @@ export default function SashimiViewer({
     }
   }, [viewMode, groups, runSamples, loadCoverage]);
 
-  // A sample recognised as DNA after its coverage was loaded: reload once for its structural evidence
+  // A sample recognised as DNA after its coverage was loaded: reload once for its structural evidence. Only when that
+  // evidence is asked for: without structural hints it never comes, `!t.structural` stayed true, and every change of
+  // the sample types (which each reload itself reports) reloaded the DNA tracks again, forever.
   useEffect(() => {
+    if (!svHints) return;
     for (const t of tracksRef.current) if (!t.gtex && isDnaSample(t.sampleId) && !t.structural && !t.loading && t.fetched) loadCoverage(t.sampleId, t.sampleName);
-  }, [sampleTypes, isDnaSample, loadCoverage]);
+  }, [sampleTypes, isDnaSample, loadCoverage, svHints]);
 
   // A new gene model: tracks whose unspliced-read counts miss one of its boundaries reload (sources that never count them are left alone)
   useEffect(() => {
