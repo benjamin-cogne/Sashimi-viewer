@@ -984,8 +984,14 @@ export default function SashimiViewer({
   onLibraryEvidenceRef.current = onLibraryEvidence;
   /** DNA samples: no splicing, so no arcs, pills, usage or retention on their tracks. */
   const isDnaSample = useCallback((sid: number) => sampleTypes?.[sid] === 'dna', [sampleTypes]);
-  const isDnaRef = useRef(isDnaSample);
-  isDnaRef.current = isDnaSample;
+  /**
+   * Structural evidence is asked for with the coverage of every sample not known to be RNA. A sample whose type is still
+   * unknown (no aligner in the header) is often recognised as DNA only from the reads of that first coverage: asked for
+   * DNA only, the evidence then needed a second request, and the source, which cannot add it to counts made without it,
+   * read the whole window again. The evidence of a sample that turns out to be RNA is simply not drawn.
+   */
+  const wantsStructuralRef = useRef((sid: number) => sampleTypes?.[sid] !== 'rna');
+  wantsStructuralRef.current = (sid: number) => sampleTypes?.[sid] !== 'rna';
   const isDnaTrack = useCallback((t: TrackData) => !t.gtex && (t.group ? t.group.dna : isDnaSample(t.sampleId)), [isDnaSample]);
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
     const view = viewRef.current;
@@ -1002,13 +1008,16 @@ export default function SashimiViewer({
     });
     try {
       // a deep view is drawn as it fills: each partial answer is exact over the part it covers
+      // A track already complete over the view (a reload for the same window: structural evidence, new exon boundaries)
+      // keeps what it shows until the new answer is complete: its partials would redraw it from the left.
       const onProgress = (p: SampleCoverage) => {
         if (reqSeq.current.get(sid) !== seq || !p.window) return;
         const part: FetchWindow = { ...win, start: p.window.start, end: p.window.end };
-        setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, fetched: part, partial: true } : t));
+        setTracks(prev => prev.map(t => t.sampleId !== sid || (!t.partial && t.coverage.length && covers(t.fetched, view) && !covers(part, view)) ? t
+          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, fetched: part, partial: true }));
       };
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && isDnaRef.current(sid), signal: ctl.signal, onProgress });
+        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && wantsStructuralRef.current(sid), signal: ctl.signal, onProgress });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
