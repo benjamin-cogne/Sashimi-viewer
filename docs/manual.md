@@ -362,6 +362,53 @@ change, loss of heterozygosity, contamination), and a window with at least 8 hom
 and none heterozygous is flagged *no heterozygous SNP (LOH / UPD?)*. Fractions come from the drawn
 reads, up to 2,500 in the window, so they are approximate on very deep data.
 
+**CpG methylation (long reads).** ONT (dorado, Guppy) and PacBio (jasmine, primrose) basecallers
+write the 5-methylcytosine calls of each read in its base-modification tags, `MM` (which bases carry
+a call) and `ML` (the probability of each call, 0–255), as the SAM specification describes (the
+legacy `Mm` / `Ml` names are read too). Switch on **Methylation** in the options panel, shown when a
+DNA track is open. Each long-read DNA track then gets a panel under its coverage:
+
+- a **header** with the CpG islands of the reference (green; at least 200 bp with GC ≥ 50 % and an
+  observed/expected CpG ratio ≥ 0.6, Gardiner-Garden & Frommer 1987) and, on the right, the 5mC
+  fraction of the view per haplotype, the CpGs and the calls counted (its tooltip gives the filter);
+- one **heat lane per haplotype**, HP 1 and HP 2, when the reads carry haplotags (one lane of all
+  reads otherwise), coloured from blue (unmethylated) to red (methylated), the same convention as
+  IGV. Each pixel shows the pooled fraction of the methylated calls over all CpGs under it (the calls
+  add up; per-CpG fractions are not averaged, so better-covered sites weigh more). It is pale
+  where under 3 calls. Zoomed in to fewer than one CpG per 4 pixels, each CpG gets its own block;
+- between them, the **difference HP 1 − HP 2** as bars up (HP 1 more methylated, in its colour) or
+  down (HP 2), and **allele-specific methylation** framed in purple across the lanes. A frame marks
+  a run of at least 5 consecutive CpGs covered on both haplotypes whose fractions differ by 50 points
+  or more, with at least 10 calls on each side, and its label gives the difference. Imprinted
+  differentially methylated regions, the inactive X of a female sample, allele-specific promoters
+  and cis-acting variants look like this.
+
+The calls follow the conventions of `modkit pileup --cpg --combine-strands` (Oxford Nanopore's
+reference tool; `pb-CpG-tools` for PacBio does the same per haplotype):
+- only the **CpG sites of the reference** are counted, never every C of the reads. Both strands are
+  combined: a − strand read's call, on the G of the CpG, is counted at the C of the + strand;
+- a call is **methylated when 5mC is the likelier state**. 5hmC, when called, is not counted as 5mC:
+  its probability is set aside and the other two renormalised (modkit's *traditional* preset);
+- calls whose confidence is below the **10th percentile** of the window's calls are **filtered
+  out**, as modkit does by default. The threshold and the calls left out are in the header's
+  tooltip;
+- the tags describe the read as sequenced: a hard-clipped record is used only when its `MN` tag
+  confirms its sequence matches them, and a record whose sequence no longer matches is skipped.
+  Secondary, duplicate and QC-failed records are left out as elsewhere.
+
+*mosdepth*, often cited for long-read depth, has no methylation mode; its role here is the coverage
+track. The counting runs **in the background** (the Web Worker of the variant scans): the page never
+waits for it. The counts are kept per sample over a window of the view plus half of it on each
+side, so panning and zooming inside it cost nothing new. Drawing is computed per pixel, not per
+read or CpG, so it takes the same time at 1 kb or at 2 Mb. It is counted for views up to 2 Mb
+(wider, the panel asks to zoom in) and needs the reference sequence.
+
+With the **reads track** open on a view of 30 kb or less, each read's CpG calls are drawn on it:
+red (methylated), blue (unmethylated), grey (below the confidence threshold). *Group: haplotype
+(HP)* then shows the two haplotypes' reads apart, and an allele-specific region stands out as a
+red block over a blue one. The panel is not part of exported pages, which carry no base-modification
+tags.
+
 ## Moving inside a view
 
 The search box next to the gene name moves the window without leaving the view. It takes, in
@@ -646,6 +693,7 @@ src/standalone/
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
   svmerge.ts                     structural arcs with nearby breakpoints merged into events
+  methylation.ts                 CpG methylation from the MM / ML tags: counts per CpG × haplotype, filter threshold, CpG islands
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)
@@ -687,6 +735,15 @@ If the viewer contributes to a publication, please cite it
   NMD verdict).
 - GTEx Consortium. *The GTEx Consortium atlas of genetic regulatory effects across human tissues.*
   Science 2020;369:1318–1330.
+- Gardiner-Garden M, Frommer M. *CpG islands in vertebrate genomes.* J Mol Biol 1987;196:261–282
+  (CpG island criteria).
+- The SAM/BAM Format Specification Working Group. *Sequence Alignment/Map Optional Fields
+  Specification*, section 1.7 "Base modifications" (MM, ML, MN tags).
+  https://samtools.github.io/hts-specs/SAMtags.pdf
+- Oxford Nanopore Technologies. *modkit* documentation: `pileup`, `--cpg`, `--combine-strands`,
+  filter threshold (10th percentile), 5hmC handling. https://nanoporetech.github.io/modkit/
+- PacBio. *pb-CpG-tools*: CpG methylation probabilities from HiFi reads, per haplotype.
+  https://github.com/PacificBiosciences/pb-CpG-tools
 - GMOD JavaScript libraries: [bam-js](https://github.com/GMOD/bam-js),
   [cram-js](https://github.com/GMOD/cram-js), [indexedfasta-js](https://github.com/GMOD/indexedfasta-js).
 

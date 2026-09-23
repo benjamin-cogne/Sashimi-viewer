@@ -26,6 +26,8 @@ export interface RawRead {
   sa?: string | null;
   /** haplotag of a phased file (WhatsHap / LongPhase haplotag, HiPhase, DRAGEN): HP haplotype, PS phase set, PC confidence */
   hp?: number | null; ps?: number | null; pc?: number | null;
+  /** base-modification tags (MM / ML, MN), kept for the methylation colours of the reads; absent in light scans */
+  mods?: { mm: string; ml: ArrayLike<number> | null; mn: number | null } | null;
 }
 
 const FLAG_PAIRED = 1, FLAG_UNMAPPED = 4, FLAG_REVERSE = 16, FLAG_READ2 = 128, FLAG_SECONDARY = 256, FLAG_QCFAIL = 512, FLAG_DUP = 1024;

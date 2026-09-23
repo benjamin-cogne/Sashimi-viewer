@@ -141,6 +141,8 @@ export interface AlignedRead {
    * DRAGEN's "copy label" may go higher), PS the phase set it belongs to, PC the Phred-scaled confidence; absent when untagged
    */
   hp?: number; ps?: number; pc?: number;
+  /** CpG calls of a long read with base-modification tags, when asked for: position of the CpG's C, P(5mC) × 255, flat */
+  me?: number[];
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {

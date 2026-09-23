@@ -66,6 +66,10 @@ from a FASTA you add. Nothing is kept when the tab closes.
   WhatsHap, LongPhase, HiPhase or DRAGEN) or from read-based phasing; reads grouped by haplotype;
   split reads joined on one row, clipped sequences on a click,
   consensus of a clip cluster ready for BLAT.
+- **CpG methylation** of long reads (ONT, PacBio; MM / ML tags) in a panel under the coverage: 5mC
+  per haplotype, their difference and the allele-specific stretches, the CpG islands; each read's
+  CpGs coloured in the reads track. Counted in the background at the reference's CpGs only, the
+  modkit way (strands combined, 10th-percentile confidence filter).
 
 **Organising the work**
 - Several genes as **views**, samples pooled into **groups**, **known variants** drawn on every view.

@@ -7,12 +7,13 @@
 import VariantWorker from './variantWorker?worker&inline';
 import type { LocalDataSource, VariantScanner, ReferenceChoice } from './localSource';
 import type { VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
+import type { MethylWindow } from './methylation';
 
 export function attachVariantWorker(ds: LocalDataSource): boolean {
   let worker: Worker;
   try { worker = new VariantWorker(); } catch (e) { console.warn('[sashimi] variant scans stay on the page (no worker):', e); return false; }
   let req = 0;
-  const pending = new Map<number, { resolve: (r: VariantScan) => void; reject: (e: Error) => void; onProgress?: (f: number) => void }>();
+  const pending = new Map<number, { resolve: (r: any) => void; reject: (e: Error) => void; onProgress?: (f: number) => void }>();
   /** the sample files and the reference the worker has, by identity */
   const sent = new Map<number, File>();
   let refSent: ReferenceChoice | null = null;
@@ -50,6 +51,22 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
         opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
         worker.postMessage({ type: 'scan', req: id, sampleId, chrom, start, end, uniqueOnly, minVaf,
           opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes, phaseSource: opts?.phaseSource } });
+      });
+    },
+    methyl(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+      const s = ds.sampleFiles(sampleId);
+      if (!s) return Promise.reject(new Error('Sample not found'));
+      if (opts?.signal?.aborted) return Promise.reject(abortError());
+      if (refSent !== ds.reference) { worker.postMessage({ type: 'reference', reference: ds.reference }); refSent = ds.reference; }
+      if (sent.get(sampleId) !== s.file) {
+        worker.postMessage({ type: 'sample', sample: { id: s.id, name: s.name, kind: s.kind, file: s.file, index: s.index } });
+        sent.set(sampleId, s.file);
+      }
+      const id = ++req;
+      return new Promise<MethylWindow>((resolve, reject) => {
+        pending.set(id, { resolve, reject, onProgress: opts?.onProgress });
+        opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
+        worker.postMessage({ type: 'methyl', req: id, sampleId, chrom, start, end });
       });
     },
     forget(sampleId: number) { if (sent.delete(sampleId)) worker.postMessage({ type: 'forget', id: sampleId }); },

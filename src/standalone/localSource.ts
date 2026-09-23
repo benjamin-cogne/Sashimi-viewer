@@ -15,6 +15,7 @@ import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
+import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { callSites, collapseReads } from './collapse';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
@@ -101,6 +102,9 @@ const COVERAGE_CACHE_BYTES = 256 * 1024 * 1024;
 const COVERAGE_MIN_GAP = 100_000;
 /** Longest stretch of one chromosome whose allele counts a sample keeps (they weigh ~9× the coverage counts per base). */
 const ALLELE_MAX_SPAN = 4_000_000;
+/** Widest window whose methylation is asked at once, longest stretch a sample keeps, and the counts kept across samples. */
+export const METHYL_MAX_BP = 2_000_000;
+const METHYL_MAX_SPAN = 6_000_000, METHYL_CACHE_BYTES = 256 * 1024 * 1024;
 /** Allele counts kept across all samples; the least recently used samples' are dropped past it. */
 const ALLELE_CACHE_BYTES = 384 * 1024 * 1024;
 /** Partial coverage is handed to the caller at most this often while a deep view fills. */
@@ -130,9 +134,18 @@ interface RecordView<R> {
   seqCodes(r: R, buf: { a: Uint8Array }): number;
   /** base qualities, null when the record has none */
   quals(r: R): ArrayLike<number> | null;
+  /** the base-modification tags (MM / ML, or the legacy Mm / Ml), null when the record has none */
+  mods(r: R): { mm: string; ml: ArrayLike<number> | null; mn: number | null } | null;
   /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
   raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
+/** The MM / ML tags of a record (the legacy Mm / Ml names too), with MN (the SEQ length they describe) when present. */
+const modTags = (get: (tag: string) => unknown): { mm: string; ml: ArrayLike<number> | null; mn: number | null } | null => {
+  const mm = get('MM') ?? get('Mm');
+  if (typeof mm !== 'string' || !mm) return null;
+  const ml = get('ML') ?? get('Ml');
+  return { mm, ml: ml != null && typeof ml === 'object' && 'length' in (ml as object) ? ml as ArrayLike<number> : null, mn: tagNumber(get('MN')) };
+};
 /** The haplotag of a record of a phased file: HP (haplotype), PS (phase set), PC (confidence); nothing when untagged. */
 const haplotag = (get: (tag: string) => unknown): { hp?: number; ps?: number; pc?: number } => {
   const hp = tagNumber(get('HP'));
@@ -160,12 +173,13 @@ const BAM_VIEW: RecordView<any> = {
     return n;
   },
   quals: r => r.qual ?? null,
+  mods: r => modTags(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
-      ...(light ? {} : haplotag(tag => r.getTag(tag))),
+      ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.next_refid, r.next_pos, r.template_length, sa) : {}) };
   },
 };
@@ -185,6 +199,7 @@ const CRAM_VIEW: RecordView<any> = {
     return seq.length;
   },
   quals: r => r.qualityScores ?? null,
+  mods: r => modTags(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
@@ -193,7 +208,7 @@ const CRAM_VIEW: RecordView<any> = {
     const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
-      ...(light ? {} : haplotag(tag => r.getTag(tag))),
+      ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
       ...(structural ? mateFields(id => refNames[id] ?? '', r.nextSequenceId ?? -1, r.nextStart ?? 0, r.templateLength ?? r.templateSize ?? 0, sa) : {}) };
   },
 };
@@ -227,6 +242,26 @@ function tagNumber(v: unknown): number | null {
 }
 /** Long reads (ONT, PacBio): the median aligned length of the window's reads is above 1 kb. */
 /** Adds the pair fields of a paired, mate-mapped record to its encoded read: mate start, template length, mate chromosome when it differs. */
+/**
+ * The CpG calls of each read (`me`: position, P(5mC) × 255, flat), for the methylation colours of the reads track; the
+ * same rules as the counting (reference CpGs only, both strands on the C of the + strand, MN / hard-clip check).
+ */
+function readMethylation(reads: AlignedRead[], raw: RawRead[], cpgs: Int32Array): void {
+  const sc = newModScratch();
+  let codes = new Uint8Array(4096);
+  raw.forEach((r, i) => {
+    const m = r.mods, n = r.seq.length;
+    if (!m || !n || !keepFlags(r.flags)) return;
+    const ops = packCigar(r.cigar);
+    if (m.mn != null ? m.mn !== n : ops.some(v => (v & 15) === 5)) return;
+    if (codes.length < n) codes = new Uint8Array(n * 2);
+    for (let k = 0; k < n; k++) codes[k] = r.seq.charCodeAt(k);
+    const me: number[] = [];
+    visitReadCalls(r.start, ops, codes, n, (r.flags & 16) !== 0, m.mm, m.ml, cpgs, sc, (cpg, mod, conf) => { me.push(cpg, Math.round((mod ? conf : 1 - conf) * 255)); });
+    if (me.length) reads[i].me = me;
+  });
+}
+
 function withMate(a: AlignedRead, r: RawRead, own: string): AlignedRead {
   if (!(r.flags & 1) || r.flags & 8 || r.matePos == null || r.matePos < 0) return a;
   a.mp = r.matePos; a.tl = r.tlen ?? 0;
@@ -247,6 +282,8 @@ export interface VariantScanner {
   forget(sampleId: number): void;
   /** the reference changed: mismatches are read against it */
   reference(reference: ReferenceChoice): void;
+  /** CpG methylation counted in the worker (absent from scanners that do not do it) */
+  methyl?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
 }
 
 export class LocalDataSource implements SashimiDataSource {
@@ -275,9 +312,9 @@ export class LocalDataSource implements SashimiDataSource {
   knownVariants: KnownVariant[] = [];
   async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
-  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
+  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
+  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
   /** The files behind a sample, for a variant scanner that reads them elsewhere (a worker). */
   sampleFiles(id: number): LocalSample | undefined { return this.samples.get(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }
@@ -529,6 +566,8 @@ export class LocalDataSource implements SashimiDataSource {
   variantScanner?: VariantScanner;
   /** What each sample has counted for its variants, one chromosome stretch per sample. */
   private alleleStates = new Map<number, AlleleState>();
+  private methylStates = new Map<number, MethylState>();
+  private methylLocks = new Map<number, Promise<unknown>>();
   private alleleLocks = new Map<number, Promise<unknown>>();
 
   /**
@@ -559,6 +598,85 @@ export class LocalDataSource implements SashimiDataSource {
       total -= x.bytes; this.alleleStates.delete(k);
     }
     return st;
+  }
+
+  /** CpG methylation of a window: counted in the worker when there is one (the reads carry their whole sequence), else here. */
+  getMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+    const s = this.samples.get(sampleId);
+    if (!s) return Promise.reject(new Error('Sample not found'));
+    if (s.embedded) return Promise.reject(new Error('methylation is not part of exported pages: add the alignment file'));
+    if (end - start > METHYL_MAX_BP) return Promise.reject(new Error(`Region too large for methylation (${(end - start).toLocaleString()} bp; up to ${METHYL_MAX_BP.toLocaleString()})`));
+    if (this.variantScanner?.methyl) return this.variantScanner.methyl(sampleId, chrom, start, end, opts);
+    return this.countMethylation(sampleId, chrom, start, end, opts);
+  }
+
+  /** The sample's methylation state for a request around [start, end): kept when near, started over otherwise; old samples' states dropped past the cache. */
+  private methylState(id: number, chrom: string, start: number, end: number): MethylState {
+    let st = this.methylStates.get(id);
+    const gap = Math.max(end - start, COVERAGE_MIN_GAP);
+    if (!st || st.chrom !== chrom || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+      || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > METHYL_MAX_SPAN)) {
+      st = new MethylState(chrom);
+      this.methylStates.set(id, st);
+    }
+    st.lastUsed = Date.now();
+    let total = 0;
+    for (const x of this.methylStates.values()) total += x.bytes;
+    for (const [k, x] of [...this.methylStates.entries()].filter(([k]) => k !== id).sort((p, q) => p[1].lastUsed - q[1].lastUsed)) {
+      if (total <= METHYL_CACHE_BYTES) break;
+      total -= x.bytes; this.methylStates.delete(k);
+    }
+    return st;
+  }
+
+  /**
+   * The methylation counting itself (methylation.ts): grows the sample's state over [start, end), each tile's reads
+   * counted against the CpGs of the reference under them, then reads the window back with the filter threshold.
+   */
+  countMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+    const signal = opts?.signal;
+    return this.locked(this.methylLocks, sampleId, async () => {
+      throwIfAborted(signal);
+      const loc = await this.locate(sampleId, chrom);
+      if (!loc) return methylWindow([], start, end, null, start);
+      const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
+      const st = this.methylState(sampleId, loc.name, start, end);
+      const scratch = { a: new Uint8Array(4096) }, mods = newModScratch();
+      let cpgs: Int32Array = new Int32Array(0);
+      // the CpGs of the reference under the reads of the tile about to be counted, before the (synchronous) counting
+      const prepare = async (recs: any[]) => {
+        let lo = Infinity, hi = -Infinity;
+        for (const r of recs) {
+          const rs = view.start(r);
+          if (rs < lo) lo = rs;
+          const ops = view.ops(r);
+          let e = rs;
+          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) e += ops[k] >>> 4; }
+          if (e > hi) hi = e;
+        }
+        const seq = hi > lo ? await this.getReferenceSeq(chrom, lo, hi + 1) : null;
+        cpgs = seq ? cpgSites(lo, seq) : new Int32Array(0);
+      };
+      const count = (layer: MethylCounts, r: any) => {
+        if (!keepFlags(view.flags(r))) return;
+        const m = view.mods(r);
+        if (!m) return;
+        const ops = view.ops(r);
+        const n = view.seqCodes(r, scratch);
+        if (!n) return;
+        // the tags describe the read as sequenced: a hard-clipped record matches them only when MN says so
+        if (m.mn != null ? m.mn !== n : Array.from(ops).some(v => (v & 15) === 5)) return;
+        const hp = tagNumber(r.getTag('HP')) ?? 0;
+        countRead(layer, view.start(r), ops, scratch.a, n, (view.flags(r) & 16) !== 0, m.mm, m.ml, cpgs, hp, mods);
+      };
+      const span = Math.max(1, end - start);
+      const progress = () => opts?.onProgress?.(Math.min(1, Math.max(0, Math.min(end, st.pe) - Math.max(start, st.ps)) / span));
+      await this.fillStretch(sampleId, st, loc, start, end, () => new MethylCounts(), count, signal, progress, prepare);
+      progress();
+      const ref = await this.getReferenceSeq(chrom, start, end + 1);
+      throwIfAborted(signal);
+      return methylWindow([st.owned, st.spill], start, end, ref, start);
+    });
   }
 
   /** The allele counting itself: grows the sample's allele state over [start, end), then reads the sites back. */
@@ -919,6 +1037,7 @@ export class LocalDataSource implements SashimiDataSource {
     throwIfAborted(opts?.signal);
     const own = (await this.locate(sampleId, chrom))?.name ?? chrom;
     const reads: AlignedRead[] = raw.map(r => withMate(encodeRead(r, ref, refStart), r, own));
+    if (opts?.methylation && !collapsed && ref) readMethylation(reads, raw, cpgSites(refStart, ref));
     const longReads = isLongRead(reads);
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;

@@ -1,3 +1,4 @@
+import type { MethylWindow } from '../../standalone/methylation';
 /**
  * Data source used by the Sashimi viewer. The web application implements it with the
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
@@ -17,6 +18,8 @@ export interface ReadsOptions {
   haplotypes?: 2 | 'any';
   /** two haplotypes: from the file's haplotags (HP/PS) when the window has tagged reads ('auto', default), or always from the reads' own phasing */
   phaseSource?: 'auto' | 'reads';
+  /** reads mode: each read's CpG calls from its MM / ML tags (`me`), for the methylation colours */
+  methylation?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
 }
@@ -85,6 +88,8 @@ export interface SashimiDataSource {
    * source cannot scan (no alignment file behind the sample).
    */
   getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  /** CpG methylation of a window from the reads' MM / ML tags (long reads), per haplotag; counted once and kept (methylation.ts) */
+  getMethylation?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   /**
    * Clipped reads of a sample rescued at breakpoints seen in other samples (their clipped bases matching the reference
    * at the other end): scanned around the breakpoint ends only. Absent when the source has no alignment file.
