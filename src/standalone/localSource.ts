@@ -4,6 +4,7 @@
  * reference-sequence requests go to the UCSC API (Ensembl REST as fallback), unless a local
  * FASTA is given.
  */
+import { SharedBudget } from '@gmod/shared-read-cache';
 import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
@@ -111,8 +112,16 @@ const ALLELE_CACHE_BYTES = 384 * 1024 * 1024;
 const PROGRESS_MS = 200;
 /** Records looked at for an NH tag before a file without one is taken as having none (uniqueness then from MAPQ). */
 const NH_PROBE = 2_000;
-/** Decoded BAM chunks the library keeps in memory (its default is 1 GB, too much for a browser tab). */
-const BAM_CACHE_BYTES = 256 * 1024 * 1024;
+/**
+ * Decoded records the alignment libraries keep, all files of this data source together (the page and the variant
+ * worker each have one). The libraries default to 1 GB per file, sized for a genome browser that decodes the same
+ * chunks again at every pan; here coverage, variants and methylation are counted once into states of their own, and
+ * only the reads track reads a window again, so the cache mostly held chunks nothing would reuse: 210 MB on a
+ * 1 000× gene before any read was shown, times two (page and worker), times every sample. One budget across files
+ * (SharedBudget: the least recently used chunk of any file goes first), and a chunk not looked at for
+ * RECORD_CACHE_IDLE_MS dropped, so a parked tab gives it back.
+ */
+const RECORD_CACHE_BYTES = 128 * 1024 * 1024, RECORD_CACHE_IDLE_MS = 45_000;
 
 /**
  * Uniform access to one decoded record of either library. Nothing heavy (name, sequence, qualities) is touched
@@ -317,10 +326,21 @@ export class LocalDataSource implements SashimiDataSource {
   addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
   removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
-  /** Drops the counts kept for an overlay the viewer switched off (they are counted again when it comes back). */
-  release(what: 'methylation' | 'variants') {
+  /** one byte budget for the decoded records of every alignment file of this source (see RECORD_CACHE_BYTES) */
+  private recordBudget = new SharedBudget(RECORD_CACHE_BYTES);
+  /**
+   * Drops what was kept for an overlay the viewer switched off (it is read or counted again when it comes back): the
+   * methylation or allele counts (here and in the worker), or the decoded records of every file (`records`: the
+   * reads track was closed, or the coverage they were decoded for is counted).
+   */
+  release(what: 'methylation' | 'variants' | 'records') {
+    if (what === 'records') { this.clearRecordCaches(); return; }
     if (what === 'methylation') this.methylStates.clear(); else this.alleleStates.clear();
     this.variantScanner?.release?.(what);
+  }
+  /** Empties the alignment libraries' record caches (every opened file). */
+  clearRecordCaches(): void {
+    for (const o of this.opened.values()) o.then(f => (f.kind === 'bam' ? f.bam.clearFeatureCache() : f.cram.clearFeatureCache())).catch(() => { /* a file that failed to open holds nothing */ });
   }
   /** The files behind a sample, for a variant scanner that reads them elsewhere (a worker). */
   sampleFiles(id: number): LocalSample | undefined { return this.samples.get(id); }
@@ -398,7 +418,7 @@ export class LocalDataSource implements SashimiDataSource {
     if (!this.opened.has(id)) {
       this.opened.set(id, (async (): Promise<Opened> => {
         if (s.kind === 'bam') {
-          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: BAM_CACHE_BYTES });
+          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget });
           await bam.getHeader();
           const refNames = (bam.indexToChr || []).map(r => r.refName);
           const header = (await bam.getHeaderText().catch(() => '')) ?? '';
@@ -409,6 +429,7 @@ export class LocalDataSource implements SashimiDataSource {
           index: new CraiIndex({ filehandle: new BlobFile(s.index) }),
           checkSequenceMD5: false,
           useSliceWorkerPool: false,
+          maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget,
           fetchReferenceSequence: async (seqId: number, start: number, end: number, refName?: string) => {
             const info = await cram.cram.getReferenceInfo();
             const name = refName ?? info[seqId]?.name ?? '';

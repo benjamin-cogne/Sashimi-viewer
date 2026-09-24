@@ -25,6 +25,11 @@ type In =
 const ds = new LocalDataSource({ build: 'GRCh38' });
 const running = new Map<number, AbortController>();
 const post = (m: unknown) => (self as unknown as Worker).postMessage(m);
+/**
+ * A scan is done: its counts are kept (allele or methylation states), so the records decoded for it serve nothing
+ * more; once no other scan is running they are let go rather than held until the libraries' idle timeout.
+ */
+const settle = (req: number) => { running.delete(req); if (!running.size) ds.clearRecordCaches(); };
 
 self.onmessage = (e: MessageEvent<In>) => {
   const m = e.data;
@@ -40,7 +45,7 @@ self.onmessage = (e: MessageEvent<In>) => {
     ds.countMethylation(m.sampleId, m.chrom, m.start, m.end, { signal: ctl.signal, onProgress: fraction => post({ type: 'progress', req: m.req, fraction }) })
       .then(result => (self as unknown as Worker).postMessage({ type: 'done', req: m.req, result }, [result.pos.buffer, ...result.mod.map(a => a.buffer), ...result.total.map(a => a.buffer)]))
       .catch((err: any) => post({ type: 'error', req: m.req, name: err?.name ?? 'Error', message: err?.message ?? String(err) }))
-      .finally(() => running.delete(m.req));
+      .finally(() => settle(m.req));
   }
   else if (m.type === 'scan') {
     const ctl = new AbortController();
@@ -49,6 +54,6 @@ self.onmessage = (e: MessageEvent<In>) => {
       { ...m.opts, signal: ctl.signal, onProgress: fraction => post({ type: 'progress', req: m.req, fraction }) })
       .then(result => post({ type: 'done', req: m.req, result }))
       .catch((err: any) => post({ type: 'error', req: m.req, name: err?.name ?? 'Error', message: err?.message ?? String(err) }))
-      .finally(() => running.delete(m.req));
+      .finally(() => settle(m.req));
   }
 };

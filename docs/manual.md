@@ -533,9 +533,21 @@ Switching an option off releases what it holds:
 - **Methylation:** the counts of every sample, here and in the worker, and the calls carried by the
   reads;
 - **Variants:** the scanned sites and the allele counts of the worker;
-- **Reads:** the reads of the reads track.
+- **Reads:** the reads of the reads track, and the records the alignment libraries decoded for it.
 
 They are read again when switched back on.
+
+**Memory.** The alignment libraries keep decoded records so that a genome browser can pan without
+decompressing again. Their default is 1 GB per file. This page counts coverage, variants and
+methylation once into compact states of its own, so it gives the libraries one budget of 128 MB
+for all files together, in the page and in the background worker each. A record nothing has used
+for 45 s is dropped, and the records are let go as soon as what they were decoded for is counted.
+On a 1,000× capture, the page's memory with coverage alone went from 396 MB to 121 MB. The
+decompressor keeps a working area as large as the largest block it has inflated (about 100 MB on
+such data); this is a one-off ceiling, not a growth. The reads track draws mismatches as one shape
+per base colour, not one per mismatch. A noisy long-read library with *Consensus* off, or a
+reference of another genome build, used to put over 100,000 shapes on the page; it now stays
+under 3,000.
 ## Moving inside a view
 
 The search box next to the gene name moves the window without leaving the view. It takes, in

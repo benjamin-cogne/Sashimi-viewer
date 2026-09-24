@@ -35,6 +35,7 @@
     "@gmod/bgzf-filehandle": "^6.6.0",
     "@gmod/cram": "^14.0.0",
     "@gmod/indexedfasta": "^5.0.11",
+    "@gmod/shared-read-cache": "^1.7.2",
     "fflate": "^0.8.3",
     "generic-filehandle2": "^2.4.0",
     "react": "^18.2.0",

@@ -91,7 +91,7 @@ export interface SashimiDataSource {
   /** CpG methylation of a window from the reads' MM / ML tags (long reads), per haplotag; counted once and kept (methylation.ts) */
   getMethylation?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   /** the viewer no longer shows these: what was counted and kept for them (every sample) can be dropped */
-  release?(what: 'methylation' | 'variants'): void;
+  release?(what: 'methylation' | 'variants' | 'records'): void;
   /**
    * Clipped reads of a sample rescued at breakpoints seen in other samples (their clipped bases matching the reference
    * at the other end): scanned around the breakpoint ends only. Absent when the source has no alignment file.

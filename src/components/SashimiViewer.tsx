@@ -960,6 +960,8 @@ export default function SashimiViewer({
   /** Count intron retention in the usage percentages (IR pills, and retention in the canonical arc's denominator). */
   const [includeRetention, setIncludeRetention] = useState(init.intronRetention ?? true);
   const [showReads, setShowReads] = useState(init.reads ?? !!initialReads);
+  const showReadsRef = useRef(showReads);
+  showReadsRef.current = showReads;
   const [readsSampleId, setReadsSampleId] = useState<number | null>(init.readsSample ?? null);
   const [readsAll, setReadsAll] = useState(init.readsAll ?? false); // one reads track under every sample (primary only by default)
   const [collapseReads, setCollapseReads] = useState(init.collapseReads ?? false);
@@ -1478,6 +1480,9 @@ export default function SashimiViewer({
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
         ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched, partial: false,
       } : t));
+      // the coverage is counted and kept: the records decoded for it would only serve a reads track, so with none shown
+      // and no other coverage still reading, they are let go now rather than at the libraries' idle timeout
+      if (!showReadsRef.current && covAbort.current.size <= 1) ds.release?.('records');
     } catch (err: any) {
       if (reqSeq.current.get(sid) !== seq || isAbort(err)) return;
       setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, partial: false, error: err.message } : t));
@@ -1753,6 +1758,7 @@ export default function SashimiViewer({
     readsAbort.current.clear();
     for (const [sid, n] of readsSeq.current) readsSeq.current.set(sid, n + 1);   // an answer still on its way is dropped
     setReadsData({});
+    ds.release?.('records');   // and the decoded records the libraries kept for the next pan
     setReadsLoading({});
   }, [showReads]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2780,6 +2786,7 @@ export default function SashimiViewer({
     const pxPerBp = linearAxis ? (scale.x(tickOrigin + 10000) - scale.x(tickOrigin)) / 10000 : 0, tickFine = Math.abs(pxPerBp) >= METHYL_TICK_FINE_PX_PER_BP;
     const meMod: string[] = [], meUnmod: string[] = [], meLow: string[] = [];
     const meLayer: JSX.Element[] = [], meN = [0, 0, 0];
+    const mmPaths = new Map<string, string[]>(), mmLetters: JSX.Element[] = [];
     const meDeferred = methylOn && viewMoving && visible.reduce((n, r, i) => n + (rows[i] >= 0 && r.me ? 1 : 0), 0) > METHYL_TICK_READS_BUDGET;
     const readEls = visible.map((r: AlignedRead, idx: number) => {
       const row = rows[idx];
@@ -2888,13 +2895,16 @@ export default function SashimiViewer({
           else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
         }
       });
+      // mismatches go to the track's shared paths (one per colour and quality class), not one rectangle each: a
+      // noisy library, or a reference of another build, gives each read hundreds of them
       for (const [pos, base, qual] of r.m) {
+        if (pos < viewStart - 1 || pos > viewEnd) continue;
         if (consensus && !snvSites.has(`${pos}\t${base}`)) continue;
         const { left, w } = basePx(pos);
-        const color = BASE_COLORS[base] || BASE_COLORS.N;
-        const alpha = qual < 10 ? 0.3 : qual < 20 ? 0.6 : 1;
-        parts.push(<rect key={`m${pos}`} x={left} y={top} width={w} height={rowH} fill={color} opacity={alpha} />);
-        if (showLetters && w >= 7) parts.push(<text key={`mt${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+        const key = `${BASE_COLORS[base] || BASE_COLORS.N}|${qual < 10 ? 0.3 : qual < 20 ? 0.6 : 1}`;
+        const d = `M${left.toFixed(1)},${top}h${w.toFixed(1)}v${rowH}h-${w.toFixed(1)}z`;
+        const l = mmPaths.get(key); if (l) l.push(d); else mmPaths.set(key, [d]);
+        if (showLetters && w >= 7) mmLetters.push(<text key={`mt${idx}:${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
       }
       r.i.forEach(([pos, len], k) => {
         if (len < SV_MIN_DELETION && (len < indelMin || (consensus && !insSites.has(pos)))) return;   // large ones always, as deletions
@@ -2981,7 +2991,13 @@ export default function SashimiViewer({
     ];
     const methylInfo = meDeferred ? ' · CpG calls: drawn when the view stops (deep window)' : methylOn ? ` · CpG calls of the reads drawn: ${meCalls ? `${meN[0].toLocaleString()} methylated (red), ${meN[1].toLocaleString()} unmethylated (blue)${meN[2] ? `, ${meN[2].toLocaleString()} below the confidence threshold (not coloured)` : ''}` : 'none (no MM / ML tags)'}`
       : showMethyl && isDnaSample(sid) && mode === 'reads' && viewEnd - viewStart > METHYL_READS_MAX_BP ? ` · zoom in to ≤ ${formatBp(METHYL_READS_MAX_BP)} for the CpG calls of each read` : '';
-    return wrap(height, info + methylInfo, [...groupEls, ...readEls.filter((e): e is JSX.Element => e !== null), ...methylEls], bodyHeight);
+    const mismatchEls = mmPaths.size ? [
+      <g key="mismatches" pointerEvents="none">
+        {[...mmPaths].map(([k, d]) => { const [fill, op] = k.split('|'); return <path key={k} d={d.join('')} fill={fill} opacity={+op} />; })}
+        {mmLetters}
+      </g>,
+    ] : [];
+    return wrap(height, info + methylInfo, [...groupEls, ...readEls.filter((e): e is JSX.Element => e !== null), ...mismatchEls, ...methylEls], bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
