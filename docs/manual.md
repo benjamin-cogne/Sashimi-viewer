@@ -169,6 +169,24 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   list is saved with the session. The same panel has **A− / A+** buttons that shrink or enlarge that
   junction's label on every track (70–250 %), for the arcs a figure should emphasise; also saved
   with the session.
+- **Supporting reads**: *Supporting reads* in an arc's panel (junction or structural arc) switches
+  every reads track shown to the reads that support that arc, with their mates in the window. It
+  opens the reads track if needed, and shows raw reads, not collapsed. What counts as support:
+  - a **junction**: an intron of the read (CIGAR N) at the junction, to the base. For long reads
+    whose junctions a few bases off were counted with it, within 6 bp.
+  - a **deletion**: a CIGAR deletion of 50 bp or more at the event, or a read broken at either end.
+  - a **split-read, duplication or inversion arc**: a read broken at either end, meaning an
+    alignment end followed by a clip of 8 bases or more, or an end of another part of the read
+    (SA tag). Ends count within the arc's merge tolerance: 5 % of its length, 20–100 bp.
+  - **discordant pairs**: pairs of the arc's class (→ ←, ← →, one strand) with one mate in each
+    of its end bins.
+
+  Every read of the window is tested before any downsampling. At most 300 supporting reads are
+  kept (every k-th past that), then their mates are added. The header gives the count
+  ("108 of 108 reads supporting the junction … + 108 mates"), and its *✕ all reads* link brings
+  every read back. The filter ends with a change of chromosome. Exported pages do the same with the
+  reads they carry. There, a mate outside the exported window is missing: the 55 reads of an LDLR
+  duplication's pairs show without their mates, which lie 3.9 kb away.
 
 ## RNA-seq and genomic DNA
 

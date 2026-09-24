@@ -14,6 +14,7 @@ import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpa
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
 import { callSites, collapseReads } from './collapse';
+import { arcReadFromAligned, supportsArc } from './arcSupport';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
@@ -302,14 +303,27 @@ export class EmbeddedDataSource extends LocalDataSource {
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
     let reads = best.reads.filter(r => r.e > start && r.s < end);
-    const total = reads.length;
-    const cap = collapsed ? 40000 : Math.max(100, maxReads);
-    if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
+    const support = !collapsed ? opts?.support : undefined;
+    let total = reads.length, mates = 0;
+    if (support) {
+      // the supporting reads (every k-th past maxReads), then their mates in the window
+      let hits = reads.filter(r => supportsArc(arcReadFromAligned(r, chrom), chrom, support));
+      total = hits.length;
+      const cap = Math.max(1, maxReads);
+      if (hits.length > cap) { const step = hits.length / cap; hits = Array.from({ length: cap }, (_, i) => hits[Math.floor(i * step)]); }
+      const kept = new Set(hits), names = new Set(hits.filter(r => r.mp != null).map(r => r.n));
+      const extra = reads.filter(r => !kept.has(r) && names.has(r.n));
+      mates = extra.length;
+      reads = [...hits, ...extra].sort((a, b) => a.s - b.s);
+    } else {
+      const cap = collapsed ? 40000 : Math.max(100, maxReads);
+      if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
+    }
     const ref = best.reference?.seq ?? null, refStart = best.reference?.start ?? 0;
     const longReads = isLongRead(reads);
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source, haplotags: haplotagCounts(reads) };
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), long_reads: longReads, reference: best.reference, reference_source: best.reference_source, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {
         // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them

@@ -261,6 +261,8 @@ export interface HaplotypeView {
 export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
+  /** only the reads supporting an arc were asked for (ReadsOptions.support): `total` supporting reads, `shown` kept of them; `mates` reads added as their mates */
+  supporting?: { mates: number };
   sites: VariantSite[]; groups: ReadGroup[];
   /** read-based phasing of the window (collapsed mode with two haplotypes) */
   phase?: PhaseResult;

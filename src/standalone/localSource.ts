@@ -18,6 +18,7 @@ import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from '
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { callSites, collapseReads } from './collapse';
+import { arcReadFromCigar, supportsArc } from './arcSupport';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import type { GenomeBuild } from './ensembl';
@@ -227,7 +228,11 @@ const CRAM_VIEW: RecordView<any> = {
 /** Result of a budgeted scan: `kept` holds every `rate`-th of the `total` reads that passed the filters. */
 interface Scan { total: number; rate: number; kept: RawRead[] }
 /** What a scan needs beyond its window: the structural fields of each record, and the caller's abort signal. */
-interface ScanOptions { structural?: boolean; signal?: AbortSignal }
+interface ScanOptions {
+  structural?: boolean; signal?: AbortSignal;
+  /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
+  filter?: (light: RawRead) => boolean;
+}
 
 /** Rejects with the standard AbortError once the caller has given up on the request. */
 function throwIfAborted(signal?: AbortSignal): void {
@@ -513,7 +518,7 @@ export class LocalDataSource implements SashimiDataSource {
    * nor the pauses grow with the depth of the library. `opts.signal` drops the decoding and the fetch in flight.
    */
   private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean, opts: ScanOptions = {}): Promise<Scan> {
-    const { structural = false, signal } = opts;
+    const { structural = false, signal, filter } = opts;
     const loc = await this.locate(id, chrom);
     if (!loc) return { total: 0, rate: 1, kept: [] };
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
@@ -531,6 +536,7 @@ export class LocalDataSource implements SashimiDataSource {
         seen++;
         if (!keepFlags(view.flags(r))) continue;
         if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
+        if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
         if (total % rate === 0) {
           kept.push(view.raw(r, light, structural, loc.o.refNames));
           if (kept.length > cap) { kept = kept.filter((_, i) => i % 2 === 0); rate *= 2; }
@@ -1073,20 +1079,35 @@ export class LocalDataSource implements SashimiDataSource {
     // a collapsed window decodes up to 40 000 reads and groups or phases them, which froze the page on deep data: the
     // worker does it, and only the answer (sites, groups, haplotypes; no read) comes back
     if (collapsed && this.variantScanner?.collapse && !s.embedded) return this.variantScanner.collapse(sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts);
-    const cap = collapsed ? Math.max(40000, maxReads) : Math.max(100, maxReads);
+    const support = !collapsed ? opts?.support : undefined;
+    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : Math.max(100, maxReads);
+    const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
     // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them; the
     // pair fields (mate position, template length) come along so that mates can be drawn linked
-    const { total, kept: raw } = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false, { structural: true, signal: opts?.signal });
+    const scanned = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false,
+      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined });
+    const total = scanned.total;
+    let raw = scanned.kept, mates = 0;
+    if (support) {
+      // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
+      const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
+      const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
+      if (want.size) {
+        const extra = await this.scan(sampleId, chrom, start, end, uniqueOnly, Infinity, false,
+          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`) });
+        mates = extra.kept.length;
+        raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);
+      }
+    }
     const refStart = Math.max(0, start - 500);
     const ref = await this.getReferenceSeq(chrom, refStart, end + 500);
     throwIfAborted(opts?.signal);
-    const own = (await this.locate(sampleId, chrom))?.name ?? chrom;
-    const reads: AlignedRead[] = raw.map(r => withMate(encodeRead(r, ref, refStart), r, own));
+    const reads: AlignedRead[] = raw.map(r => withMate(encodeRead(r, ref, refStart), r, ownName));
     if (opts?.methylation && !collapsed && ref) readMethylation(reads, raw, cpgSites(refStart, ref));
     const longReads = isLongRead(reads);
     const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
     const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length, long_reads: longReads,
+    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), long_reads: longReads,
       reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {

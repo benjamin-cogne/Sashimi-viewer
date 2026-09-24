@@ -1,4 +1,5 @@
 import type { MethylWindow } from '../../standalone/methylation';
+import type { ArcSupport } from '../../standalone/arcSupport';
 /**
  * Data source used by the Sashimi viewer. The web application implements it with the
  * FastAPI backend (see apiDataSource.ts); the standalone HTML viewer implements it in the
@@ -20,6 +21,11 @@ export interface ReadsOptions {
   phaseSource?: 'auto' | 'reads';
   /** reads mode: each read's CpG calls from its MM / ML tags (`me`), for the methylation colours */
   methylation?: boolean;
+  /**
+   * reads mode: only the reads supporting this arc (arcSupport.ts), with their mates in the window; `maxReads` then caps
+   * the supporting reads (every k-th kept) and `total` counts them all
+   */
+  support?: ArcSupport;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
 }
