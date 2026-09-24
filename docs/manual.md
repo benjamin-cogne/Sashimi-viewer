@@ -53,6 +53,10 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
    and their coverage is read three samples at a time, so a run of dozens of files stays usable.
    **Hide all** removes every track, the primary too (*Hide all matching* only those that match the
    search); **Primary only** removes every track but the first.
+   Each view keeps its own tracks: switching views, or reopening them from a session, shows exactly
+   the samples the view had, in its order. A view reduced to one sample stays that way. A new view
+   starts from the tracks of the one it was opened from. Only the very first view adds a comparison
+   sample to the primary.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
 
