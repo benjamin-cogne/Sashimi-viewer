@@ -337,30 +337,80 @@ one row per local haplotype × splice pattern with its read count, groups below 
 into a minor bucket. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
-**Variants and allele balance.** A DNA track opens as a plain coverage histogram: no read is
-decoded until asked, and the **Variants** option of the options panel is off. Switch it on to get
-the **variants** chip next to each DNA sample name. Variant sites are drawn as allele-fraction bars
-on the coverage (no star strip on DNA tracks; the bar's label gives the fraction, its tooltip the
-site), from the reads track when it is shown, or from the chip otherwise: the chip counts every
-read of the current window, whatever its width and depth, calls every site above *Min VAF*
-(at least 3 supporting reads, bases of quality 20 or more), and then reads *variants ✓ N*. The
-counts are exact (no read is left out) and are made **in the background** (a Web Worker): the page
-stays fluid while a deep window is read, the progress shows on the chip, and a click stops it.
-From then on the variants follow the window: moving or widening it counts only the part not
-counted yet, and what has been counted is kept, so zooming back in, going back, the unique-reads
-switch or another *Min VAF* are answered at once; another chromosome starts over. A click on the
-✓ chip forgets the variants (plain coverage until the next click). Switching the **Variants** option
-off removes the bars (and the
-chip) for a plain coverage. When every shown
+**Layers.** A DNA track opens as its coverage alone. Three layers go under it, switched in the toolbar
+under *Layers* for every DNA sample at once. They are always drawn in this order:
+- **coverage** (always shown);
+- **Variants**: the variants track described below;
+- **Methylation**: CpG methylation of long reads (below);
+- **Reads**: the alignments. The sample chip, or the selector next to the toggle, picks which
+  sample's reads are shown, or all of them.
+
+Why global toggles: the same question is usually asked of every sample at once (patient against
+controls), and switching a layer off stops its reading and releases what it held, so the page only
+ever carries what is shown.
+
+**Variants track.** With *Variants* on, the reads of each DNA track's window are scanned in the
+background (a Web Worker), for views up to 3 Mb. The scan counts every read, whatever the width and
+depth. A site needs at least 3 supporting reads with bases of quality 20 or more, and an
+alternate-allele fraction of *Min VAF* or more (*Min VAF (long)* for long reads). The sites then
+follow the window: moving or widening it scans only what is new, and zooming back in, going back,
+or another *Min VAF* are answered at once. Each site is drawn in a track of its own under the
+coverage, never on it:
+- a **bar** as high as its alternate-allele fraction, on a 0–100 % axis with a 50 % guide, in the
+  colour of the alternate base (purple for an insertion, black for a deletion). The grey above it
+  is the reference share. The fraction is written over the bar where there is room;
+- four **quality cells** under the bar, green (pass), amber (check), red (likely artefact) or grey
+  (too few reads to judge). Where sites are too close for four cells, a single cell takes the
+  colour of the worst check. From left to right:
+  1. **BQ** (SNV): the share of the alternate bases seen with a base quality under 20. Those bases
+     are left out of the allele fraction; when they are most of the allele, the call rests on a
+     few good bases. Amber from 25 %, red from 50 %. For an indel the first cell is **HP**, the
+     length of the reference homopolymer at the site, where polymerase slippage (short reads) and
+     basecalling (ONT) make indel errors. Short reads: amber from 6, red from 10. Long reads: amber
+     from 4, red from 7.
+  2. **MQ**: the share of the alternate reads mapped with MAPQ < 20, against the other reads over
+     the site. Red when half of them or more map poorly while the other reads do not (30 points
+     more); amber from 20 % (15 points more), or when every read maps poorly there (a repeat).
+  3. **SB** (strand bias): the alternate reads' + strand share against the other reads'
+     (two-sided binomial test). Amber at p < 0.01, red at p < 0.001. An allele carried on one
+     strand only is the signature of oxidative damage (8-oxoG, G>T) or of a library or PCR
+     artefact.
+  4. **END** (read-position bias): the share of the alternate calls within 10 bases of an
+     alignment end, against the other reads' (one-sided binomial). Amber at p < 0.01, red at
+     p < 0.001. It catches misaligned read ends near an indel, and adapter or clip artefacts.
+
+Testing each share against the same reads' reference side keeps a library whose reads all run one
+way (amplicons), or a region where every read maps poorly, from being called an artefact. The
+checks follow what GATK's hard filters (FisherStrand, MQ and MQRankSum, ReadPosRankSum) and a
+reviewer in IGV look at. They are an aid to judge a call, not a variant caller's filter.
+
+Hovering a site gives its values. A click opens the **distributions from the reads** over the
+site, decoded there (up to 5,000):
+- the alternate and reference reads by strand;
+- their mapping qualities;
+- the alternate bases' qualities;
+- their distances to the nearer read end.
+
+Distributions are compared as shares, so a skew shows whatever the depth. The track's header gives
+the sites of the view and how many pass, need a check or are flagged.
+
+The scan counts this evidence without holding a record per error. The first two calls of each
+(position, base) are kept as flags in a byte, and only an allele seen a third time gets an entry.
+On a noisy long-read library most mismatches are isolated errors, so the added memory stays
+moderate.
+
+**Allele balance.** *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch them on
+to separate a known polymorphism from a novel change. With Variants on, the track label then
+summarises the allele balance of the common SNPs covered: how many are heterozygous
+(0.2 ≤ VAF ≤ 0.8) and the range of their fractions around 0.5. The label flags two patterns:
+- *allele imbalance?*: heterozygous fractions far from 0.5 (median deviation above 0.15 over at
+  least 5 SNPs), as in a mosaic copy change, loss of heterozygosity or contamination;
+- *no heterozygous SNP (LOH / UPD?)*: a window with at least 8 homozygous common SNPs and none
+  heterozygous.
+
+When every shown
 sample is DNA the axis keeps the genomic orientation, coordinates increasing to the right, even
-for a minus-strand gene. *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch
-them on to separate a known polymorphism from a novel change. The track label then
-summarises the **allele balance** of the common SNPs covered: how many are heterozygous
-(0.2 ≤ VAF ≤ 0.8) and the range of their fractions around 0.5. Heterozygous fractions far from 0.5
-(median deviation above 0.15 over at least 5 SNPs) are flagged *allele imbalance?* (mosaic copy
-change, loss of heterozygosity, contamination), and a window with at least 8 homozygous common SNPs
-and none heterozygous is flagged *no heterozygous SNP (LOH / UPD?)*. Fractions come from the drawn
-reads, up to 2,500 in the window, so they are approximate on very deep data.
+for a minus-strand gene.
 
 **CpG methylation (long reads).** ONT (dorado, Guppy) and PacBio (jasmine, primrose) basecallers
 write the 5-methylcytosine calls of each read in its base-modification tags, `MM` (which bases carry
@@ -746,6 +796,7 @@ src/standalone/
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
   svmerge.ts                     structural arcs with nearby breakpoints merged into events
+  alleles.ts                     allele counts of the full variant scan, with each call's quality evidence
   methylation.ts                 CpG methylation from the MM / ML tags: counts per CpG × haplotype, filter threshold, CpG islands
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
@@ -757,6 +808,7 @@ src/components/
   sashimi/spliceModel.ts         splice event → mRNA / protein / NMD model
   sashimi/SpliceCartoon.tsx      animated splicing cartoon
   sashimi/knownVariants.ts       HGVS g. / ISCN parsing for the known-variants panel
+  sashimi/siteQuality.ts         quality checks of a variant site (BQ / homopolymer, MQ, strand, read position)
   sashimi/datasource.ts, types.ts   interfaces shared with the parent application
 ```
 

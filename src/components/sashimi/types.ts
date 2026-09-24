@@ -148,6 +148,20 @@ export interface AlignedRead {
 export interface VariantSite {
   pos: number; kind: 'snv' | 'ins' | 'del'; ref: string; alt: string; length: number;
   alt_count: number; depth: number; vaf: number;
+  /** quality evidence (full variant scans): the alternate reads' shares, each with the same share among the other reads over the site */
+  q?: SiteQuality;
+}
+export interface SiteQuality {
+  /** on the + strand */
+  fwd: number; fwdRef: number | null;
+  /** mapping quality under 20 */
+  lowMq: number; lowMqRef: number;
+  /** the call within 10 bases of an alignment end */
+  end: number; endRef: number | null;
+  /** SNV: share of the alternate bases seen with a base quality under 20 (left out of the allele fraction) */
+  lowBq?: number;
+  /** indel: length of the reference homopolymer at the site */
+  hp?: number;
 }
 /** One consensus group: a local haplotype × splice pattern with its supporting read count. */
 export interface ReadGroup {

@@ -4,6 +4,7 @@ import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc } from './sashimi/types';
 import { findSvEvent, svMergeTolerance } from '../standalone/svmerge';
+import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
 import type { MethylWindow } from '../standalone/methylation';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
@@ -334,6 +335,8 @@ function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number
 // Reads track (IGV-like alignment view)
 const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
 const READS_MAX_ROWS = 120;
+/** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
+const VARIANTS_MAX_VIEW_BP = 3_000_000;
 const READS_HEADER_H = 22;
 const READS_SEQ_ROW_H = 18;
 const READS_MAX = 2500;
@@ -357,6 +360,58 @@ const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto
 const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#6b7280' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const READ_FILL = '#c8cdd6';
+// ======================== Variants track (DNA) ========================
+/**
+ * Under the coverage of a DNA track, one mark per called site: a bar as high as its alternate-allele fraction (0–100 %,
+ * the reference share in grey above it) in the colour of the allele, and under it four quality cells (base quality or
+ * homopolymer, mapping quality, strand, read position; siteQuality.ts) in green, amber or red. Where neighbouring
+ * sites leave less than VAR_CELLS_PX, the four cells give way to one in the colour of the worst.
+ */
+const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7;
+const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 5;
+const VAR_CELLS_PX = 17;
+const DEL_COLOR = '#111827';
+/** the checks of a site, computed once per site object (their binomial tests are not redone at every frame) */
+const siteCheckCache = new WeakMap<VariantSite, { long: boolean; checks: QCheck[]; worst: QLevel }>();
+function cachedChecks(s: VariantSite, long: boolean): { checks: QCheck[]; worst: QLevel } {
+  const c = siteCheckCache.get(s);
+  if (c && c.long === long) return c;
+  const checks = siteChecks(s, long), out = { long, checks, worst: worstLevel(checks) };
+  siteCheckCache.set(s, out);
+  return out;
+}
+
+/**
+ * A small two-series histogram for the variant panel: per bin, the share of the alternate reads (in the allele's
+ * colour) next to the share of the reference reads (grey), each series summing to 100 %, so a skew of the
+ * alternate reads shows whatever the depth.
+ */
+function MiniHist({ title, bins, alt, other, color }: { title: string; bins: string[]; alt: number[]; other?: number[]; color: string }) {
+  const W = 340, H = 38, n = bins.length, bw = (W - 8) / n;
+  const ta = alt.reduce((a, b) => a + b, 0), tr = other ? other.reduce((a, b) => a + b, 0) : 0;
+  return (
+    <div className="mt-1.5">
+      <div className="text-[10px] text-gray-500">{title}</div>
+      <svg width={W} height={H + 12} className="block">
+        {bins.map((b, i) => {
+          const fa = ta ? alt[i] / ta : 0, fr = tr ? other![i] / tr : 0, x = 4 + i * bw;
+          const one = other ? (bw - 6) / 2 : bw - 6;
+          return (
+            <g key={b}>
+              <rect x={x + 2} y={H - fa * H} width={one} height={Math.max(fa ? 1 : 0, fa * H)} fill={color}><title>{`${b}: ${Math.round(fa * 100)} % of the alternate reads (${alt[i]})`}</title></rect>
+              {other && <rect x={x + 3 + one} y={H - fr * H} width={one} height={Math.max(fr ? 1 : 0, fr * H)} fill="#9ca3af"><title>{`${b}: ${Math.round(fr * 100)} % of the reference reads (${other[i]})`}</title></rect>}
+              <text x={x + bw / 2} y={H + 10} textAnchor="middle" fontSize={8} fill="#6b7280">{b}</text>
+            </g>
+          );
+        })}
+        <line x1={2} y1={H + 0.5} x2={W - 2} y2={H + 0.5} stroke="#d1d5db" />
+      </svg>
+    </div>
+  );
+}
+const binOf = (edges: number[], v: number) => { let i = 0; while (i + 1 < edges.length && v >= edges[i + 1]) i++; return i; };
+const histOf = (edges: number[], vals: number[]) => { const h = new Array(edges.length).fill(0); for (const v of vals) h[binOf(edges, v)]++; return h; };
+
 // ======================== CpG methylation panel ========================
 /** Widest view whose methylation is counted and drawn (the counted window reaches half a view further on each side). */
 const METHYL_MAX_VIEW_BP = 2_000_000;
@@ -872,7 +927,7 @@ export default function SashimiViewer({
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
   /** Variant sites of DNA tracks without a reads track, from the "variants" chip (the reads of the window, sampled only past the scan's budget); nothing is read until the user asks. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number };
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** long reads (the homopolymer check is stricter) */ long?: boolean; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   /** Fraction of the window the running full scan has covered, per sample. */
@@ -1654,14 +1709,15 @@ export default function SashimiViewer({
     const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
     (async () => {
       const sites: VariantSite[] = [];
-      let total = 0, done = 0, rate = 1;
+      let total = 0, done = 0, rate = 1, long = false;
       for (const r of ranges) {
         const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.uniqueOnly, minVaf,
           { ...opts, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: (done + f * (r.end - r.start)) / span })); } });
         sites.push(...res.sites); total += res.total; done += r.end - r.start;
         rate = Math.max(rate, res.sampled?.rate ?? 1);
+        long = long || res.long_reads;
       }
-      return { sites, total, rate };
+      return { sites, total, rate, long };
     })()
       .then(data => {
         if (!live()) return;
@@ -1672,7 +1728,7 @@ export default function SashimiViewer({
           const fetched: FetchWindow = { chrom: v.chrom, uniqueOnly: v.uniqueOnly, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
           const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
           const rate = Math.max(data.rate, keep ? old.rate ?? 1 : 1);
-          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined } };
+          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined, long: data.long } };
         });
       })
       .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
@@ -1685,10 +1741,6 @@ export default function SashimiViewer({
     for (const k of Object.keys(dnaSites)) { const sid = Number(k); if (!shown.has(sid)) forgetVariants(sid); }
   }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The "variants" chip of a DNA track: scans the whole current window. */
-  const loadAllVariants = useCallback((sid: number) => {
-    const v = viewRef.current;
-    scanVariants(sid, [{ start: v.start, end: v.end }], false);
-  }, [scanVariants]);
 
   // a request still running when the viewer unmounts is stopped, whatever started it
   useEffect(() => () => {
@@ -1704,6 +1756,21 @@ export default function SashimiViewer({
   /** Sequence panel (HTML, never exported): the clipped, inserted and hard-clipped bases of a read, or the consensus of a soft-clip cluster. */
   type SeqItem = { label: string; seq?: string; note?: string; action?: { label: string; run: () => void } };
   const [seqPanel, setSeqPanel] = useState<{ title: string; subtitle?: string; x: number; y: number; items: SeqItem[]; busy?: string; error?: string } | null>(null);
+  /** The evidence of one variant site, from the reads decoded around it (HTML panel, never exported). */
+  const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence } | null>(null);
+  const variantSeq = useRef(0);
+  const openVariantPanel = useCallback(async (sid: number, name: string, site: VariantSite, long: boolean, x: number, y: number) => {
+    const v = viewRef.current, seq = ++variantSeq.current;
+    setVariantPanel({ sid, name, site, long, x, y, busy: true });
+    try {
+      const end = site.pos + (site.kind === 'del' ? site.length : 1);
+      const data = await ds.getReads(sid, v.chrom, Math.max(0, site.pos - 1), end + 1, v.uniqueOnly, 5000, 'reads', 1, 0.01, {});
+      if (variantSeq.current !== seq) return;
+      setVariantPanel(p => p && { ...p, busy: false, ev: readEvidence(data.reads, site) });
+    } catch (err: any) {
+      if (variantSeq.current === seq) setVariantPanel(p => p && { ...p, busy: false, error: err?.message ?? String(err) });
+    }
+  }, [ds]);
   const copyText = (text: string) => { try { void navigator.clipboard?.writeText(text); } catch { /* no clipboard */ } };
   const fetchHardClips = useCallback(async (sid: number, r: AlignedRead) => {
     if (!ds.getPrimaryRecord || !r.h) return;
@@ -2955,7 +3022,9 @@ export default function SashimiViewer({
     sites: VariantSite[];
     /** allele balance of the heterozygous common SNPs of a DNA track */
     balance?: { text: string; title: string; warn: boolean };
-    /** height of the CpG methylation panel under the coverage (0 when none) */
+    /** height of the variants track under the coverage of a DNA track (0 when none) */
+    variants: number;
+    /** height of the CpG methylation panel under the variants track, or under the coverage (0 when none) */
     methyl: number;
     /** the panel has the row of the CpG-island differences with the other samples */
     methylDiff: boolean;
@@ -3010,12 +3079,16 @@ export default function SashimiViewer({
   useEffect(() => {
     if (!coverageVariants || !ds.getVariantSites) return;
     const v = viewRef.current;
+    if (v.end - v.start > VARIANTS_MAX_VIEW_BP) return;
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const jobs: { sid: number; ranges: { start: number; end: number }[]; extend: boolean }[] = [];
     for (const t of tracks) {
       const sid = t.sampleId;
       const e = dnaSites[sid];
-      if (!isDnaSample(sid) || !e?.full || e.error || dnaSitesLoading[sid] || readsTracks.get(sid)?.loaded) continue;
+      if (t.gtex || t.group || !isDnaSample(sid) || dnaSitesLoading[sid]) continue;
+      // every DNA track is scanned while Variants is on: its first window, or again after a failure elsewhere
+      if (!e || (e.error && !covers(e.fetched, v))) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
+      if (!e.full || e.error) continue;
       const f = e.fetched;
       const same = f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
       if (!same || v.end <= f.start || v.start >= f.end || scannedTooFar(f, v)) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
@@ -3027,7 +3100,7 @@ export default function SashimiViewer({
     if (!jobs.length) return;
     const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
     return () => clearTimeout(timer);
-  }, [tracks, readsTracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
     const out: TrackLayout[] = [];
@@ -3066,7 +3139,9 @@ export default function SashimiViewer({
         if (!covers && !dnaSitesLoading[track.sampleId]) return [];
         return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
       };
-      const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.loaded ? readsBelow.sites : dnaTrack ? chipSites() : [];
+      // a DNA track's sites come from the full scan of its window (the variants track, with their quality evidence), an
+      // RNA track's from its reads track
+      const trackSites: VariantSite[] = dnaTrack ? (coverageVariants ? chipSites() : []) : readsBelow?.loaded ? readsBelow.sites : [];
       // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
       const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
@@ -3268,8 +3343,9 @@ export default function SashimiViewer({
         }
       }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
-      const height = juncH + COVERAGE_H + methyl;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance, methyl, methylDiff: methyl > 0 && methylDiffRow });
+      const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites ? VAR_TRACK_H : 0;
+      const height = juncH + COVERAGE_H + variants + methyl;
+      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
@@ -3384,6 +3460,36 @@ export default function SashimiViewer({
             <rect x={0} y={y - 6.5} width={40} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.elsewhere} strokeWidth={1} />
             <text x={20} y={y + 3} textAnchor="middle" fill={SV_COLORS.elsewhere} fontSize={8.5} fontWeight={700}>→ chr</text>
             <text x={46} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mate or split alignment on another chromosome</text>
+          </g>
+        ),
+      });
+    }
+    if (anyDna && coverageVariants) {
+      items.push({
+        w: 176, el: (
+          <g key="lvar1">
+            <rect x={0} y={y - 7} width={5} height={14} fill="#9ca3af" opacity={0.3} /><rect x={0} y={y - 1} width={5} height={8} fill={BASE_COLORS.T} />
+            <text x={9} y={y + 3.5} fill={INK.muted} fontSize={9.5}>variant: bar = allele fraction</text>
+          </g>
+        ),
+      });
+      items.push({
+        w: 20 + 'quality: BQ or homopolymer · MQ · strand · read end'.length * 5.4 + 14, el: (
+          <g key="lvar2">
+            {[0, 1, 2, 3].map(i => <rect key={i} x={i * 4} y={y - 3.5} width={3} height={7} fill={Q_COLORS.good} />)}
+            <text x={20} y={y + 3.5} fill={INK.muted} fontSize={9.5}>quality: BQ or homopolymer · MQ · strand · read end</text>
+          </g>
+        ),
+      });
+      items.push({
+        w: 196, el: (
+          <g key="lvar3">
+            {(['good', 'warn', 'bad', 'na'] as QLevel[]).map((lv, i) => (
+              <g key={lv} transform={`translate(${i * 48}, 0)`}>
+                <rect x={0} y={y - 3.5} width={3} height={7} fill={Q_COLORS[lv]} />
+                <text x={6} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{lv === 'good' ? 'pass' : lv === 'warn' ? 'check' : lv === 'bad' ? 'flag' : 'n.a.'}</text>
+              </g>
+            ))}
           </g>
         ),
       });
@@ -3628,6 +3734,87 @@ export default function SashimiViewer({
     );
   };
 
+  /** Where each site of a variants track is drawn, for the view: centre and width of its bar, and the room its neighbours leave. */
+  const variantMarks = (sites: VariantSite[]) => {
+    const marks = sites.filter(s => s.pos + (s.kind === 'del' ? s.length : 1) > viewStart && s.pos < viewEnd).map(s => {
+      const xa = scale.x(s.pos), xb = scale.x(s.pos + (s.kind === 'del' ? s.length : s.kind === 'ins' ? 0 : 1));
+      const cx = (xa + xb) / 2, w = Math.max(3, Math.abs(xb - xa));
+      return { s, cx, w, room: Infinity };
+    }).sort((a, b) => a.cx - b.cx);
+    for (let i = 0; i < marks.length; i++) marks[i].room = Math.min(i ? marks[i].cx - marks[i - 1].cx : Infinity, i + 1 < marks.length ? marks[i + 1].cx - marks[i].cx : Infinity);
+    return marks;
+  };
+  const siteShort = (s: VariantSite) => s.kind === 'snv' ? `${s.ref}>${s.alt}` : s.kind === 'ins' ? `ins ${s.length} bp` : `del ${s.length} bp`;
+  const siteColor = (s: VariantSite) => s.kind === 'snv' ? (BASE_COLORS[s.alt] || BASE_COLORS.N) : s.kind === 'ins' ? INSERTION_COLOR : DEL_COLOR;
+
+  /**
+   * The variants track of a DNA track, under its coverage: the sites of the full scan of the window, each as its
+   * allele-fraction bar and quality cells (see VAR_TRACK_H). Bars, grey reference shares and cells are merged into one
+   * path per colour, so a window of thousands of sites stays a handful of nodes.
+   */
+  const renderVariantTrack = (L: TrackLayout, top: number, clipId: string) => {
+    const sid = L.track.sampleId, e = dnaSites[sid], loading = !!dnaSitesLoading[sid], span = viewEnd - viewStart;
+    const y0 = top + VAR_GAP, barTop = y0 + VAR_HEAD_H, barBottom = barTop + VAR_BAR_H, cellY = barBottom + 3;
+    const marks = variantMarks(L.sites), long = !!e?.long;
+    const bars = new Map<string, string[]>(), refs: string[] = [], cells = new Map<QLevel, string[]>(), labels: JSX.Element[] = [];
+    const push = <K,>(m: Map<K, string[]>, k: K, d: string) => { const l = m.get(k); if (l) l.push(d); else m.set(k, [d]); };
+    const verdicts: Record<QLevel, number> = { good: 0, warn: 0, bad: 0, na: 0 };
+    for (const { s, cx, w, room } of marks) {
+      const h = Math.max(1, s.vaf * VAR_BAR_H), x = (cx - w / 2).toFixed(1), ww = w.toFixed(1);
+      push(bars, siteColor(s), `M${x},${(barBottom - h).toFixed(1)}h${ww}v${h.toFixed(1)}h-${ww}z`);
+      if (h < VAR_BAR_H) refs.push(`M${x},${barTop}h${ww}v${(VAR_BAR_H - h).toFixed(1)}h-${ww}z`);
+      const { checks, worst } = cachedChecks(s, long);
+      verdicts[worst]++;
+      if (checks.length && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(cx - 7.5 + k * 4).toFixed(1)},${cellY}h3v${VAR_CELL_H}h-3z`));
+      else if (checks.length) push(cells, worst, `M${x},${cellY}h${ww}v${VAR_CELL_H}h-${ww}z`);
+      if (room >= 30) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - h - 2)} textAnchor="middle" fontSize={8} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{Math.round(s.vaf * 100)}</text>);
+    }
+    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+    const status = span > VARIANTS_MAX_VIEW_BP && !(e && e.fetched.start <= viewStart && e.fetched.end >= viewEnd)
+      ? { text: `zoom in to ≤ ${formatBp(VARIANTS_MAX_VIEW_BP)} for the variants`, color: INK.faint }
+      : e?.error ? { text: `variants: ${e.error}`, color: UNIQUE_COLOR }
+      : !e || (loading && !marks.length) ? { text: `scanning the reads… ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %`, color: INK.faint }
+      : { text: `${marks.length.toLocaleString()} site${marks.length === 1 ? '' : 's'} ≥ ${Math.round((long ? Math.max(minVaf, longReadMinVafPct / 100) : minVaf) * 100)} %`
+          + (marks.length ? ` · ${verdicts.good} pass · ${verdicts.warn} check · ${verdicts.bad} flagged` : '')
+          + `${e.rate && e.rate > 1 ? ` · sampled 1 in ${e.rate}` : ''}${loading ? ` · scanning ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %` : ''}`, color: INK.muted };
+    return (
+      <g key="variants">
+        <line x1={PLOT_LEFT} y1={top + 1} x2={plotRight} y2={top + 1} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />
+        <text transform={`translate(${12}, ${(barTop + cellY + VAR_CELL_H) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>VAF</text>
+        {[1, 0.5].map(f => (
+          <g key={f}>
+            <line x1={PLOT_LEFT - 4} y1={barBottom - f * VAR_BAR_H} x2={PLOT_LEFT} y2={barBottom - f * VAR_BAR_H} stroke={INK.gridStrong} strokeWidth={1} />
+            <text x={PLOT_LEFT - 7} y={barBottom - f * VAR_BAR_H + 3} textAnchor="end" fill={INK.muted} fontSize={8.5}>{f * 100} %</text>
+          </g>
+        ))}
+        <text x={PLOT_LEFT - 7} y={cellY + VAR_CELL_H - 0.5} textAnchor="end" fill={INK.faint} fontSize={7.5}>
+          <title>Quality cells under each site: base quality (SNV) or homopolymer (indel) · mapping quality · strand · read position; green pass, amber check, red likely artefact, grey not judged (too few reads). One cell in the colour of the worst where sites are close.</title>
+          Q
+        </text>
+        <g clipPath={`url(#${clipId})`}>
+          <line x1={PLOT_LEFT} y1={barBottom - VAR_BAR_H / 2} x2={plotRight} y2={barBottom - VAR_BAR_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="3 3" />
+          <line x1={PLOT_LEFT} y1={barBottom} x2={plotRight} y2={barBottom} stroke={INK.gridStrong} strokeWidth={0.8} />
+          {refs.length > 0 && <path d={refs.join('')} fill="#9ca3af" opacity={0.3} />}
+          {[...bars].map(([c, d]) => <path key={c} d={d.join('')} fill={c} />)}
+          {[...cells].map(([lv, d]) => <path key={lv} d={d.join('')} fill={Q_COLORS[lv]} />)}
+          {labels}
+          {/* a click on a site opens its evidence from the reads */}
+          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={VAR_TRACK_H - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? 'pointer' : undefined }}
+            onMouseDown={ev => ev.stopPropagation()}
+            onClick={ev => {
+              ev.stopPropagation();
+              const p = svgPoint(ev);
+              let best: (typeof marks)[number] | null = null;
+              for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
+              if (best) void openVariantPanel(sid, L.track.sampleName, best.s, long, ev.clientX, ev.clientY);
+            }} />
+        </g>
+        <text x={plotRight - 6} y={y0 + VAR_HEAD_H - 3} textAnchor="end" fill={status.color} fontSize={8.5} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{status.text}</text>
+        {loading && <rect x={PLOT_LEFT} y={top} width={plotWidth * Math.max(0.02, Math.min(1, dnaSitesProgress[sid] ?? 0))} height={1.5} fill={SNP_INDEL_COLOR} opacity={0.6} />}
+      </g>
+    );
+  };
+
   /**
    * The CpG methylation panel of a long-read DNA track, under its coverage: CpG islands and the status in a header,
    * then one heat lane per haplotype (or one for all reads) with, between them, the difference HP 1 − HP 2 as bars
@@ -3833,7 +4020,7 @@ export default function SashimiViewer({
             </g>
           ))}
           {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.sites.length > 0 && L.sites.map(st => {
+          {L.sites.length > 0 && !isDnaTrack(track) && L.sites.map(st => {
             const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
             let left = Math.min(xa, xb), w = Math.abs(xb - xa);
             if (w < 3) { left += w / 2 - 1.5; w = 3; }
@@ -3893,7 +4080,8 @@ export default function SashimiViewer({
           })}
         </g>
 
-        {L.methyl > 0 && renderMethylPanel(L, baseline, clipId)}
+        {L.variants > 0 && renderVariantTrack(L, baseline, clipId)}
+        {L.methyl > 0 && renderMethylPanel(L, baseline + L.variants, clipId)}
 
         {/* Edge chevrons for arcs continuing beyond the window (drawn outside the clip) */}
         {arcs.filter(a => a.edge).map(a => {
@@ -3944,33 +4132,6 @@ export default function SashimiViewer({
                 <title>{active ? (readsAll ? `Show only ${track.sampleName} reads` : 'Hide the reads track') : `Show ${track.sampleName} reads under this track`}</title>
                 <rect x={0} y={0} width={44} height={14} rx={7} fill={active ? color : INK.bg} stroke={active ? color : INK.faint} strokeWidth={0.8} />
                 <text x={22} y={10} textAnchor="middle" fill={active ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{active ? 'reads ✓' : 'reads'}</text>
-              </g>
-            );
-          })()}
-          {/* Variants chip (DNA track without its reads track): scan the whole window and call every site */}
-          {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsTracks.get(track.sampleId)?.loaded && !!ds.getVariantSites && (() => {
-            const span = viewEnd - viewStart;
-            const entry = dnaSites[track.sampleId];
-            const loading = !!dnaSitesLoading[track.sampleId];
-            const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-            const done = !!entry?.full && !entry.error && entry.fetched.chrom === currentChrom && entry.fetched.start <= viewStart && entry.fetched.end >= viewEnd
-              && entry.minVaf <= minVaf && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct;
-            const nHere = done ? entry.sites.filter(s => s.pos >= viewStart && s.pos < viewEnd && s.vaf >= minVaf).length : 0;
-            const pct = Math.round((dnaSitesProgress[track.sampleId] ?? 0) * 100);
-            const text = loading ? `variants… ${pct} %` : done ? `variants ✓ ${nHere.toLocaleString()}` : 'variants';
-            const w = text.length * 5.6 + 14;
-            const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
-            const sampled = done && !!entry.rate && entry.rate > 1;
-            const title = loading ? `Scanning the reads of the window (${formatBp(span)}), ${pct} % done. Click to stop and forget the variants.`
-              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window (${sampled ? '≈' : ''}${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %).${sampled ? ` The window was deeper than the scan's budget, so one read in ${entry.rate} was read and the counts scaled back: the allele fractions are unchanged, the read counts are estimates.` : ''} The variants follow the window: moving or widening it scans the new part. Click to forget them (plain coverage).`
-              : `Scan the reads of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage; the variants then follow the window. Nothing is read until you ask; the scan runs tile by tile and can be stopped, and a tile deeper than its budget is sampled (same allele fractions, estimated counts).`;
-            return (
-              <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: 'pointer' }}
-                onClick={e => { e.stopPropagation(); if (loading || done) forgetVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
-                <title>{title}</title>
-                <rect x={0} y={0} width={w} height={14} rx={7} fill={done ? SNP_INDEL_COLOR : INK.bg} stroke={done || loading ? SNP_INDEL_COLOR : INK.faint} strokeWidth={0.8} />
-                {loading && <rect x={0} y={0} width={Math.max(0, Math.min(w, w * (dnaSitesProgress[track.sampleId] ?? 0)))} height={14} rx={7} fill={SNP_INDEL_COLOR} opacity={0.25} />}
-                <text x={w / 2} y={10} textAnchor="middle" fill={done ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{text}</text>
               </g>
             );
           })()}
@@ -4407,8 +4568,18 @@ export default function SashimiViewer({
         for (const v of knownOnChrom(L.track.sampleId)) if (hit(v)) known.push({ v, sample: L.track.sampleName, off: false });
       }
     }
+    // over a variants track: the site under the pointer, with its checks
+    let variant: { name: string; color: string; site: VariantSite; checks: QCheck[] } | null = null;
+    for (const L of layouts) {
+      if (!L.variants) continue;
+      const top = L.yOff + L.juncH + COVERAGE_H;
+      if (hover.py < top || hover.py > top + L.variants) continue;
+      let best: { s: VariantSite; d: number } | null = null;
+      for (const m of variantMarks(L.sites)) { const d = Math.abs(m.cx - hover.px); if (d <= Math.max(5, m.w / 2 + 2) && (!best || d < best.d)) best = { s: m.s, d }; }
+      if (best) variant = { name: L.track.sampleName, color: siteColor(best.s), site: best.s, checks: cachedChecks(best.s, !!dnaSites[L.track.sampleId]?.long).checks };
+    }
     return {
-      x: hover.px, pos, alt, snps: here, known,
+      x: hover.px, pos, alt, snps: here, known, variant,
       cdna: tx ? cdnaPosition(pos, tx) : null,
       rows: layouts.map(L => ({ name: L.track.sampleName, color: L.color, depth: depthAt(L.track.coverage, pos), methyl: L.methyl ? methylHover(methylData[L.track.sampleId], L.track.sampleId) : null })),
     };
@@ -4422,7 +4593,7 @@ export default function SashimiViewer({
       const lanes = (phased ? [1, 2, ...(c.t[0] ? [0] : [])] : [3]).map(l => ({ label: l === 3 ? (P.tagged ? 'all (not phased)' : '5mC') : l === 0 ? 'untagged' : `HP${l}`, f: c.f[l], t: c.t[l] }));
       return { n: c.b - c.a, from: P.pos[c.a], to: P.pos[c.b - 1] + 2, lanes };
     }
-  }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, methylIslands, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
+  }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, methylIslands, dnaSites, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
 
   // ---- Popover content: junction (HGVS, frame, share vs canonical, usage of skipped exons) or exon (depth usage + junction ψ) ----
   interface PopTable { caption?: string; head: string[]; rows: string[][] }
@@ -4693,6 +4864,20 @@ export default function SashimiViewer({
             <Toggle checked={uniqueOnly} onChange={setUniqueOnly} label="Unique reads"
               title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
             <span className="flex items-center gap-1">
+              {/* the layers under each track, in the order they are drawn: coverage (always), variants, methylation, reads */}
+              {anyDna && <span className={`text-xs ${t.muted} font-semibold`} title="Layers drawn under each DNA track, in this order: coverage (always), variants, methylation, reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released.">Layers</span>}
+              {anyDna && (
+                <Toggle checked={coverageVariants} onChange={setCoverageVariants} label="Variants"
+                  title={`DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.`} />
+              )}
+              {anyDna && !!ds.getMethylation && (
+                <Toggle checked={showMethyl} onChange={setShowMethyl} label="Methylation"
+                  title={`Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.`} />
+              )}
+              {anyDna && !!ds.getMethylation && showMethyl && (
+                <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
+                  title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
+              )}
               <Toggle checked={showReads} onChange={setShowReads} label="Reads"
                 title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
               {showReads && tracks.length > 1 && (
@@ -4703,20 +4888,8 @@ export default function SashimiViewer({
                   <option value="all">All samples</option>
                 </select>
               )}
-              {anyDna && (
-                <Toggle checked={coverageVariants} onChange={setCoverageVariants} label="Variants"
-                  title="DNA tracks: draw the variant sites called from the reads as allele bars on the coverage, from the reads track when it is shown or from the variants chip next to the sample name otherwise. Off: plain coverage, no site." />
-              )}
-              {anyDna && !!ds.getMethylation && (
-                <Toggle checked={showMethyl} onChange={setShowMethyl} label="Methylation"
-                  title={`Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.`} />
-              )}
-              {anyDna && !!ds.getMethylation && showMethyl && (
-                <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
-                  title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
-              )}
               {(showReads || (anyDna && coverageVariants)) && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">
                   Min VAF
                   <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                     className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
@@ -5061,6 +5234,19 @@ export default function SashimiViewer({
                 <span className="text-gray-400">{'\n'}{k.off ? 'click the arrow to go there' : 'click the mark to centre the view on it'}</span>
               </div>
             ))}
+            {hoverInfo.variant && (
+              <div className="text-[10px] leading-4 mb-1 border-l-2 pl-1.5" style={{ borderColor: hoverInfo.variant.color }}>
+                <span className="font-semibold" style={{ color: hoverInfo.variant.color }}>{siteShort(hoverInfo.variant.site)}</span>
+                <span className="text-gray-600"> · {hoverInfo.variant.name} · VAF {Math.round(hoverInfo.variant.site.vaf * 100)} % ({hoverInfo.variant.site.alt_count}/{hoverInfo.variant.site.depth})</span>
+                {hoverInfo.variant.checks.map(c => (
+                  <div key={c.key} className="flex items-center gap-1">
+                    <span className="inline-block h-2 w-2 rounded-sm" style={{ background: Q_COLORS[c.level] }} />
+                    <span className="font-semibold text-gray-700 w-7">{c.key}</span><span className="text-gray-600">{c.value}</span>
+                  </div>
+                ))}
+                <div className="text-gray-400">click for the reads' distributions</div>
+              </div>
+            )}
             {hoverInfo.snps.map(v => <div key={v.id + v.start} className="text-[10px] text-blue-700 leading-4 mb-0.5 whitespace-pre-line">{snpText(v)}</div>)}
             {hoverInfo.alt && <div className="text-[10px] text-amber-700 leading-4 mb-0.5">{hoverInfo.alt.id} ({hoverInfo.alt.biotype}) · {hoverInfo.alt.kind === 'cds' ? 'coding' : hoverInfo.alt.kind === 'intron' ? 'intronic' : hoverInfo.alt.kind.replace('utr', "UTR ")}</div>}
             {hoverInfo.cdna && tx && <div className="text-[10px] text-gray-500 leading-4 mb-0.5">{hoverInfo.alt ? `${hoverInfo.cdna.label} on ` : ''}{tx.transcriptId} ({modelKindLabel(tx)}) · {hoverInfo.cdna.kind === 'cds' ? 'coding' : hoverInfo.cdna.kind === 'intron' ? 'intronic' : hoverInfo.cdna.kind.replace('utr', "UTR ")}</div>}
@@ -5084,6 +5270,57 @@ export default function SashimiViewer({
           <SpliceCartoon story={cartoonState.story} loading={cartoonState.loading} error={cartoonState.error} tx={cartoon.model}
             sampleName={cartoon.sample} sampleColor={cartoon.color} junctionLabel={cartoon.label} onClose={() => setCartoon(null)} />
         )}
+        {variantPanel && (() => {
+          const { site: s, ev } = variantPanel, color = siteColor(s);
+          const { checks } = cachedChecks(s, variantPanel.long);
+          const mqEdges = [0, 10, 20, 30, 40, 50, 60], mqBins = ['0–9', '10–19', '20–29', '30–39', '40–49', '50–59', '60+'];
+          const endEdges = [0, 10, 25, 50, 100, 500, 2000], endBins = ['<10', '10–24', '25–49', '50–99', '100–499', '500–1,999', '2,000+'];
+          const bqEdges = [0, 10, 20, 30, 40], bqBins = ['<10', '10–19', '20–29', '30–39', '40+'];
+          const fw = (l: { fwd: boolean }[]) => l.filter(o => o.fwd).length;
+          return (
+            // pinned to the window at the click (the plot's container scrolls and would clip it), kept on screen
+            <div className="fixed z-50 w-[372px] max-w-[95vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-variant-panel
+              style={{ left: Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384)), top: Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470)), maxHeight: window.innerHeight - 16 }}
+              onMouseDown={e => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-2 px-3 pt-2">
+                <div className="min-w-0">
+                  <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString()} <span style={{ color }}>{siteShort(s)}</span></div>
+                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString()} of {s.depth.toLocaleString()} reads (full scan)</div>
+                </div>
+                <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
+              </div>
+              <div className="px-3 pt-1.5">
+                {checks.map(c => (
+                  <div key={c.key} className="flex items-start gap-1.5 leading-4 mb-0.5">
+                    <span className="mt-[3px] inline-block h-2 w-2 shrink-0 rounded-sm" style={{ background: Q_COLORS[c.level] }} />
+                    <span className="w-8 shrink-0 font-semibold text-gray-700">{c.key}</span>
+                    <span className="text-gray-600">{c.detail}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="px-3 pb-2 pt-1.5 mt-1 border-t border-gray-100">
+                {variantPanel.busy && <div className="text-gray-400">reading the reads over the site…</div>}
+                {variantPanel.error && <div className="text-red-600">{variantPanel.error}</div>}
+                {ev && (
+                  <>
+                    <div className="text-gray-700">From the reads over the site: <b style={{ color }}>{ev.alt.length} alternate</b> · {ev.ref.length} reference{ev.other ? ` · ${ev.other} other allele` : ''}</div>
+                    <table className="mt-1 text-[10px] text-gray-600">
+                      <tbody>
+                        <tr><td className="pr-3" /><td className="pr-3 font-semibold">+ strand</td><td className="font-semibold">− strand</td></tr>
+                        <tr><td className="pr-3" style={{ color }}>alternate</td><td>{fw(ev.alt)}</td><td>{ev.alt.length - fw(ev.alt)}</td></tr>
+                        <tr><td className="pr-3">reference</td><td>{fw(ev.ref)}</td><td>{ev.ref.length - fw(ev.ref)}</td></tr>
+                      </tbody>
+                    </table>
+                    <MiniHist title="Mapping quality (alternate vs reference reads)" bins={mqBins} alt={histOf(mqEdges, ev.alt.map(o => o.mq))} other={histOf(mqEdges, ev.ref.map(o => o.mq))} color={color} />
+                    {s.kind === 'snv' && <MiniHist title="Base quality of the alternate bases (those under 20 are not counted in the allele fraction)" bins={bqBins} alt={histOf(bqEdges, ev.alt.map(o => o.bq ?? 0))} color={color} />}
+                    <MiniHist title="Distance to the nearer alignment end, bp (alternate vs reference reads)" bins={endBins} alt={histOf(endEdges, ev.alt.map(o => o.end))} other={histOf(endEdges, ev.ref.map(o => o.end))} color={color} />
+                    <div className="mt-1 text-[10px] text-gray-400">Cells: shares over the whole scan of the window. Here: the reads decoded at the site (up to 5,000), alternate bases of every quality (the scan's allele fraction leaves out those under 20).</div>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })()}
         {seqPanel && (
           <div className="absolute z-30 w-[560px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-seq-panel
             style={{ left: Math.min(seqPanel.x + 12, Math.max(8, svgWidth - 572)), top: Math.max(RULER_H, seqPanel.y + 12) }}

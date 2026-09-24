@@ -718,7 +718,7 @@ export class LocalDataSource implements SashimiDataSource {
         const ops = view.ops(r);
         const n = view.seqCodes(r, scratch);
         const start0 = view.start(r);
-        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique);
+        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r));
         if (st.longReads == null) {
           let span = 0;
           for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) span += ops[k] >>> 4; }
