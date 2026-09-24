@@ -25,12 +25,15 @@
 import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc } from '../components/sashimi/types';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, type RawRead } from './alignments';
 import { DepthIndexBuilder, registerDepthIndex } from '../components/sashimi/geometry';
+import { snapJunctions } from './junctionSnap';
 
 const CHUNK_BITS = 12, CHUNK = 1 << CHUNK_BITS, CHUNK_MASK = CHUNK - 1;
 /** Blocks this short or shorter can sit strictly inside a boundary's anchor window (16 bases) and are kept in a list. */
 const SHORT_BLOCK = SPAN_EXON_ANCHOR + SPAN_INTRON_ANCHOR;
 /** Junction key: start and length packed in one safe integer (introns up to 8.4 Mb, starts up to 2^30). */
 const JUNC_LEN = 8_388_608;
+/** Mean aligned bases per read above which the layers hold long reads (localSource.ts, isLongRead: 1 kb). */
+const LONG_READ_BASES = 1000;
 
 /** BAM CIGAR operation codes, as packed in NUMERIC_CIGAR (length << 4 | op). */
 export const CIGAR_OP = { M: 0, I: 1, D: 2, N: 3, S: 4, H: 5, P: 6, EQ: 7, X: 8 } as const;
@@ -127,6 +130,8 @@ class Counts {
   junc = new Map<number, number>();
   reads = 0;
   spliced = 0;
+  /** aligned and deleted bases (not the introns): their mean per read tells a long-read library */
+  bases = 0;
   /** |template length| of proper pairs, for the median insert the structural evidence measures discordance against */
   inserts = new Map<number, number>();
   /** the short blocks as start × 32 + length, sorted; rebuilt after new reads (a deep RNA gene holds hundreds of thousands) */
@@ -150,7 +155,7 @@ class Counts {
       if (op === 0 || op === 7 || op === 8) {
         this.S.add(pos); this.E.add(pos + len);
         if (len <= SHORT_BLOCK) { this.shortS.push(pos); this.shortE.push(pos + len); this.sortedShort = null; }
-        pos += len;
+        pos += len; this.bases += len;
       } else if (op === 3) {
         // a junction is the N operation itself, as STAR's SJ.out.tab, regtools and pysam count it. The gap between two
         // aligned blocks, which the previous counting used, also took in a deletion next to the intron (the junction
@@ -158,7 +163,7 @@ class Counts {
         const key = pos * JUNC_LEN + Math.min(len, JUNC_LEN - 1);
         this.junc.set(key, (this.junc.get(key) ?? 0) + 1);
         pos += len; spliced = true;
-      } else if (op === 2) pos += len;
+      } else if (op === 2) { pos += len; this.bases += len; }
     }
     this.reads++;
     if (spliced) this.spliced++;
@@ -281,13 +286,32 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
   // junctions overlapping the window
   const junc = new Map<number, number>();
   for (const [c, sign] of parts) for (const [k, v] of c.junc) junc.set(k, (junc.get(k) ?? 0) + sign * v);
-  const junctions: JunctionArc[] = [];
+  let reads = 0, spliced = 0, bases = 0;
+  for (const [c, sign] of parts) { reads += sign * c.reads; spliced += sign * c.spliced; bases += sign * c.bases; }
+  let arcs: JunctionArc[] = [];
   for (const [k, count] of junc) {
     if (count <= 0) continue;
-    const js = Math.floor(k / JUNC_LEN), je = js + (k % JUNC_LEN);
-    if (je > start && js < end) junctions.push({ start: js, end: je, count });
+    const js = Math.floor(k / JUNC_LEN);
+    arcs.push({ start: js, end: js + (k % JUNC_LEN), count });
   }
-  junctions.sort((a, b) => a.start - b.start || a.end - b.end);
+  // long reads (mean aligned length over 1 kb, as the reads track tells them): the junctions placed a few bases off a
+  // much more common one are counted with it (junctionSnap.ts), instead of a fan of arcs around each true junction
+  if (reads && bases / reads > LONG_READ_BASES) {
+    const snap = snapJunctions(arcs);
+    if (snap.size) {
+      const merged = new Map<number, JunctionArc>();
+      for (const a of arcs) {
+        const to = snap.get(a.start * JUNC_LEN + Math.min(a.end - a.start, JUNC_LEN - 1));
+        const [s0, e0] = to ?? [a.start, a.end], k = s0 * JUNC_LEN + (e0 - s0);
+        let m = merged.get(k);
+        if (!m) merged.set(k, m = { start: s0, end: e0, count: 0 });
+        m.count += a.count;
+        if (to) m.snapped = (m.snapped ?? 0) + a.count;
+      }
+      arcs = [...merged.values()];
+    }
+  }
+  const junctions = arcs.filter(j => j.end > start && j.start < end).sort((a, b) => a.start - b.start || a.end - b.end);
 
   /** blocks with start ≤ a and end ≥ b */
   const covering = (a: number, b: number): number => {
@@ -301,9 +325,6 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
   // intron start p: a block over [p − exon anchor, p + intron anchor); intron end q: over [q − intron anchor, q + exon anchor)
   for (const p of starts) spanning.intronStart[p] = covering(p - SPAN_EXON_ANCHOR, p + SPAN_INTRON_ANCHOR);
   for (const q of ends) spanning.intronEnd[q] = covering(q - SPAN_INTRON_ANCHOR, q + SPAN_EXON_ANCHOR);
-
-  let reads = 0, spliced = 0;
-  for (const [c, sign] of parts) { reads += sign * c.reads; spliced += sign * c.spliced; }
 
   // insert median, at the same rank structuralEvidence takes it (sorted list, index length >> 1)
   const inserts = new Map<number, number>();

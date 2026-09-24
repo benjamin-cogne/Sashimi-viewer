@@ -22,6 +22,7 @@ import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { HAP_MIN_DEPTH } from '../standalone/haplotypes';
+import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
@@ -3337,6 +3338,7 @@ export default function SashimiViewer({
           : null;
         const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
           `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · intron ${formatBp(j.end - j.start)}\n` +
+          (j.snapped ? `including ${j.snapped.toLocaleString()} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +

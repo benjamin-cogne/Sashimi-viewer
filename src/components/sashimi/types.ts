@@ -22,7 +22,11 @@ export interface AllTranscripts { gene_name: string; chrom: string; strand: numb
 /** Run-length encoded coverage: 0-based half-open [start, end) at constant depth. */
 export interface CoverageRun { start: number; end: number; depth: number; }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
-export interface JunctionArc { start: number; end: number; count: number; }
+export interface JunctionArc {
+  start: number; end: number; count: number;
+  /** long reads: of `count`, the reads that placed this junction a few bases off and were counted with it (junctionSnap.ts) */
+  snapped?: number;
+}
 /**
  * A structural arc: its breakpoints (0-based half-open) and supporting reads. Arcs of one event whose breakpoints lie
  * within a few tens of bases (svmerge.ts) are merged: the event then says what it was made of.

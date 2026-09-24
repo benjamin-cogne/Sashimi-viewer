@@ -291,6 +291,24 @@ with the session. Indels of every size are called. Random homopolymer indels sta
 because *Consensus* draws indels only at called sites. A homopolymer indel common enough to be
 called is flagged by the variants track's HP check. (An earlier *Min indel* option hid the indels
 under 10 bp; it also hid every real short indel of long reads, and was removed.)
+
+**Junction arcs of long reads.** Long reads place a junction a few bases off where the bases next to
+it carry errors (ONT especially). One junction then drew as a fan of arcs: the true one, and
+neighbours 1–6 bp away with a handful of reads each. On a track whose reads average more than 1 kb
+aligned, a junction within 6 bp at both ends of one used by at least 20 times as many reads is
+counted with it. Its tooltip says how many reads were counted that way. The ψ values and the
+boundary counts use the merged junction. IsoQuant corrects to the annotation within 6 bp on ONT data
+(4 on PacBio), FLAIR within 15; here the reads are the only reference.
+
+The 1-in-20 rule is strict on purpose. A variant that creates a cryptic donor or acceptor a few bases
+from the canonical one gives a junction at one exact place, used by a real share of the reads (often
+a whole haplotype's). Alignment jitter spreads a few per cent over many offsets. A cryptic site used
+by at least 5 % as many reads as its neighbour stays its own arc. On a simulated gene, an acceptor
+4 bp into an exon, used by 40 % of one haplotype's molecules, stayed apart (137 reads next to 594). It
+also formed its own consensus group and was flagged as used by that haplotype only. A looser 1-in-4
+rule would have merged it. The known limit: a real site used by fewer than 1 in 20 of its
+neighbour's reads is merged into it. Short reads (STAR, HISAT2 place junctions to the base) are
+never merged.
 Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On DNA
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
@@ -382,9 +400,8 @@ are used:
     no site of either) stays apart, because the reads cannot say which.
   - Every fragment is finally placed again against the final groups.
   - Homozygous sites (above 90 % alternate) are shown but not used, because every read agrees there.
-  - On long reads, a junction seen in few reads within 6 bp of one seen at least four times as often
-    is taken for it. ONT reads place junctions a few bases off where the bases next to them carry
-    errors. IsoQuant corrects within 6 bp on ONT data, FLAIR within 15.
+  - On long reads, a junction within 6 bp of one used by at least 20 times as many reads is taken for
+    it, as on the junction arcs (see *Long reads* above).
   - When most fragments agree with nobody (a wrong reference, a junk window), the exact patterns are
     used instead.
 
@@ -913,6 +930,7 @@ src/standalone/
   localSource.ts                 SashimiDataSource over local files (@gmod/bam, @gmod/cram, @gmod/indexedfasta)
   alignments.ts                  coverage runs, junction counts, CIGAR/mismatch decoding, strandness
   collapse.ts                    variant-site calling and consensus-group collapsing of reads
+  junctionSnap.ts                long-read junctions a few bases off a much more common one, merged into it
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
   svmerge.ts                     structural arcs with nearby breakpoints merged into events

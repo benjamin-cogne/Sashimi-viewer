@@ -13,6 +13,7 @@
  */
 import type { AlignedRead, ReadGroup, VariantSite } from '../components/sashimi/types';
 import { depthArray } from './alignments';
+import { snapJunctions } from './junctionSnap';
 
 const BASE_CODE: Record<string, number> = { A: 0, C: 1, G: 2, T: 3, N: 4 };
 const CODE_BASE = 'ACGTN';
@@ -161,34 +162,11 @@ export function readJunctions(r: AlignedRead, visit: (k: number, be: number, ns:
   }
 }
 
-/**
- * Long reads place a junction a few bases off where the bases next to it carry errors (ONT especially), so the reads
- * of one isoform disagree on it and no two would share a splice pattern. A junction seen in few reads, within
- * JUNCTION_SNAP_BP at both ends of one seen at least 1 / JUNCTION_SNAP_RATIO times as often, is taken for that one:
- * IsoQuant corrects to the annotation within 6 bp on ONT data (its `delta`, 4 on PacBio), FLAIR within 15. Two real
- * splice sites as close as that (NAGNAG acceptors, 3 bp) stay apart when both are common.
- */
-const JUNCTION_SNAP_BP = 6, JUNCTION_SNAP_RATIO = 4;
+/** Long-read junctions a few bases off a much more common one, taken for it (junctionSnap.ts). */
 export function junctionSnap(reads: AlignedRead[]): Map<number, [number, number]> {
-  const count = new Map<number, { s: number; e: number; n: number }>();
-  for (const r of reads) readJunctions(r, (_, s, e) => { const k = jKey(s, e); const c = count.get(k); if (c) c.n++; else count.set(k, { s, e, n: 1 }); });
-  const all = [...count.values()].sort((a, b) => b.n - a.n || a.s - b.s);
-  const byStart = [...all].sort((a, b) => a.s - b.s);
-  const snap = new Map<number, [number, number]>();
-  const done = new Set<number>();
-  for (const c of all) {
-    const ck = jKey(c.s, c.e);
-    if (done.has(ck)) continue;
-    done.add(ck);
-    let lo = 0, hi = byStart.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (byStart[mid].s < c.s - JUNCTION_SNAP_BP) lo = mid + 1; else hi = mid; }
-    for (let i = lo; i < byStart.length && byStart[i].s <= c.s + JUNCTION_SNAP_BP; i++) {
-      const o = byStart[i], ok = jKey(o.s, o.e);
-      if (done.has(ok) || Math.abs(o.e - c.e) > JUNCTION_SNAP_BP || o.n * JUNCTION_SNAP_RATIO > c.n) continue;
-      done.add(ok); snap.set(ok, [c.s, c.e]);
-    }
-  }
-  return snap;
+  const count = new Map<number, { start: number; end: number; count: number }>();
+  for (const r of reads) readJunctions(r, (_, s, e) => { const k = jKey(s, e); const c = count.get(k); if (c) c.count++; else count.set(k, { start: s, end: e, count: 1 }); });
+  return snapJunctions([...count.values()]);
 }
 
 function mergeBlocks(blocks: [number, number][]): [number, number][] {
