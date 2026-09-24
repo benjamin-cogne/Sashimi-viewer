@@ -6,7 +6,8 @@
  */
 import VariantWorker from './variantWorker?worker&inline';
 import type { LocalDataSource, VariantScanner, ReferenceChoice } from './localSource';
-import type { VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
+import type { ReadsOptions, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
+import type { ReadsResponse } from '../components/sashimi/types';
 import type { MethylWindow } from './methylation';
 
 export function attachVariantWorker(ds: LocalDataSource): boolean {
@@ -70,6 +71,23 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
       });
     },
     release(what: 'methylation' | 'variants') { worker.postMessage({ type: 'release', what }); },
+    collapse(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
+      const s = ds.sampleFiles(sampleId);
+      if (!s) return Promise.reject(new Error('Sample not found'));
+      if (opts?.signal?.aborted) return Promise.reject(abortError());
+      if (refSent !== ds.reference) { worker.postMessage({ type: 'reference', reference: ds.reference }); refSent = ds.reference; }
+      if (sent.get(sampleId) !== s.file) {
+        worker.postMessage({ type: 'sample', sample: { id: s.id, name: s.name, kind: s.kind, file: s.file, index: s.index } });
+        sent.set(sampleId, s.file);
+      }
+      const id = ++req;
+      return new Promise<ReadsResponse>((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
+        const { signal: _, ...plain } = opts ?? {};
+        worker.postMessage({ type: 'collapse', req: id, sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts: plain });
+      });
+    },
     forget(sampleId: number) { if (sent.delete(sampleId)) worker.postMessage({ type: 'forget', id: sampleId }); },
     reference(reference: ReferenceChoice) { worker.postMessage({ type: 'reference', reference }); refSent = reference; },
   };

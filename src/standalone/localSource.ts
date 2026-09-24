@@ -295,6 +295,8 @@ export interface VariantScanner {
   methyl?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   /** drop the counts kept for these */
   release?(what: 'methylation' | 'variants'): void;
+  /** a collapsed reads window (consensus groups or haplotypes) decoded and computed in the worker */
+  collapse?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
 }
 
 export class LocalDataSource implements SashimiDataSource {
@@ -1056,6 +1058,9 @@ export class LocalDataSource implements SashimiDataSource {
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
     const collapsed = mode === 'collapsed';
+    // a collapsed window decodes up to 40 000 reads and groups or phases them, which froze the page on deep data: the
+    // worker does it, and only the answer (sites, groups, haplotypes; no read) comes back
+    if (collapsed && this.variantScanner?.collapse && !s.embedded) return this.variantScanner.collapse(sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts);
     const cap = collapsed ? Math.max(40000, maxReads) : Math.max(100, maxReads);
     // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them; the
     // pair fields (mate position, template length) come along so that mates can be drawn linked
@@ -1073,11 +1078,13 @@ export class LocalDataSource implements SashimiDataSource {
       reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {
-        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf);
-        return { ...base, reads: [], sites: phase?.sites ?? callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [], phase, haplotypes };
+        // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
+        const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites);
+        return { ...base, reads: [], sites, groups: [], phase, haplotypes };
       }
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
+      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
     }
     return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };

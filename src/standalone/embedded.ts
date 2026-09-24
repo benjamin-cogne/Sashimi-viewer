@@ -312,11 +312,13 @@ export class EmbeddedDataSource extends LocalDataSource {
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source, haplotags: haplotagCounts(reads) };
     if (collapsed) {
       if (opts?.haplotypes !== 'any') {
-        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf);
-        return { ...base, reads: [], sites: phase?.sites ?? callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [], phase, haplotypes };
+        // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
+        const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites);
+        return { ...base, reads: [], sites, groups: [], phase, haplotypes };
       }
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
+      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
       return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
     }
     return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };

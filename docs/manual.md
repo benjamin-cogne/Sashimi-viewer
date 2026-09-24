@@ -296,7 +296,9 @@ device for RNA).
 two haplotypes**: one row per haplotype and phase set, drawn like a read. Grey marks the stretches
 covered by at least 3 of the haplotype's reads (blank where fewer). Coloured bases, deletion lines
 (large ones included) and insertion marks are the variants at least half of its reads carry, so a
-heterozygous variant lands on one row and a homozygous one on both. Phase sets side by side share a
+heterozygous variant lands on one row and a homozygous one on both. A variant of a haplotype must
+also be a site of the window over all reads. Otherwise, where a haplotype has only 3–4 reads (at
+the window's edges), two sequencing errors of the same base would make a false variant. Phase sets side by side share a
 pair of rows, separated by a dashed line: the haplotypes are linked within a set, not across it
 (H1 of one set is unrelated to H1 of the next). Hover a row for its reads, the median assignment
 confidence and its variants.
@@ -317,7 +319,9 @@ The haplotypes come from one of two sources, chosen with *Phase*:
   when at least 2 fragments cover both and at most 20 % of them disagree. The sites are walked in
   order, and each joins the current **phase block** when its trusted links agree, or starts a new
   one (no linking fragment, or contradicting links, which is what a third haplotype, mosaic alleles
-  or errors look like). Each fragment then goes to the haplotype of its block that it matches at
+  or errors look like). A single site that does not fit, while the next one does, is taken for an
+  outlier and left unphased: an error-made site, or a homozygous one read as heterozygous. The block
+  goes on past it instead of ending there. Each fragment then goes to the haplotype of its block that it matches at
   more sites, and the blocks act as phase sets. Short-read pairs phase sites within an insert of
   each other; long reads phase whole windows; RNA-seq phases too, with the fewer heterozygous sites
   its exons carry.
@@ -336,7 +340,27 @@ parts of a split read stay together. A read's tooltip gives its HP, PS and PC.
 
 *Haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
 one row per local haplotype × splice pattern with its read count, groups below *Min reads* folded
-into a minor bucket. These choices are saved with the session. Exported pages keep the haplotags of
+into a minor bucket. The two kinds of reads are grouped differently:
+- **Short reads** are grouped by identical patterns of alleles and splice junctions, seeded by
+  patterns seen in at least *Min reads* reads.
+- **Long reads** are clustered with a tolerance. No two long reads carry the same pattern: each
+  covers its own run of sites, with its own sequencing errors. The reads are taken left to right,
+  and each joins the group whose consensus it agrees with at their shared sites, up to 20 % of them
+  disagreeing. A read agreeing with two groups goes to the one it agrees with by 2 more sites, and
+  is ambiguous otherwise. Groups that agree where they overlap are then merged. A diploid window
+  thus gives its two haplotypes as two groups, whatever the number of groups the other alleles
+  (mosaic, a paralogue, a third copy) add.
+
+**Allele fractions of the reads track.** Every alternate base counts in a site's fraction,
+whatever its base quality, as in the variants track. Before, the bases under Q20 were left out of
+the count but not of the depth. On ONT data, where a third of the bases can be under Q20, every
+fraction came out a third too low. Homozygous sites (about 0.67) were then taken for heterozygous
+ones, and heterozygous ones (about 0.33) fell under the phasing window. The phasing itself still
+uses only alleles of Q20 or more.
+
+**Speed.** A collapsed window (up to 40,000 reads decoded, then phased or grouped) is computed in
+the background worker, and only its answer, not the reads, comes back to the page. A 1,000×
+capture, which used to freeze the page for half a second while collapsing, no longer holds it up. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
 **Layers.** Four layers make a DNA track, switched in the toolbar by one colour-coded control,

@@ -16,26 +16,27 @@
  *  5. Fragments are assigned to the haplotype they match best inside each block; support and disagreement counted.
  */
 import type { AlignedRead, VariantSite, PhaseBlock, PhaseResult, UnphasedSite } from '../components/sashimi/types';
-import { callSites } from './collapse';
+import { callSites, inBlocks, mismatchAt } from './collapse';
 
 export const HET_MIN = 0.25, HET_MAX = 0.75;
 export const MIN_LINK = 2, MAX_CONFLICT = 0.2;
 
 export type Allele = 0 | 1 | -1;   // 0 ref, 1 alt, -1 unknown
 
-/** Allele of one read at one site (unknown when not covered, low quality, or another allele). */
+/** Allele of one read at one site (unknown when not covered, low quality, or another allele); lookups by binary search. */
 export function alleleAt(r: AlignedRead, s: VariantSite, minBq: number): Allele {
   if (s.kind === 'snv') {
-    if (!r.b.some(([bs, be]) => bs <= s.pos && s.pos < be)) return -1;
-    for (const [pos, base, qual] of r.m) if (pos === s.pos) return qual < minBq ? -1 : base === s.alt ? 1 : -1;
-    return 0;
+    if (!inBlocks(r, s.pos)) return -1;
+    const m = mismatchAt(r, s.pos);
+    if (!m) return 0;
+    return m[1] < minBq ? -1 : m[0] === s.alt ? 1 : -1;
   }
   if (s.kind === 'ins') {
     if (r.i.some(([p, l]) => p === s.pos && l === s.length)) return 1;
-    return r.b.some(([bs, be]) => bs < s.pos && s.pos < be) ? 0 : -1;
+    return inBlocks(r, s.pos, true) ? 0 : -1;
   }
   if (r.d.some(([a, b]) => a === s.pos && b === s.pos + s.length)) return 1;
-  return r.b.some(([bs, be]) => bs <= s.pos && s.pos < be) ? 0 : -1;
+  return inBlocks(r, s.pos) ? 0 : -1;
 }
 
 /** Reads joined into fragments: a read and its mate (both in the set) count once. */
@@ -55,8 +56,9 @@ export function fragmentsOf(reads: AlignedRead[]): AlignedRead[][] {
 }
 
 export function phaseReads(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1): PhaseResult {
-  const sites = callSites(reads, start, end, ref, refStart, minAlt, minVaf, minBq, minIndel);
+  minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1, called?: VariantSite[]): PhaseResult {
+  // the window's sites, called by the caller already or here
+  const sites = called ?? callSites(reads, start, end, ref, refStart, minAlt, minVaf, minBq, minIndel);
   const het = sites.map((s, i) => i).filter(i => sites[i].vaf >= HET_MIN && sites[i].vaf <= HET_MAX);
   const hom = sites.map((s, i) => i).filter(i => sites[i].vaf > HET_MAX);
   const unphased: UnphasedSite[] = sites.map((s, i) => i).filter(i => sites[i].vaf < HET_MIN).map(i => ({ site: i, reason: 'low' as const }));
@@ -100,18 +102,29 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
       support: [0, 0], ambiguous: 0, conflicting: 0, links: [], breakBefore: nextReason });
     cur = [];
   };
-  for (let j = 0; j < het.length; j++) {
-    if (!cur.length) { cur.push(j); continue; }
+  /** site j against the current block: its phase set when its trusted links agree, else why it does not fit */
+  const tryJoin = (j: number): 'ok' | 'no link' | 'conflict' => {
     const links = linksOf(j);
-    if (!links.length) { close(); nextReason = 'no link'; cur.push(j); continue; }
+    if (!links.length) return 'no link';
     // vote: each trusted link says whether j is in phase with i (same) or opposite, weighted by its fragments
     let vote0 = 0, vote1 = 0;
     for (const l of links) { const inPhase = l.s >= l.d; const p = inPhase ? phase[l.i] : 1 - phase[l.i]; if (p === 0) vote0 += l.s + l.d; else vote1 += l.s + l.d; }
-    if (Math.min(vote0, vote1) / (vote0 + vote1) > MAX_CONFLICT) { close(); nextReason = 'conflict'; cur.push(j); continue; }
+    if (Math.min(vote0, vote1) / (vote0 + vote1) > MAX_CONFLICT) return 'conflict';
     phase[j] = vote0 >= vote1 ? 0 : 1;
-    cur.push(j);
+    return 'ok';
+  };
+  // a site that does not fit while the next one does is an outlier (an error-made or mistyped site, a homozygous one
+  // read as heterozygous): it is left unphased and the block goes on, instead of ending there
+  const skipped: UnphasedSite[] = [];
+  for (let j = 0; j < het.length; j++) {
+    if (!cur.length) { cur.push(j); continue; }
+    const r = tryJoin(j);
+    if (r === 'ok') { cur.push(j); continue; }
+    if (j + 1 < het.length && tryJoin(j + 1) === 'ok') { skipped.push({ site: het[j], reason: r === 'conflict' ? 'conflict' : 'unlinked' }); cur.push(j + 1); j++; continue; }
+    close(); nextReason = r; cur.push(j);
   }
   close();
+  unphased.push(...skipped);
   // fragments on haplotypes, per block; links kept for the tooltips
   const hetIndex = new Map(het.map((si, k) => [si, k]));
   for (const b of blocks) {

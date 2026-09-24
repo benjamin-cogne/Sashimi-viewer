@@ -39,7 +39,7 @@ export function haplotagCounts(reads: AlignedRead[]): { tagged: number; sets: nu
 }
 
 interface Group { key: string; ps: number | null; hap: number; frags: AlignedRead[][] }
-interface Options { start: number; end: number; ref: string | null; refStart: number; minBq: number; minIndel: number; minAlt: number; minVaf: number }
+interface Options { start: number; end: number; ref: string | null; refStart: number; minBq: number; minIndel: number; minAlt: number; minVaf: number; /** the window's sites over all reads, when the caller has them */ sites?: VariantSite[] }
 
 /** Haplotypes from the HP / PS tags: one group per (phase set, haplotype); a fragment takes the tag of the mate that has one. */
 export function haplotypesFromTags(reads: AlignedRead[], o: Options): HaplotypeView {
@@ -95,7 +95,9 @@ function build(source: HaplotypeView['source'], sets: { id: string; ps: number |
   let checked = 0;
   const conflicting = new Set<AlignedRead>();
   // heterozygous sites of the window, over all reads, with the sample's thresholds
-  const het = callSites(reads, o.start, o.end, o.ref, o.refStart, o.minAlt, o.minVaf, o.minBq, o.minIndel).filter(s => s.vaf >= HET_MIN && s.vaf <= HET_MAX);
+  const all = o.sites ?? callSites(reads, o.start, o.end, o.ref, o.refStart, o.minAlt, o.minVaf, o.minBq, o.minIndel);
+  const het = all.filter(s => s.vaf >= HET_MIN && s.vaf <= HET_MAX);
+  const windowKeys = new Set(all.map(siteKey));
   for (const set of sets) {
     const setReads = set.groups.flatMap(g => g.frags.flat());
     if (!setReads.length) continue;
@@ -108,7 +110,10 @@ function build(source: HaplotypeView['source'], sets: { id: string; ps: number |
       const covered = coveredStretches(rs, s0, e0);
       // a variant counts only where the haplotype is covered by HAP_MIN_DEPTH reads, as the row is drawn
       const inCovered = (p: number) => covered.some(([a, b]) => a <= p && p < b);
-      const sites = callSites(rs, s0, e0, o.ref, o.refStart, Math.min(o.minAlt, 2), CONSENSUS_FRACTION, o.minBq, o.minIndel).filter(x => inCovered(x.pos));
+      // a site of one haplotype must be a site of the window over all its reads too: a real allele always is, while two
+      // sequencing errors of the same base among the 3–4 reads of a haplotype at the window's edge otherwise make one
+      const sites = callSites(rs, s0, e0, o.ref, o.refStart, Math.min(o.minAlt, 2), CONSENSUS_FRACTION, o.minBq, o.minIndel)
+        .filter(x => inCovered(x.pos) && windowKeys.has(siteKey(x)));
       const pcs = rs.map(r => r.pc).filter((x): x is number => x != null).sort((a, b) => a - b);
       return { hap: g.hap, reads: countReads ? rs.length : g.frags.length, covered, sites, ...(pcs.length ? { pc: pcs[pcs.length >> 1] } : {}) };
     });
@@ -144,6 +149,8 @@ function fragAllele(fr: AlignedRead[], s: VariantSite, minBq: number): number {
   return a;
 }
 
+const siteKey = (s: VariantSite) => `${s.pos}:${s.kind}:${s.alt}`;
+
 /** Stretches of [start, end) where at least HAP_MIN_DEPTH reads align or delete bases. */
 function coveredStretches(reads: AlignedRead[], start: number, end: number): [number, number][] {
   const w = end - start, diff = new Int32Array(w + 1);
@@ -165,8 +172,8 @@ function coveredStretches(reads: AlignedRead[], start: number, end: number): [nu
  * caller asks for the reads' own phasing), else the in-page read-based phasing, whose blocks are also returned.
  */
 export function windowHaplotypes(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minVaf: number, minIndel: number, source: 'auto' | 'reads', phaseReads: () => PhaseResult): { phase?: PhaseResult; haplotypes: HaplotypeView } {
-  const o: Options = { start, end, ref, refStart, minBq: 20, minIndel, minAlt: 3, minVaf };
+  minVaf: number, minIndel: number, source: 'auto' | 'reads', phaseReads: () => PhaseResult, sites?: VariantSite[]): { phase?: PhaseResult; haplotypes: HaplotypeView } {
+  const o: Options = { start, end, ref, refStart, minBq: 20, minIndel, minAlt: 3, minVaf, sites };
   if (source !== 'reads' && reads.some(r => r.hp)) return { haplotypes: haplotypesFromTags(reads, o) };
   const phase = phaseReads();
   return { phase, haplotypes: haplotypesFromPhase(reads, phase, o) };
