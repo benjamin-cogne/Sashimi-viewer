@@ -370,18 +370,30 @@ DNA track is open. Each long-read DNA track then gets a panel under its coverage
 
 - a **header** with the CpG islands of the reference (green; at least 200 bp with GC ≥ 50 % and an
   observed/expected CpG ratio ≥ 0.6, Gardiner-Garden & Frommer 1987) and, on the right, the 5mC
-  fraction of the view per haplotype, the CpGs and the calls counted (its tooltip gives the filter);
-- one **heat lane per haplotype**, HP 1 and HP 2, when the reads carry haplotags (one lane of all
-  reads otherwise), coloured from blue (unmethylated) to red (methylated), the same convention as
-  IGV. Each pixel shows the pooled fraction of the methylated calls over all CpGs under it (the calls
-  add up; per-CpG fractions are not averaged, so better-covered sites weigh more). It is pale
-  where under 3 calls. Zoomed in to fewer than one CpG per 4 pixels, each CpG gets its own block;
-- between them, the **difference HP 1 − HP 2** as bars up (HP 1 more methylated, in its colour) or
-  down (HP 2), and **allele-specific methylation** framed in purple across the lanes. A frame marks
-  a run of at least 5 consecutive CpGs covered on both haplotypes whose fractions differ by 50 points
-  or more, with at least 10 calls on each side, and its label gives the difference. Imprinted
-  differentially methylated regions, the inactive X of a female sample, allele-specific promoters
-  and cis-acting variants look like this.
+  fraction of the view per haplotype, the share of the view that is phased, the CpGs and the calls
+  counted (its tooltip gives the filter);
+- a **ribbon** coloured from blue (unmethylated) to red (methylated), the same convention as IGV.
+  Where the reads are **phased** it splits in two, HP 1 on top and HP 2 below; where they are not,
+  it joins into one band of **all reads**. A thin vertical line marks each split and join. Unphased
+  stretches include regions with no heterozygous variant to tag the reads by, homozygous or
+  hemizygous stretches, and the gaps between phase sets. A pixel is split when both haplotypes carry a
+  fair share of its calls: each at least 20 % of them, the tagged reads together at least 60 %, and
+  each haplotype 3 calls or more. Split stretches narrower than 4 pixels are joined.
+  A file without haplotags gives one band all along;
+- a **regional density at every zoom**. Each pixel shows the pooled fraction of methylated calls
+  over the CpGs under it: the calls add up, and per-CpG fractions are not averaged, so better-covered
+  sites weigh more. When fewer than 6 CpGs lie under the pixel, it pools the 6 nearest, as long as
+  they are within 1 kb of it. Zoomed out, a pixel is exactly its stretch of genome; zoomed in, the
+  window stays a few CpGs wide and narrows as you zoom, so the panel keeps reading as a density
+  instead of isolated sites. A CpG desert wider than that stays a gap. A pixel with fewer than
+  3 calls is drawn pale. The hover card gives the fractions of the pixel under the pointer, split or
+  joined as drawn, with the CpGs and the span pooled;
+- under the ribbon, the **difference HP 1 − HP 2** where it is split, as bars up (HP 1 more
+  methylated, in its colour) or down (HP 2). **Allele-specific methylation** is framed in purple
+  across the panel. A frame marks a run of at least 5 consecutive CpGs covered on both haplotypes
+  whose fractions differ by 50 points or more, with at least 10 calls on each side, and its label
+  gives the difference. Imprinted differentially methylated regions, the inactive X of a female
+  sample, allele-specific promoters and cis-acting variants look like this.
 
 The calls follow the conventions of `modkit pileup --cpg --combine-strands` (Oxford Nanopore's
 reference tool; `pb-CpG-tools` for PacBio does the same per haplotype):
