@@ -63,7 +63,8 @@ from a FASTA you add. Nothing is kept when the tab closes.
 - A **variants track**: each site as a bar of its allele fraction with four quality cells (base
   quality or homopolymer, mapping quality, strand bias, read-position bias; green / amber / red),
   from an exact scan of the window run in the background; a click gives the reads' distributions.
-  Allele balance of the common SNPs.
+  Under it, the smoothed major allele fraction: green where balanced (0.5), amber to red as one allele
+  takes over, red over a run of homozygosity (LOH / UPD). Allele balance of the common SNPs.
 - Coverage drawn as the exact mean depth of every pixel, with a tick down to any base below half of
   it: a narrow dropout stays visible on a whole-gene view.
 - Reads, pairs, the **two haplotypes as consensus rows**, from the file's haplotags (HP/PS from

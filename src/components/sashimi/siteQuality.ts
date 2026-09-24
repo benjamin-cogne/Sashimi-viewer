@@ -2,21 +2,21 @@
  * Quality verdicts of a called variant site, from its evidence (VariantSite.q, counted by the full variant scan): four
  * checks in the spirit of GATK's hard filters and of what a reviewer looks at in IGV before trusting a call.
  *
- * - **BQ** (SNV): share of the alternate bases seen with a base quality under 20. They are left out of the allele
- *   fraction; when they are most of what carries the allele, the call leans on its few good bases (sequencing errors
- *   of a noisy cycle or homopolymer tail). Warn from 25 %, bad from 50 %.
+ * - **BQ** (SNV): share of the alternate bases seen with a base quality under 20. They count in the allele fraction
+ *   like the others; when they are most of what carries the allele, the call may be sequencing errors (a noisy cycle,
+ *   a homopolymer tail) rather than an allele. Warn from 25 %, bad from 50 %.
  * - **HP** (indel, in place of BQ): length of the reference homopolymer at the site, where polymerase slippage (short
  *   reads) and basecalling (ONT, less PacBio HiFi) make indel errors. Short reads: warn from 6, bad from 10; long
  *   reads: warn from 4, bad from 7.
  * - **MQ**: share of the alternate reads with a mapping quality under 20, against the other reads over the site
  *   (GATK's MQ / MQRankSum idea). Bad when at least half of them map poorly while the other reads do not (+30 points),
  *   warn from 20 % (+15 points), or when the region maps poorly for every read (other reads ≥ 50 %).
- * - **SB** (strand bias): the alternate reads' + strand share tested against the other reads' (binomial, two-sided;
- *   GATK's FisherStrand compares the same two strand splits). Warn p < 0.01, bad p < 0.001: an allele carried on one
- *   strand only is the signature of oxidative damage (8-oxoG, G>T), of a PCR or library artefact.
- * - **END** (read-position bias): the share of alternate calls within 10 bases of an alignment end, tested one-sided
- *   against the other reads' share (GATK's ReadPosRankSum idea): misaligned ends near an indel, adapter or clip
- *   artefacts. Warn p < 0.01, bad p < 0.001.
+ * - **SB** (strand bias): the alternate reads' strand split against the other reads' (Fisher's exact test, two-sided,
+ *   as GATK's FisherStrand). Warn p < 0.001, bad p < 1e-4: an allele carried on one strand only is the signature of
+ *   oxidative damage (8-oxoG, G>T), of a PCR or library artefact.
+ * - **END** (read-position bias): the alternate calls within 10 bases of an alignment end against the other reads'
+ *   (Fisher, one-sided; GATK's ReadPosRankSum idea): misaligned ends near an indel, adapter or clip artefacts.
+ *   Warn p < 0.001, bad p < 1e-4.
  *
  * Each test needs a few alternate reads to say anything; with fewer, the check is not judged.
  */
@@ -39,24 +39,33 @@ function lnGamma(x: number): number {
   for (let i = 1; i < 9; i++) a += c[i] / (x + i);
   return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
 }
-/** P(X ≥ k) for X ~ Binomial(n, p): the first term from log-gamma, the next ones by recurrence, O(n − k). */
-export function binomUpper(n: number, k: number, p: number): number {
-  if (k <= 0) return 1;
-  if (k > n) return 0;
-  let term = Math.exp(lnGamma(n + 1) - lnGamma(k + 1) - lnGamma(n - k + 1) + k * Math.log(p) + (n - k) * Math.log(1 - p)), s = 0;
-  const r = p / (1 - p);
-  for (let i = k; i <= n; i++) { s += term; term *= ((n - i) / (i + 1)) * r; if (term < s * 1e-16) break; }
+/** Probability of one 2×2 table with the given margins (hypergeometric): a successes among r draws from a + c successes in n. */
+const lnChoose = (n: number, k: number) => lnGamma(n + 1) - lnGamma(k + 1) - lnGamma(n - k + 1);
+/**
+ * Fisher's exact test of a 2×2 table [[a, b], [c, d]] (rows: alternate / reference reads; columns: yes / no), as
+ * GATK's FisherStrand does for the strand split. `side`: 'two' for any difference, 'greater' for a larger share among
+ * the alternate reads. Both rows are counts, so a reference side of few reads weighs as little as it should.
+ */
+export function fisher(a: number, b: number, c: number, d: number, side: 'two' | 'greater'): number {
+  const r1 = a + b, r2 = c + d, c1 = a + c, n = r1 + r2;
+  if (!r1 || !r2 || !c1 || c1 === n) return 1;
+  const lo = Math.max(0, c1 - r2), hi = Math.min(r1, c1), base = lnChoose(n, c1);
+  const p = (x: number) => Math.exp(lnChoose(r1, x) + lnChoose(r2, c1 - x) - base);
+  const pa = p(a);
+  let s = 0;
+  if (side === 'greater') for (let x = a; x <= hi; x++) s += p(x);
+  else for (let x = lo; x <= hi; x++) { const px = p(x); if (px <= pa * (1 + 1e-7)) s += px; }
   return Math.min(1, s);
-}
-/** Two-sided binomial p-value (twice the smaller tail). */
-function binomTwoSided(n: number, k: number, p: number): number {
-  const upper = binomUpper(n, k, p), lower = 1 - binomUpper(n, k + 1, p);
-  return Math.min(1, 2 * Math.min(upper, lower));
 }
 const pct = (x: number) => `${Math.round(x * 100)} %`;
 const pText = (p: number) => (p < 1e-4 ? p.toExponential(0) : p < 0.01 ? p.toFixed(4) : p.toFixed(2));
 /** Alternate reads needed before a strand or read-position test is judged. */
 const MIN_TEST_READS = 5;
+/**
+ * Fisher p-values for amber and red. A window holds hundreds of sites, so a per-site cut-off at 0.01 would colour
+ * a few of them by chance alone; GATK's hard filter for SNVs (FS > 60) sits near p = 1e-6.
+ */
+const P_WARN = 1e-3, P_BAD = 1e-4;
 
 export function siteChecks(s: VariantSite, longReads: boolean): QCheck[] {
   const q = s.q;
@@ -65,7 +74,7 @@ export function siteChecks(s: VariantSite, longReads: boolean): QCheck[] {
   if (s.kind === 'snv') {
     const lb = q.lowBq ?? 0;
     out.push({ key: 'BQ', level: lb >= 0.5 ? 'bad' : lb >= 0.25 ? 'warn' : 'good', value: pct(lb),
-      detail: `${pct(lb)} of the alternate bases have a base quality under 20 (left out of the allele fraction)` });
+      detail: `${pct(lb)} of the alternate bases have a base quality under 20 (all are counted in the allele fraction)` });
   } else {
     const hp = q.hp ?? 0, [w, b] = longReads ? [4, 7] : [6, 10];
     out.push({ key: 'HP', level: hp >= b ? 'bad' : hp >= w ? 'warn' : 'good', value: `${hp}`,
@@ -74,17 +83,18 @@ export function siteChecks(s: VariantSite, longReads: boolean): QCheck[] {
   const lm = q.lowMq, lr = q.lowMqRef;
   out.push({ key: 'MQ', level: (lm >= 0.5 && lm - lr >= 0.3) ? 'bad' : ((lm >= 0.2 && lm - lr >= 0.15) || lr >= 0.5) ? 'warn' : 'good', value: pct(lm),
     detail: `${pct(lm)} of the alternate reads map with MAPQ < 20 (other reads: ${pct(lr)})${lr >= 0.5 ? '; the region maps poorly for every read' : ''}` });
-  if (q.fwdRef == null || n < MIN_TEST_READS) out.push({ key: 'SB', level: 'na', value: pct(q.fwd), detail: `${pct(q.fwd)} of the alternate reads on the + strand (too few reads to test)` });
+  const nRef = q.nRef ?? 0;
+  if (q.fwdRef == null || n < MIN_TEST_READS || nRef < MIN_TEST_READS) out.push({ key: 'SB', level: 'na', value: pct(q.fwd), detail: `${pct(q.fwd)} of the alternate reads on the + strand (too few reads to test)` });
   else {
-    const p0 = Math.min(0.95, Math.max(0.05, q.fwdRef)), pv = binomTwoSided(n, Math.round(q.fwd * n), p0);
-    out.push({ key: 'SB', level: pv < 1e-3 ? 'bad' : pv < 1e-2 ? 'warn' : 'good', value: pct(q.fwd),
-      detail: `${pct(q.fwd)} of the alternate reads on the + strand, ${pct(q.fwdRef)} of the other reads (binomial p = ${pText(pv)})` });
+    const af = Math.round(q.fwd * n), rf = Math.round(q.fwdRef * nRef), pv = fisher(af, n - af, rf, nRef - rf, 'two');
+    out.push({ key: 'SB', level: pv < P_BAD ? 'bad' : pv < P_WARN ? 'warn' : 'good', value: pct(q.fwd),
+      detail: `${pct(q.fwd)} of the ${n} alternate reads on the + strand, ${pct(q.fwdRef)} of the ${nRef} other reads (Fisher p = ${pText(pv)})` });
   }
-  if (q.endRef == null || n < MIN_TEST_READS) out.push({ key: 'END', level: 'na', value: pct(q.end), detail: `${pct(q.end)} of the alternate calls within 10 bases of a read end (too few reads to test)` });
+  if (q.endRef == null || n < MIN_TEST_READS || nRef < MIN_TEST_READS) out.push({ key: 'END', level: 'na', value: pct(q.end), detail: `${pct(q.end)} of the alternate calls within 10 bases of a read end (too few reads to test)` });
   else {
-    const p0 = Math.min(0.95, Math.max(0.01, q.endRef)), pv = binomUpper(n, Math.round(q.end * n), p0);
-    out.push({ key: 'END', level: pv < 1e-3 ? 'bad' : pv < 1e-2 ? 'warn' : 'good', value: pct(q.end),
-      detail: `${pct(q.end)} of the alternate calls within 10 bases of a read end, ${pct(q.endRef)} of the other reads' bases (binomial p = ${pText(pv)})` });
+    const ae = Math.round(q.end * n), re = Math.round(q.endRef * nRef), pv = fisher(ae, n - ae, re, nRef - re, 'greater');
+    out.push({ key: 'END', level: pv < P_BAD ? 'bad' : pv < P_WARN ? 'warn' : 'good', value: pct(q.end),
+      detail: `${pct(q.end)} of the ${n} alternate calls within 10 bases of a read end, ${pct(q.endRef)} of the ${nRef} other reads (Fisher p = ${pText(pv)}, one-sided)` });
   }
   return out;
 }

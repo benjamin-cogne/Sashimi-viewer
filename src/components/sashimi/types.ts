@@ -158,6 +158,8 @@ export interface SiteQuality {
   lowMq: number; lowMqRef: number;
   /** the call within 10 bases of an alignment end */
   end: number; endRef: number | null;
+  /** the other reads over the site (the reference side of each comparison) */
+  nRef?: number;
   /** SNV: share of the alternate bases seen with a base quality under 20 (left out of the allele fraction) */
   lowBq?: number;
   /** indel: length of the reference homopolymer at the site */

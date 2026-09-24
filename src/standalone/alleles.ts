@@ -8,7 +8,8 @@
  * 11.2 s, garbage collection 7.7 s, callSites 1.9 s.
  *
  * Here each record's bases go straight into per-position counts: the depth (block starts and ends,
- * as for coverage), each mismatching base with a quality of MIN_BQ or more, insertions and deletions
+ * as for coverage), each mismatching base whatever its quality (those under MIN_BQ flagged for the base-quality
+ * check), insertions and deletions
  * by position and length, and where reads start and end (the reads a range holds). Sites are then
  * read back with exactly the rules of callSites (collapse.ts): at least MIN_ALT supporting reads, an
  * alternate fraction of at least Min VAF over the block depth (plus the deleting reads themselves for
@@ -20,12 +21,16 @@
 import type { VariantSite } from '../components/sashimi/types';
 import { Hist } from './coverage';
 
-/** callSites' fixed thresholds: supporting reads, and base quality of a counted mismatch. */
+/**
+ * Supporting reads a site needs; the base quality under which an alternate base is flagged. The scan counts every
+ * alternate base in the allele fraction (a low-quality one is flagged, the BQ check says how much of the allele they
+ * are); callSites, on the reads of the reads track, still leaves them out.
+ */
 export const MIN_ALT = 3, MIN_BQ = 20;
 /**
  * Quality evidence of each call, for the variants track: of the reads carrying an alternate allele, how many are on the
  * + strand, have a mapping quality under LOW_MQ, place it within END_BP of their alignment's ends, and (SNVs) how many
- * more carried it with a base quality under MIN_BQ (not counted in the allele fraction). Kept per (position, allele)
+ * of them carried it with a base quality under MIN_BQ (counted in the allele fraction all the same). Kept per (position, allele)
  * as one number, four 13-bit counters (saturating), in a Map: only positions where an alternate base was seen take
  * room. The reference side of each comparison is counted over the blocks, like the depth: + strand, low mapping
  * quality and near-end depth.
@@ -34,18 +39,19 @@ export const LOW_MQ = 20, END_BP = 10;
 const QF = 8192, Q_FWD = 1, Q_LMQ = QF, Q_END = QF * QF, Q_LBQ = QF * QF * QF;
 const qField = (v: number, unit: number) => Math.floor(v / unit) % QF;
 /**
- * The flags of the first two alternate calls seen at a (position, base), one byte per position and base, in chunks:
+ * The flags of the first two alternate calls seen at a (position, base), 16 bits per position and base, in chunks:
  * most mismatches of a noisy long-read library are isolated errors, and a Map entry for each would take far more room
  * than the counts themselves. A site needs MIN_ALT (3) calls anyway: a (position, base) gets its entry at its third
- * call, the first two calls' flags folded in. Bits 0–2: the first call's + strand, low MAPQ, near-end; 3–5: the
- * second's; 7: one call seen; 6: two.
+ * call, the first two calls' flags folded in. Bits 0–3: the first call's + strand, low MAPQ, near-end, low base
+ * quality; 4–7: the second's; 8: one call seen; 9: two.
  */
-const FIRST_SET = 128, SECOND_SET = 64, F_FWD = 1, F_LMQ = 2, F_END = 4;
+const FIRST_SET = 256, SECOND_SET = 512, F_FWD = 1, F_LMQ = 2, F_END = 4, F_LBQ = 8;
+const flagUnits = (fl: number): number[] => [...(fl & F_FWD ? [Q_FWD] : []), ...(fl & F_LMQ ? [Q_LMQ] : []), ...(fl & F_END ? [Q_END] : []), ...(fl & F_LBQ ? [Q_LBQ] : [])];
 class FirstFlags {
-  private chunks = new Map<number, Uint8Array>();
-  get bytes(): number { return this.chunks.size * 4096; }
+  private chunks = new Map<number, Uint16Array>();
+  get bytes(): number { return this.chunks.size * 8192; }
   get(pos: number): number { return this.chunks.get(pos >> 12)?.[pos & 4095] ?? 0; }
-  set(pos: number, v: number): void { let a = this.chunks.get(pos >> 12); if (!a) this.chunks.set(pos >> 12, a = new Uint8Array(4096)); a[pos & 4095] = v; }
+  set(pos: number, v: number): void { let a = this.chunks.get(pos >> 12); if (!a) this.chunks.set(pos >> 12, a = new Uint16Array(4096)); a[pos & 4095] = v; }
 }
 const qBump = (m: Map<number, number>, key: number, units: number[]) => {
   if (!units.length && !m.has(key)) return;
@@ -74,7 +80,7 @@ class AlleleCounts {
   /** reads: where they start, where their span ends — the reads over [a, b) are starts < b − ends ≤ a */
   RS = new Hist();
   RE = new Hist();
-  /** mismatching bases A, C, G, T, N with quality ≥ MIN_BQ; any other code in `other` (position × 256 + code) */
+  /** mismatching bases A, C, G, T, N, whatever their quality; any other code in `other` (position × 256 + code) */
   base = [new Hist(), new Hist(), new Hist(), new Hist(), new Hist()];
   other = new Map<number, number>();
   ins = new Map<number, number>();
@@ -125,19 +131,19 @@ class AlleleCounts {
             const rb = rc[ri], b = codes[qi];
             if (b === rb || rb === N_CODE) continue;
             const qual = quals && quals.length > qi ? quals[qi] : 30;
+            // every alternate base counts in the allele fraction, whatever its quality; a low one is flagged (the BQ check)
             const bi = BASE_INDEX[b], p = pos + i, qkey = p * 8 + (bi ?? 5);
-            // a low-quality call only adds to an allele already carried twice (single errors take no room)
-            if (qual < MIN_BQ) { if (this.snvQ.has(qkey)) qBump(this.snvQ, qkey, [Q_LBQ]); continue; }
-            if (bi === undefined) { const key = p * 256 + b; this.other.set(key, (this.other.get(key) ?? 0) + 1); qBump(this.snvQ, qkey, units(p)); continue; }
-            this.base[bi].add(p);
             const u = units(p);
+            if (qual < MIN_BQ) u.push(Q_LBQ);
+            if (bi === undefined) { const key = p * 256 + b; this.other.set(key, (this.other.get(key) ?? 0) + 1); qBump(this.snvQ, qkey, u); continue; }
+            this.base[bi].add(p);
             if (this.snvQ.has(qkey)) { qBump(this.snvQ, qkey, u); continue; }
-            const f = this.first[bi].get(p), bits = (u.includes(Q_FWD) ? F_FWD : 0) | (u.includes(Q_LMQ) ? F_LMQ : 0) | (u.includes(Q_END) ? F_END : 0);
+            const f = this.first[bi].get(p), bits = (u.includes(Q_FWD) ? F_FWD : 0) | (u.includes(Q_LMQ) ? F_LMQ : 0) | (u.includes(Q_END) ? F_END : 0) | (u.includes(Q_LBQ) ? F_LBQ : 0);
             if (!(f & FIRST_SET)) { this.first[bi].set(p, FIRST_SET | bits); continue; }
-            if (!(f & SECOND_SET)) { this.first[bi].set(p, f | SECOND_SET | (bits << 3)); continue; }
+            if (!(f & SECOND_SET)) { this.first[bi].set(p, f | SECOND_SET | (bits << 4)); continue; }
             // the third call: the entry starts with the first two calls' flags
             this.snvQ.set(qkey, 0);
-            for (const fl of [f & 7, (f >> 3) & 7]) qBump(this.snvQ, qkey, [...(fl & F_FWD ? [Q_FWD] : []), ...(fl & F_LMQ ? [Q_LMQ] : []), ...(fl & F_END ? [Q_END] : [])]);
+            for (const fl of [f & 15, (f >> 4) & 15]) qBump(this.snvQ, qkey, flagUnits(fl));
             qBump(this.snvQ, qkey, u);
           }
         }
@@ -258,7 +264,7 @@ function addSiteQuality(sites: VariantSite[], parts: [AlleleCounts, number][], d
       if (e != null) { v += sign * e; continue; }
       if (bi === undefined) continue;
       const f = c.first[bi].get(pos);
-      for (const [set, fl] of [[FIRST_SET, f & 7], [SECOND_SET, (f >> 3) & 7]]) if (f & set) v += sign * ((fl & F_FWD ? Q_FWD : 0) + (fl & F_LMQ ? Q_LMQ : 0) + (fl & F_END ? Q_END : 0));
+      for (const [set, fl] of [[FIRST_SET, f & 15], [SECOND_SET, (f >> 4) & 15]]) if (f & set) v += sign * flagUnits(fl).reduce((a, x) => a + x, 0);
     }
     return v;
   };
@@ -274,8 +280,8 @@ function addSiteQuality(sites: VariantSite[], parts: [AlleleCounts, number][], d
     s.q = {
       fwd: n ? f / n : 0, fwdRef: share(fwdD[i] - (inBlocks ? f : 0), bd),
       lowMq: n ? l / n : 0, lowMqRef: share(lmqD[i] - (inBlocks ? l : 0), bd) ?? 0,
-      end: n ? e / n : 0, endRef: share(endD[i] - (inBlocks ? e : 0), bd),
-      ...(s.kind === 'snv' ? { lowBq: lb / (lb + n) } : { hp: homopolymer(ref, s.pos, s.kind === 'ins') }),
+      end: n ? e / n : 0, endRef: share(endD[i] - (inBlocks ? e : 0), bd), nRef: Math.max(0, bd),
+      ...(s.kind === 'snv' ? { lowBq: n ? Math.min(1, lb / n) : 0 } : { hp: homopolymer(ref, s.pos, s.kind === 'ins') }),
     };
   }
 }

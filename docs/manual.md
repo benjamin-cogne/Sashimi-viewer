@@ -351,8 +351,10 @@ ever carries what is shown.
 
 **Variants track.** With *Variants* on, the reads of each DNA track's window are scanned in the
 background (a Web Worker), for views up to 3 Mb. The scan counts every read, whatever the width and
-depth. A site needs at least 3 supporting reads with bases of quality 20 or more, and an
-alternate-allele fraction of *Min VAF* or more (*Min VAF (long)* for long reads). The sites then
+depth. A site needs at least 3 supporting reads and an alternate-allele fraction of *Min VAF* or
+more (*Min VAF (long)* for long reads). Every alternate base counts in that fraction, whatever its
+base quality: the BQ check below says how much of it rests on low-quality bases, rather than
+hiding them. The sites then
 follow the window: moving or widening it scans only what is new, and zooming back in, going back,
 or another *Min VAF* are answered at once. Each site is drawn in a track of its own under the
 coverage, never on it:
@@ -362,27 +364,49 @@ coverage, never on it:
 - four **quality cells** under the bar, green (pass), amber (check), red (likely artefact) or grey
   (too few reads to judge). Where sites are too close for four cells, a single cell takes the
   colour of the worst check. From left to right:
-  1. **BQ** (SNV): the share of the alternate bases seen with a base quality under 20. Those bases
-     are left out of the allele fraction; when they are most of the allele, the call rests on a
-     few good bases. Amber from 25 %, red from 50 %. For an indel the first cell is **HP**, the
+  1. **BQ** (SNV): the share of the alternate bases seen with a base quality under 20. They count in
+     the allele fraction; when they are most of the allele, it may be sequencing errors (a noisy
+     cycle, a homopolymer tail) rather than an allele. Amber from 25 %, red from 50 %. For an indel the first cell is **HP**, the
      length of the reference homopolymer at the site, where polymerase slippage (short reads) and
      basecalling (ONT) make indel errors. Short reads: amber from 6, red from 10. Long reads: amber
      from 4, red from 7.
   2. **MQ**: the share of the alternate reads mapped with MAPQ < 20, against the other reads over
      the site. Red when half of them or more map poorly while the other reads do not (30 points
      more); amber from 20 % (15 points more), or when every read maps poorly there (a repeat).
-  3. **SB** (strand bias): the alternate reads' + strand share against the other reads'
-     (two-sided binomial test). Amber at p < 0.01, red at p < 0.001. An allele carried on one
-     strand only is the signature of oxidative damage (8-oxoG, G>T) or of a library or PCR
-     artefact.
-  4. **END** (read-position bias): the share of the alternate calls within 10 bases of an
-     alignment end, against the other reads' (one-sided binomial). Amber at p < 0.01, red at
-     p < 0.001. It catches misaligned read ends near an indel, and adapter or clip artefacts.
+  3. **SB** (strand bias): the alternate reads' strand split against the other reads' (Fisher's
+     exact test, two-sided, as GATK's FisherStrand). Amber at p < 0.001, red at p < 1e-4. An allele
+     carried on one strand only is the signature of oxidative damage (8-oxoG, G>T) or of a library
+     or PCR artefact.
+  4. **END** (read-position bias): the alternate calls within 10 bases of an alignment end against
+     the other reads' (Fisher, one-sided). Amber at p < 0.001, red at p < 1e-4. It catches
+     misaligned read ends near an indel, and adapter or clip artefacts.
+
+  Both tests compare two sets of counts, so a reference side of a few reads, itself noisy, weighs
+  as little as it should. The cut-offs are strict because a window holds hundreds of sites: at
+  p < 0.01 a few would be coloured by chance alone. On clean synthetic data (199 sites, 40×) none
+  is flagged. GATK's hard filter for SNVs (FS > 60) sits near p = 1e-6.
 
 Testing each share against the same reads' reference side keeps a library whose reads all run one
 way (amplicons), or a region where every read maps poorly, from being called an artefact. The
 checks follow what GATK's hard filters (FisherStrand, MQ and MQRankSum, ReadPosRankSum) and a
 reviewer in IGV look at. They are an aid to judge a call, not a variant caller's filter.
+
+- under them, the **allele balance** strip: the major allele fraction, max(VAF, 1 − VAF), smoothed
+  along the window. Each pixel pools the sites under it, or its 8 nearest within 100 kb, leaving out
+  sites under 20 % and those flagged red. Where heterozygous sites (VAF 0.2–0.8) are among them, the
+  strip takes their median:
+  - 0.5, in green, is a balanced diploid region;
+  - it turns amber, then red, as one allele takes over. A copy gain gives 0.67, and a mosaic change
+    anything in between.
+
+  Where hardly any site is heterozygous, and a wider stretch agrees (at least 15 of the 20 nearest
+  sites within 500 kb, under 10 % heterozygous), the region is a **run of homozygosity** in red:
+  loss of heterozygosity, uniparental disomy or identity by descent. Homozygous sites alone never
+  make a region red. In a normal genome about 40 % of the variant sites are homozygous for the
+  alternate allele, which is why the median of the heterozygous sites gives the balance, and not a
+  mean over all. A thin line gives the value, 0.5 at the bottom to 1 at the top, and the hover card
+  gives the sites pooled. Twenty sites is far fewer than PLINK's default run (100 SNPs over 1 Mb on
+  arrays), so take a red stretch as a lead to check, for example against a copy-number view.
 
 Hovering a site gives its values. A click opens the **distributions from the reads** over the
 site, decoded there (up to 5,000):
