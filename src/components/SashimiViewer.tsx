@@ -343,6 +343,8 @@ const VARIANTS_MAX_VIEW_BP = 3_000_000;
 /** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
 const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
+/** Coverage requests at once when "Show all" adds many samples (samples picker). */
+const SHOW_ALL_PARALLEL = 3;
 const READS_SEQ_ROW_H = 18;
 const READS_MAX = 2500;
 const SITES_STRIP_H = 18;      // strip above the sashimi holding the variant-site stars
@@ -2052,7 +2054,10 @@ export default function SashimiViewer({
   }, []);
 
   // ---- Track management ----
+  /** Samples "Show all" added and has not loaded yet (a track removed meanwhile leaves the set and is not loaded). */
+  const showAllPending = useRef(new Set<number>());
   const removeTrack = useCallback((sid: number) => {
+    showAllPending.current.delete(sid);
     if (sid < 0) { setGtexTracks(prev => prev.filter(t => t.sampleId !== sid)); return; }
     setTracks(prev => prev.filter(t => t.sampleId !== sid));
     reqSeq.current.set(sid, (reqSeq.current.get(sid) || 0) + 1); // drop in-flight responses
@@ -4969,6 +4974,30 @@ export default function SashimiViewer({
   const toggleSample = useCallback((s: { id: number; name: string }) => {
     if (tracksRef.current.some(t => t.sampleId === s.id)) removeTrack(s.id); else loadCoverage(s.id, s.name);
   }, [removeTrack, loadCoverage]);
+  /**
+   * Every sample of `list` not shown yet as a track, in the list's order: the tracks appear at once (loading), and their
+   * coverage is read SHOW_ALL_PARALLEL at a time, so that a run of dozens of files does not open them all together.
+   */
+  const showAllSamples = useCallback((list: { id: number; name: string }[]) => {
+    const todo = list.filter(s => !tracksRef.current.some(t => t.sampleId === s.id));
+    if (!todo.length) return;
+    for (const s of todo) showAllPending.current.add(s.id);
+    setTracks(prev => [...prev, ...todo.filter(s => !prev.some(t => t.sampleId === s.id)).map(s => ({ sampleId: s.id, sampleName: s.name, coverage: [], junctions: [], loading: true }))]);
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length) {
+        const s = todo[next++];
+        // removed meanwhile (primary only, or its own click): not loaded
+        if (!showAllPending.current.delete(s.id)) continue;
+        try { await loadCoverage(s.id, s.name); } catch { /* the track shows its error */ }
+      }
+    };
+    for (let k = 0; k < Math.min(SHOW_ALL_PARALLEL, todo.length); k++) void worker();
+  }, [loadCoverage]);
+  /** Back to the primary sample alone. */
+  const showPrimaryOnly = useCallback(() => {
+    for (const tr of tracksRef.current.slice(1)) removeTrack(tr.sampleId);
+  }, [removeTrack]);
 
   // ======================== Main render (always light theme for readability) ========================
 
@@ -5267,6 +5296,22 @@ export default function SashimiViewer({
                 <input type="text" value={pickerSearch} onChange={e => setPickerSearch(e.target.value)}
                   placeholder="Search samples…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
                 <div className={`px-3 py-1 text-[10px] ${t.muted} border-b border-gray-100`}>click to show as a track · click again to remove</div>
+                {runSamples.length > 1 && (() => {
+                  const hidden = filteredSamples.filter(s => !tracks.some(x => x.sampleId === s.id)).length;
+                  const q = pickerSearch.trim();
+                  return (
+                    <div className="flex items-center gap-1 px-2 py-1 border-b border-gray-100">
+                      <button onClick={() => showAllSamples(filteredSamples)} disabled={!hidden}
+                        title={q ? `Show every sample matching "${q}" as a track (${hidden} more), in the list's order` : `Show every loaded sample as a track (${hidden} more), in the list's order`}
+                        className={`${t.btn} px-2 py-0.5 text-[11px] font-medium disabled:opacity-40`}>
+                        {q ? `Show all matching (${hidden})` : `Show all (${hidden})`}
+                      </button>
+                      <button onClick={showPrimaryOnly} disabled={tracks.length <= 1}
+                        title="Remove every track but the primary one (the first)"
+                        className={`${t.btn} px-2 py-0.5 text-[11px] disabled:opacity-40`}>Primary only</button>
+                    </div>
+                  );
+                })()}
                 <div className="max-h-48 overflow-y-auto">
                   {filteredSamples.length === 0 ? (
                     <div className={`px-3 py-2 text-xs ${t.muted}`}>{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>

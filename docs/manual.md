@@ -47,6 +47,11 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
    read (a few blocks from the start of the file, never the index), and its badge shows the library
    type. The index is read when the first region is requested.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
+   The **Samples · n/N shown** menu of the plot lists every loaded sample: click one to show it as a
+   track, click it again to remove it. **Show all** adds every sample not shown yet (with a search
+   typed, *Show all matching* adds those that match), in the list's order. The tracks appear at once
+   and their coverage is read three samples at a time, so a run of dozens of files stays usable.
+   **Primary only** removes every track but the first.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
 
