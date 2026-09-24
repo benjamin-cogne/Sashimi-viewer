@@ -4994,6 +4994,11 @@ export default function SashimiViewer({
     };
     for (let k = 0; k < Math.min(SHOW_ALL_PARALLEL, todo.length); k++) void worker();
   }, [loadCoverage]);
+  /** Every sample of `list` shown as a track removed (the primary too): an empty plot, or one without the matching samples. */
+  const hideAllSamples = useCallback((list: { id: number }[]) => {
+    const ids = new Set(list.map(s => s.id));
+    for (const tr of tracksRef.current) if (ids.has(tr.sampleId)) removeTrack(tr.sampleId);
+  }, [removeTrack]);
   /** Back to the primary sample alone. */
   const showPrimaryOnly = useCallback(() => {
     for (const tr of tracksRef.current.slice(1)) removeTrack(tr.sampleId);
@@ -5287,24 +5292,30 @@ export default function SashimiViewer({
             <button onClick={() => setShowGroupsDialog(true)} className={`${t.btn} px-3 py-1 font-medium`} title="Create and edit the sample groups of the aggregate view">Groups…</button>
           )}
           {!hideSamplePicker && <div className="relative">
-            <button onClick={e => openDropdown(e, 256, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
+            <button onClick={e => openDropdown(e, 288, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
               title="Samples loaded in the page: click one to show it as a track, click it again to remove the track">
               {runSamples.length ? `Samples · ${tracks.length}/${runSamples.length} shown` : '+ Add sample'}
             </button>
             {showPicker && (
-              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-64 overflow-hidden`}>
+              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-72 overflow-hidden`}>
                 <input type="text" value={pickerSearch} onChange={e => setPickerSearch(e.target.value)}
                   placeholder="Search samples…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
                 <div className={`px-3 py-1 text-[10px] ${t.muted} border-b border-gray-100`}>click to show as a track · click again to remove</div>
                 {runSamples.length > 1 && (() => {
                   const hidden = filteredSamples.filter(s => !tracks.some(x => x.sampleId === s.id)).length;
+                  const shownHere = filteredSamples.length - hidden;
                   const q = pickerSearch.trim();
                   return (
-                    <div className="flex items-center gap-1 px-2 py-1 border-b border-gray-100">
+                    <div className="flex flex-wrap items-center gap-1 px-2 py-1 border-b border-gray-100">
                       <button onClick={() => showAllSamples(filteredSamples)} disabled={!hidden}
                         title={q ? `Show every sample matching "${q}" as a track (${hidden} more), in the list's order` : `Show every loaded sample as a track (${hidden} more), in the list's order`}
                         className={`${t.btn} px-2 py-0.5 text-[11px] font-medium disabled:opacity-40`}>
                         {q ? `Show all matching (${hidden})` : `Show all (${hidden})`}
+                      </button>
+                      <button onClick={() => hideAllSamples(filteredSamples)} disabled={!shownHere}
+                        title={q ? `Remove the track of every sample matching "${q}" (${shownHere})` : `Remove every sample track (${shownHere}), the primary too: click a sample, or Show all, to bring tracks back`}
+                        className={`${t.btn} px-2 py-0.5 text-[11px] disabled:opacity-40`}>
+                        {q ? `Hide all matching (${shownHere})` : `Hide all (${shownHere})`}
                       </button>
                       <button onClick={showPrimaryOnly} disabled={tracks.length <= 1}
                         title="Remove every track but the primary one (the first)"

@@ -51,7 +51,8 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
    track, click it again to remove it. **Show all** adds every sample not shown yet (with a search
    typed, *Show all matching* adds those that match), in the list's order. The tracks appear at once
    and their coverage is read three samples at a time, so a run of dozens of files stays usable.
-   **Primary only** removes every track but the first.
+   **Hide all** removes every track, the primary too (*Hide all matching* only those that match the
+   search); **Primary only** removes every track but the first.
 
 Nothing is stored between sessions. Close the tab and the data is gone.
 
