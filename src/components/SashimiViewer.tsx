@@ -2863,8 +2863,12 @@ export default function SashimiViewer({
       const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
       // a mate carrying a deletion or an insertion of 50 bp or more in its CIGAR: the event is in the alignment (drawn as
       // such), and the pair's positions, taken without it, would read as another (alignments.ts)
-      const carries = (x: AlignedRead | null) => !!x && (x.d.some(([a, b]) => b - a >= 50) || x.i.some(([, l]) => l >= 50));
-      if (dnaTrack && (carries(r) || carries(mate))) return !(r.f & 2) ? { text: 'not a proper pair (the event is in the alignment of the pair: a deletion or insertion of 50 bp or more in its CIGAR)', cls: 'other' } : null;
+      // (a mate carrying an insertion keeps only the duplication reading: see alignments.ts)
+      const carriesDel = (x: AlignedRead | null) => !!x && x.d.some(([a, b]) => b - a >= 50);
+      const carriesIns = (x: AlignedRead | null) => !!x && x.i.some(([, l]) => l >= 50);
+      const inAlignment = { text: 'not a proper pair (the event is in the alignment of the pair: a deletion or insertion of 50 bp or more in its CIGAR)', cls: 'other' as PairClass };
+      if (dnaTrack && (carriesDel(r) || carriesDel(mate))) return !(r.f & 2) ? inAlignment : null;
+      const insPair = dnaTrack && (carriesIns(r) || carriesIns(mate));
       if (dnaTrack) {
         // orientation first (genomic DNA only: on RNA, mates facing away are back-splicing, circular RNA)
         const rev = r.r === 1, mateRev = (r.f & 32) !== 0, apart = Math.abs(r.mp - r.s);
@@ -2882,6 +2886,7 @@ export default function SashimiViewer({
             : { text: `both mates across one junction (forward mate clipped at its start, reverse mate at its end): the molecule goes back ${(revEnd - fwdStart).toLocaleString('en-US')} bp, the junction of a tandem duplication`, cls: 'duplication' };
         }
         if (revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP && fwdStart - revStart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString('en-US')} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
+        if (insPair) return !(r.f & 2) ? inAlignment : null;
         if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString('en-US')} bp, far above the median (${medianInsert.toLocaleString('en-US')} bp): deletion-type`, cls: 'deletion' };
       }
       if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };

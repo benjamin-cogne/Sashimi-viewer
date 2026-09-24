@@ -271,15 +271,23 @@ The orientation is read with care, because short fragments and realigned reads m
   and then the forward mate's. Such a pair is a split read seen through two mates: deletion-type
   when the junction jumps forward, duplication-type when it goes back. By orientation alone it
   reads the other way round.
-- **The event in the alignment.** A pair a mate of which carries a deletion or an insertion of 50 bp
-  or more in its CIGAR is not counted as discordant. The event is already drawn from that alignment,
-  and the mates' positions, taken without it, would describe another event.
+- **The event in the alignment.**
+  - A pair a mate of which carries a deletion of 50 bp or more in its CIGAR is not counted as
+    discordant. The deletion is drawn from that alignment, and the mates' positions, taken without
+    it, would describe another event.
+  - A mate carrying an insertion of 50 bp or more (a tandem copy, as realigners write a
+    duplication) keeps its pair only when the mates face away. That reading is right for such a
+    pair. Read as mates facing each other far apart, it would turn the duplication into a deletion.
 - **CIGAR insertions** of 50 bp or more are evidence of their own. Some pipelines (realigners such
   as ABRA2) write a tandem duplication as an insertion of the copy's bases. When the first and last
   24 inserted bases are the reference just before (or just after) the insertion point, within
   60 bp, the reads count on a duplication arc over the copied stretch (source "CIGAR insertion").
-  Otherwise they count as an insertion pill. The reference is read that much further around the
-  window, up to 50 kb.
+  Otherwise they count as an insertion pill. The copy's end next to the insertion point is always
+  in the window. Its far end is checked where the reference reaches it: the reference is read up to
+  50 kb further around the window, or the window alone when that stretch cannot be had. When it
+  cannot be checked, the insertion's length places it. On an LDLR capture, 93 reads with a 3,964 bp
+  insertion, written at 40 different places inside the repeat, gave one duplication arc next to the
+  55 pairs facing away.
 
 A pair is counted once, from its leftmost mate, or from the other one when the leftmost lies
 beyond the window. The two ends of a duplication are often far apart (4 kb for a copy of two exons),

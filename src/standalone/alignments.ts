@@ -529,9 +529,15 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   // pairs a mate of which carries a deletion or an insertion of SV_MIN_DELETION or more in its CIGAR: the event is in
   // the alignment already (counted as a deletion, or an insertion / tandem copy below), and the mates' positions and
   // orientation, taken without it, say something else (an 8 kb deletion read as a duplication by its short fragments)
-  const eventInAlignment = new Set<string>();
+  // A mate carrying an insertion (a tandem copy, as realigners write a duplication) keeps its pair when the mates face
+  // away, which such a pair reads rightly; read as mates facing each other far apart, it would make a deletion of the
+  // duplication (33 pairs of an LDLR duplication did), and is left out. A mate carrying a deletion leaves its pair out.
+  const eventInAlignment = new Set<string>(), insertionInAlignment = new Set<string>();
   for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) {
-    if (parseCigar(r.cigar).some(([len, op]) => (op === 'D' || op === 'I') && len >= SV_MIN_DELETION)) eventInAlignment.add(r.name);
+    for (const [len, op] of parseCigar(r.cigar)) {
+      if (op === 'D' && len >= SV_MIN_DELETION) eventInAlignment.add(r.name);
+      else if (op === 'I' && len >= SV_MIN_DELETION) insertionInAlignment.add(r.name);
+    }
     primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
     let e = r.start;
     for (const [len, op] of parseCigar(r.cigar)) if ('MDN=X'.includes(op)) e += len;
@@ -617,7 +623,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
           : crossing ? (fwdStart > revEnd ? 'deletion' : 'duplication')
           : revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP_BP ? (fwdStart - revStart > outwardMin ? 'duplication' : null)
           : span > farInsert ? 'deletion' : null;
-        if (kind) {
+        if (kind && !(kind !== 'duplication' && r.name && insertionInAlignment.has(r.name))) {
           const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
           if (b > a) {
             add(discKind[kind], a, b, 1, 'pair', r.name);
@@ -697,12 +703,22 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     if (ref?.seq && g.seq.length >= 2 * TANDEM_PROBE) {
       const head = g.seq.slice(0, TANDEM_PROBE).toUpperCase(), tail = g.seq.slice(-TANDEM_PROBE).toUpperCase(), refSeq = ref.seq.toUpperCase();
       // the copy before the insertion point: its first bases at pos − len, its last just before pos (within TANDEM_SLACK)
-      for (const [from, to] of [[g.pos - g.len, g.pos], [g.pos, g.pos + g.len]] as const) {
-        const i = refSeq.indexOf(head, Math.max(0, from - TANDEM_SLACK - ref.start));
-        if (i < 0 || Math.abs(ref.start + i - from) > TANDEM_SLACK) continue;
-        const j = refSeq.indexOf(tail, Math.max(0, to - TANDEM_PROBE - TANDEM_SLACK - ref.start));
-        if (j < 0 || Math.abs(ref.start + j + TANDEM_PROBE - to) > TANDEM_SLACK) continue;
-        copy = [ref.start + i, ref.start + j + TANDEM_PROBE];
+      // the copy's end next to the insertion point is always in the window; its far end is checked where the reference
+      // reaches it (read around the window by the insertion's length, when it could be fetched), else the length places it
+      const refEnd = ref.start + refSeq.length;
+      const near = (probe: string, at: number) => {
+        const i = refSeq.indexOf(probe, Math.max(0, at - TANDEM_SLACK - ref.start));
+        return i >= 0 && Math.abs(ref.start + i - at) <= TANDEM_SLACK ? ref.start + i : null;
+      };
+      for (const [from, to, before] of [[g.pos - g.len, g.pos, true], [g.pos, g.pos + g.len, false]] as const) {
+        // copy before the point: its last bases end at pos; after it: its first bases start at pos
+        const inner = before ? near(tail, to - TANDEM_PROBE) : near(head, from);
+        if (inner == null) continue;
+        const farAt = before ? from : to - TANDEM_PROBE, farProbe = before ? head : tail;
+        const reachable = farAt - TANDEM_SLACK >= ref.start && farAt + TANDEM_PROBE + TANDEM_SLACK <= refEnd;
+        const far = reachable ? near(farProbe, farAt) : null;
+        if (reachable && far == null) continue;
+        copy = before ? [far ?? inner + TANDEM_PROBE - g.len, inner + TANDEM_PROBE] : [inner, far != null ? far + TANDEM_PROBE : inner + g.len];
         break;
       }
     }

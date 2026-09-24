@@ -1064,8 +1064,10 @@ export class LocalDataSource implements SashimiDataSource {
           const insLen = Math.min(TANDEM_MAX_BP, longestPlaceableInsertion(sl.sv));
           if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv)) || insLen) {
             try {
-              const rs = Math.max(0, w.start - (insLen ? insLen + 200 : 0)), re = w.end + (insLen ? insLen + 200 : 0);
-              const seq = await this.getReferenceSeq(chrom, rs, re);
+              let rs = Math.max(0, w.start - (insLen ? insLen + 200 : 0)), re = w.end + (insLen ? insLen + 200 : 0);
+              let seq = await this.getReferenceSeq(chrom, rs, re).catch(() => null);
+              // the window alone when the wider stretch cannot be had: a tandem copy is still told by its end next to the insertion
+              if (!seq && (rs < w.start || re > w.end)) { rs = w.start; re = w.end; seq = await this.getReferenceSeq(chrom, rs, re); }
               if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian);
             } catch (e) { console.warn('reference for clip realignment not available:', e); }
             // outside the catch: a reference that cannot be fetched is not fatal, a caller that gave up is

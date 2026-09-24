@@ -105,7 +105,8 @@ export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
     case 'discordant': {
       if (r.matePos == null || !r.mateChrom || !sameChrom(r.mateChrom, chrom) || !(r.flags & 1)) return false;
       // the event in the read's alignment: not a discordant pair (alignments.ts)
-      if (r.bigIns.length || r.gaps.some(([s, e, op]) => op === 'D' && e - s >= MIN_DELETION)) return false;
+      if (r.gaps.some(([s, e, op]) => op === 'D' && e - s >= MIN_DELETION)) return false;
+      if (r.bigIns.length && a.pairKind !== 'duplication') return false;
       const lo = Math.min(r.start, r.matePos), hi = Math.max(r.start, r.matePos);
       if (Math.abs(lo - a.start) > PAIR_SLACK || Math.abs(hi - a.end) > PAIR_SLACK) return false;
       // as far apart as the evidence asks (alignments.ts: 1 kb for mates facing each other, 300 bp facing away) and
