@@ -337,13 +337,21 @@ one row per local haplotype × splice pattern with its read count, groups below 
 into a minor bucket. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
-**Layers.** A DNA track opens as its coverage alone. Three layers go under it, switched in the toolbar
-under *Layers* for every DNA sample at once. They are always drawn in this order:
-- **coverage** (always shown);
-- **Variants**: the variants track described below;
-- **Methylation**: CpG methylation of long reads (below);
-- **Reads**: the alignments. The sample chip, or the selector next to the toggle, picks which
-  sample's reads are shown, or all of them.
+**Layers.** Four layers make a DNA track, switched in the toolbar by one colour-coded control,
+**C · V · M · R**. A filled letter is a layer that is on; a click switches it for every DNA sample
+at once. They are always drawn in this order, top to bottom:
+- **C, coverage** (blue, on by default): the coverage histogram and the structural arcs over it.
+  Switched off, a DNA track keeps its label band and the layers under it, for example to compare
+  the methylation or the variants of several samples in little room. The coverage stays loaded,
+  so switching it back on is immediate. RNA tracks always show their coverage, since the sashimi
+  plot is drawn on it;
+- **V, variants** (amber): the variants track described below;
+- **M, methylation** (red): CpG methylation of long reads (below). *CpG islands only* appears next
+  to the control while it is on;
+- **R, reads** (slate): the alignments. The sample chip, or the selector next to the control,
+  picks which sample's reads are shown, or all of them.
+
+A page without a DNA sample shows a plain *Reads* option instead.
 
 Why global toggles: the same question is usually asked of every sample at once (patient against
 controls), and switching a layer off stops its reading and releases what it held, so the page only

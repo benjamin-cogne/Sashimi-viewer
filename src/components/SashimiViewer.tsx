@@ -102,6 +102,8 @@ export interface ViewerSettings {
   coverageVariants?: boolean;
   /** long-read DNA tracks: CpG methylation from the MM / ML tags, a panel under the coverage and colours on the reads (default off) */
   methylation?: boolean;
+  /** DNA tracks: the coverage layer (histogram and structural arcs; default on). Off, a DNA track keeps its label band and the layers under it */
+  coverage?: boolean;
   /** the methylation panel restricted to the CpG islands of the reference (default off: every CpG) */
   methylIslands?: boolean;
   /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
@@ -125,7 +127,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, coverage: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -337,6 +339,8 @@ const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IG
 const READS_MAX_ROWS = 120;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
+/** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
+const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
 const READS_SEQ_ROW_H = 18;
 const READS_MAX = 2500;
@@ -976,6 +980,7 @@ export default function SashimiViewer({
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
+  const [showCoverage, setShowCoverage] = useState(init.coverage ?? true);
   const [methylIslands, setMethylIslands] = useState(init.methylIslands ?? false);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
@@ -3099,6 +3104,8 @@ export default function SashimiViewer({
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
+    /** height of the coverage area: COVERAGE_H, or 0 for a DNA track whose coverage layer is off */
+    covH: number;
     paths: CoveragePaths; arcs: ArcRender[]; height: number;
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
@@ -3430,13 +3437,16 @@ export default function SashimiViewer({
       }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
       const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites ? VAR_TRACK_H : 0;
-      const height = juncH + COVERAGE_H + variants + methyl;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow });
+      // the coverage layer switched off: a DNA track keeps its label band, then its other layers
+      const hideCov = !showCoverage && dnaTrack && !track.gtex;
+      const covH = hideCov ? 0 : COVERAGE_H, jH = hideCov ? TRACK_LABEL_H : juncH;
+      const height = jH + covH + variants + methyl;
+      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -3568,7 +3578,7 @@ export default function SashimiViewer({
         ),
       });
       items.push({
-        w: 322, el: (
+        w: 42 + 'allele balance (MAF): balanced · imbalance · homozygous run'.length * 5.4 + 14, el: (
           <g key="lvar4">
             {[0.5, 0.56, 0.62, 0.68, 0.74, 0.8].map((v, i) => <rect key={v} x={i * 6} y={y - 4} width={6} height={8} fill={mafColor(v)} />)}
             <text x={42} y={y + 3.5} fill={INK.muted} fontSize={9.5}>allele balance (MAF): balanced · imbalance · homozygous run</text>
@@ -4056,7 +4066,7 @@ export default function SashimiViewer({
     const { track, idx, color, yOff, juncH, yMax, paths, arcs, height } = L;
     const clipId = `sashimi-clip-${track.sampleId}`;
     void L.strip;
-    const baseline = yOff + juncH + COVERAGE_H;
+    const baseline = yOff + juncH + L.covH, covOn = L.covH > 0;
     const depthToY = (d: number) => baseline - (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
     const isPrimary = idx === 0 && tracks.length > 1;
     const gtexNote = track.gtex ? `  GTEx ${track.gtex.dataset.replace('gtex_', '')} · n=${track.gtex.tissue.samples}${track.gtex.tpm != null ? ` · median ${track.gtex.tpm < 10 ? track.gtex.tpm.toFixed(2) : track.gtex.tpm.toFixed(0)} TPM` : ''}${track.gtex.lowCoverage ? ' · LOW COVERAGE (TPM < 1)' : ' · exon usage from junction medians'}` : '';
@@ -4088,6 +4098,8 @@ export default function SashimiViewer({
         {/* Track frame + subtle junction/coverage separator */}
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
         {L.strip > 0 && <line x1={PLOT_LEFT} y1={yOff + TRACK_LABEL_H + L.strip} x2={plotRight} y2={yOff + TRACK_LABEL_H + L.strip} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />}
+        {/* the coverage layer: baseline, depth axis and histogram (a DNA track with it switched off has none) */}
+        {covOn && (<>
         <line x1={PLOT_LEFT} y1={baseline} x2={plotRight} y2={baseline} stroke={INK.gridStrong} strokeWidth={1} />
 
         {/* Depth axis */}
@@ -4102,15 +4114,16 @@ export default function SashimiViewer({
           );
         })}
         <text transform={`translate(${12}, ${baseline - (COVERAGE_H - 12) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>{track.gtex ? 'exon usage' : relative ? 'depth · % of max' : 'depth'}</text>
+        </>)}
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
           {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
               usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
-          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
-          {paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
-          {paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
-          {paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
+          {covOn && paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
+          {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
+          {covOn && paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
+          {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
 
           {/* Junction arcs */}
           {arcs.map(a => (
@@ -4692,7 +4705,7 @@ export default function SashimiViewer({
     let maf: { name: string; v: number; n: number; het: number; from: number; to: number; roh: boolean } | null = null;
     for (const L of layouts) {
       if (!L.variants) continue;
-      const top = L.yOff + L.juncH + COVERAGE_H;
+      const top = L.yOff + L.juncH + L.covH;
       if (hover.py < top || hover.py > top + L.variants) continue;
       const mafTop = top + VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 4;
       if (hover.py >= mafTop - 1 && hover.py <= mafTop + VAR_MAF_H + 1) {
@@ -4873,13 +4886,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -4990,22 +5003,34 @@ export default function SashimiViewer({
             <Toggle checked={uniqueOnly} onChange={setUniqueOnly} label="Unique reads"
               title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
             <span className="flex items-center gap-1">
-              {/* the layers under each track, in the order they are drawn: coverage (always), variants, methylation, reads */}
-              {anyDna && <span className={`text-xs ${t.muted} font-semibold`} title="Layers drawn under each DNA track, in this order: coverage (always), variants, methylation, reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released.">Layers</span>}
-              {anyDna && (
-                <Toggle checked={coverageVariants} onChange={setCoverageVariants} label="Variants"
-                  title={`DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.`} />
+              {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
+              {anyDna ? (
+                <>
+                  <span className={`text-xs ${t.muted} font-semibold`} title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">Layers</span>
+                  <span role="group" aria-label="Layers" className="inline-flex overflow-hidden rounded-md border border-gray-300 shadow-sm">
+                    {([
+                      { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
+                      { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
+                      ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
+                      { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.` },
+                    ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map((l, i) => (
+                      <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
+                        onClick={() => l.set(!l.on)}
+                        className="px-2 py-0.5 text-xs font-bold leading-5 transition-colors"
+                        style={{ background: l.on ? l.color : '#ffffff', color: l.on ? '#ffffff' : l.color, borderLeft: i ? '1px solid #d1d5db' : undefined, minWidth: 26 }}>
+                        {l.key}
+                      </button>
+                    ))}
+                  </span>
+                  {!!ds.getMethylation && showMethyl && (
+                    <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
+                      title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
+                  )}
+                </>
+              ) : (
+                <Toggle checked={showReads} onChange={setShowReads} label="Reads"
+                  title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
               )}
-              {anyDna && !!ds.getMethylation && (
-                <Toggle checked={showMethyl} onChange={setShowMethyl} label="Methylation"
-                  title={`Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.`} />
-              )}
-              {anyDna && !!ds.getMethylation && showMethyl && (
-                <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
-                  title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
-              )}
-              <Toggle checked={showReads} onChange={setShowReads} label="Reads"
-                title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
               {showReads && tracks.length > 1 && (
                 <select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')}
                   onChange={e => { if (e.target.value === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(e.target.value)); } }}

@@ -58,8 +58,8 @@ from a FASTA you add. Nothing is kept when the tab closes.
   phased haplotypes or consensus groups.
 
 **Genomic DNA** (short or long reads)
-- Coverage alone by default; **layers** under it switched for every DNA sample: variants, methylation,
-  reads, always in that order.
+- **Layers** switched for every DNA sample by one colour-coded control, **C · V · M · R**: coverage (on
+  by default, can be hidden), variants, methylation, reads, always drawn in that order.
 - A **variants track**: each site as a bar of its allele fraction with four quality cells (base
   quality or homopolymer, mapping quality, strand bias, read-position bias; green / amber / red),
   from an exact scan of the window run in the background; a click gives the reads' distributions.
