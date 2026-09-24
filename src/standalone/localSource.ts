@@ -13,7 +13,7 @@ import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
-import { RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
@@ -137,6 +137,8 @@ interface RecordView<R> {
   ops(r: R): ArrayLike<number>;
   /** reference id of the mate, −1 when none */
   mateRef(r: R): number;
+  /** 0-based start of the mate */
+  matePos(r: R): number;
   tlen(r: R): number;
   sa(r: R): unknown;
   /** the read's bases as character codes into `buf.a` (grown when too short); returns their number, 0 without a sequence */
@@ -172,7 +174,7 @@ const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArr
 const NIBBLE_CODES = Uint8Array.from('=ACMGRSVTWYHKDBN', c => c.charCodeAt(0));
 const BAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
-  ops: r => r.NUMERIC_CIGAR, mateRef: r => r.next_refid, tlen: r => r.template_length, sa: r => r.getTag('SA'),
+  ops: r => r.NUMERIC_CIGAR, mateRef: r => r.next_refid, matePos: r => r.next_pos, tlen: r => r.template_length, sa: r => r.getTag('SA'),
   seqCodes: (r, buf) => {
     const n = r.seq_length ?? 0;
     if (!n) return 0;
@@ -200,7 +202,7 @@ const cramBases = (r: any): string => (typeof r.getReadBases === 'function' ? r.
 const CRAM_VIEW: RecordView<any> = {
   start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => packCigar(cramCigar(r.readFeatures, r.readLength, r.lengthOnRef ?? 0)),
-  mateRef: r => r.nextSequenceId ?? -1, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
+  mateRef: r => r.nextSequenceId ?? -1, matePos: r => r.nextStart ?? 0, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
   seqCodes: (r, buf) => {
     const seq = cramBases(r);
     if (buf.a.length < seq.length) buf.a = new Uint8Array(seq.length * 2);
@@ -881,7 +883,10 @@ export class LocalDataSource implements SashimiDataSource {
     }
     if (!keep && (flags & 1) && !(flags & 8)) {
       const mate = view.mateRef(r);
-      keep = mate >= 0 && (mate !== seqId || ((flags & 16) !== 0) === ((flags & 32) !== 0) || Math.abs(view.tlen(r)) > 1000);
+      const rev = (flags & 16) !== 0, mp = view.matePos(r);
+      // the mate elsewhere, on the same strand, far away, or facing away (← →: the reverse mate on the left), from the
+      // positions (aligners set the TLEN sign of such pairs differently)
+      keep = mate >= 0 && (mate !== seqId || rev === ((flags & 32) !== 0) || Math.abs(view.tlen(r)) > 1000 || (Math.abs(mp - start) > OUTWARD_MIN_BP && (rev ? start < mp : mp < start)));
     }
     if (!keep) keep = typeof view.sa(r) === 'string';
     if (keep) layer.sv.push({ r: view.raw(r, true, true, refNames), unique, end: start + refLen });

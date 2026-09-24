@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc } from './sashimi/types';
+import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
 import type { MethylWindow } from '../standalone/methylation';
@@ -107,7 +107,7 @@ export interface ViewerSettings {
   coverage?: boolean;
   /** the methylation panel restricted to the CpG islands of the reference (default off: every CpG) */
   methylIslands?: boolean;
-  /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
+  /** reads track: mates on one row joined by a line, discordant pairs coloured by orientation (default on); off = every read on its own */
   pairs?: boolean;
   /** collapsed reads: two haplotypes per phase block from read-based phasing (default), or any number of consensus groups (haplotype × splice pattern) */
   haplotypes?: 2 | 'any';
@@ -790,6 +790,38 @@ function methylReadTicks(r: AlignedRead, thr: number, h: number) {
 const HAP_COLORS = ['#0369a1', '#be185d', '#4d7c0f', '#92400e'];
 /** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
 const READ_DISCORDANT_FILL = '#fcd34d';
+/**
+ * Discordant pairs of genomic DNA by orientation, as IGV colours them ("color by insert size and pair orientation"):
+ * mates facing each other far apart (→ ←, deletion-type), facing away (← →, the junction of a tandem duplication read
+ * across) and on the same strand (→ → or ← ←, inversion-type); read fill and the line joining the mates.
+ */
+type PairClass = 'deletion' | 'duplication' | 'inversion' | 'other';
+const PAIR_CLASS_FILL: Record<PairClass, string> = { deletion: '#fca5a5', duplication: '#86efac', inversion: '#93c5fd', other: READ_DISCORDANT_FILL };
+const PAIR_CLASS_LINE: Record<PairClass, string> = { deletion: '#b91c1c', duplication: '#15803d', inversion: '#2563eb', other: '#d97706' };
+const PAIR_CLASS_LABEL: Record<PairClass, string> = { deletion: 'mates → ← far apart (deletion-type)', duplication: 'mates ← → facing away (tandem duplication-type)', inversion: 'mates on one strand (inversion-type)', other: 'mate elsewhere, or not a proper pair' };
+/** Mates facing away at least this far apart (and twice the median insert) are a duplication's (alignments.ts, OUTWARD_MIN_BP). */
+const OUTWARD_MIN = 300;
+/**
+ * What a duplicated or deleted stretch holds of the transcript drawn: the whole exons inside, their coding bases and the
+ * frame the change leaves (a tandem copy of exons 13–14 of LDLR, 141 + 152 = 293 coding bases, shifts it), and the
+ * exons its ends cut. For a tooltip; `approx` when the ends come from pairs (binned, a few hundred bases off).
+ */
+function exonContent(tx: TxModel | null, a: number, b: number, what: 'duplicated' | 'deleted', approx: boolean): string {
+  if (!tx) return '';
+  const whole = tx.exons.filter(e => e.start >= a && e.end <= b).sort((x, y) => x.rank - y.rank);
+  const cut = tx.exons.filter(e => e.start < b && e.end > a && !(e.start >= a && e.end <= b)).sort((x, y) => x.rank - y.rank);
+  const caveat = approx ? ' (ends from the pairs, a few hundred bases uncertain: split reads, when there are any, place them to the base)' : '';
+  if (!whole.length && !cut.length) return `\n${what} stretch: no exon of ${tx.transcriptId}, intronic${caveat}`;
+  const ranks = whole.map(e => e.rank);
+  const run = ranks.length > 1 && ranks[ranks.length - 1] - ranks[0] === ranks.length - 1 ? `exons ${ranks[0]}–${ranks[ranks.length - 1]}` : ranks.length ? `exon${ranks.length > 1 ? 's' : ''} ${ranks.join(', ')}` : '';
+  let coding = 0;
+  if (tx.cdsStart != null && tx.cdsEnd != null) for (const e of whole) coding += Math.max(0, Math.min(e.end, tx.cdsEnd) - Math.max(e.start, tx.cdsStart));
+  const frame = !whole.length ? '' : !coding ? ': no coding base' : coding % 3
+    ? `: ${coding} coding bases, not a multiple of 3, so the reading frame shifts ${what === 'duplicated' ? 'when the copy is spliced in tandem' : 'without them'}`
+    : `: ${coding} coding bases, the frame kept (${coding / 3} codons ${what === 'duplicated' ? 'repeated' : 'lost'})`;
+  return `\n${what} stretch of ${tx.transcriptId}: ${run ? `whole ${run}${frame}` : 'no whole exon'}` +
+    (cut.length ? `; its ends cut exon${cut.length > 1 ? 's' : ''} ${cut.map(e => e.rank).join(', ')}` : '') + caveat;
+}
 const PAIR_LINK_COLOR = '#9ca3af';
 const CLIP_FILL = '#0f766e';          // soft-clipped bases when too small for letters
 const HARD_CLIP_FILL = '#9ca3af';     // hard-clipped stub (bases in the primary record)
@@ -2785,14 +2817,20 @@ export default function SashimiViewer({
     const dnaTrack = isDnaSample(sid);
     /** bases a read skips on the reference inside its alignment (CIGAR D and N): its span minus its aligned blocks */
     const innerGap = (r: AlignedRead) => { let g = r.e - r.s; for (const [bs, be] of r.b) g -= be - bs; return Math.max(0, g); };
-    const discordantOf = (r: AlignedRead, idx: number): string | null => {
+    const discordantOf = (r: AlignedRead, idx: number): { text: string; cls: PairClass } | null => {
       if (r.mp == null) return null;
-      if (r.mc) return `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`;
-      if (!(r.f & 2)) return 'not a proper pair';
+      if (r.mc) return { text: `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`, cls: 'other' };
       // the template length runs across the deletions and introns the two reads carry: those are not a long insert
       const mate = mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
       const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
-      if (dnaTrack && medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return `insert ${insert.toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp)`;
+      if (dnaTrack) {
+        // orientation first (genomic DNA only: on RNA, mates facing away are back-splicing, circular RNA)
+        const rev = r.r === 1, mateRev = (r.f & 32) !== 0, apart = Math.abs(r.mp - r.s);
+        if (rev === mateRev) return { text: `both mates on the ${rev ? '−' : '+'} strand, ${apart.toLocaleString()} bp apart: inversion-type`, cls: 'inversion' };
+        if ((rev ? r.s < r.mp : r.mp < r.s) && apart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString()} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
+        if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp): deletion-type`, cls: 'deletion' };
+      }
+      if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };
       return null;
     };
     const rowH = nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode
@@ -2857,12 +2895,12 @@ export default function SashimiViewer({
       const lowMapq = r.q === 0;
       const spans = readSpansBoundary(r, modelBoundaries);
       const discordant = pairMode ? discordantOf(r, idx) : null;
-      const fill = discordant ? READ_DISCORDANT_FILL : READ_FILL;
+      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : READ_FILL;
       // the line to the mate, drawn once per pair from the left mate
       const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
       if (mate && (r.s < mate.s || (r.s === mate.s && idx < mateOf[idx]))) {
         const a = scale.x(Math.min(r.e, mate.e)), b = scale.x(Math.max(r.s, mate.s));
-        if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? SV_COLORS.discordant : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
+        if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? PAIR_CLASS_LINE[discordant.cls] : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
       }
       // the line to the other parts of a split read, drawn once from the left part (parts that overlap on the reference get none)
       for (const j of partsOf[idx]) {
@@ -2975,7 +3013,7 @@ export default function SashimiViewer({
       const titleText = () => `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
-        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant}` : ''}` : '') +
+        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant.text}` : ''}` : '') +
         (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '') +
         (clipTxt.length ? `\n${clipTxt.join(' · ')}` : '') +
         (r.hp ? `\nhaplotag: HP ${r.hp}${r.ps != null ? ` · phase set PS ${r.ps.toLocaleString()}` : ''}${r.pc != null ? ` · confidence PC ${r.pc}` : ''}` : '') +
@@ -3010,7 +3048,14 @@ export default function SashimiViewer({
       (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
       (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}` : '') +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
-      (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter((r, i) => discordantOf(r, i)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
+      (pairMode ? (() => {
+        const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2;
+        const by: Record<PairClass, number> = { duplication: 0, deletion: 0, inversion: 0, other: 0 };
+        visible.forEach((r, i) => { const d = discordantOf(r, i); if (d) by[d.cls]++; });
+        const d = by.duplication + by.deletion + by.inversion + by.other;
+        const parts = (['duplication', 'deletion', 'inversion'] as const).filter(k => by[k]).map(k => `${by[k].toLocaleString()} ${k}-type`);
+        return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}` : ''}`;
+      })() : '') + commonInfo;
     const meCalls = meN[0] + meN[1] + meN[2];
     // the layer's transform: genome (relative to tickOrigin) to pixels; ticks 2 bases wide, at least 1.5 px (runs: their
     // extent, and a 1.2 px outline so a lone call stays visible)
@@ -3379,16 +3424,21 @@ export default function SashimiViewer({
           const resc = (sv.rescued ?? []).filter(x => x.own && x.kind === kind && x.start === j.start && x.end === j.end);
           const nResc = resc.reduce((n, x) => n + x.count, 0), nRescHard = resc.reduce((n, x) => n + x.hard, 0);
           const nAligned = j.count - nPlaced - nResc;
-          const title = `${SV_LABEL[kind]}: ${approx}${j.count.toLocaleString()} read${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
+          const pairKind = kind === 'discordant' ? ((j as DiscordantArc).kind ?? null) : null;
+          const what = kind === 'discordant' ? (pairKind ? `discordant pairs, ${PAIR_CLASS_LABEL[pairKind]}` : SV_LABEL[kind]) : SV_LABEL[kind];
+          const title = `${what}: ${approx}${j.count.toLocaleString()} ${kind === 'discordant' ? 'pair' : 'read'}${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
             (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString()} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
               (nPlaced ? ` + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
               (nResc ? ` + ${approx}${nResc.toLocaleString()} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString()} hard-clipped, attached by position` : ''})` : '') : '') +
             (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
+            (pairKind === 'duplication' ? `\nmates facing away (← →): the reads at the right end continue at the left end, as across the junction of a tandem duplication of about this stretch (a gain: compare the depth inside the arc with the depth outside)` : '') +
+            (kind === 'duplication' || pairKind === 'duplication' ? exonContent(tx, j.start, j.end, 'duplicated', kind === 'discordant') : '') +
+            ((kind === 'deletion' || pairKind === 'deletion') && j.end - j.start >= 1000 ? exonContent(tx, j.start, j.end, 'deleted', kind === 'discordant') : '') +
             (kind !== 'discordant' ? svEvidenceText(j, approx) : '') +
             '\nevidence, not a call: open the reads to check it';
           // a deletion is drawn solid when only CIGARs carry it, dashed as soon as split or clipped reads support it
           const onlyCigar = kind === 'deletion' && !Object.entries((j as SvArc).sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0);
-          arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+          arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
         }
       }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
@@ -3561,7 +3611,9 @@ export default function SashimiViewer({
       line(SV_COLORS.deletion, true, 'deletion also in split or clipped reads (nearby breakpoints merged)', 'lsv2');
       line(SV_COLORS.duplication, true, 'split reads, duplication-type', 'lsv2b');
       line(SV_COLORS.inversion, true, 'split reads, inversion', 'lsv2c');
-      line(SV_COLORS.discordant, true, 'discordant pairs (insert > 5× median or same strand)', 'lsv3');
+      line(PAIR_CLASS_LINE.duplication, true, 'discordant pairs ← → (duplication-type)', 'lsv3');
+      line(PAIR_CLASS_LINE.deletion, true, 'discordant pairs → ← far apart (deletion-type)', 'lsv3b');
+      line(PAIR_CLASS_LINE.inversion, true, 'discordant pairs on one strand (inversion-type)', 'lsv3c');
       items.push({
         w: 250, el: (
           <g key="lsv6">
@@ -3711,12 +3763,14 @@ export default function SashimiViewer({
     }
     if (showReads && anyPairs && showPairs) {
       items.push({
-        w: 210, el: (
+        w: 360, el: (
           <g key="lpair">
             <rect x={0} y={y - 4} width={10} height={8} fill={READ_FILL} /><line x1={10} y1={y} x2={24} y2={y} stroke={PAIR_LINK_COLOR} strokeWidth={1} /><rect x={24} y={y - 4} width={10} height={8} fill={READ_FILL} />
             <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mates joined</text>
-            <rect x={104} y={y - 4} width={10} height={8} fill={READ_DISCORDANT_FILL} /><line x1={114} y1={y} x2={124} y2={y} stroke={SV_COLORS.discordant} strokeWidth={1.5} />
-            <text x={128} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant pair</text>
+            {(['duplication', 'deletion', 'inversion', 'other'] as const).map((c, i) => (
+              <rect key={c} x={104 + i * 11} y={y - 4} width={10} height={8} fill={PAIR_CLASS_FILL[c]}><title>{PAIR_CLASS_LABEL[c]}</title></rect>
+            ))}
+            <text x={150} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant: ← → dup · → ← del · inv · other</text>
           </g>
         ),
       });
@@ -4148,6 +4202,17 @@ export default function SashimiViewer({
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
+          {/* a stretch the reads say is duplicated (split reads going back, mates facing away), shaded under the depth: its
+              depth should stand about 1.5 times the flanks' (one extra copy of two) */}
+          {covOn && svHints && isDnaTrack(track) && track.structural && (() => {
+            const minSv = svMinReads(track.sampleId);
+            const gains = [...(track.structural.duplications ?? []), ...track.structural.discordant.filter(j => (j as DiscordantArc).kind === 'duplication')]
+              .filter(j => j.count >= minSv && j.end > viewStart && j.start < viewEnd);
+            return gains.map(j => {
+              const x1 = Math.max(PLOT_LEFT, scale.x(j.start)), x2 = Math.min(plotRight, scale.x(j.end));
+              return <rect key={`gain${j.start}-${j.end}`} x={Math.min(x1, x2)} y={baseline - (COVERAGE_H - 12)} width={Math.abs(x2 - x1)} height={COVERAGE_H - 12} fill={PAIR_CLASS_LINE.duplication} opacity={0.07} pointerEvents="none" />;
+            });
+          })()}
           {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
               usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
           {covOn && paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
@@ -4820,7 +4885,7 @@ export default function SashimiViewer({
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
         tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
         strip: null,
-        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; their ends are binned to 500 bp and neighbouring bins of one class joined. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };
     }
     if (popover.kind === 'junction') {
@@ -5077,7 +5142,7 @@ export default function SashimiViewer({
               )}
               {showReads && anyPairs && (
                 <Toggle checked={showPairs} onChange={setShowPairs} label="Pairs"
-                  title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair (mate on another chromosome, not a proper pair, or on genomic DNA an insert above 5 times the median) are amber. Off: every read on its own row." />
+                  title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair are coloured by what the pair says, as IGV colours them: on genomic DNA, green when the mates face away from each other (← →, the junction of a tandem duplication), red when they face each other far apart (→ ←, more than 5 times the median insert: a deletion), blue when both are on one strand (an inversion); amber when the mate is on another chromosome or the pair is not proper. Off: every read on its own row." />
               )}
               {showReads && !collapseReads && anyClips && (
                 <Toggle checked={showClipped} onChange={setShowClipped} label="Clipped"

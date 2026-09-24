@@ -211,9 +211,29 @@ the two inversion junctions) and the spread of the merged breakpoints. A deletio
 arc when only CIGARs carry it, dashed when split or clipped reads support it. The panel matches
 the event in the other samples with the same tolerance, and the Groups view pools the members'
 events the same way.
-**Discordant pairs** (insert size above five times the window's median, at least 1 kb, or both
-mates on the same strand) are dashed amber arcs between 500 bp bins, and **soft-clip clusters**
-(at least 3 reads clipped by 20 bases or more at one position, split reads excluded) teal pills on
+**Discordant pairs** are dashed arcs between 500 bp bins (neighbouring bins of one class joined),
+coloured by what the orientation of the mates says, as IGV colours pairs:
+- **red, deletion-type**: mates facing each other (→ ←) more than five times the window's median
+  insert apart (at least 1 kb);
+- **green, duplication-type**: mates facing away (← →), at least 300 bp and twice the median apart.
+  The reads at the right end continue at the left end, as they do across the junction of a tandem
+  duplication. The stretch under the arc is shaded green over the coverage, where the depth should
+  stand about 1.5 times the flanks' (one extra copy);
+- **blue, inversion-type**: both mates on one strand.
+
+A pair is counted once, from its leftmost mate, or from the other one when the leftmost lies
+beyond the window. The two ends of a duplication are often far apart (4 kb for a copy of two exons),
+and counting only from the left used to lose every pair whose left mate was off screen. The extent
+comes from the mates' positions, not the template length: BWA gave the pairs of a 4 kb LDLR
+duplication a TLEN of about 110 and the proper-pair flag, their mates 3.9 kb apart. The tooltip of
+a duplication or of a deletion of 1 kb or more names the whole exons of the transcript inside it
+and their coding length. For example, whole exons 13–14 of NM_000527.5 hold 295 coding bases, not
+a multiple of 3, so the frame shifts when the copy is spliced in tandem. The tooltip also names the
+exons its ends cut (a few hundred bases uncertain from the pairs; split reads place the ends to the
+base).
+
+**Soft-clip clusters**
+(at least 3 reads clipped by 20 bases or more at one position, split reads excluded) are teal pills on
 the baseline (⇤ clipped before, ⇥ clipped after). **Clipped reads without an SA tag are placed by
 realignment**: the clipped consensus of each cluster is searched on both strands of the window's
 reference (its 20 bases next to the breakpoint must occur once, and up to 60 bases must agree with
@@ -247,8 +267,14 @@ discordant pairs (CRAM mate fields are read when the file records them).
 
 **Pairs.** In the reads track the two mates of a pair share one row and are joined by a line
 (*Pairs*, on by default, next to *Reads*); the tooltip of a read gives its mate's position and the
-insert size. Reads of a **discordant pair** are amber: mate on another chromosome, pair not flagged
-as proper by the aligner, or, on genomic DNA, an insert above five times the median of the window.
+insert size. Reads of a **discordant pair** are coloured by class (the fill, and the line to the
+mate). On genomic DNA they are green when the mates face away (← →, duplication-type), red when they
+face each other more than five times the median insert apart (deletion-type), and blue when both
+are on one strand (inversion-type). They are amber when the mate is on another chromosome or the
+aligner did not flag the pair as proper. The orientation is judged before the proper-pair flag,
+which an aligner may set on the pairs of a duplication. On RNA-seq, mates facing away are
+back-splicing (circular RNA), so only the amber class applies. The header counts the discordant
+reads by class.
 The pairs are kept in exported pages.
 
 **Clipped, inserted and split-read sequences.** The reads keep the bases their alignment leaves

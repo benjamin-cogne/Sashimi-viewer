@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { AlignedRead, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc } from '../components/sashimi/types';
+import type { AlignedRead, DiscordantArc, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc } from '../components/sashimi/types';
 import { clusterSv, type SvMember } from './svmerge';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
@@ -242,6 +242,8 @@ export function exonDepth(reads: AlignedRead[], start: number, end: number): { m
 // ======================== Structural evidence (genomic libraries) ========================
 
 export const SV_MIN_DELETION = 50, SV_MIN_CLIP = 20, SV_MIN_SUPPORT = 3;
+/** Mates facing away from each other (← →) at least this far apart (and twice the median insert) are duplication-type. */
+export const OUTWARD_MIN_BP = 300;
 const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32, FLAG_SUPPLEMENTARY = 2048;
 
 const cigarRefLen = (cigar: string) => parseCigar(cigar).reduce((n, [len, op]) => n + ('MDN=X'.includes(op) ? len : 0), 0);
@@ -463,7 +465,8 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
  */
 export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null): StructuralEvidence {
   // every arc before merging, with its evidence units by source and the names of the reads behind them
-  const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>(), disc = new Map<string, SvMember>();
+  const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>();
+  const discKind = { deletion: new Map<string, SvMember>(), duplication: new Map<string, SvMember>(), inversion: new Map<string, SvMember>() };
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
@@ -484,6 +487,13 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
   }
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
+  // mates facing away from each other (← →) further apart than this: the junction of a tandem duplication. Closer, they
+  // are short fragments whose reads ran past each other (adapter read-through), not an event
+  const outwardMin = Math.max(OUTWARD_MIN_BP, 2 * (median ?? 0));
+  // primary records of each pair among `reads`: a pair is counted from its leftmost mate, or from the other one when the
+  // leftmost is not among them (a mate beyond the window: the reads of a duplication's far side, 4 kb away, were all lost)
+  const primaries = new Map<string, number>();
+  for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
   // Deleted and skipped bases (CIGAR D, N) inside the primary records of each pair, by read name. The template length
@@ -526,16 +536,24 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     // base), and from primary records only (a supplementary record repeats its primary's mate fields)
     if (r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
-      else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2))) {
-        const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
-        // where the mate ends: the template's far end, from TLEN (leftmost to rightmost aligned base, SAM spec); without
-        // one, the mate's start plus this read's aligned length (its own deletions and introns left out)
+      else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2)) || (r.name && primaries.get(r.name) === 1)) {
+        const rev = (r.flags & FLAG_REVERSE) !== 0, mateRev = (r.flags & FLAG_MATE_REVERSE) !== 0;
+        const leftmost = r.start <= r.matePos;
+        // the pair's extent: from the leftmost start to the rightmost end. From the positions, the mate's end taken as
+        // its start plus this read's aligned length (its own deletions and introns left out): TLEN is no guide across an
+        // event (BWA gave pairs of a 4 kb duplication, mates 3.9 kb apart, a TLEN of 110 and the proper-pair flag)
         const readLen = alnEnd - r.start - innerGap(r.cigar);
-        const mateEnd = r.tlen ? r.start + Math.abs(r.tlen) : r.matePos + readLen;
-        const span = mateEnd - r.start - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
-        if (sameStrand || span > farInsert) {
-          const a = Math.floor(r.start / 500) * 500, b = Math.ceil(mateEnd / 500) * 500;
-          if (b > a) add(disc, a, b, 1, 'pair', r.name);
+        const lo = Math.min(r.start, r.matePos);
+        const hi = r.matePos >= r.start ? Math.max(alnEnd, r.matePos + readLen) : alnEnd;
+        const span = hi - lo - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
+        // orientation of the leftmost mate and of the other: → ← normal, ← → outward (duplication), same strand (inversion)
+        const leftRev = leftmost ? rev : mateRev, rightRev = leftmost ? mateRev : rev;
+        const kind: 'deletion' | 'duplication' | 'inversion' | null = rev === mateRev ? 'inversion'
+          : leftRev && !rightRev ? (Math.abs(r.matePos - r.start) > outwardMin ? 'duplication' : null)
+          : span > farInsert ? 'deletion' : null;
+        if (kind) {
+          const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
+          if (b > a) add(discKind[kind], a, b, 1, 'pair', r.name);
         }
       }
     }
@@ -634,9 +652,21 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const inversionEvents = family('inversion', [['inversion', invs]]);
   for (const x of realigned) { const ev = eventOf.get(`${x.arc.kind}:${x.arc.start}-${x.arc.end}`); if (ev) x.arc = { start: ev.start, end: ev.end, kind: ev.kind }; }
   for (const x of rescued) { const ev = eventOf.get(`${x.kind}:${x.start}-${x.end}`); if (ev) { x.start = ev.start; x.end = ev.end; x.kind = ev.kind; } }
-  const scaled = (m: Map<string, SvMember>): SvArc[] => [...m.values()].map(j => ({ start: j.start, end: j.end, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
+  // the pairs of one event fall in neighbouring bins (their insert sizes vary): bins of one class within one bin of the
+  // strongest at both ends join it, one arc per event
+  const discordant: DiscordantArc[] = (Object.keys(discKind) as (keyof typeof discKind)[]).flatMap(kind => {
+    const bins = [...discKind[kind].values()].sort((a, b) => b.count - a.count || a.start - b.start);
+    const out: DiscordantArc[] = [], used = new Set<SvMember>();
+    for (const x of bins) {
+      if (used.has(x)) continue;
+      const arc: DiscordantArc = { start: x.start, end: x.end, count: 0, kind };
+      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) { used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end); }
+      out.push(arc);
+    }
+    return out;
+  }).sort((a, b) => a.start - b.start || a.end - b.end);
   return {
-    deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant: scaled(disc),
+    deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant,
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),

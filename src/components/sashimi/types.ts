@@ -21,6 +21,8 @@ export interface AllTranscripts { gene_name: string; chrom: string; strand: numb
 
 /** Run-length encoded coverage: 0-based half-open [start, end) at constant depth. */
 export interface CoverageRun { start: number; end: number; depth: number; }
+/** Discordant pairs of one class between two 500-bp bins. */
+export interface DiscordantArc extends JunctionArc { kind?: 'deletion' | 'duplication' | 'inversion' }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
 export interface JunctionArc {
   start: number; end: number; count: number;
@@ -88,8 +90,13 @@ export interface StructuralEvidence {
   inversions: SvArc[];
   /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
   insertions: { pos: number; len: number; count: number }[];
-  /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
-  discordant: JunctionArc[];
+  /**
+   * discordant pairs on the same chromosome, both ends binned to 500 bp, by orientation (IGV's convention):
+   * `deletion` mates facing each other (→ ←) far above the median insert; `duplication` mates facing away (← →), the
+   * junction of a tandem duplication read across; `inversion` both mates on the same strand (→ → or ← ←). Absent kind:
+   * `deletion` (files exported before the classes).
+   */
+  discordant: DiscordantArc[];
   /** split alignments and mates on other chromosomes */
   elsewhere: ElsewhereLink[];
   /** soft-clip clusters of at least 3 reads clipped by 20 bases or more, whose clipped sequence could not be placed in the window */
