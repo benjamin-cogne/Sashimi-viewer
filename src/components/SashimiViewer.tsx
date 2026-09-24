@@ -4272,10 +4272,13 @@ export default function SashimiViewer({
     const gA = scale.x(tx.start), gB = scale.x(tx.end);
     const gLeft = Math.max(PLOT_LEFT, Math.min(gA, gB)), gRight = Math.min(plotRight, Math.max(gA, gB));
 
-    // Direction chevrons every 56 px along the intron line (5' → 3' after the axis flip)
+    // Direction chevrons every 56 px along the intron line, pointing where the gene's 3′ end lies on screen: always
+    // right after the flip of a minus-strand gene's axis, but left for one drawn on the genomic axis (DNA samples only)
     const arrows: JSX.Element[] = [];
+    const toRight = (tx.strand > 0) !== reverse;
     for (let ax = gLeft + 28; ax < gRight - 8; ax += 56) {
-      arrows.push(<path key={`arr${ax}`} d={`M${ax - 2.5},${midY - 3.5} L${ax + 2.5},${midY} L${ax - 2.5},${midY + 3.5}`} fill="none" stroke={INK.intron} strokeWidth={1.2} />);
+      const d = toRight ? `M${ax - 2.5},${midY - 3.5} L${ax + 2.5},${midY} L${ax - 2.5},${midY + 3.5}` : `M${ax + 2.5},${midY - 3.5} L${ax - 2.5},${midY} L${ax + 2.5},${midY + 3.5}`;
+      arrows.push(<path key={`arr${ax}`} d={d} fill="none" stroke={INK.intron} strokeWidth={1.2} />);
     }
 
     // Exon boxes: CDS at full height, UTR portions at half height
