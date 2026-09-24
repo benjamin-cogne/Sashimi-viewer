@@ -4143,7 +4143,6 @@ export default function SashimiViewer({
               }}>
               <title>{a.title}</title>
               <path d={a.geom.d} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
-              <path d={a.geom.d} fill="none" stroke={INK.bg} strokeWidth={a.strokeW + 2} opacity={0.9} />
               <path d={a.geom.d} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
                 strokeDasharray={a.dashed ? '5 3.5' : undefined} opacity={0.92} />
             </g>
