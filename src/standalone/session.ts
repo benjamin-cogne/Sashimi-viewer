@@ -76,7 +76,7 @@ export function buildSession(args: {
     viewMode: state.viewMode,
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
-    consensusMode: state.consensusMode, minIndelBp: state.minIndelBp, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, methylation: state.methylation, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases,
+    consensusMode: state.consensusMode, minIndelBp: state.minIndelBp, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases,
   });
   const geneOf = (state: ViewerState): SessionGene => ({ name: state.gene.name, id: state.gene.id, chrom: state.gene.chrom, start: state.gene.start, end: state.gene.end, view: { ...state.view }, mark: state.mark });
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));

@@ -69,6 +69,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
         worker.postMessage({ type: 'methyl', req: id, sampleId, chrom, start, end });
       });
     },
+    release(what: 'methylation' | 'variants') { worker.postMessage({ type: 'release', what }); },
     forget(sampleId: number) { if (sent.delete(sampleId)) worker.postMessage({ type: 'forget', id: sampleId }); },
     reference(reference: ReferenceChoice) { worker.postMessage({ type: 'reference', reference }); refSent = reference; },
   };

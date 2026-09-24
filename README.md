@@ -68,7 +68,8 @@ from a FASTA you add. Nothing is kept when the tab closes.
   consensus of a clip cluster ready for BLAT.
 - **CpG methylation** of long reads (ONT, PacBio; MM / ML tags) in a panel under the coverage: a 5mC
   density ribbon that splits into the two haplotypes where the reads are phased and joins where they
-  are not, their difference and the allele-specific stretches, the CpG islands; each read's
+  are not, their difference and the allele-specific stretches, the CpG islands (or the islands only),
+  the mean island difference of each sample with the primary (e.g. −26 %); each read's
   CpGs coloured in the reads track. Counted in the background at the reference's CpGs only, the
   modkit way (strands combined, 10th-percentile confidence filter).
 

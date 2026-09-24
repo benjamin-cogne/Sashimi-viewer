@@ -101,6 +101,8 @@ export interface ViewerSettings {
   coverageVariants?: boolean;
   /** long-read DNA tracks: CpG methylation from the MM / ML tags, a panel under the coverage and colours on the reads (default off) */
   methylation?: boolean;
+  /** the methylation panel restricted to the CpG islands of the reference (default off: every CpG) */
+  methylIslands?: boolean;
   /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
   pairs?: boolean;
   /** collapsed reads: two haplotypes per phase block from read-based phasing (default), or any number of consensus groups (haplotype × splice pattern) */
@@ -122,7 +124,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', uniqueOnly: false,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -409,18 +411,62 @@ const METHYL_PHASED_SHARE = 0.2, METHYL_TAGGED_SHARE = 0.6, METHYL_PHASED_MIN_PX
 interface MethylCol { x: number; a: number; b: number; phased: boolean; f: number[]; t: number[] }
 /** Modified and all calls of a lane over the CpGs of indices [i, j). */
 const methylSumIdx = (P: MethylPrefix, lane: number, i: number, j: number): [number, number] => [P.mod[lane][j] - P.mod[lane][i], P.total[lane][j] - P.total[lane][i]];
-/** The column at pixel x (x the left edge of the pixel), or null without calls. */
-function methylCol(P: MethylPrefix, scale: { invert(px: number): number }, x: number): MethylCol | null {
-  const n = P.pos.length;
+/**
+ * What the panel counts: every CpG, or (CpG islands only) the CpGs of the islands, each column then kept to the islands
+ * it overlaps and its smoothing to their bounds, so nothing outside an island leaks in.
+ */
+interface MethylSource { P: MethylPrefix; bounds?: (ga: number, gb: number) => [number, number] | null }
+const methylIslandCache = new WeakMap<MethylPrefix, MethylPrefix>();
+function methylSource(e: MethylEntry, islandsOnly: boolean): MethylSource | null {
+  const P = e.prefix, w = e.w;
+  if (!P || !w) return null;
+  if (!islandsOnly) return { P };
+  const isl = w.islands;
+  let Q = methylIslandCache.get(P);
+  if (!Q) {
+    const keep: number[] = [];
+    for (let i = 0, k = 0; i < P.pos.length; i++) {
+      while (k < isl.length && isl[k][1] <= P.pos[i]) k++;
+      if (k < isl.length && isl[k][0] <= P.pos[i]) keep.push(i);
+    }
+    const n = keep.length, mod: Float64Array[] = [], total: Float64Array[] = [];
+    for (let lane = 0; lane < 4; lane++) {
+      const m = new Float64Array(n + 1), t = new Float64Array(n + 1);
+      keep.forEach((i, j) => { m[j + 1] = m[j] + P.mod[lane][i + 1] - P.mod[lane][i]; t[j + 1] = t[j] + P.total[lane][i + 1] - P.total[lane][i]; });
+      mod.push(m); total.push(t);
+    }
+    Q = { pos: Int32Array.from(keep, i => P.pos[i]), mod, total, tagged: total[1][n] + total[2][n] > 0 };
+    methylIslandCache.set(P, Q);
+  }
+  const starts = isl.map(r => r[0]);
+  return {
+    P: Q,
+    bounds: (ga, gb) => {
+      // the islands overlapping [ga, gb): from the last starting before gb, back while they end after ga
+      let j = methylLowerArr(starts, gb) - 1;
+      if (j < 0 || isl[j][1] <= ga) return null;
+      let lo = isl[j][0];
+      const hi = isl[j][1];
+      while (j > 0 && isl[j - 1][1] > ga) lo = isl[--j][0];
+      return [lo, hi];
+    },
+  };
+}
+const methylLowerArr = (a: number[], p: number) => { let lo = 0, hi = a.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < p) lo = mid + 1; else hi = mid; } return lo; };
+/** The column at pixel x (x the left edge of the pixel), or null without calls (or outside the islands, when kept to them). */
+function methylCol(S: MethylSource, scale: { invert(px: number): number }, x: number): MethylCol | null {
+  const P = S.P, n = P.pos.length;
   const g1 = scale.invert(x), g2 = scale.invert(x + 1);
   let ga = Math.ceil(Math.min(g1, g2)), gb = Math.ceil(Math.max(g1, g2));
   if (gb <= ga) { ga = Math.floor((g1 + g2) / 2); gb = ga + 1; }
+  let lo = -Infinity, hi = Infinity;
+  if (S.bounds) { const r = S.bounds(ga, gb); if (!r) return null; [lo, hi] = r; }
   const i0 = methylLower(P.pos, ga), i1 = methylLower(P.pos, gb);
   let a = i0, b = i1;
   if (b - a < METHYL_SMOOTH_CPGS) {
     // the nearest CpGs, alternately left and right, within reach
     while (b - a < METHYL_SMOOTH_CPGS) {
-      const canL = a > 0 && P.pos[a - 1] >= ga - METHYL_SMOOTH_MAX_BP, canR = b < n && P.pos[b] < gb + METHYL_SMOOTH_MAX_BP;
+      const canL = a > 0 && P.pos[a - 1] >= Math.max(lo, ga - METHYL_SMOOTH_MAX_BP), canR = b < n && P.pos[b] < Math.min(hi, gb + METHYL_SMOOTH_MAX_BP);
       if (!canL && !canR) break;
       if (canL && (!canR || ga - P.pos[a - 1] <= P.pos[b] - gb)) a--; else b++;
     }
@@ -432,9 +478,9 @@ function methylCol(P: MethylPrefix, scale: { invert(px: number): number }, x: nu
   const phased = P.tagged && t[1] >= METHYL_MIN_CALLS && t[2] >= METHYL_MIN_CALLS && t[1] >= METHYL_PHASED_SHARE * t[3] && t[2] >= METHYL_PHASED_SHARE * t[3] && t[1] + t[2] >= METHYL_TAGGED_SHARE * t[3];
   return { x, a, b, phased, f, t };
 }
-function methylCols(P: MethylPrefix, scale: Scale): MethylCol[] {
+function methylCols(S: MethylSource, scale: Scale): MethylCol[] {
   const out: MethylCol[] = [];
-  for (let x = scale.plotLeft; x < scale.plotRight; x++) { const c = methylCol(P, scale, x); if (c) out.push(c); }
+  for (let x = scale.plotLeft; x < scale.plotRight; x++) { const c = methylCol(S, scale, x); if (c) out.push(c); }
   // phased runs too narrow to read as a split are joined
   for (let i = 0; i < out.length;) {
     if (!out[i].phased) { i++; continue; }
@@ -478,10 +524,10 @@ interface MethylDraw {
   /** CpGs, calls and 5mC fraction of the view per lane (3 = all reads) */
   summary: { cpgs: number; frac: number[]; calls: number[] };
 }
-function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: number): MethylDraw | null {
-  const P = e.prefix, w = e.w;
-  if (!P || !w) return null;
-  const cols = methylCols(P, scale);
+function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: number, islandsOnly: boolean): MethylDraw | null {
+  const S = methylSource(e, islandsOnly), w = e.w;
+  if (!S || !w) return null;
+  const P = S.P, cols = methylCols(S, scale);
   const ribbon: MethylPath[] = [], y = METHYL_HEAD_H;
   methylBand(cols, 1, c => c.phased, y, METHYL_LANE_H, ribbon);
   methylBand(cols, 2, c => c.phased, y + METHYL_LANE_H + 1, METHYL_LANE_H, ribbon);
@@ -535,8 +581,80 @@ function methylAsm(P: MethylPrefix, from: number, to: number): { start: number; 
     return { start: x.start, end: x.end, delta: m1 / Math.max(1, t1) - m2 / Math.max(1, t2), cpgs: methylLower(P.pos, x.end) - methylLower(P.pos, x.start) };
   });
 }
-/** Height of a track's methylation panel: a header, the ribbon, and the difference of the haplotypes when the reads are tagged. */
-const methylPanelH = (e: MethylEntry | undefined): number => METHYL_GAP + METHYL_HEAD_H + METHYL_RIBBON_H + (e?.prefix?.tagged ? METHYL_DELTA_H : 0) + 4;
+/**
+ * Mean methylation of each CpG island compared between samples: over the CpGs of the island covered by at least
+ * METHYL_DIFF_MIN_CALLS calls in both samples (paired, so a CpG covered in one sample only does not tilt the mean), the
+ * mean of their 5mC fractions, all reads; an island needs METHYL_DIFF_MIN_CPGS such CpGs. The primary sample's tag is
+ * its mean minus the mean of the others', each other sample's tag its own mean minus the primary's.
+ */
+const METHYL_DIFF_MIN_CALLS = 5, METHYL_DIFF_MIN_CPGS = 3, METHYL_DIFF_H = 13;
+/** Differences under this many points are drawn grey, at or above METHYL_DIFF_STRONG bold. */
+const METHYL_DIFF_WEAK = 0.1, METHYL_DIFF_STRONG = 0.2;
+interface MethylIslandDiff { start: number; end: number; delta: number; cpgs: number; mean: number; vs: { name: string; mean: number; ref: number; cpgs: number }[] }
+function methylIslandDiffs(ref: { sid: number; name: string; e: MethylEntry }, others: { sid: number; name: string; e: MethylEntry }[]): Map<number, MethylIslandDiff[]> {
+  const out = new Map<number, MethylIslandDiff[]>();
+  const R = ref.e.prefix, isl = ref.e.w?.islands ?? [];
+  if (!R) return out;
+  const beta = (P: MethylPrefix, i: number) => { const t = P.total[3][i + 1] - P.total[3][i]; return t >= METHYL_DIFF_MIN_CALLS ? (P.mod[3][i + 1] - P.mod[3][i]) / t : NaN; };
+  const refRows: MethylIslandDiff[] = [];
+  const otherRows = new Map<number, MethylIslandDiff[]>(others.map(o => [o.sid, []]));
+  for (const [s, e] of isl) {
+    const vs: MethylIslandDiff['vs'] = [];
+    for (const o of others) {
+      const Q = o.e.prefix;
+      if (!Q || o.e.chrom !== ref.e.chrom || o.e.start > s || o.e.end < e) continue;
+      // merge walk over the island's CpGs of both samples
+      let i = methylLower(R.pos, s), j = methylLower(Q.pos, s), n = 0, sr = 0, so = 0;
+      while (i < R.pos.length && j < Q.pos.length && R.pos[i] < e && Q.pos[j] < e) {
+        if (R.pos[i] < Q.pos[j]) i++;
+        else if (R.pos[i] > Q.pos[j]) j++;
+        else { const br = beta(R, i), bo = beta(Q, j); if (!Number.isNaN(br) && !Number.isNaN(bo)) { n++; sr += br; so += bo; } i++; j++; }
+      }
+      if (n < METHYL_DIFF_MIN_CPGS) continue;
+      vs.push({ name: o.name, mean: so / n, ref: sr / n, cpgs: n });
+      otherRows.get(o.sid)!.push({ start: s, end: e, delta: so / n - sr / n, cpgs: n, mean: so / n, vs: [{ name: ref.name, mean: sr / n, ref: so / n, cpgs: n }] });
+    }
+    if (!vs.length) continue;
+    const d = vs.reduce((a, v) => a + (v.ref - v.mean), 0) / vs.length, m = vs.reduce((a, v) => a + v.ref, 0) / vs.length;
+    refRows.push({ start: s, end: e, delta: d, cpgs: Math.max(...vs.map(v => v.cpgs)), mean: m, vs });
+  }
+  out.set(ref.sid, refRows);
+  for (const [sid, rows] of otherRows) out.set(sid, rows);
+  return out;
+}
+/** Height of a track's methylation panel: a header, the island differences (several samples), the ribbon, and the difference of the haplotypes when the reads are tagged. */
+const methylPanelH = (e: MethylEntry | undefined, diffRow = false): number => METHYL_GAP + METHYL_HEAD_H + (diffRow ? METHYL_DIFF_H : 0) + METHYL_RIBBON_H + (e?.prefix?.tagged ? METHYL_DELTA_H : 0) + 4;
+
+/**
+ * A read's CpG ticks as three paths (methylated, unmethylated, below the confidence threshold), vertical lines at the
+ * middle of each CpG in bases from the read's start: built once per read, threshold and row height, then moved by
+ * transforms only. Kept on the read object, so they go with the reads.
+ */
+const methylTickCache = new WeakMap<AlignedRead, { thr: number; h: number; mod: string; unmod: string; low: string; runs: [string, string, string]; n: [number, number, number] }>();
+/**
+ * Wide views (under METHYL_TICK_FINE_PX_PER_BP pixels per base) draw a read's calls coarser: consecutive calls of one class
+ * within METHYL_RUN_GAP_BP of each other as one rectangle. A 120× window then rasterises a few thousand shapes instead
+ * of a few hundred thousand lines, which a pan frame could not afford; zoomed in, every call is its own line again.
+ */
+const METHYL_TICK_FINE_PX_PER_BP = 0.08, METHYL_RUN_GAP_BP = 100;
+const METHYL_TICK_READS_BUDGET = 400, METHYL_SETTLE_MS = 200;
+function methylReadTicks(r: AlignedRead, thr: number, h: number) {
+  const c = methylTickCache.get(r);
+  if (c && c.thr === thr && c.h === h) return c;
+  const parts: string[][] = [[], [], []], runs: string[][] = [[], [], []], n: [number, number, number] = [0, 0, 0], me = r.me ?? [];
+  let run: { cls: number; a: number; b: number } | null = null;
+  const flush = () => { if (run) { const w = run.b - run.a; runs[run.cls].push(`M${run.a - r.s},0h${w}v${h}h${-w}z`); run = null; } };
+  for (let k = 0; k < me.length; k += 2) {
+    const p = me[k + 1] / 255, conf = Math.max(p, 1 - p), cls = conf < thr ? 2 : p > 0.5 ? 0 : 1, pos = me[k];
+    parts[cls].push(`M${pos + 1 - r.s},0v${h}`); n[cls]++;
+    if (run && run.cls === cls && pos - run.b <= METHYL_RUN_GAP_BP) run.b = pos + 2;
+    else { flush(); run = { cls, a: pos, b: pos + 2 }; }
+  }
+  flush();
+  const out = { thr, h, mod: parts[0].join(''), unmod: parts[1].join(''), low: parts[2].join(''), runs: runs.map(x => x.join('')) as [string, string, string], n };
+  methylTickCache.set(r, out);
+  return out;
+}
 
 /** haplotypes 1, 2 (and DRAGEN's higher copy labels): the chip of a consensus row, the band of a group of reads */
 const HAP_COLORS = ['#0369a1', '#be185d', '#4d7c0f', '#92400e'];
@@ -731,6 +849,7 @@ export default function SashimiViewer({
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
+  const [methylIslands, setMethylIslands] = useState(init.methylIslands ?? false);
   const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
@@ -1409,14 +1528,37 @@ export default function SashimiViewer({
   // from prefix sums, so that any zoom or pan inside the counted window costs a few binary searches per pixel ----
   const [methylData, setMethylData] = useState<Record<number, MethylEntry>>({});
   const methylAbort = useRef(new Map<number, AbortController>());
+  const methylWasOn = useRef(false);
+  /**
+   * The view is being moved (a pan or zoom frame less than METHYL_SETTLE_MS ago): a reads track with more than
+   * METHYL_TICK_READS_BUDGET coloured reads leaves their CpG calls out until it settles. Such a window (a deep, short-read
+   * long-read library) holds thousands of tick paths whose rows are repacked at every pan frame; redrawing them each
+   * frame halved the frame rate, and the calls are only readable once the view stops anyway.
+   */
+  const [viewMoving, setViewMoving] = useState(false);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!showMethyl) return;
+    setViewMoving(true);
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(() => setViewMoving(false), METHYL_SETTLE_MS);
+    return () => { if (settleTimer.current) clearTimeout(settleTimer.current); };
+  }, [viewStart, viewEnd, showMethyl]);
   useEffect(() => {
     if (!showMethyl) {
-      // switched off: stop what runs and forget the counts (the worker keeps its cache for a quick return)
+      // switched off: stop what runs, forget the counts here and in the worker, and the CpG calls carried by the reads
+      if (!methylWasOn.current) return;
+      methylWasOn.current = false;
       for (const c of methylAbort.current.values()) c.abort();
       methylAbort.current.clear();
-      if (Object.keys(methylData).length) setMethylData({});
+      setMethylData({});
+      ds.release?.('methylation');
+      setReadsData(p => Object.values(p).some(e => e.methyl)
+        ? Object.fromEntries(Object.entries(p).map(([k, e]) => [k, e.methyl ? { ...e, methyl: false, data: { ...e.data, reads: e.data.reads.map(({ me: _, ...r }) => r) } } : e]))
+        : p);
       return;
     }
+    methylWasOn.current = true;
     if (!ds.getMethylation) return;
     const v = viewRef.current, span = v.end - v.start;
     if (span > METHYL_MAX_VIEW_BP) return;
@@ -1451,9 +1593,9 @@ export default function SashimiViewer({
   const methylDraws = useMemo(() => {
     const m = new Map<number, MethylDraw | null>();
     if (!showMethyl) return m;
-    for (const [sid, e] of Object.entries(methylData)) if (e.chrom === currentChrom) m.set(Number(sid), methylDraw(e, scale, viewStart, viewEnd));
+    for (const [sid, e] of Object.entries(methylData)) if (e.chrom === currentChrom) m.set(Number(sid), methylDraw(e, scale, viewStart, viewEnd, methylIslands));
     return m;
-  }, [showMethyl, methylData, scale, viewStart, viewEnd, currentChrom]);
+  }, [showMethyl, methylData, scale, viewStart, viewEnd, currentChrom, methylIslands]);
 
   /** Forgets the variants of a sample: its running scan is stopped and its sites dropped (plain coverage again until the chip is clicked). */
   const forgetVariants = useCallback((sid: number) => {
@@ -1463,6 +1605,31 @@ export default function SashimiViewer({
     setDnaSitesLoading(p => ({ ...p, [sid]: false }));
     setDnaSites(p => { const { [sid]: _, ...rest } = p; return rest; });
   }, []);
+
+  /**
+   * Overlays switched off let their data go: the variants of every DNA track (scans stopped, sites dropped, the allele
+   * counts kept in the worker released) and the reads of the reads track. They are read again when switched back on;
+   * until then the page holds and redraws nothing for them, so it stays as light as before they were asked for.
+   */
+  const variantsWereOn = useRef(false), readsWereOn = useRef(false);
+  useEffect(() => {
+    if (coverageVariants) { variantsWereOn.current = true; return; }
+    if (!variantsWereOn.current) return;
+    variantsWereOn.current = false;
+    for (const sid of Object.keys(dnaSites).map(Number)) forgetVariants(sid);
+    for (const [sid, c] of dnaSitesAbort.current) { c.abort(); forgetVariants(sid); }
+    ds.release?.('variants');
+  }, [coverageVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (showReads) { readsWereOn.current = true; return; }
+    if (!readsWereOn.current) return;
+    readsWereOn.current = false;
+    for (const c of readsAbort.current.values()) c.abort();
+    readsAbort.current.clear();
+    for (const [sid, n] of readsSeq.current) readsSeq.current.set(sid, n + 1);   // an answer still on its way is dropped
+    setReadsData({});
+    setReadsLoading({});
+  }, [showReads]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Scans the reads of one or more ranges of the current chromosome for a sample (tile by tile, sampled only where a tile is deeper than the scan's budget, whatever
@@ -2467,23 +2634,41 @@ export default function SashimiViewer({
     const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
     const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
     const nSpan = visible.filter((r, i) => rows[i] >= 0 && readSpansBoundary(r, modelBoundaries)).length;
-    // CpG calls of the reads (Methylation on, narrow view): one path per class for the whole track, whatever the reads
+    // CpG calls of the reads (Methylation on, narrow view). On a linear axis each read's ticks are built once, relative to
+    // its start (methylReadTicks), and the layer is placed by one transform: a pan or zoom frame then changes two
+    // attributes instead of rebuilding and re-parsing tens of thousands of rectangles
     const methylOn = showMethyl && !!readsData[sid]?.methyl && viewEnd - viewStart <= METHYL_READS_MAX_BP;
     const methylThr = methylData[sid]?.w?.threshold ?? 0;
+    const linearAxis = scale.axis.kind === 'linear', tickOrigin = entry?.fetched.start ?? 0;
+    const pxPerBp = linearAxis ? (scale.x(tickOrigin + 10000) - scale.x(tickOrigin)) / 10000 : 0, tickFine = Math.abs(pxPerBp) >= METHYL_TICK_FINE_PX_PER_BP;
     const meMod: string[] = [], meUnmod: string[] = [], meLow: string[] = [];
-    let meCalls = 0;
+    const meLayer: JSX.Element[] = [], meN = [0, 0, 0];
+    const meDeferred = methylOn && viewMoving && visible.reduce((n, r, i) => n + (rows[i] >= 0 && r.me ? 1 : 0), 0) > METHYL_TICK_READS_BUDGET;
     const readEls = visible.map((r: AlignedRead, idx: number) => {
       const row = rows[idx];
       if (row < 0) return null;
-      if (methylOn && r.me) {
-        const t0 = readsTop + row * (rowH + 1), hh = rowH.toFixed(1);
-        for (let k = 0; k < r.me.length; k += 2) {
-          const pos = r.me[k];
-          if (pos < viewStart - 2 || pos >= viewEnd) continue;
-          const xa = scale.x(pos), xb = scale.x(pos + 2), mid = (xa + xb) / 2, w = Math.max(1.5, Math.abs(xb - xa) - 0.5);
-          const p = r.me[k + 1] / 255, conf = Math.max(p, 1 - p);
-          (conf < methylThr ? meLow : p > 0.5 ? meMod : meUnmod).push(`M${(mid - w / 2).toFixed(1)},${t0}h${w.toFixed(1)}v${hh}h${(-w).toFixed(1)}z`);
-          meCalls++;
+      if (methylOn && !meDeferred && r.me) {
+        const t0 = readsTop + row * (rowH + 1);
+        if (linearAxis) {
+          const c = methylReadTicks(r, methylThr, rowH);
+          meN[0] += c.n[0]; meN[1] += c.n[1]; meN[2] += c.n[2];
+          // two nodes per read at most (the page's cost grows with its nodes): calls below the confidence threshold are
+          // left uncoloured, the read's own grey reading as "no confident call"
+          const [dm, du] = tickFine ? [c.mod, c.unmod] : c.runs, at = `translate(${r.s - tickOrigin},${t0})`, key = r.n + r.s + r.f;
+          if (du) meLayer.push(<path key={`u${key}`} transform={at} d={du} stroke={METHYL_COLORS[0]} fill={tickFine ? 'none' : METHYL_COLORS[0]} vectorEffect="non-scaling-stroke" />);
+          if (dm) meLayer.push(<path key={`m${key}`} transform={at} d={dm} stroke={METHYL_COLORS[METHYL_COLORS.length - 1]} fill={tickFine ? 'none' : METHYL_COLORS[METHYL_COLORS.length - 1]} vectorEffect="non-scaling-stroke" />);
+        } else {
+          // a virtual axis (equal introns): positions are not an affine map of the genome, drawn frame by frame
+          const hh = rowH.toFixed(1);
+          const me: number[] = r.me;
+          for (let k = 0; k < me.length; k += 2) {
+            const pos = me[k];
+            if (pos < viewStart - 2 || pos >= viewEnd) continue;
+            const xa = scale.x(pos), xb = scale.x(pos + 2), mid = (xa + xb) / 2, w = Math.max(1.5, Math.abs(xb - xa) - 0.5);
+            const p: number = me[k + 1] / 255, conf = Math.max(p, 1 - p), cls = conf < methylThr ? 2 : p > 0.5 ? 0 : 1;
+            (cls === 2 ? meLow : cls === 0 ? meMod : meUnmod).push(`M${(mid - w / 2).toFixed(1)},${t0}h${w.toFixed(1)}v${hh}h${(-w).toFixed(1)}z`);
+            meN[cls]++;
+          }
         }
       }
       const top = readsTop + row * (rowH + 1);
@@ -2645,20 +2830,25 @@ export default function SashimiViewer({
       (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter((r, i) => discordantOf(r, i)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
-    const methylEls = meCalls ? [
+    const meCalls = meN[0] + meN[1] + meN[2];
+    // the layer's transform: genome (relative to tickOrigin) to pixels; ticks 2 bases wide, at least 1.5 px (runs: their
+    // extent, and a 1.2 px outline so a lone call stays visible)
+    const methylEls = !meCalls ? [] : linearAxis ? [
+      <g key="methyl" pointerEvents="none" transform={`matrix(${pxPerBp},0,0,1,${scale.x(tickOrigin)},0)`} strokeWidth={tickFine ? Math.max(1.5, Math.abs(2 * pxPerBp) - 0.4) : 1.2}>{meLayer}</g>,
+    ] : [
       <g key="methyl" pointerEvents="none">
         {meLow.length > 0 && <path d={meLow.join('')} fill="#9ca3af" opacity={0.35} />}
         {meUnmod.length > 0 && <path d={meUnmod.join('')} fill={METHYL_COLORS[0]} />}
         {meMod.length > 0 && <path d={meMod.join('')} fill={METHYL_COLORS[METHYL_COLORS.length - 1]} />}
       </g>,
-    ] : [];
-    const methylInfo = methylOn ? ` · CpG calls: ${meCalls ? `${meMod.length.toLocaleString()} methylated (red), ${meUnmod.length.toLocaleString()} unmethylated (blue)${meLow.length ? `, ${meLow.length.toLocaleString()} below the confidence threshold (grey)` : ''}` : 'none (no MM / ML tags)'}`
+    ];
+    const methylInfo = meDeferred ? ' · CpG calls: drawn when the view stops (deep window)' : methylOn ? ` · CpG calls of the reads drawn: ${meCalls ? `${meN[0].toLocaleString()} methylated (red), ${meN[1].toLocaleString()} unmethylated (blue)${meN[2] ? `, ${meN[2].toLocaleString()} below the confidence threshold (not coloured)` : ''}` : 'none (no MM / ML tags)'}`
       : showMethyl && isDnaSample(sid) && mode === 'reads' && viewEnd - viewStart > METHYL_READS_MAX_BP ? ` · zoom in to ≤ ${formatBp(METHYL_READS_MAX_BP)} for the CpG calls of each read` : '';
     return wrap(height, info + methylInfo, [...groupEls, ...readEls.filter((e): e is JSX.Element => e !== null), ...methylEls], bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, haplotypes, phaseSource, readsGroup, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, haplotypes, phaseSource, readsGroup, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -2767,6 +2957,8 @@ export default function SashimiViewer({
     balance?: { text: string; title: string; warn: boolean };
     /** height of the CpG methylation panel under the coverage (0 when none) */
     methyl: number;
+    /** the panel has the row of the CpG-island differences with the other samples */
+    methylDiff: boolean;
   }
 
   const transcriptY = RULER_H;
@@ -2843,6 +3035,8 @@ export default function SashimiViewer({
     const hiddenSet = new Set(hiddenArcs);
     /** difference in percentage points with another group, signed */
     const deltaText = (d: number) => (Math.abs(d) < 0.0005 ? '±0 %' : `${d < 0 ? '−' : '+'}${pctLabel(Math.abs(d))}`);
+    // the samples with a methylation panel: with two or more, each panel gets the row of the island differences
+    const methylDiffRow = showMethyl && !!ds.getMethylation && displayTracks.filter(t => isDnaTrack(t) && !t.gtex && !t.group).length >= 2;
     displayTracks.forEach((track, idx) => {
       const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? TRACK_COLORS[idx % TRACK_COLORS.length];
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
@@ -3073,14 +3267,31 @@ export default function SashimiViewer({
             title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
-      const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId]) : 0;
+      const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
       const height = juncH + COVERAGE_H + methyl;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance, methyl });
+      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance, methyl, methylDiff: methyl > 0 && methylDiffRow });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
   }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
+   * of the others: computed when their counts change, not per frame (the panels only place the tags).
+   */
+  const methylDiffCache = useRef<{ keys: unknown[]; out: Map<number, MethylIslandDiff[]> } | null>(null);
+  const methylDiffs = useMemo(() => {
+    const panels = layouts.filter(L => L.methylDiff).map(L => ({ sid: L.track.sampleId, name: L.track.sampleName, e: methylData[L.track.sampleId] }))
+      .filter((x): x is { sid: number; name: string; e: MethylEntry } => !!x.e?.prefix && x.e.chrom === currentChrom);
+    if (panels.length < 2) return new Map<number, MethylIslandDiff[]>();
+    const keys = panels.flatMap(p => [p.sid, p.e.prefix]);
+    const c = methylDiffCache.current;
+    if (c && c.keys.length === keys.length && c.keys.every((k, i) => k === keys[i])) return c.out;
+    const out = methylIslandDiffs(panels[0], panels.slice(1));
+    methylDiffCache.current = { keys, out };
+    return out;
+  }, [layouts, methylData, currentChrom]);
 
   const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
   /** Each reads track sits right under the coverage track of its sample. */
@@ -3194,6 +3405,15 @@ export default function SashimiViewer({
             <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>Δ HP1 − HP2</text>
             <rect x={88} y={y - 6} width={26} height={12} rx={2} fill={METHYL_ASM_COLOR} fillOpacity={0.07} stroke={METHYL_ASM_COLOR} strokeDasharray="3 2" />
             <text x={119} y={y + 3.5} fill={INK.muted} fontSize={9.5}>allele-specific methylation</text>
+          </g>
+        ),
+      });
+      if (layouts.some(L => L.methylDiff)) items.push({
+        w: 290, el: (
+          <g key="lme4">
+            <rect x={0} y={y - 5.5} width={34} height={11} rx={5.5} fill={METHYL_COLORS[0]} stroke={METHYL_COLORS[0]} />
+            <text x={17} y={y + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight={700}>−26 %</text>
+            <text x={40} y={y + 3.5} fill={INK.muted} fontSize={9.5}>CpG-island mean 5mC, primary vs other samples</text>
           </g>
         ),
       });
@@ -3426,29 +3646,65 @@ export default function SashimiViewer({
       const s = draw!.summary, w = e.w!;
       const lanes = e.prefix?.tagged ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view` : `5mC ${pct(s.frac[3])}`;
       status = {
-        text: `${lanes} · ${s.cpgs.toLocaleString()} CpG · ${Math.round(s.calls[3]).toLocaleString()} calls${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
+        text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString()} CpG · ${Math.round(s.calls[3]).toLocaleString()} calls${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
         color: INK.muted,
         title: `5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${w.threshold.toFixed(2)} (the 10th percentile of this window's calls, as modkit does) are left out: ${w.filtered.toLocaleString()} of ${(w.calls + w.filtered).toLocaleString()} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.`,
       };
     }
+    // the island tags: placed from the largest difference down, each where it does not cover one already placed
+    const diffRows = L.methylDiff ? methylDiffs.get(sid) ?? [] : [];
+    const firstDiff = layouts.find(x => x.methylDiff);
+    const diffRef = firstDiff?.track.sampleId === sid, diffRefName = firstDiff?.track.sampleName ?? 'the primary';
+    const diffPills: { d: MethylIslandDiff; cx: number; w: number; text: string; color: string; strong: boolean; title: string }[] = [];
+    if (L.methylDiff) {
+      const placed: [number, number][] = [];
+      for (const d of [...diffRows].filter(r => r.end > viewStart && r.start < viewEnd).sort((p, q) => Math.abs(q.delta) - Math.abs(p.delta))) {
+        const pts = Math.round(d.delta * 100), text = `${pts > 0 ? '+' : pts < 0 ? '−' : '±'}${Math.abs(pts)} %`, w = text.length * 4.9 + 9;
+        const xa = scale.x(d.start), xb = scale.x(d.end), cx = Math.min(Math.max((xa + xb) / 2, PLOT_LEFT + w / 2), plotRight - w / 2);
+        if (placed.some(([l, r]) => cx - w / 2 < r + 2 && cx + w / 2 > l - 2)) continue;
+        placed.push([cx - w / 2, cx + w / 2]);
+        const weak = Math.abs(d.delta) < METHYL_DIFF_WEAK, color = weak ? INK.faint : d.delta < 0 ? METHYL_COLORS[0] : METHYL_COLORS[METHYL_COLORS.length - 1];
+        const where = `CpG island ${currentChrom}:${(d.start + 1).toLocaleString()}-${d.end.toLocaleString()} (${formatBp(d.end - d.start)})`;
+        const title = diffRef
+          ? `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC, ${text} against the other samples:\n${d.vs.map(v => `  ${v.name}: ${pct(v.mean)} (${v.ref - v.mean >= 0 ? '+' : '−'}${Math.abs(Math.round((v.ref - v.mean) * 100))} points; ${v.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`).join('\n')}`
+          : `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC against ${diffRefName}: ${pct(d.vs[0].mean)}, ${text} (${d.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`;
+        diffPills.push({ d, cx, w, text, color, strong: Math.abs(d.delta) >= METHYL_DIFF_STRONG, title: `${title}\nmean of the CpGs' 5mC fractions over the CpGs covered in both samples, all reads` });
+      }
+    }
     const laneLabel = (label: string) => label === 'HP1' ? HAP_COLORS[0] : label === 'HP2' ? HAP_COLORS[1] : INK.muted;
-    const lanesTop = y0 + METHYL_HEAD_H, lanesBottom = y0 + L.methyl - METHYL_GAP - 4;
+    // the row of the CpG-island differences (several samples) sits between the header and the ribbon
+    const dH = L.methylDiff ? METHYL_DIFF_H : 0, ry = y0 + dH;
+    const lanesTop = ry + METHYL_HEAD_H, lanesBottom = y0 + L.methyl - METHYL_GAP - 4;
     return (
       <g key="methyl">
         <line x1={PLOT_LEFT} y1={top + 1} x2={plotRight} y2={top + 1} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />
         <text transform={`translate(${12}, ${(lanesTop + lanesBottom) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>CpG</text>
         {draw && (draw.phasedRuns.length ? (
           <>
-            <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_LANE_H / 2 + 3} textAnchor="end" fill={HAP_COLORS[0]} fontSize={8.5} fontWeight={700}>HP1</text>
-            <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_LANE_H * 1.5 + 4} textAnchor="end" fill={HAP_COLORS[1]} fontSize={8.5} fontWeight={700}>HP2</text>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H / 2 + 3} textAnchor="end" fill={HAP_COLORS[0]} fontSize={8.5} fontWeight={700}>HP1</text>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H * 1.5 + 4} textAnchor="end" fill={HAP_COLORS[1]} fontSize={8.5} fontWeight={700}>HP2</text>
           </>
-        ) : <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 3} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>5mC</text>)}
-        {draw?.delta && <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_RIBBON_H + METHYL_DELTA_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8.5}>Δ</text>}
+        ) : <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 3} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>5mC</text>)}
+        {dH > 0 && <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_DIFF_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8}>
+          <title>{diffRef ? 'Mean CpG-island methylation of this sample minus the mean of the other samples' : `Mean CpG-island methylation of this sample minus ${diffRefName}'s (the primary)`}</title>
+          {diffRef ? 'Δ others' : 'Δ prim.'}
+        </text>}
+        {draw?.delta && <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_RIBBON_H + METHYL_DELTA_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8.5}>Δ</text>}
         <g clipPath={`url(#${clipId})`}>
           {draw?.islands.map(r => (
             <rect key={`isl${r.start}`} x={r.x0} y={y0 + METHYL_HEAD_H - 4} width={Math.max(1, r.x1 - r.x0)} height={3} rx={1} fill="#16a34a" opacity={0.55}>
               <title>{`CpG island ${currentChrom}:${(r.start + 1).toLocaleString()}-${r.end.toLocaleString()} (${formatBp(r.end - r.start)}; GC ≥ 50 %, observed/expected CpG ≥ 0.6 over ≥ 200 bp, Gardiner-Garden & Frommer 1987)`}</title>
             </rect>
+          ))}
+          {dH > 0 && diffPills.map(p => (
+            <g key={`dp${p.d.start}`}>
+              <title>{p.title}</title>
+              <line x1={p.cx} y1={y0 + METHYL_HEAD_H - 1} x2={p.cx} y2={y0 + METHYL_HEAD_H + 1.5} stroke={p.color} strokeWidth={1} />
+              <rect x={p.cx - p.w / 2} y={y0 + METHYL_HEAD_H + 1.5} width={p.w} height={METHYL_DIFF_H - 2.5} rx={(METHYL_DIFF_H - 2.5) / 2}
+                fill={diffRef && p.strong ? p.color : INK.bg} stroke={p.color} strokeWidth={p.strong ? 1.2 : 0.8} />
+              <text x={p.cx} y={y0 + METHYL_HEAD_H + METHYL_DIFF_H / 2 + 3} textAnchor="middle" fontSize={8} fontWeight={p.strong ? 700 : 600}
+                fill={diffRef && p.strong ? '#fff' : p.color}>{p.text}</text>
+            </g>
           ))}
           {/* allele-specific methylation: a frame across the lanes */}
           {draw?.asm.map(r => (
@@ -3457,7 +3713,7 @@ export default function SashimiViewer({
             </rect>
           ))}
           {draw && (
-            <g transform={`translate(0, ${y0})`}>
+            <g transform={`translate(0, ${ry})`}>
               <line x1={PLOT_LEFT} y1={METHYL_HEAD_H + METHYL_RIBBON_H / 2} x2={plotRight} y2={METHYL_HEAD_H + METHYL_RIBBON_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="1 3" />
               {draw.ribbon.map((p, i) => <path key={i} d={p.d} fill={p.color} opacity={p.faint ? 0.35 : 1} />)}
               {/* where the ribbon splits into the two haplotypes and joins again */}
@@ -3467,7 +3723,7 @@ export default function SashimiViewer({
             </g>
           )}
           {draw?.delta && (
-            <g transform={`translate(0, ${y0 + METHYL_HEAD_H + METHYL_RIBBON_H})`}>
+            <g transform={`translate(0, ${ry + METHYL_HEAD_H + METHYL_RIBBON_H})`}>
               {draw.phasedRuns.map(([a, b]) => <rect key={`dr${a}`} x={a} y={1} width={b - a} height={METHYL_DELTA_H - 2} fill={INK.grid} opacity={0.35} />)}
               <line x1={PLOT_LEFT} y1={METHYL_DELTA_H / 2} x2={plotRight} y2={METHYL_DELTA_H / 2} stroke={INK.gridStrong} strokeWidth={0.6} strokeDasharray={draw.phasedRuns.length ? undefined : '1 3'} />
               {draw.delta.up && <path d={draw.delta.up} fill={HAP_COLORS[0]} opacity={0.85} />}
@@ -4158,15 +4414,15 @@ export default function SashimiViewer({
     };
     /** the 5mC fractions of the column under the pointer, as the panel draws it (split when phased, all reads when not) */
     function methylHover(e: MethylEntry | undefined, sid: number) {
-      const P = e?.prefix;
-      if (!P || e.chrom !== currentChrom) return null;
-      const x = Math.floor(hover!.px), c = methylCol(P, scale, x);
+      const S = e && e.chrom === currentChrom ? methylSource(e, methylIslands) : null;
+      if (!S) return null;
+      const P = S.P, x = Math.floor(hover!.px), c = methylCol(S, scale, x);
       if (!c) return null;
       const phased = !!methylDraws.get(sid)?.phasedRuns.some(([a, b]) => x >= a && x < b);
       const lanes = (phased ? [1, 2, ...(c.t[0] ? [0] : [])] : [3]).map(l => ({ label: l === 3 ? (P.tagged ? 'all (not phased)' : '5mC') : l === 0 ? 'untagged' : `HP${l}`, f: c.f[l], t: c.t[l] }));
       return { n: c.b - c.a, from: P.pos[c.a], to: P.pos[c.b - 1] + 2, lanes };
     }
-  }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
+  }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, methylIslands, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
 
   // ---- Popover content: junction (HGVS, frame, share vs canonical, usage of skipped exons) or exon (depth usage + junction ψ) ----
   interface PopTable { caption?: string; head: string[]; rows: string[][] }
@@ -4320,13 +4576,13 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, methylation: showMethyl, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -4454,6 +4710,10 @@ export default function SashimiViewer({
               {anyDna && !!ds.getMethylation && (
                 <Toggle checked={showMethyl} onChange={setShowMethyl} label="Methylation"
                   title={`Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.`} />
+              )}
+              {anyDna && !!ds.getMethylation && showMethyl && (
+                <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
+                  title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
               )}
               {(showReads || (anyDna && coverageVariants)) && (
                 <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">

@@ -284,6 +284,8 @@ export interface VariantScanner {
   reference(reference: ReferenceChoice): void;
   /** CpG methylation counted in the worker (absent from scanners that do not do it) */
   methyl?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
+  /** drop the counts kept for these */
+  release?(what: 'methylation' | 'variants'): void;
 }
 
 export class LocalDataSource implements SashimiDataSource {
@@ -315,6 +317,11 @@ export class LocalDataSource implements SashimiDataSource {
   addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
   removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
+  /** Drops the counts kept for an overlay the viewer switched off (they are counted again when it comes back). */
+  release(what: 'methylation' | 'variants') {
+    if (what === 'methylation') this.methylStates.clear(); else this.alleleStates.clear();
+    this.variantScanner?.release?.(what);
+  }
   /** The files behind a sample, for a variant scanner that reads them elsewhere (a worker). */
   sampleFiles(id: number): LocalSample | undefined { return this.samples.get(id); }
   list(): SampleRef[] { return [...this.samples.values()].map(s => ({ id: s.id, name: s.name })); }

@@ -416,11 +416,52 @@ read or CpG, so it takes the same time at 1 kb or at 2 Mb. It is counted for vie
 (wider, the panel asks to zoom in) and needs the reference sequence.
 
 With the **reads track** open on a view of 30 kb or less, each read's CpG calls are drawn on it:
-red (methylated), blue (unmethylated), grey (below the confidence threshold). *Group: haplotype
-(HP)* then shows the two haplotypes' reads apart, and an allele-specific region stands out as a
-red block over a blue one. The panel is not part of exported pages, which carry no base-modification
-tags.
+red for methylated, blue for unmethylated. Calls below the confidence threshold are left uncoloured,
+so the read's grey reads as "no confident call". *Group: haplotype (HP)* then shows the two
+haplotypes' reads apart, and an allele-specific region stands out as a red block over a blue one.
+Wider than about 15 kb (under 0.08 pixel per base), a read's consecutive calls of one kind (within
+100 bp of each other) are drawn as one bar rather than one line each. The panel is not part of exported pages, which carry no
+base-modification tags.
 
+**CpG islands only.** Once *Methylation* is on, a second option, *CpG islands only*, restricts
+the panel to the CpG islands of the reference. Only their CpGs are counted in the ribbon, the
+haplotype difference, the allele-specific frames and the figures of the header. A pixel's smoothing
+never reaches outside its island, and the panel stays empty between islands. Promoter islands are
+where methylation carries most of its regulatory and diagnostic meaning: an imprinting centre, a
+hypermethylated tumour-suppressor promoter, a fragile-site expansion such as *FMR1*. Leaving out
+the gene-body CpGs (mostly methylated) makes the islands stand out.
+
+**Island differences between samples.** With two or more long-read DNA samples open, each panel
+gets a row of tags, one per CpG island, whichever mode the panel is in:
+- on the **primary sample** (the first one), its mean island methylation minus the mean of the
+  other samples, for example **−26 %** for an island 26 points less methylated than in the others;
+- on **each other sample**, its own mean minus the primary's.
+
+A tag is coloured blue (less methylated) or red (more), and grey below 10 points. From 20 points it
+is bold, and on the primary it is filled. The mean is taken over the island's CpGs covered by at least
+5 calls **in both samples**. These CpGs are paired, so a CpG covered in only one sample cannot tilt
+the comparison, and an island needs at least 3 of them. Each CpG counts once, as the mean of the
+CpGs' 5mC fractions (the usual mean β of array and bisulfite analyses), whatever its depth. When
+tags would overlap, the largest differences are kept. The tooltip lists each sample's mean, its
+difference and the CpGs compared. The differences are computed when the counts change, not while
+the view moves.
+
+**Staying fluid.** Methylation is designed to stay fluid:
+- **Counting in the background.** It runs in the Web Worker, and the panel is computed per pixel.
+- **Moving read calls.** Each read's calls are built once, as paths relative to the read, and a pan
+  or zoom only moves them. With reads, variants and methylation all on, frames stay at the
+  display's rate on 30× long reads, like frames with all three off.
+- **Deep windows.** A deep window can hold more than 400 coloured reads, for example 120× of
+  5 kb reads. There, the calls on the reads are left out while the view moves and come back
+  200 ms after it stops.
+
+Switching an option off releases what it holds:
+- **Methylation:** the counts of every sample, here and in the worker, and the calls carried by the
+  reads;
+- **Variants:** the scanned sites and the allele counts of the worker;
+- **Reads:** the reads of the reads track.
+
+They are read again when switched back on.
 ## Moving inside a view
 
 The search box next to the gene name moves the window without leaving the view. It takes, in

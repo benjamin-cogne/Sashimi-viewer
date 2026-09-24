@@ -7,7 +7,7 @@
  * (File objects cross to a worker) and the same reference (a local FASTA, or the web APIs, fetched from
  * here), with the same code as the page would run — countVariants, allele counts kept per sample.
  *
- * Messages in: reference, sample, forget, scan {req, …}, methyl {req, …}, cancel {req}. Out: progress, done, error.
+ * Messages in: reference, sample, forget, scan {req, …}, methyl {req, …}, cancel {req}, release {what}. Out: progress, done, error.
  * The CpG methylation of long reads (methylation.ts) is counted here too, for the same reason.
  */
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
@@ -18,6 +18,7 @@ type In =
   | { type: 'sample'; sample: LocalSample }
   | { type: 'forget'; id: number }
   | { type: 'cancel'; req: number }
+  | { type: 'release'; what: 'methylation' | 'variants' }
   | { type: 'methyl'; req: number; sampleId: number; chrom: string; start: number; end: number }
   | { type: 'scan'; req: number; sampleId: number; chrom: string; start: number; end: number; uniqueOnly: boolean; minVaf: number; opts: Omit<VariantScanOptions, 'signal' | 'onProgress'> };
 
@@ -31,6 +32,7 @@ self.onmessage = (e: MessageEvent<In>) => {
   else if (m.type === 'sample') ds.addSample(m.sample);
   else if (m.type === 'forget') ds.removeSample(m.id);
   else if (m.type === 'cancel') running.get(m.req)?.abort();
+  else if (m.type === 'release') ds.release(m.what);
   else if (m.type === 'methyl') {
     // CpG methylation (methylation.ts): the window comes back as typed arrays, handed over without a copy
     const ctl = new AbortController();
