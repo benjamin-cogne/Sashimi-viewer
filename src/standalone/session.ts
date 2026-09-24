@@ -23,7 +23,7 @@ export interface SessionGene {
   mark: { start: number; end: number } | null;
 }
 /** Viewer options with samples referred to by name (ids are per page load). */
-export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample'> & { groups: { name: string; samples: string[]; color?: string }[]; readsSample: string | null };
+export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample' | 'shownSamples'> & { groups: { name: string; samples: string[]; color?: string }[]; readsSample: string | null; /** the samples shown as tracks, by name, in order */ samples?: string[] };
 export interface SessionFile {
   app: typeof SESSION_APP;
   version: number;
@@ -75,6 +75,7 @@ export function buildSession(args: {
     minJunctionReads: state.minJunctionReads, minJunctionReadsSet: state.minJunctionReadsSet, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
+    samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
     consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases,
   });
@@ -114,6 +115,7 @@ export function parseSession(text: string): SessionFile {
     ...v,
     groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [], color: typeof x.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : undefined })) : [],
     readsSample: typeof v.readsSample === 'string' ? v.readsSample : null,
+    samples: Array.isArray(v.samples) ? v.samples.filter((x: any) => typeof x === 'string') : undefined,
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
     labelScales: v.labelScales && typeof v.labelScales === 'object' ? Object.fromEntries(Object.entries(v.labelScales).filter(([, n]) => typeof n === 'number' && Number.isFinite(n) && n > 0)) as Record<string, number> : undefined,
     hiddenTranscripts: Array.isArray(v.hiddenTranscripts) ? v.hiddenTranscripts.filter((x: any) => typeof x === 'string') : undefined,
@@ -148,10 +150,11 @@ export function viewerSettingsOf(session: SessionFile | { viewer: SessionViewer 
   const v = session.viewer;
   if (!v) return undefined;
   const idOf = (name: string) => samples.find(s => s.name === name)?.id;
-  const { groups, readsSample, ...rest } = v;
+  const { groups, readsSample, samples: shown, ...rest } = v;
   return {
     ...rest,
     readsSample: readsSample ? idOf(readsSample) ?? null : null,
+    ...(shown ? { shownSamples: shown.map(idOf).filter((id): id is number => id != null) } : {}),
     groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
   };
 }

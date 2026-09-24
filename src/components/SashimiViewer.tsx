@@ -122,6 +122,11 @@ export interface ViewerSettings {
   insertedBases?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
+  /**
+   * the samples shown as tracks, in track order (the primary first): a view opens with exactly these (none when empty);
+   * absent = a first view, which shows the primary sample and one comparison sample
+   */
+  shownSamples?: number[];
 }
 /** The options a fresh viewer starts with (the same defaults as its state initialisers), for hosts that need a full state before the viewer has reported one. */
 export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
@@ -1547,12 +1552,18 @@ export default function SashimiViewer({
     }
   }, []);
 
-  // ---- Initial load: primary sample + one random comparison ----
+  // ---- Initial load: the samples the view showed (switching views, a session), else primary sample + one random comparison ----
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    if (sampleId > 0) {
+    if (initialSettings?.shownSamples) {
+      // exactly the tracks the view had: a view reduced to one sample stays so (a random comparison came back each time)
+      for (const sid of initialSettings.shownSamples) {
+        if (sampleNames && sampleNames[sid] == null && sid !== sampleId) continue;   // a sample no longer loaded
+        loadCoverage(sid, sampleNames?.[sid] ?? (sid === sampleId ? sampleName : `sample ${sid}`));
+      }
+    } else if (sampleId > 0) {
       loadCoverage(sampleId, sampleName);
       ds.getRandomSample(runId, sampleId)
         .then(s => loadCoverage(s.id, s.name))
@@ -5067,6 +5078,8 @@ export default function SashimiViewer({
 
   // ======================== Main render (always light theme for readability) ========================
 
+  /** the sample tracks shown, in order, as a key (reported to the host with the options) */
+  const shownKey = tracks.filter(t => t.sampleId > 0).map(t => t.sampleId).join(',');
   // Report every option and the navigation to the host (session files, options kept across remounts)
   const onStateChangeRef = useRef(onStateChange);
   onStateChangeRef.current = onStateChange;
@@ -5077,11 +5090,12 @@ export default function SashimiViewer({
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
       viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
+      shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
