@@ -1065,11 +1065,16 @@ export class LocalDataSource implements SashimiDataSource {
           if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv)) || insLen) {
             try {
               let rs = Math.max(0, w.start - (insLen ? insLen + 200 : 0)), re = w.end + (insLen ? insLen + 200 : 0);
-              let seq = await this.getReferenceSeq(chrom, rs, re).catch(() => null);
+              let wideErr = '';
+              let seq = await this.getReferenceSeq(chrom, rs, re).catch(e => { wideErr = String(e?.message ?? e); return null; });
               // the window alone when the wider stretch cannot be had: a tandem copy is still told by its end next to the insertion
               if (!seq && (rs < w.start || re > w.end)) { rs = w.start; re = w.end; seq = await this.getReferenceSeq(chrom, rs, re); }
               if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian);
-            } catch (e) { console.warn('reference for clip realignment not available:', e); }
+              if (wideErr && ev.diagnostics) ev.diagnostics.referenceError = `${chrom}:${Math.max(0, w.start - insLen - 200) + 1}-${w.end + insLen + 200}: ${wideErr}`;
+            } catch (e) {
+              console.warn('reference for clip realignment not available:', e);
+              if (ev.diagnostics) ev.diagnostics.referenceError = String((e as Error)?.message ?? e);
+            }
             // outside the catch: a reference that cannot be fetched is not fatal, a caller that gave up is
             throwIfAborted(signal);
           }

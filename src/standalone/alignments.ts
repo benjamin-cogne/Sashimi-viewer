@@ -3,7 +3,7 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { AlignedRead, DiscordantArc, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc } from '../components/sashimi/types';
+import type { AlignedRead, DiscordantArc, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc, SvDiagnostics } from '../components/sashimi/types';
 import { clusterSv, type SvMember } from './svmerge';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
@@ -491,6 +491,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
+  const diag: SvDiagnostics = { records: reads.length, pairs: { deletion: 0, duplication: 0, inversion: 0 }, pairsWithDeletion: 0, pairsWithInsertion: 0, insertionGroups: [], reference: ref?.seq ? { start: ref.start, end: ref.start + ref.seq.length } : null };
   const add = (m: Map<string, SvMember>, s: number, e: number, n = 1, src = 'other', name?: string) => {
     const k = `${s}-${e}`;
     let j = m.get(k);
@@ -590,7 +591,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     // base), and from primary records only (a supplementary record repeats its primary's mate fields)
     if (r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
-      else if (r.name && eventInAlignment.has(r.name)) { /* the event is in the alignment */ }
+      else if (r.name && eventInAlignment.has(r.name)) { if (r.start <= r.matePos) diag.pairsWithDeletion++; /* the event is in the alignment */ }
       else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2)) || (r.name && primaries.get(r.name) === 1)) {
         const rev = (r.flags & FLAG_REVERSE) !== 0, mateRev = (r.flags & FLAG_MATE_REVERSE) !== 0;
         const leftmost = r.start <= r.matePos;
@@ -623,7 +624,9 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
           : crossing ? (fwdStart > revEnd ? 'deletion' : 'duplication')
           : revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP_BP ? (fwdStart - revStart > outwardMin ? 'duplication' : null)
           : span > farInsert ? 'deletion' : null;
-        if (kind && !(kind !== 'duplication' && r.name && insertionInAlignment.has(r.name))) {
+        if (kind && kind !== 'duplication' && r.name && insertionInAlignment.has(r.name)) diag.pairsWithInsertion++;
+        else if (kind) {
+          diag.pairs[kind]++;
           const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
           if (b > a) {
             add(discKind[kind], a, b, 1, 'pair', r.name);
@@ -722,6 +725,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
         break;
       }
     }
+    diag.insertionGroups.push({ pos: g.pos, len: g.len, reads: g.names.length, bases: g.seq.length, copy });
     if (copy) for (const n of g.names) add(dups, copy[0], copy[1], 1, 'insertion', n);
     else { const k = r5(g.pos); const x = insertions.get(k); if (x) { x.count += g.names.length; x.len = Math.round((x.len * (x.count - g.names.length) + g.len * g.names.length) / x.count); } else insertions.set(k, { pos: k, len: g.len, count: g.names.length }); }
   }
@@ -799,6 +803,6 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     realigned: realigned.length ? realigned.sort((a, b) => a.pos - b.pos) : undefined,
     rescued: rescued.length ? rescued.sort((a, b) => a.start - b.start || a.end - b.end) : undefined,
-    insertMedian: median, reads: reads.length,
+    insertMedian: median, reads: reads.length, diagnostics: diag,
   };
 }

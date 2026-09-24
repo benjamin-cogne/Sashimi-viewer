@@ -109,6 +109,26 @@ export interface StructuralEvidence {
   insertMedian: number | null;
   /** reads the evidence was gathered from (after sampling, for a source that samples) */
   reads: number;
+  /** what the evidence was gathered from and what was left out, to tell why an expected arc is missing */
+  diagnostics?: SvDiagnostics;
+}
+
+/** The counts behind a window's structural evidence (see StructuralEvidence.diagnostics). */
+export interface SvDiagnostics {
+  /** records examined: those carrying possible evidence (clips, SA tag, big D or I, mates away or elsewhere) */
+  records: number;
+  /** discordant pairs counted, by class */
+  pairs: { deletion: number; duplication: number; inversion: number };
+  /** pairs left out because a mate carries a deletion of 50 bp or more (the event is in the alignment) */
+  pairsWithDeletion: number;
+  /** pairs read as a deletion or inversion left out because a mate carries an insertion of 50 bp or more */
+  pairsWithInsertion: number;
+  /** CIGAR insertions of 50 bp or more grouped by position and length: the tandem copy they were found to be, if any */
+  insertionGroups: { pos: number; len: number; reads: number; bases: number; copy: [number, number] | null }[];
+  /** reference stretch the clips and insertions were matched against; null when none was fetched */
+  reference: { start: number; end: number } | null;
+  /** why the reference could not be had, when it was needed */
+  referenceError?: string;
 }
 
 export interface SampleCoverage {

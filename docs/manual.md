@@ -289,6 +289,16 @@ The orientation is read with care, because short fragments and realigned reads m
   insertion, written at 40 different places inside the repeat, gave one duplication arc next to the
   55 pairs facing away.
 
+**Why an arc is missing.** Hover the *DNA* tag next to a DNA track's name. With structural hints
+on, its tooltip lists what the window's evidence was gathered from:
+- the records examined and the median insert size;
+- the discordant pairs counted by class, and those left out because a mate carries a deletion or
+  an insertion of 50 bp or more;
+- each CIGAR insertion (position, length, reads, bases read) and the tandem copy it was found to
+  be, or why not (no sequence, no reference, not a copy of the reference nearby);
+- the reference stretch fetched, or the error that prevented it;
+- the strongest arcs of each kind with their support, marked when below the minimum drawn.
+
 A pair is counted once, from its leftmost mate, or from the other one when the leftmost lies
 beyond the window. The two ends of a duplication are often far apart (4 kb for a copy of two exons),
 and counting only from the left used to lose every pair whose left mate was off screen. The extent

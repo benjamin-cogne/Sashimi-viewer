@@ -816,6 +816,31 @@ const OUTWARD_OVERLAP = 20;
 /** Clip at the outer end of each mate for a pair to be read as one molecule across a junction (alignments.ts, CROSSING_MIN_CLIP). */
 const CROSSING_MIN_CLIP = 10;
 /**
+ * The counts behind a DNA track's structural arcs (StructuralEvidence.diagnostics), for the track label's tooltip: the
+ * records examined, the discordant pairs by class and those left out, the CIGAR insertions and the tandem copies found,
+ * the reference used, and every arc with its support against the minimum drawn. It tells why an expected arc is missing.
+ */
+function svDiagnosticsText(sv: StructuralEvidence, minReads: number): string {
+  const d = sv.diagnostics!;
+  const n = (x: number) => Math.round(x).toLocaleString('en-US');
+  const span = (a: number, b: number) => `${(a + 1).toLocaleString('en-US')}-${b.toLocaleString('en-US')}`;
+  const lines = [
+    `Structural evidence (arcs drawn from ${n(minReads)} reads or pairs):`,
+    `${n(d.records)} records with possible evidence · median insert ${sv.insertMedian != null ? `${n(sv.insertMedian)} bp` : 'unknown'}`,
+    `discordant pairs: ${n(d.pairs.deletion)} deletion-type, ${n(d.pairs.duplication)} duplication-type, ${n(d.pairs.inversion)} inversion-type`,
+  ];
+  if (d.pairsWithDeletion || d.pairsWithInsertion) lines.push(`left out: ${n(d.pairsWithDeletion)} pairs with a deletion ≥ 50 bp in a mate, ${n(d.pairsWithInsertion)} deletion- or inversion-type pairs with an insertion ≥ 50 bp in a mate`);
+  for (const g of d.insertionGroups.slice(0, 6)) lines.push(`insertion of ${n(g.len)} bp at ${n(g.pos + 1)} in ${n(g.reads)} reads (${n(g.bases)} bases read): ${g.copy ? `tandem copy of ${span(g.copy[0], g.copy[1])}` : g.bases < 48 ? 'no sequence to compare' : d.reference ? 'not a copy of the reference nearby' : 'no reference to compare'}`);
+  lines.push(d.reference ? `reference used: ${span(d.reference.start, d.reference.end)}` : 'reference: none fetched');
+  if (d.referenceError) lines.push(`reference not available: ${d.referenceError}`);
+  const arcs: [string, { start: number; end: number; count: number }[]][] = [['deletion', sv.deletions], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []],
+    ...(['deletion', 'duplication', 'inversion'] as const).map(k => [`pairs ${k}-type`, sv.discordant.filter(j => (j.kind ?? 'deletion') === k)] as [string, DiscordantArc[]])];
+  for (const [what, list] of arcs) for (const j of [...list].sort((p, q) => q.count - p.count).slice(0, 4))
+    lines.push(`arc ${what} ${span(j.start, j.end)}: ${n(j.count)}${j.count < minReads ? ' (below the minimum, not drawn)' : ''}`);
+  return lines.join('\n');
+}
+
+/**
  * What a duplicated or deleted stretch holds of the transcript drawn: the whole exons inside, their coding bases and the
  * frame the change leaves (a tandem copy of exons 13–14 of LDLR, 141 + 152 = 293 coding bases, shifts it), and the
  * exons its ends cut. For a tooltip; `approx` when the ends come from pairs (binned, a few hundred bases off).
@@ -4220,6 +4245,7 @@ export default function SashimiViewer({
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
     const axisNote = relative ? `  ·  max ${yMax.toLocaleString('en-US')}×` : '';
     const dnaNote = isDnaTrack(track) ? '  ·  DNA' : '';
+    const svDiag = isDnaTrack(track) && svHints && track.structural?.diagnostics ? svDiagnosticsText(track.structural, svMinReads(track.sampleId)) : '';
     const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
     const sampledTitle = track.sampled
       ? `Deep window: ${track.sampled.decoded.toLocaleString('en-US')} of ${track.sampled.total.toLocaleString('en-US')} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
@@ -4392,7 +4418,7 @@ export default function SashimiViewer({
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
             {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
-            {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)</title></tspan>}
+            {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>{`Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)${svDiag ? `\n\n${svDiag}` : ''}`}</title></tspan>}
             {L.balance && <tspan fill={L.balance.warn ? SNP_INDEL_COLOR : INK.faint} fontSize={9} fontWeight={L.balance.warn ? 700 : 400}>{L.balance.text}<title>{L.balance.title}</title></tspan>}
             {sampledNote && <tspan fill={SNP_INDEL_COLOR} fontSize={9} fontWeight={600}>{sampledNote}<title>{sampledTitle}</title></tspan>}
 
