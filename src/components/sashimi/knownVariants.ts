@@ -197,7 +197,7 @@ export function knownVariantTitle(v: KnownVariant): string {
   const span = v.end - v.start;
   const lines = [
     `${v.gene ? `${v.gene} · ` : ''}${KNOWN_VARIANT_KIND_NAMES[v.kind]} · ${SOURCE_NAMES[v.source]}`,
-    `${v.chrom}:${(v.start + 1).toLocaleString()}${span > 1 ? `-${v.end.toLocaleString()} (${span >= 1e6 ? `${(span / 1e6).toFixed(2)} Mb` : span >= 1e3 ? `${Math.round(span / 1e3)} kb` : `${span} bp`})` : ''}`,
+    `${v.chrom}:${(v.start + 1).toLocaleString('en-US')}${span > 1 ? `-${v.end.toLocaleString('en-US')} (${span >= 1e6 ? `${(span / 1e6).toFixed(2)} Mb` : span >= 1e3 ? `${Math.round(span / 1e3)} kb` : `${span} bp`})` : ''}`,
     v.text,
   ];
   if (v.cdna) lines.push(v.cdna);

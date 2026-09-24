@@ -204,7 +204,7 @@ export function nmdVerdict(iso: Isoform, canonical: Isoform): NmdVerdict {
   const lastJ = iso.junctions.length ? iso.junctions[iso.junctions.length - 1] : null;
   const d = lastJ != null ? lastJ - iso.stopIndex : null;
   const common = { ptc: iso.stopIndex, ptcCodon, distanceToLastJunction: d, distanceFromStart: fromStart, utr3Length: utr3, longUtr };
-  const utrNote = longUtr ? ` The ${utr3.toLocaleString()}-nt 3′ UTR left downstream is long, which can trigger EJC-independent NMD.` : '';
+  const utrNote = longUtr ? ` The ${utr3.toLocaleString('en-US')}-nt 3′ UTR left downstream is long, which can trigger EJC-independent NMD.` : '';
   if (lastJ == null || iso.stopIndex >= lastJ) {
     return { ...common, verdict: 'escape_last_exon', degraded: false, headline: 'PTC in the last exon: escapes NMD',
       text: `The premature stop (codon ${ptcCodon}) lies in the last exon, downstream of every exon junction complex: the truncated protein is made.${utrNote}` };

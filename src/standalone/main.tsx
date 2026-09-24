@@ -270,7 +270,7 @@ function App() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const onFolderInput = useCallback((list: FileList) => {
-    setIntake(`Listing ${list.length.toLocaleString()} file${list.length === 1 ? '' : 's'}…`);
+    setIntake(`Listing ${list.length.toLocaleString('en-US')} file${list.length === 1 ? '' : 's'}…`);
     try { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); } finally { setIntake(null); }
   }, [addFolder]);
   const onDropFiles = useCallback(async (dt: DataTransfer) => {
@@ -302,7 +302,7 @@ function App() {
     if (ev.reads < 200 || !ev.multiExon) return;
     const type: LibraryType | null = ev.fraction >= 0.02 ? 'rna' : ev.fraction < 0.002 ? 'dna' : null;
     if (!type) return;
-    const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString()} reads spliced`;
+    const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString('en-US')} reads spliced`;
     // unchanged samples keep the same array: a new one re-derives the sample types, which the viewer reacts to
     setSamples(prev => {
       const next: LocalSample[] = prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s));
@@ -347,7 +347,7 @@ function App() {
         const t = await ds.getTranscript(LINK.gene, LINK.gene.toUpperCase().startsWith('ENSG') ? LINK.gene : undefined);
         best = { gene_name: t.gene_name, start: t.start, end: t.end } as any;
       }
-      if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString()}-${view.end.toLocaleString()} (add gene=SYMBOL to the link)`);
+      if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString('en-US')}-${view.end.toLocaleString('en-US')} (add gene=SYMBOL to the link)`);
       openNew({ geneName: best.gene_name, chrom: view.chrom, start: best.start, end: best.end, view: { start: view.start, end: view.end }, mark: { start: mark.start, end: mark.end }, reads: LINK.reads });
     } catch (e: any) {
       setError(`Could not open the linked locus: ${e.message}. Check the genome build (${LINK.build}) and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
@@ -509,7 +509,7 @@ function App() {
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotes([
-        `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString()} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
+        `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString('en-US')} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
         ...(skipped.length ? [`Reads not exported for ${skipped.join('; ')}`] : []),
       ]);
     } catch (e: any) {
@@ -806,7 +806,7 @@ function App() {
           {knownVars.map(v => (
             <span key={v.id} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border bg-rose-50 border-rose-300 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
               <span className="font-medium">{v.label}</span>
-              <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString()}{v.end > v.start + 1 ? `-${v.end.toLocaleString()}` : ''}</span>
+              <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString('en-US')}{v.end > v.start + 1 ? `-${v.end.toLocaleString('en-US')}` : ''}</span>
               <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove">×</button>
             </span>
           ))}

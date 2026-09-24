@@ -232,10 +232,10 @@ type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
 const SV_SOURCE_LABEL: Record<string, string> = { cigar: 'CIGAR D', split: 'split reads (SA)', clip: 'clipped reads placed by realignment', rescued: 'clipped reads rescued at the breakpoint', '+/-': 'split reads, junction + → −', '-/+': 'split reads, junction − → +', pair: 'discordant pairs' };
 /** "CIGAR D 8 · split reads (SA) 4" for an event, and the spread of the breakpoints it merged */
 const svEvidenceText = (j: SvArc, approx: string): string => {
-  const src = Object.entries(j.sources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${SV_SOURCE_LABEL[k] ?? k} ${approx}${Math.round(n).toLocaleString()}`);
+  const src = Object.entries(j.sources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${SV_SOURCE_LABEL[k] ?? k} ${approx}${Math.round(n).toLocaleString('en-US')}`);
   const spread = j.spread && j.merged && j.merged > 1
     ? `
-${j.merged} arcs merged (breakpoints within ${svMergeTolerance(j.end - j.start)} bp): starts ${(j.spread[0] + 1).toLocaleString()}–${(j.spread[1] + 1).toLocaleString()}, ends ${j.spread[2].toLocaleString()}–${j.spread[3].toLocaleString()}`
+${j.merged} arcs merged (breakpoints within ${svMergeTolerance(j.end - j.start)} bp): starts ${(j.spread[0] + 1).toLocaleString('en-US')}–${(j.spread[1] + 1).toLocaleString('en-US')}, ends ${j.spread[2].toLocaleString('en-US')}–${j.spread[3].toLocaleString('en-US')}`
     : '';
   return (src.length ? `
 evidence: ${src.join(' · ')}` : '') + spread;
@@ -887,7 +887,7 @@ function modelKindLabel(m: { transcriptId: string; modelKind: string }): string 
 function phaseTitle(p: ExonPhase): string {
   const rem = p.cds % 3;
   const skip = p.hasStart && p.hasStop ? 'holds the whole CDS' : p.hasStart ? 'holds the start codon' : p.hasStop ? 'holds the stop codon' : p.symmetric ? 'skipping keeps the frame' : `skipping shifts the frame (${rem} base${rem === 1 ? '' : 's'} over a multiple of 3)`;
-  return `${p.cds.toLocaleString()} coding bases (3n${rem ? `+${rem}` : ''}) · codon phase ${p.phaseIn} | ${p.phaseOut} · ${skip}`;
+  return `${p.cds.toLocaleString('en-US')} coding bases (3n${rem ? `+${rem}` : ''}) · codon phase ${p.phaseIn} | ${p.phaseOut} · ${skip}`;
 }
 
 /** A neighbouring gene (1-based, from the data source) as a 0-based transcript model; exons ranked in transcription order. */
@@ -1150,7 +1150,7 @@ export default function SashimiViewer({
   }, [axis]);
 
   const regionStr = useMemo(() => {
-    const fmt = (n: number) => n.toLocaleString();
+    const fmt = (n: number) => n.toLocaleString('en-US');
     return `${currentChrom}:${fmt(viewStart + 1)}-${fmt(viewEnd)} · ${formatBp(viewEnd - viewStart)}`;
   }, [currentChrom, viewStart, viewEnd]);
 
@@ -1910,7 +1910,7 @@ export default function SashimiViewer({
       let found: { seq: string; flags: number; cigar: string } | null = null, where = '';
       for (const part of parseSa(r.sa)) {
         found = await ds.getPrimaryRecord(sid, part.chrom, part.start, r.n);
-        if (found) { where = `${part.chrom}:${(part.start + 1).toLocaleString()}`; break; }
+        if (found) { where = `${part.chrom}:${(part.start + 1).toLocaleString('en-US')}`; break; }
       }
       if (!found) throw new Error('the primary record was not found at the positions the SA tag names');
       const hc = hardClippedBases({ h: r.h, c: r.c, r: r.r, queryLen: queryLength(r) }, found);
@@ -1933,20 +1933,20 @@ export default function SashimiViewer({
       const seq = r.cs?.[k];
       items.push({ label: `${side} soft clip · ${r.c[k]} bp`, seq: seq || undefined, note: seq ? undefined : 'sequence not available' });
     });
-    r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString()}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
+    r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString('en-US')}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
     const sa = parseSa(r.sa);
-    for (const p of sa) items.push({ label: 'other part of this read', note: `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand}) · ${p.cigar} · MAPQ ${p.mapq}` });
+    for (const p of sa) items.push({ label: 'other part of this read', note: `${p.chrom}:${(p.start + 1).toLocaleString('en-US')} (${p.strand}) · ${p.cigar} · MAPQ ${p.mapq}` });
     if (r.h && (r.h[0] || r.h[1])) {
       const reachable = !!ds.getPrimaryRecord && sa.length > 0 && !/^read \d+$/.test(r.n);
       items.push({ label: `hard clips · ${r.h[0]} / ${r.h[1]} bp`, note: reachable ? 'the bases sit in the primary record' : 'the bases sit in the primary record, which this page cannot reach',
         action: reachable ? { label: 'Fetch from the primary record', run: () => void fetchHardClips(sid, r) } : undefined });
     }
-    setSeqPanel({ title: r.n, subtitle: `${chrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${r.r ? '−' : '+'} strand · MAPQ ${r.q}${r.f & 2048 ? ' · supplementary record' : ''}`, x, y, items });
+    setSeqPanel({ title: r.n, subtitle: `${chrom}:${(r.s + 1).toLocaleString('en-US')}-${r.e.toLocaleString('en-US')} · ${r.r ? '−' : '+'} strand · MAPQ ${r.q}${r.f & 2048 ? ' · supplementary record' : ''}`, x, y, items });
   }, [ds, fetchHardClips]);   // eslint-disable-line react-hooks/exhaustive-deps
   const openClipConsensus = useCallback((sid: number, pos: number, side: 'left' | 'right', count: number, x: number, y: number) => {
     const v = viewRef.current;
-    const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString()}`;
-    setSeqPanel({ title, subtitle: `${count.toLocaleString()} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
+    const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString('en-US')}`;
+    setSeqPanel({ title, subtitle: `${count.toLocaleString('en-US')} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
     ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.uniqueOnly, 5000, 'reads', 1, 0.05, {})
       .then(res => {
         const k = side === 'left' ? 0 : 1;
@@ -2179,7 +2179,7 @@ export default function SashimiViewer({
       }
       if (!opened) {
         hintRef.current = undefined;
-        setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString()}`);
+        setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString('en-US')}`);
         setCurrentGeneStart(s); setCurrentGeneEnd(e);
         setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus');
         ax = LINEAR_AXIS;
@@ -2309,7 +2309,7 @@ export default function SashimiViewer({
   const siteLabel = useCallback((st: VariantSite) => {
     const what = st.kind === 'snv' ? `${st.ref}>${st.alt}` : st.kind === 'ins' ? `insertion ${st.alt} bp` : `deletion ${st.alt.slice(1)} bp`;
     const k = knownSnp(st);
-    return `${currentChrom}:${(st.pos + 1).toLocaleString()} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)` +
+    return `${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)` +
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
@@ -2467,7 +2467,7 @@ export default function SashimiViewer({
       const laneTop: number[] = [];
       let hapRows = 0;
       for (const n of hapsPerLane) { laneTop.push(hapRows); hapRows += n; }
-      const posTxt = (p: number) => `${currentChrom}:${(p + 1).toLocaleString()}`;
+      const posTxt = (p: number) => `${currentChrom}:${(p + 1).toLocaleString('en-US')}`;
       const siteTxt = (x: VariantSite) => x.kind === 'snv' ? `${posTxt(x.pos)} ${x.ref}>${x.alt}` : x.kind === 'ins' ? `${posTxt(x.pos)} insertion of ${x.length} bp` : `${posTxt(x.pos)} deletion of ${x.length} bp`;
       const rows: JSX.Element[] = [];
       sets.forEach((st, i) => {
@@ -2490,7 +2490,7 @@ export default function SashimiViewer({
             const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
             const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
             const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
-            const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString()}): ${j.n.toLocaleString()} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString()} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
+            const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString('en-US')}): ${j.n.toLocaleString('en-US')} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString('en-US')} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
               (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
             const peak = top + 1;
             parts.push(
@@ -2519,7 +2519,7 @@ export default function SashimiViewer({
                 </g>);
             }
           }
-          const label = `H${h.hap} · ${st.id} · ${h.reads.toLocaleString()} ${unit}`;
+          const label = `H${h.hap} · ${st.id} · ${h.reads.toLocaleString('en-US')} ${unit}`;
           const lx = Math.min(plotRight - label.length * 5.4 - 20, Math.max(PLOT_LEFT + 3, setLeft + 3)), lw = label.length * 5.4 + 16;
           parts.push(
             <g key="lab">
@@ -2528,7 +2528,7 @@ export default function SashimiViewer({
               <text x={lx + 13} y={mid + 3.5} fill={INK.text} fontSize={9} fontWeight={700}>{label}</text>
             </g>);
           const variants = h.sites.map(siteTxt);
-          const title = `H${h.hap} of ${st.id} (${posTxt(st.start)}-${st.end.toLocaleString()}): consensus of ${h.reads.toLocaleString()} ${hv.source === 'tags' ? `reads tagged HP ${h.hap}` : 'fragments phased to this haplotype'}` +
+          const title = `H${h.hap} of ${st.id} (${posTxt(st.start)}-${st.end.toLocaleString('en-US')}): consensus of ${h.reads.toLocaleString('en-US')} ${hv.source === 'tags' ? `reads tagged HP ${h.hap}` : 'fragments phased to this haplotype'}` +
             (h.pc != null ? ` · median PC ${h.pc}` : '') +
             `\nvariants carried by at least half of them: ${variants.length ? variants.slice(0, 15).join(', ') + (variants.length > 15 ? ` … (${variants.length})` : '') : 'none (reference)'}` +
             `\ngrey where at least ${HAP_MIN_DEPTH} of its reads cover, blank where fewer` +
@@ -2556,10 +2556,10 @@ export default function SashimiViewer({
       const bodyHeight = Math.max(1, ri) * rowStep + 6;
       const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
       const nAllelic = sets.reduce((n, st) => n + (st.allelic?.filter(a => a.end > viewStart && a.start < viewEnd).length ?? 0), 0);
-      const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString()} reads on a haplotype, ${hv.unassigned.toLocaleString()} not` +
-        (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString()} ${unit} against their haplotype` : '') +
+      const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString('en-US')} reads on a haplotype, ${hv.unassigned.toLocaleString('en-US')} not` +
+        (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString('en-US')} ${unit} against their haplotype` : '') +
         (nAllelic ? ` · ${nAllelic} junction${nAllelic === 1 ? '' : 's'} used differently by the haplotypes` : '') +
-        (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + commonInfo;
+        (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
       return wrap(height, info, rows, bodyHeight);
     }
 
@@ -2568,7 +2568,7 @@ export default function SashimiViewer({
       const ph = current.phase;
       const allSites = ph.sites;
       const rowStep = GROUP_ROW_H + 4;
-      const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString()}`;
+      const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString('en-US')}`;
       const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
       /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
       const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
@@ -2616,9 +2616,9 @@ export default function SashimiViewer({
         const a = scale.x(b.start), z = scale.x(b.end);
         const left = Math.min(a, z), right = Math.max(a, z);
         const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
-        const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString()}-${b.end.toLocaleString()} · ${b.sites.length} heterozygous sites` +
-          `\nfragments (read + mate): ${b.support[0].toLocaleString()} on H1, ${b.support[1].toLocaleString()} on H2` +
-          (b.ambiguous ? `, ${b.ambiguous.toLocaleString()} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString()} disagreeing with their haplotype at one site or more` : '') +
+        const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')} · ${b.sites.length} heterozygous sites` +
+          `\nfragments (read + mate): ${b.support[0].toLocaleString('en-US')} on H1, ${b.support[1].toLocaleString('en-US')} on H2` +
+          (b.ambiguous ? `, ${b.ambiguous.toLocaleString('en-US')} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString('en-US')} disagreeing with their haplotype at one site or more` : '') +
           (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
           (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
         ([b.h1, b.h2] as const).forEach((hap, hi) => {
@@ -2628,7 +2628,7 @@ export default function SashimiViewer({
           parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
           b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
           const share = nFrag ? b.support[hi] / nFrag : 0;
-          parts.push(badgeEl(`${b.support[hi].toLocaleString()} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
+          parts.push(badgeEl(`${b.support[hi].toLocaleString('en-US')} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
           parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
           const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
           rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
@@ -2652,8 +2652,8 @@ export default function SashimiViewer({
       if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
       const bodyHeight = Math.max(1, ri) * rowStep + 6;
       const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const info = `${current.total.toLocaleString()} reads · ${ph.fragments.toLocaleString()} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
-        (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + commonInfo;
+      const info = `${current.total.toLocaleString('en-US')} reads · ${ph.fragments.toLocaleString('en-US')} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
+        (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
       return wrap(height, info, rows, bodyHeight);
     }
 
@@ -2711,12 +2711,12 @@ export default function SashimiViewer({
               <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
             </g>,
           );
-          alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString()} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
+          alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
         });
         // Support badge just after the last block (or pinned inside the right edge)
         const xs = g.blocks.flatMap(([bs, be]) => [scale.x(bs), scale.x(be)]);
         const rightEnd = Math.min(plotRight - 4, Math.max(...xs) + 6);
-        const badge = `${g.n.toLocaleString()} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
+        const badge = `${g.n.toLocaleString('en-US')} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
         const bw = badge.length * 5.6 + 10;
         const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
         parts.push(
@@ -2735,17 +2735,17 @@ export default function SashimiViewer({
           </g>,
         );
         const chainTxt = g.chain.map(([js, je]) => junctionContext({ start: js, end: je, count: g.n }).info.label).join('; ');
-        const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString()} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString()} absorbed as compatible` : ''}`
-          : g.kind === 'ambiguous' ? `${g.n.toLocaleString()} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
-          : `${g.n.toLocaleString()} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
+        const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString('en-US')} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString('en-US')} absorbed as compatible` : ''}`
+          : g.kind === 'ambiguous' ? `${g.n.toLocaleString('en-US')} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
+          : `${g.n.toLocaleString('en-US')} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
           (chainTxt ? `\nsplicing: ${chainTxt}` : '\nsplicing: none (unspliced)') +
           (alleleTxt.length ? `\nalleles: ${alleleTxt.join(', ')}` : '');
         return <g key={g.id}><title>{title}</title>{parts}</g>;
       });
       if (!groups.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>no reads in this window</text>);
       const nCons = groups.filter(g => g.kind === 'consensus').length;
-      const info = `${current.total.toLocaleString()} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
-        (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
+      const info = `${current.total.toLocaleString('en-US')} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
+        (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
       return wrap(height, info, rows, bodyHeight);
     }
 
@@ -2842,16 +2842,16 @@ export default function SashimiViewer({
     const innerGap = (r: AlignedRead) => { let g = r.e - r.s; for (const [bs, be] of r.b) g -= be - bs; return Math.max(0, g); };
     const discordantOf = (r: AlignedRead, idx: number): { text: string; cls: PairClass } | null => {
       if (r.mp == null) return null;
-      if (r.mc) return { text: `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`, cls: 'other' };
+      if (r.mc) return { text: `mate on ${r.mc}:${(r.mp + 1).toLocaleString('en-US')}`, cls: 'other' };
       // the template length runs across the deletions and introns the two reads carry: those are not a long insert
       const mate = mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
       const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
       if (dnaTrack) {
         // orientation first (genomic DNA only: on RNA, mates facing away are back-splicing, circular RNA)
         const rev = r.r === 1, mateRev = (r.f & 32) !== 0, apart = Math.abs(r.mp - r.s);
-        if (rev === mateRev) return { text: `both mates on the ${rev ? '−' : '+'} strand, ${apart.toLocaleString()} bp apart: inversion-type`, cls: 'inversion' };
-        if ((rev ? r.s < r.mp : r.mp < r.s) && apart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString()} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
-        if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp): deletion-type`, cls: 'deletion' };
+        if (rev === mateRev) return { text: `both mates on the ${rev ? '−' : '+'} strand, ${apart.toLocaleString('en-US')} bp apart: inversion-type`, cls: 'inversion' };
+        if ((rev ? r.s < r.mp : r.mp < r.s) && apart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString('en-US')} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
+        if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString('en-US')} bp, far above the median (${medianInsert.toLocaleString('en-US')} bp): deletion-type`, cls: 'deletion' };
       }
       if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };
       return null;
@@ -3005,7 +3005,7 @@ export default function SashimiViewer({
         if (len < SV_MIN_DELETION && (len < indelMin || (consensus && !insSites.has(pos)))) return;   // large ones always, as deletions
         const x = scale.x(pos);
         const seq = r.is?.[k] ?? '';
-        const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString()}${seq ? `: ${seq}` : ''}`;
+        const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString('en-US')}${seq ? `: ${seq}` : ''}`;
         const pxb = Math.abs(scale.x(pos + 1) - scale.x(pos));
         if (showInserted && seq && showLetters && pxb >= 4) {
           // the inserted bases written in a box over the insertion point (they have no width on the reference)
@@ -3033,14 +3033,14 @@ export default function SashimiViewer({
       // Built on hover, not here: this runs for every drawn read on every pan frame, and the string costs
       // more than the rectangles around it (a dozen toLocaleString calls and two parseSa passes per read).
       // The <title> below is empty until the pointer enters the group, well before the browser's tooltip delay.
-      const titleText = () => `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
+      const titleText = () => `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString('en-US')}-${r.e.toLocaleString('en-US')} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
-        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant.text}` : ''}` : '') +
+        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString('en-US')}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString('en-US')} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant.text}` : ''}` : '') +
         (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '') +
         (clipTxt.length ? `\n${clipTxt.join(' · ')}` : '') +
-        (r.hp ? `\nhaplotag: HP ${r.hp}${r.ps != null ? ` · phase set PS ${r.ps.toLocaleString()}` : ''}${r.pc != null ? ` · confidence PC ${r.pc}` : ''}` : '') +
-        (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
+        (r.hp ? `\nhaplotag: HP ${r.hp}${r.ps != null ? ` · phase set PS ${r.ps.toLocaleString('en-US')}` : ''}${r.pc != null ? ` · confidence PC ${r.pc}` : ''}` : '') +
+        (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString('en-US')} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
         `\nclick for the sequences (clipped, inserted, hard-clipped from the primary record)`;
       return (
         <g key={r.n + r.s + r.f} style={{ cursor: 'pointer' }}
@@ -3054,7 +3054,7 @@ export default function SashimiViewer({
 
     const groupEls = groupRows.map(g => {
       const top = readsTop + g.row * (rowH + 1), color = g.hp ? HAP_COLORS[(g.hp - 1) % HAP_COLORS.length] : INK.faint;
-      const label = `${g.hp ? `HP ${g.hp}` : 'untagged'} · ${g.reads.toLocaleString()} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} phase set${g.sets === 1 ? '' : 's'}` : ''}`;
+      const label = `${g.hp ? `HP ${g.hp}` : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} phase set${g.sets === 1 ? '' : 's'}` : ''}`;
       return (
         <g key={`grp${g.hp}`}>
           <title>{g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally'}</title>
@@ -3065,21 +3065,21 @@ export default function SashimiViewer({
       );
     });
     const info = (current.supporting && readsSupport
-      ? `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString()} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
-      : `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads`) +
-      (grouped ? ` · grouped by haplotag: ${groupRows.filter(g => g.hp).map(g => `HP ${g.hp} ${g.reads.toLocaleString()}`).join(', ')}${groupRows.some(g => !g.hp) ? `, untagged ${groupRows.find(g => !g.hp)!.reads.toLocaleString()}` : ''}` : '') +
+      ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
+      : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
+      (grouped ? ` · grouped by haplotag: ${groupRows.filter(g => g.hp).map(g => `HP ${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, untagged ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
-      (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
-      (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
+      (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
+      (modelBoundaries ? ` · ${nSpan.toLocaleString('en-US')} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
       (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}` : '') +
-      (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
+      (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString('en-US')} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString('en-US')} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => {
         const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2;
         const by: Record<PairClass, number> = { duplication: 0, deletion: 0, inversion: 0, other: 0 };
         visible.forEach((r, i) => { const d = discordantOf(r, i); if (d) by[d.cls]++; });
         const d = by.duplication + by.deletion + by.inversion + by.other;
-        const parts = (['duplication', 'deletion', 'inversion'] as const).filter(k => by[k]).map(k => `${by[k].toLocaleString()} ${k}-type`);
-        return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}` : ''}`;
+        const parts = (['duplication', 'deletion', 'inversion'] as const).filter(k => by[k]).map(k => `${by[k].toLocaleString('en-US')} ${k}-type`);
+        return ` · ${n.toLocaleString('en-US')} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString('en-US')} discordant read${d === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}` : ''}`;
       })() : '') + commonInfo;
     const meCalls = meN[0] + meN[1] + meN[2];
     // the layer's transform: genome (relative to tickOrigin) to pixels; ticks 2 bases wide, at least 1.5 px (runs: their
@@ -3093,7 +3093,7 @@ export default function SashimiViewer({
         {meMod.length > 0 && <path d={meMod.join('')} fill={METHYL_COLORS[METHYL_COLORS.length - 1]} />}
       </g>,
     ];
-    const methylInfo = meDeferred ? ' · CpG calls: drawn when the view stops (deep window)' : methylOn ? ` · CpG calls of the reads drawn: ${meCalls ? `${meN[0].toLocaleString()} methylated (red), ${meN[1].toLocaleString()} unmethylated (blue)${meN[2] ? `, ${meN[2].toLocaleString()} below the confidence threshold (not coloured)` : ''}` : 'none (no MM / ML tags)'}`
+    const methylInfo = meDeferred ? ' · CpG calls: drawn when the view stops (deep window)' : methylOn ? ` · CpG calls of the reads drawn: ${meCalls ? `${meN[0].toLocaleString('en-US')} methylated (red), ${meN[1].toLocaleString('en-US')} unmethylated (blue)${meN[2] ? `, ${meN[2].toLocaleString('en-US')} below the confidence threshold (not coloured)` : ''}` : 'none (no MM / ML tags)'}`
       : showMethyl && isDnaSample(sid) && mode === 'reads' && viewEnd - viewStart > METHYL_READS_MAX_BP ? ` · zoom in to ≤ ${formatBp(METHYL_READS_MAX_BP)} for the CpG calls of each read` : '';
     const mismatchEls = mmPaths.size ? [
       <g key="mismatches" pointerEvents="none">
@@ -3349,7 +3349,7 @@ export default function SashimiViewer({
           balance = {
             text: `  ·  ${het.length} het SNP${het.length === 1 ? '' : 's'}${medDev != null ? `, VAF ${(0.5 - medDev).toFixed(2)}–${(0.5 + medDev).toFixed(2)}` : ''}${imbalance ? ' · allele imbalance?' : noHet ? ' · no heterozygous SNP (LOH / UPD?)' : ''}`,
             warn: imbalance || noHet,
-            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString()} in the window)` : 'the whole window (variants chip)'}.`,
+            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString('en-US')} in the window)` : 'the whole window (variants chip)'}.`,
           };
         }
       }
@@ -3373,7 +3373,7 @@ export default function SashimiViewer({
         const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
-        const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString()}`) : approx + j.count.toLocaleString();
+        const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString('en-US')}`) : approx + j.count.toLocaleString('en-US');
         const labelScale = labelScales[`${currentChrom}:${key}`] ?? 1;
         const deltas = share ? otherGroups.map(o => ({ text: deltaText(share.pct - (o.group!.agg.events.get(key)?.shares[0]?.pct ?? 0)), color: o.group!.color, name: o.sampleName })) : [];
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
@@ -3395,7 +3395,7 @@ export default function SashimiViewer({
           const atStart = (side === 'left') !== reverse;
           const pos = atStart ? j.start : j.end;
           const exon = atStart ? info.leftExon : info.rightExon;
-          return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString()}${exon != null ? ` (exon ${exon})` : ''}`;
+          return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString('en-US')}${exon != null ? ` (exon ${exon})` : ''}`;
         };
         if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: partner('left') };
         else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: partner('right') };
@@ -3404,11 +3404,11 @@ export default function SashimiViewer({
           ? (agg.shares.length
             ? agg.shares.map(sh => `${pctLabel(sh.pct)} ${sh.note}`).join('\n')
             : 'touches no annotated splice site: no share') +
-            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString()} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
+            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString('en-US')} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
           : null;
-        const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
-          `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · intron ${formatBp(j.end - j.start)}\n` +
-          (j.snapped ? `including ${j.snapped.toLocaleString()} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
+        const title = (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
+          `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
+          (j.snapped ? `including ${j.snapped.toLocaleString('en-US')} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +
@@ -3441,8 +3441,8 @@ export default function SashimiViewer({
           const labelX = (visLo + visHi) / 2;
           const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
           let edge: ArcRender['edge'] = null;
-          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString()}` };
-          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString()}` };
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}` };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString('en-US')}` };
           const size = kind === 'discordant' ? `${formatBp(j.end - j.start)} between the breakpoints the pairs point to (their outermost reads for a duplication, innermost for a deletion; the breakpoint lies within an insert size of them)` : formatBp(j.end - j.start);
           const placed = (sv.realigned ?? []).filter(x => x.arc.kind === kind && x.arc.start === j.start && x.arc.end === j.end);
           const nPlaced = placed.reduce((n, x) => n + x.count, 0), nHard = placed.reduce((n, x) => n + x.hard, 0);
@@ -3451,11 +3451,11 @@ export default function SashimiViewer({
           const nAligned = j.count - nPlaced - nResc;
           const pairKind = kind === 'discordant' ? ((j as DiscordantArc).kind ?? null) : null;
           const what = kind === 'discordant' ? (pairKind ? `discordant pairs, ${PAIR_CLASS_LABEL[pairKind]}` : SV_LABEL[kind]) : SV_LABEL[kind];
-          const title = `${what}: ${approx}${j.count.toLocaleString()} ${kind === 'discordant' ? 'pair' : 'read'}${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
-            (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString()} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
-              (nPlaced ? ` + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
-              (nResc ? ` + ${approx}${nResc.toLocaleString()} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString()} hard-clipped, attached by position` : ''})` : '') : '') +
-            (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
+          const title = `${what}: ${approx}${j.count.toLocaleString('en-US')} ${kind === 'discordant' ? 'pair' : 'read'}${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · ${size}` +
+            (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString('en-US')} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
+              (nPlaced ? ` + ${approx}${nPlaced.toLocaleString('en-US')} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString('en-US')} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString('en-US')} → ${(x.target + 1).toLocaleString('en-US')} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
+              (nResc ? ` + ${approx}${nResc.toLocaleString('en-US')} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString('en-US')} hard-clipped, attached by position` : ''})` : '') : '') +
+            (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString('en-US')} bp` : '') +
             (pairKind === 'duplication' ? `\nmates facing away (← →): the reads at the right end continue at the left end, as across the junction of a tandem duplication of about this stretch (a gain: compare the depth inside the arc with the depth outside)` : '') +
             (kind === 'duplication' || pairKind === 'duplication' ? exonContent(tx, j.start, j.end, 'duplicated', kind === 'discordant') : '') +
             ((kind === 'deletion' || pairKind === 'deletion') && j.end - j.start >= 1000 ? exonContent(tx, j.start, j.end, 'deleted', kind === 'discordant') : '') +
@@ -3463,7 +3463,7 @@ export default function SashimiViewer({
             '\nevidence, not a call: open the reads to check it';
           // a deletion is drawn solid when only CIGARs carry it, dashed as soon as split or clipped reads support it
           const onlyCigar = kind === 'deletion' && !Object.entries((j as SvArc).sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0);
-          arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+          arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
         }
       }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
@@ -3525,19 +3525,19 @@ export default function SashimiViewer({
         const minSv = svMinReads(track.sampleId);
         for (const c of track.structural.clips) {
           if (c.count < minSv || c.pos < viewStart || c.pos > viewEnd) continue;
-          retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString()}`, deltas: [], color: SV_COLORS.clip,
+          retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.clip,
             onClick: e => { const pt = svgPoint(e); openClipConsensus(track.sampleId, c.pos, c.side, c.count, pt.x, pt.y); },
-            title: `soft-clip cluster: ${approx}${c.count.toLocaleString()} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString()} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
+            title: `soft-clip cluster: ${approx}${c.count.toLocaleString('en-US')} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString('en-US')} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
         for (const x of track.structural.insertions ?? []) {
           if (x.count < minSv || x.pos < viewStart || x.pos > viewEnd) continue;
-          retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString()}`, deltas: [], color: SV_COLORS.insertion,
-            title: `insertion: ${approx}${x.count.toLocaleString()} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString()}\nevidence, not a call: open the reads to check it` });
+          retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.insertion,
+            title: `insertion: ${approx}${x.count.toLocaleString('en-US')} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString('en-US')}\nevidence, not a call: open the reads to check it` });
         }
         for (const e of track.structural.elsewhere) {
           if (e.count < minSv || e.pos < viewStart || e.pos > viewEnd) continue;
-          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString()}`, deltas: [], color: SV_COLORS.elsewhere,
-            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
+          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.elsewhere,
+            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
@@ -3911,7 +3911,7 @@ export default function SashimiViewer({
     );
     if (axis.kind === 'linear') {
       for (const t of niceTicks(viewStart + 1, viewEnd, Math.max(3, Math.floor(plotWidth / 130)))) {
-        items.push(tick(scale.x(t - 0.5), t.toLocaleString(), `t${t}`));
+        items.push(tick(scale.x(t - 0.5), t.toLocaleString('en-US'), `t${t}`));
       }
     } else if (tx) {
       // Exon boundaries carry the coordinates; introns get a broken-axis mark.
@@ -3924,7 +3924,7 @@ export default function SashimiViewer({
         if (x < PLOT_LEFT || x > plotRight) continue;
         const show = Math.abs(x - lastLabelX) >= 68;
         if (show) lastLabelX = x;
-        items.push(tick(x, show ? b.label.toLocaleString() : null, `b${b.pos}`));
+        items.push(tick(x, show ? b.label.toLocaleString('en-US') : null, `b${b.pos}`));
       }
       for (const intron of intronsOf(tx)) {
         const mx = scale.x((intron.start + intron.end) / 2);
@@ -4002,7 +4002,7 @@ export default function SashimiViewer({
       ? { text: `zoom in to ≤ ${formatBp(VARIANTS_MAX_VIEW_BP)} for the variants`, color: INK.faint }
       : e?.error ? { text: `variants: ${e.error}`, color: UNIQUE_COLOR }
       : !e || (loading && !marks.length) ? { text: `scanning the reads… ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %`, color: INK.faint }
-      : { text: `${marks.length.toLocaleString()} site${marks.length === 1 ? '' : 's'} ≥ ${Math.round((long ? Math.max(minVaf, longReadMinVafPct / 100) : minVaf) * 100)} %`
+      : { text: `${marks.length.toLocaleString('en-US')} site${marks.length === 1 ? '' : 's'} ≥ ${Math.round((long ? Math.max(minVaf, longReadMinVafPct / 100) : minVaf) * 100)} %`
           + (marks.length ? ` · ${verdicts.good} pass · ${verdicts.warn} check · ${verdicts.bad} flagged` : '')
           + `${e.rate && e.rate > 1 ? ` · sampled 1 in ${e.rate}` : ''}${loading ? ` · scanning ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %` : ''}`, color: INK.muted };
     return (
@@ -4068,9 +4068,9 @@ export default function SashimiViewer({
       const s = draw!.summary, w = e.w!;
       const lanes = e.prefix?.tagged ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view` : `5mC ${pct(s.frac[3])}`;
       status = {
-        text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString()} CpG · ${Math.round(s.calls[3]).toLocaleString()} calls${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
+        text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString('en-US')} CpG · ${Math.round(s.calls[3]).toLocaleString('en-US')} calls${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
         color: INK.muted,
-        title: `5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${w.threshold.toFixed(2)} (the 10th percentile of this window's calls, as modkit does) are left out: ${w.filtered.toLocaleString()} of ${(w.calls + w.filtered).toLocaleString()} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.`,
+        title: `5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${w.threshold.toFixed(2)} (the 10th percentile of this window's calls, as modkit does) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.`,
       };
     }
     // the island tags: placed from the largest difference down, each where it does not cover one already placed
@@ -4086,7 +4086,7 @@ export default function SashimiViewer({
         if (placed.some(([l, r]) => cx - w / 2 < r + 2 && cx + w / 2 > l - 2)) continue;
         placed.push([cx - w / 2, cx + w / 2]);
         const weak = Math.abs(d.delta) < METHYL_DIFF_WEAK, color = weak ? INK.faint : d.delta < 0 ? METHYL_COLORS[0] : METHYL_COLORS[METHYL_COLORS.length - 1];
-        const where = `CpG island ${currentChrom}:${(d.start + 1).toLocaleString()}-${d.end.toLocaleString()} (${formatBp(d.end - d.start)})`;
+        const where = `CpG island ${currentChrom}:${(d.start + 1).toLocaleString('en-US')}-${d.end.toLocaleString('en-US')} (${formatBp(d.end - d.start)})`;
         const title = diffRef
           ? `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC, ${text} against the other samples:\n${d.vs.map(v => `  ${v.name}: ${pct(v.mean)} (${v.ref - v.mean >= 0 ? '+' : '−'}${Math.abs(Math.round((v.ref - v.mean) * 100))} points; ${v.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`).join('\n')}`
           : `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC against ${diffRefName}: ${pct(d.vs[0].mean)}, ${text} (${d.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`;
@@ -4115,7 +4115,7 @@ export default function SashimiViewer({
         <g clipPath={`url(#${clipId})`}>
           {draw?.islands.map(r => (
             <rect key={`isl${r.start}`} x={r.x0} y={y0 + METHYL_HEAD_H - 4} width={Math.max(1, r.x1 - r.x0)} height={3} rx={1} fill="#16a34a" opacity={0.55}>
-              <title>{`CpG island ${currentChrom}:${(r.start + 1).toLocaleString()}-${r.end.toLocaleString()} (${formatBp(r.end - r.start)}; GC ≥ 50 %, observed/expected CpG ≥ 0.6 over ≥ 200 bp, Gardiner-Garden & Frommer 1987)`}</title>
+              <title>{`CpG island ${currentChrom}:${(r.start + 1).toLocaleString('en-US')}-${r.end.toLocaleString('en-US')} (${formatBp(r.end - r.start)}; GC ≥ 50 %, observed/expected CpG ≥ 0.6 over ≥ 200 bp, Gardiner-Garden & Frommer 1987)`}</title>
             </rect>
           ))}
           {dH > 0 && diffPills.map(p => (
@@ -4131,7 +4131,7 @@ export default function SashimiViewer({
           {/* allele-specific methylation: a frame across the lanes */}
           {draw?.asm.map(r => (
             <rect key={`asm${r.start}`} x={r.x0} y={lanesTop - 1} width={Math.max(2, r.x1 - r.x0)} height={lanesBottom - lanesTop + 2} fill={METHYL_ASM_COLOR} fillOpacity={0.07} stroke={METHYL_ASM_COLOR} strokeWidth={1} strokeDasharray="3 2" rx={2}>
-              <title>{`allele-specific methylation ${currentChrom}:${(r.start + 1).toLocaleString()}-${r.end.toLocaleString()}: HP1 − HP2 = ${r.delta > 0 ? '+' : '−'}${Math.round(Math.abs(r.delta) * 100)} points over ${r.cpgs} CpG\n(runs of ≥ ${METHYL_ASM_CPGS} CpGs covered on both haplotypes whose 5mC fractions differ by ≥ ${METHYL_ASM_DELTA * 100} points, ≥ ${METHYL_ASM_MIN_CALLS} calls each): imprinting, X inactivation, allele-specific promoters, or a cis-acting variant`}</title>
+              <title>{`allele-specific methylation ${currentChrom}:${(r.start + 1).toLocaleString('en-US')}-${r.end.toLocaleString('en-US')}: HP1 − HP2 = ${r.delta > 0 ? '+' : '−'}${Math.round(Math.abs(r.delta) * 100)} points over ${r.cpgs} CpG\n(runs of ≥ ${METHYL_ASM_CPGS} CpGs covered on both haplotypes whose 5mC fractions differ by ≥ ${METHYL_ASM_DELTA * 100} points, ≥ ${METHYL_ASM_MIN_CALLS} calls each): imprinting, X inactivation, allele-specific promoters, or a cis-acting variant`}</title>
             </rect>
           ))}
           {draw && (
@@ -4182,11 +4182,11 @@ export default function SashimiViewer({
     const gtexWarn = track.gtex ? (track.error || track.gtex.warning || '') : '';
     const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
-    const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
+    const axisNote = relative ? `  ·  max ${yMax.toLocaleString('en-US')}×` : '';
     const dnaNote = isDnaTrack(track) ? '  ·  DNA' : '';
     const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
     const sampledTitle = track.sampled
-      ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
+      ? `Deep window: ${track.sampled.decoded.toLocaleString('en-US')} of ${track.sampled.total.toLocaleString('en-US')} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
       : '';
     const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2 + (L.balance?.text.length ?? 0) * 5.2;
     /** a request still running: how much of the view it has counted, or that only the margins are left */
@@ -4218,7 +4218,7 @@ export default function SashimiViewer({
             <g key={v}>
               <line x1={PLOT_LEFT - 4} y1={y} x2={PLOT_LEFT} y2={y} stroke={INK.gridStrong} strokeWidth={1} />
               {v > 0 && <line x1={PLOT_LEFT} y1={y} x2={plotRight} y2={y} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="2 4" />}
-              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{relative ? `${Math.round((v / yMax) * 100)} %` : v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString()}</text>
+              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{relative ? `${Math.round((v / yMax) * 100)} %` : v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString('en-US')}</text>
             </g>
           );
         })}
@@ -4340,7 +4340,7 @@ export default function SashimiViewer({
             : `M${plotRight + 1},${y} l6,-4 v8 z`;
           return (
             <g key={`e-${a.key}`}>
-              <title>{`${a.j.count.toLocaleString()} reads · ${e.title}`}</title>
+              <title>{`${a.j.count.toLocaleString('en-US')} reads · ${e.title}`}</title>
               <path d={d} fill={a.color} />
             </g>
           );
@@ -4509,7 +4509,7 @@ export default function SashimiViewer({
           if (w < 14) return null;
           return (
             <g key={`n${ex.rank}`} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
-              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp${phases.get(ex.rank) ? ` · ${phaseTitle(phases.get(ex.rank)!)}` : ''} · click for ψ`}</title>
+              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')} · ${ex.end - ex.start} bp${phases.get(ex.rank) ? ` · ${phaseTitle(phases.get(ex.rank)!)}` : ''} · click for ψ`}</title>
               <text x={cx} y={inCds ? midY + 3.5 : midY + 20} textAnchor="middle" fill={inCds ? '#ffffff' : INK.muted} fontSize={8.5} fontWeight={600}>{ex.rank}</text>
             </g>
           );
@@ -4557,7 +4557,7 @@ export default function SashimiViewer({
         : right + 4 + lw <= plotRight ? right + 4 : Math.max(PLOT_LEFT + 3, left - lw - 4);
       const relation = tx ? (same ? `same strand as ${tx.geneName}` : `antisense to ${tx.geneName}`) : '';
       const title = `${m.geneName} · ${m.transcriptId}${m.isCanonical ? (isEnsemblId(m.transcriptId) ? ' (Ensembl canonical)' : ' (RefSeq Select)') : ''} · ${m.biotype}\n` +
-        `${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
+        `${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
         `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}`;
       return (
         <g key={m.geneId}>
@@ -4576,7 +4576,7 @@ export default function SashimiViewer({
     const list = visibleSnps;
     const dense = list.length > SNP_MAX_MARKS;
     const stem = (af: number) => 6 + 18 * Math.min(1, Math.log10(Math.max(af, 0.001) / 0.001) / Math.log10(0.5 / 0.001));
-    const status = snpStatus.error ? snpStatus.error : snpStatus.loading ? 'loading…' : !snps ? '' : `${list.length.toLocaleString()} variant${list.length === 1 ? '' : 's'} with AF ≥ ${(snpMinAf * 100).toFixed(snpMinAf < 0.01 ? 1 : 0)}%${dense ? ' (ticks only, zoom in)' : ''}`;
+    const status = snpStatus.error ? snpStatus.error : snpStatus.loading ? 'loading…' : !snps ? '' : `${list.length.toLocaleString('en-US')} variant${list.length === 1 ? '' : 's'} with AF ≥ ${(snpMinAf * 100).toFixed(snpMinAf < 0.01 ? 1 : 0)}%${dense ? ' (ticks only, zoom in)' : ''}`;
     const marks: JSX.Element[] = [];
     for (const v of list) {
       const xa = scale.x(v.start), xb = scale.x(v.end);
@@ -4728,7 +4728,7 @@ export default function SashimiViewer({
       const label = `${m.id}${m.is_mane ? ' · MANE' : ''}${shown ? ' · shown' : ''}`;
       const lw = label.length * 5.4 + 8 + (shown ? 0 : 12);
       const nNovel = m.exons.filter(ex => !manes.has(`s${ex.start}`) && !manes.has(`e${ex.end}`)).length;
-      const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.exons.length} exons` +
+      const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.exons.length} exons` +
         (m.cdsStart == null ? ' · non-coding' : '') + (m.is_mane ? '\nsame exon structure as the MANE Select transcript' : shown ? '\nthe model displayed on the top track' : nNovel ? `\n${nNovel} exon${nNovel > 1 ? 's' : ''} absent from the displayed model (amber)` : '') +
         (shown ? '' : '\nclick to display this model as the reference (exon numbering, junction classes, HGVS, usage)');
       return (
@@ -4900,11 +4900,11 @@ export default function SashimiViewer({
         const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end).reduce((n, x) => n + x.count, 0);
         const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && ((x.start === at.start && x.end === at.end) || (!x.own && findSvEvent([x], j))));
         const own = resc.filter(x => x.own).reduce((n, x) => n + x.count, 0), borrowed = resc.filter(x => !x.own).reduce((n, x) => n + x.count, 0);
-        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', own ? own.toLocaleString() : borrowed ? `${borrowed.toLocaleString()} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
+        return [t.sampleName, mine ? mine.count.toLocaleString('en-US') : '0', placed ? placed.toLocaleString('en-US') : '0', own ? own.toLocaleString('en-US') : borrowed ? `${borrowed.toLocaleString('en-US')} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString('en-US')} bp` : '—'];
       });
       const size = j.end - j.start;
       return {
-        title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
+        title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
         subtitle: sv === 'discordant' ? `${formatBp(size)} between the breakpoints the pairs point to` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
         cartoon: null,
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
@@ -4932,7 +4932,7 @@ export default function SashimiViewer({
       const altLabel = alts.find(a => a.alt)?.alt?.label ?? '';
       const tables: PopTable[] = [{
         head: ['sample', 'reads', 'canonical alternative', 'share'],
-        rows: alts.map(a => [a.name, a.count.toLocaleString(), a.alt?.canonical == null ? '—' : num(a.alt.canonical, a.alt.canonical % 1 ? 1 : 0), pct(a.alt?.share)]),
+        rows: alts.map(a => [a.name, a.count.toLocaleString('en-US'), a.alt?.canonical == null ? '—' : num(a.alt.canonical, a.alt.canonical % 1 ? 1 : 0), pct(a.alt?.share)]),
       }];
       // skipped exons of the queried gene: their depth usage
       const strips: PopStrip[] = [];
@@ -4945,7 +4945,7 @@ export default function SashimiViewer({
       }
       const canCartoon = !!model && model.cdsStart != null && ['canonical', 'skip', 'cryptic_exon', 'exonic_site', 'intronic_site'].includes(spliceEvent(j, model, allJunctions).kind);
       return {
-        title: `Junction ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
+        title: `Junction ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
         subtitle: `intron ${formatBp(j.end - j.start)} · ${info.label}${inAlt ? ` · annotated in ${inAlt.slice(0, 3).join(', ')}${inAlt.length > 3 ? '…' : ''}` : ''}`,
         cartoon: canCartoon ? { j, model: model!, label: info.label } : null,
         hgvs: hgvsLines, tables, strip: strips[0] ?? null,
@@ -4962,13 +4962,13 @@ export default function SashimiViewer({
     const iv = u?.interval;
     const psiRows = displayTracks.map(t => ({ name: t.sampleName, ...exonPsi(ex, t.junctions, tx?.strand ?? 1) }));
     const tables: PopTable[] = [
-      usageTable(idx, `Depth-based usage${iv ? ` · ${iv.coding ? 'coding part ' : ''}${currentChrom}:${(iv.start + 1).toLocaleString()}-${iv.end.toLocaleString()}` : ''}`),
+      usageTable(idx, `Depth-based usage${iv ? ` · ${iv.coding ? 'coding part ' : ''}${currentChrom}:${(iv.start + 1).toLocaleString('en-US')}-${iv.end.toLocaleString('en-US')}` : ''}`),
       { caption: 'Junction reads', head: ['sample', 'inclusion 5′', 'inclusion 3′', 'skipping', 'ψ (inclusion)'],
-        rows: psiRows.map(r => [r.name, r.inclusionUp.toLocaleString(), r.inclusionDown.toLocaleString(), r.exclusion.toLocaleString(), pct(r.psi)]) },
+        rows: psiRows.map(r => [r.name, r.inclusionUp.toLocaleString('en-US'), r.inclusionDown.toLocaleString('en-US'), r.exclusion.toLocaleString('en-US'), pct(r.psi)]) },
     ];
     const ph = tx ? exonPhases(tx).find(p => p.rank === ex.rank) : undefined;
     return {
-      title: `Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp`,
+      title: `Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')} · ${ex.end - ex.start} bp`,
       subtitle: (cFirst && cLast ? `${tx!.transcriptId}: ${cFirst}_${cLast.replace(/^[cn]\./, '')}` : '') + (ph ? ` · ${phaseTitle(ph)}` : ''),
       hgvs: [] as string[], tables, strip: idx >= 0 ? stripFor(idx) : null,
       note: `Usage = median depth of the exon / median depth of the gene's other coding exons (${u ? u.refIdx.length : '…'} exons); ± is a delta-method sd from the read counts. ` +
@@ -5026,7 +5026,7 @@ export default function SashimiViewer({
    */
   const showSupporting = useCallback((p: { kind: 'junction'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind }) => {
     const { j } = p;
-    const pos = `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`;
+    const pos = `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`;
     let arc: ArcSupport, label: string;
     if (p.kind === 'junction') {
       arc = { kind: 'junction', start: j.start, end: j.end, tol: j.snapped ? JUNCTION_SNAP_BP : 0 };
@@ -5154,8 +5154,8 @@ export default function SashimiViewer({
                   <select value="" onChange={e => { const v = primaryKnown.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
                     className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
                     <option value="">go to…</option>
-                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString()}</option>)}
-                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString()} (opens the gene there)</option>)}
+                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString('en-US')}</option>)}
+                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString('en-US')} (opens the gene there)</option>)}
                   </select>
                 )}
               </span>
@@ -5471,7 +5471,7 @@ export default function SashimiViewer({
             const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
             if (right < PLOT_LEFT || left > plotRight) return null;
             const point = locusMark.end - locusMark.start <= 1;
-            const label = point ? `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}` : `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}-${locusMark.end.toLocaleString()}`;
+            const label = point ? `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString('en-US')}` : `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString('en-US')}-${locusMark.end.toLocaleString('en-US')}`;
             const w = label.length * 5.6 + 10;
             const lx = Math.min(plotRight - w - 2, Math.max(PLOT_LEFT + 2, (left + right) / 2 - w / 2));
             // left button and hover pass through to the plot (pan, positions); a right click removes the highlight
@@ -5535,7 +5535,7 @@ export default function SashimiViewer({
             <g data-export="skip" pointerEvents="none">
               <line x1={hoverInfo.x} y1={RULER_H} x2={hoverInfo.x} y2={tracksBottom - TRACK_GAP} stroke={INK.select} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
               {(() => {
-                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString()}`;
+                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString('en-US')}`;
                 const w = txt.length * 6.2 + 12;
                 const x = Math.min(plotRight - w / 2, Math.max(PLOT_LEFT + w / 2, hoverInfo.x));
                 return (
@@ -5561,7 +5561,7 @@ export default function SashimiViewer({
           <div className="pointer-events-none absolute z-20 min-w-[190px] rounded-md border border-gray-200 bg-white/95 px-2.5 py-1.5 text-xs shadow-lg"
             style={{ left: Math.min(hover!.px + 14, svgWidth - 200), top: Math.max(RULER_H + 4, hover!.py - 10) }}>
             <div className="font-mono text-[11px] text-gray-900 leading-5">
-              {currentChrom}:{(hoverInfo.pos + 1).toLocaleString()}
+              {currentChrom}:{(hoverInfo.pos + 1).toLocaleString('en-US')}
               {hoverInfo.alt ? <span className="ml-2 font-semibold text-amber-700">{hoverInfo.alt.label}</span> : hoverInfo.cdna && <span className="ml-2 font-semibold text-indigo-700">{hoverInfo.cdna.label}</span>}
             </div>
             {hoverInfo.known.map(k => (
@@ -5588,7 +5588,7 @@ export default function SashimiViewer({
               <div className="text-[10px] leading-4 mb-1 border-l-2 pl-1.5" style={{ borderColor: mafColor(hoverInfo.maf.v) }}>
                 <span className="font-semibold" style={{ color: mafColor(hoverInfo.maf.v) }}>{hoverInfo.maf.roh ? 'run of homozygosity?' : `major allele fraction ${hoverInfo.maf.v.toFixed(2)}`}</span>
                 <span className="text-gray-600"> · {hoverInfo.maf.name}</span>
-                <div className="text-gray-600">{hoverInfo.maf.n} sites ({hoverInfo.maf.het} heterozygous) over {currentChrom}:{(hoverInfo.maf.from + 1).toLocaleString()}-{hoverInfo.maf.to.toLocaleString()}{hoverInfo.maf.roh ? ` · mean MAF ${hoverInfo.maf.v.toFixed(2)}` : ' · median of the heterozygous sites'}</div>
+                <div className="text-gray-600">{hoverInfo.maf.n} sites ({hoverInfo.maf.het} heterozygous) over {currentChrom}:{(hoverInfo.maf.from + 1).toLocaleString('en-US')}-{hoverInfo.maf.to.toLocaleString('en-US')}{hoverInfo.maf.roh ? ` · mean MAF ${hoverInfo.maf.v.toFixed(2)}` : ' · median of the heterozygous sites'}</div>
               </div>
             )}
             {hoverInfo.snps.map(v => <div key={v.id + v.start} className="text-[10px] text-blue-700 leading-4 mb-0.5 whitespace-pre-line">{snpText(v)}</div>)}
@@ -5598,7 +5598,7 @@ export default function SashimiViewer({
               <div key={r.name} className="flex items-center gap-3 leading-5">
                 <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: r.color }} />
                 <span className="text-gray-700">{r.name}</span>
-                <span className="ml-auto font-mono font-semibold text-gray-900">{r.depth.toLocaleString()}</span>
+                <span className="ml-auto font-mono font-semibold text-gray-900">{r.depth.toLocaleString('en-US')}</span>
                 {r.methyl && (
                   <span className="font-mono text-[10px] text-gray-600" title={`5mC pooled over ${r.methyl.n} CpG${r.methyl.n === 1 ? '' : 's'} (${formatBp(r.methyl.to - r.methyl.from)}) under the pointer`}>
                     {r.methyl.lanes.map(l => (
@@ -5628,8 +5628,8 @@ export default function SashimiViewer({
               onMouseDown={e => e.stopPropagation()}>
               <div className="flex items-start justify-between gap-2 px-3 pt-2">
                 <div className="min-w-0">
-                  <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString()} <span style={{ color }}>{siteShort(s)}</span></div>
-                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString()} of {s.depth.toLocaleString()} reads (full scan)</div>
+                  <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString('en-US')} <span style={{ color }}>{siteShort(s)}</span></div>
+                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads (full scan)</div>
                 </div>
                 <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
               </div>

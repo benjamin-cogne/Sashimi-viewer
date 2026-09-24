@@ -282,7 +282,7 @@ export class EmbeddedDataSource extends LocalDataSource {
       const ov = Math.min(c.window.end, core.end) - Math.max(c.window.start, core.start);
       if (ov > bestOv) { bestOv = ov; bestVi = vi; }
     });
-    if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see it` };
+    if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
     return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural: b.structural, error: b.error };
@@ -299,7 +299,7 @@ export class EmbeddedDataSource extends LocalDataSource {
       const ov = Math.min(r.window.end, end) - Math.max(r.window.start, start);
       if (ov > bestOv) { bestOv = ov; bestVi = vi; }
     });
-    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see them`);
+    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
     let reads = best.reads.filter(r => r.e > start && r.s < end);

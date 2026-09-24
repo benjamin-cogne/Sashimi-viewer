@@ -58,7 +58,7 @@ export function haplotypesFromTags(reads: AlignedRead[], o: Options): HaplotypeV
   const bySet = new Map<string, Group[]>();
   for (const g of groups.values()) { const k = `${g.ps ?? 'none'}`; const l = bySet.get(k); if (l) l.push(g); else bySet.set(k, [g]); }
   const sets: { id: string; ps: number | null; groups: Group[] }[] = [...bySet.entries()].map(([k, gs]) => ({
-    id: k === 'none' ? 'no phase set' : `PS ${Number(k).toLocaleString()}`, ps: gs[0].ps, groups: gs.sort((a, b) => a.hap - b.hap),
+    id: k === 'none' ? 'no phase set' : `PS ${Number(k).toLocaleString('en-US')}`, ps: gs[0].ps, groups: gs.sort((a, b) => a.hap - b.hap),
   }));
   return build('tags', sets, reads, assigned, unassigned, o, true);
 }

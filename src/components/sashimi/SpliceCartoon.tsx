@@ -437,9 +437,9 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     const labelTxt = isCryptic ? 'cryptic' : isExt ? `+${p.len}` : p.rank != null ? String(p.rank) : '';
     const first = plus ? p.start : p.end - 1, lastB = plus ? p.end - 1 : p.start;
     const lines = isCryptic
-      ? [`Cryptic exon · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString()}-${p.end.toLocaleString()}`, `${cpos(first)} → ${cpos(lastB)} (intronic offsets)`]
-      : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString()}-${p.end.toLocaleString()}`, `${cpos(first)} → ${cpos(lastB)}`]
-      : [`Exon ${p.rank}${affected ? ' · affected' : ''} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString()}-${p.end.toLocaleString()}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
+      ? [`Cryptic exon · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)} (intronic offsets)`]
+      : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`]
+      : [`Exon ${p.rank}${affected ? ' · affected' : ''} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
     const isSel = explore && selected != null && p.rank === selected && !isCryptic && !isExt;
     return (
       <g key={`b${i}`} opacity={appear * vis * (1 - dissolve * 0.85)} filter="url(#sc-shadow)" {...hov(lines)}
@@ -466,7 +466,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       const pulse = degraded && downstream && readPos != null && readPos >= stop ? 1 + 0.25 * Math.sin(t * 9 + i) : 1;
       deco.push(
         <g key={`ejc${i}`} opacity={mrna * (passed ? 0 : 1) * (1 - dissolve)} transform={`translate(${ex}, ${y - EXON_H / 2 - 9}) scale(${pulse})`}
-          {...hov([`Exon junction complex ${i + 1}`, `deposited ~20–24 nt upstream of the junction at mRNA position ${jm.toLocaleString()}`, passed ? 'displaced by the ribosome' : downstream ? 'still bound downstream of the stop: NMD signal' : 'not yet reached'])}>
+          {...hov([`Exon junction complex ${i + 1}`, `deposited ~20–24 nt upstream of the junction at mRNA position ${jm.toLocaleString('en-US')}`, passed ? 'displaced by the ribosome' : downstream ? 'still bound downstream of the stop: NMD signal' : 'not yet reached'])}>
           <circle r={5.5} fill={C.ejc} stroke="#fff" strokeWidth={1.2} />
           {i === 0 && <text y={-9} textAnchor="middle" fontSize={8.5} fill={C.ejc} fontWeight={600}>EJC</text>}
         </g>,
@@ -483,7 +483,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     const chainTipX = chainX0 + aaMade * aaPx;
     ribo.push(
       <g key="ribo" opacity={1 - Math.max(leave, dissolve) } transform={`translate(${rx}, ${y})`}
-        {...hov(stalled ? ['Ribosome stalled at the premature termination codon', `codon ${story.verdict.ptcCodon} · ${story.verdict.distanceFromStart} nt after the AUG`, story.verdict.headline] : ['Ribosome', `reading mRNA position ${Math.round(readPos).toLocaleString()} · ${aaMade} aa made`])}>
+        {...hov(stalled ? ['Ribosome stalled at the premature termination codon', `codon ${story.verdict.ptcCodon} · ${story.verdict.distanceFromStart} nt after the AUG`, story.verdict.headline] : ['Ribosome', `reading mRNA position ${Math.round(readPos).toLocaleString('en-US')} · ${aaMade} aa made`])}>
         <ellipse cx={0} cy={-15} rx={30} ry={17} fill="url(#sc-ribo)" opacity={0.85} />
         <ellipse cx={0} cy={13} rx={24} ry={10} fill="url(#sc-ribo)" opacity={0.7} />
         {stalled && <text y={-38} textAnchor="middle" fontSize={9.5} fill={C.lost} fontWeight={700}>PTC</text>}
@@ -660,7 +660,7 @@ function Details({ story }: { story: SpliceStory }) {
         <div className="text-[10.5px] text-gray-500 mt-1">
           {verdict.ptc != null ? `PTC at codon ${verdict.ptcCodon}, ${verdict.distanceFromStart} nt after the AUG` : 'no premature stop'}
           {verdict.distanceToLastJunction != null ? ` · ${verdict.distanceToLastJunction} nt upstream of the last exon–exon junction` : ''}
-          {verdict.utr3Length != null ? ` · 3′ UTR ${verdict.utr3Length.toLocaleString()} nt${verdict.longUtr ? ' (long: EJC-independent NMD possible)' : ''}` : ''}
+          {verdict.utr3Length != null ? ` · 3′ UTR ${verdict.utr3Length.toLocaleString('en-US')} nt${verdict.longUtr ? ' (long: EJC-independent NMD possible)' : ''}` : ''}
           {' · '}canonical protein {canonical.protein.length} aa, observed {aberrant.protein.length} aa
         </div>
       </div>

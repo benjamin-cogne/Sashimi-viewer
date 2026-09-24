@@ -210,7 +210,7 @@ function geneModels(build: GenomeBuild, geneName: string, geneId?: string, hint?
         const best = [...byGene.entries()].filter(([, o]) => o > 0).sort((a, b) => b[1] - a[1])[0];
         if (best) mine = all.filter(g => g.symbol === best[0]);
       }
-      if (!mine.length) throw new Error(`no RefSeq model for ${geneName || geneId} in ${locus.chrom}:${locus.start.toLocaleString()}-${locus.end.toLocaleString()} (UCSC ncbiRefSeq)`);
+      if (!mine.length) throw new Error(`no RefSeq model for ${geneName || geneId} in ${locus.chrom}:${locus.start.toLocaleString('en-US')}-${locus.end.toLocaleString('en-US')} (UCSC ncbiRefSeq)`);
       const strand = mine.filter(g => g.strand === -1).length > mine.length / 2 ? -1 : 1;
       const start = Math.min(...mine.map(g => g.txStart)), end = Math.max(...mine.map(g => g.txEnd));
       const [select, mane] = await Promise.all([selectAccessions(build, locus.chrom, start, end), maneStatus(build, locus.chrom, start, end)]);

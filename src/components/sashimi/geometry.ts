@@ -925,7 +925,7 @@ export function junctionHgvs(j: { start: number; end: number }, tx: TxModel, oth
     const b = (pos: number) => cdnaPosition(pos, tx).bare;
     return { donor: donor.label, acceptor: acceptor.label,
       effect: `r.${b(lastUp)}_${b(firstDown)}ins${b(peFirst)}_${b(peLast)}`,
-      summary: `${pe.end - pe.start}-nt cryptic exon ${tx.chrom}:${(pe.start + 1).toLocaleString()}-${pe.end.toLocaleString()} between exons ${first.rank} and ${second.rank}` };
+      summary: `${pe.end - pe.start}-nt cryptic exon ${tx.chrom}:${(pe.start + 1).toLocaleString('en-US')}-${pe.end.toLocaleString('en-US')} between exons ${first.rank} and ${second.rank}` };
   }
   const order = plus ? [...tx.exons] : [...tx.exons].reverse();  // transcription order
   const firstBase = (e: Exon0) => (plus ? e.start : e.end - 1);

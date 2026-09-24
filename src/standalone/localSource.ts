@@ -649,7 +649,7 @@ export class LocalDataSource implements SashimiDataSource {
     const s = this.samples.get(sampleId);
     if (!s) return Promise.reject(new Error('Sample not found'));
     if (s.embedded) return Promise.reject(new Error('methylation is not part of exported pages: add the alignment file'));
-    if (end - start > METHYL_MAX_BP) return Promise.reject(new Error(`Region too large for methylation (${(end - start).toLocaleString()} bp; up to ${METHYL_MAX_BP.toLocaleString()})`));
+    if (end - start > METHYL_MAX_BP) return Promise.reject(new Error(`Region too large for methylation (${(end - start).toLocaleString('en-US')} bp; up to ${METHYL_MAX_BP.toLocaleString('en-US')})`));
     if (this.variantScanner?.methyl) return this.variantScanner.methyl(sampleId, chrom, start, end, opts);
     return this.countMethylation(sampleId, chrom, start, end, opts);
   }
@@ -1002,7 +1002,7 @@ export class LocalDataSource implements SashimiDataSource {
   async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
-    if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString()} bp); maximum is ${MAX_REGION_BP.toLocaleString()} bp`);
+    if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString('en-US')} bp); maximum is ${MAX_REGION_BP.toLocaleString('en-US')} bp`);
     const signal = opts?.signal;
     const loc = await this.locate(sampleId, chrom);
     const result = (w: { start: number; end: number }, sl: CoverageSlice): SampleCoverage => ({
@@ -1074,7 +1074,7 @@ export class LocalDataSource implements SashimiDataSource {
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
-    if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString()} bp)`);
+    if (end - start > MAX_READS_REGION_BP) throw new Error(`Region too large for reads (${(end - start).toLocaleString('en-US')} bp)`);
     const collapsed = mode === 'collapsed';
     // a collapsed window decodes up to 40 000 reads and groups or phases them, which froze the page on deep data: the
     // worker does it, and only the answer (sites, groups, haplotypes; no read) comes back

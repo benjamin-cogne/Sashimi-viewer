@@ -74,7 +74,7 @@ function variantOf(text: string, index: number, label: string | undefined, fallb
   const locus = parseLocus(t);
   if (locus) {
     const point = locus.start === locus.end;
-    return { id: `link${index}`, kind: point ? 'snv' : 'other', chrom: locus.chrom, start: locus.start - 1, end: locus.end, label: label || `${locus.chrom}:${locus.start.toLocaleString()}${point ? '' : `-${locus.end.toLocaleString()}`}`, text: t, source: 'indication', build: null };
+    return { id: `link${index}`, kind: point ? 'snv' : 'other', chrom: locus.chrom, start: locus.start - 1, end: locus.end, label: label || `${locus.chrom}:${locus.start.toLocaleString('en-US')}${point ? '' : `-${locus.end.toLocaleString('en-US')}`}`, text: t, source: 'indication', build: null };
   }
   return null;
 }
@@ -126,6 +126,6 @@ export function parseLink(hash: string, search: string): LinkRequest | null {
 
 /** One line describing the request, for the waiting notice. */
 export function describeLink(req: LinkRequest): string {
-  const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString()}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString()}` : ''}`;
-  return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString()}-${req.view.end.toLocaleString()}`;
+  const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString('en-US')}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString('en-US')}` : ''}`;
+  return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString('en-US')}-${req.view.end.toLocaleString('en-US')}`;
 }
