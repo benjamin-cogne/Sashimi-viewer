@@ -281,11 +281,13 @@ the library; off, every mismatch and indel of every read is drawn. Deletions and
 are structural evidence, not sequencing noise, and the reads of one large deletion often place
 its breakpoint a few bases apart, so no single site would gather them.
 
-**Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets two
-more noise controls: *Min VAF (long)* (20 %) is the allele fraction a site needs on long reads,
-above the short-read *Min VAF*; *Min indel* (10 bp) hides and leaves uncalled the shorter indels
-typical of homopolymer errors. The controls appear next to *Collapse* when such reads are shown
-and are saved with the session.
+**Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets one
+more noise control: *Min VAF (long)* (20 %), the allele fraction a site needs on long reads, above
+the short-read *Min VAF*. It appears next to *Collapse* when such reads are shown and is saved
+with the session. Indels of every size are called. Random homopolymer indels stay out of sight
+because *Consensus* draws indels only at called sites. A homopolymer indel common enough to be
+called is flagged by the variants track's HP check. (An earlier *Min indel* option hid the indels
+under 10 bp; it also hid every real short indel of long reads, and was removed.)
 Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On DNA
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).

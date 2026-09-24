@@ -94,7 +94,7 @@ export interface ViewerSettings {
   hiddenTranscripts?: string[];
   /** long reads (ONT, PacBio): draw mismatches and indels only at called variant sites (default on) */
   consensusMode?: boolean;
-  /** long reads: indels shorter than this many bases are neither drawn nor called (default 10) */
+  /** no longer used (the long-read minimum indel size was removed: Consensus mode draws indels only at called sites); ignored in old sessions */
   minIndelBp?: number;
   /** long reads: a variant site needs at least this alternate-allele fraction, in percent (default 20) */
   longReadMinVafPct?: number;
@@ -982,7 +982,13 @@ export default function SashimiViewer({
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
   const [showCoverage, setShowCoverage] = useState(init.coverage ?? true);
   const [methylIslands, setMethylIslands] = useState(init.methylIslands ?? false);
-  const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
+  /**
+   * Smallest indel called and drawn in long reads: every one. A threshold (formerly the Min indel option, 10 bp) hid
+   * the random homopolymer indels of long reads, but Consensus mode already draws indels only at called sites (3
+   * reads, Min VAF (long)), and it also hid every real indel under its size; homopolymer calls that reach a site are
+   * flagged by the variants track's HP check instead.
+   */
+  const minIndelBp = 1;
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
   const [showSnps, setShowSnps] = useState(init.commonSnps ?? false);
@@ -2979,7 +2985,7 @@ export default function SashimiViewer({
       (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
-      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
+      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}` : '') +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter((r, i) => discordantOf(r, i)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
     const meCalls = meN[0] + meN[1] + meN[2];
@@ -4885,7 +4891,7 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
@@ -5067,11 +5073,6 @@ export default function SashimiViewer({
                     Min VAF (long)
                     <input type="number" min={1} max={100} value={longReadMinVafPct} onChange={e => setLongReadMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                       className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
-                  </label>
-                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: insertions and deletions shorter than this are neither drawn in the reads nor called as sites (homopolymer errors); deletions of 50 bp or more are still structural evidence.">
-                    Min indel
-                    <input type="number" min={1} max={200} value={minIndelBp} onChange={e => setMinIndelBp(Math.min(200, Math.max(1, parseInt(e.target.value) || 1)))}
-                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />bp
                   </label>
                 </>
               )}
