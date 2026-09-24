@@ -91,7 +91,7 @@ export interface StructuralEvidence {
   /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
   insertions: { pos: number; len: number; count: number }[];
   /**
-   * discordant pairs on the same chromosome, both ends binned to 500 bp, by orientation (IGV's convention):
+   * discordant pairs on the same chromosome, grouped in 500 bp bins, the ends where their reads place the breakpoints, by orientation (IGV's convention):
    * `deletion` mates facing each other (→ ←) far above the median insert; `duplication` mates facing away (← →), the
    * junction of a tandem duplication read across; `inversion` both mates on the same strand (→ → or ← ←). Absent kind:
    * `deletion` (files exported before the classes).

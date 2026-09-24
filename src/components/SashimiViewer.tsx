@@ -3,7 +3,7 @@ import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
 import type { SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
-import { findSvEvent, svMergeTolerance } from '../standalone/svmerge';
+import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
 import type { MethylWindow } from '../standalone/methylation';
 import {
@@ -3443,7 +3443,7 @@ export default function SashimiViewer({
           let edge: ArcRender['edge'] = null;
           if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString()}` };
           else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString()}` };
-          const size = kind === 'discordant' ? `mates about ${formatBp(j.end - j.start)} apart (ends binned to 500 bp)` : formatBp(j.end - j.start);
+          const size = kind === 'discordant' ? `${formatBp(j.end - j.start)} between the breakpoints the pairs point to (their outermost reads for a duplication, innermost for a deletion; the breakpoint lies within an insert size of them)` : formatBp(j.end - j.start);
           const placed = (sv.realigned ?? []).filter(x => x.arc.kind === kind && x.arc.start === j.start && x.arc.end === j.end);
           const nPlaced = placed.reduce((n, x) => n + x.count, 0), nHard = placed.reduce((n, x) => n + x.hard, 0);
           const resc = (sv.rescued ?? []).filter(x => x.own && x.kind === kind && x.start === j.start && x.end === j.end);
@@ -4895,7 +4895,7 @@ export default function SashimiViewer({
       const rows = displayTracks.filter(t => t.structural).map(t => {
         const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
         // the same event in another sample: its breakpoints within the merge tolerance, not to the base
-        const mine = findSvEvent(list, j);
+        const mine = sv === 'discordant' ? findPairEvent(list, j as DiscordantArc) : findSvEvent(list, j);
         const at = mine ?? j;
         const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end).reduce((n, x) => n + x.count, 0);
         const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && ((x.start === at.start && x.end === at.end) || (!x.own && findSvEvent([x], j))));
@@ -4905,12 +4905,12 @@ export default function SashimiViewer({
       const size = j.end - j.start;
       return {
         title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
-        subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
+        subtitle: sv === 'discordant' ? `${formatBp(size)} between the breakpoints the pairs point to` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
         cartoon: null,
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
         tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
         strip: null,
-        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; their ends are binned to 500 bp and neighbouring bins of one class joined. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; the pairs are grouped in 500 bp bins (neighbouring bins of one class joined) and the arc drawn where their reads place the breakpoints: the outermost reads of the pairs of a duplication, the innermost of a deletion, the median of an inversion (within an insert size of the true breakpoint). Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };
     }
     if (popover.kind === 'junction') {

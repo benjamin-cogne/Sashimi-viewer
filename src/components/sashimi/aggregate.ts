@@ -17,7 +17,7 @@
  */
 import type { BoundarySpanning, CoverageRun, JunctionArc, StructuralEvidence } from './types';
 import { classifyJunction, junctionKey, type TxModel } from './geometry';
-import { mergeSvArcs } from '../../standalone/svmerge';
+import { mergeSvArcs, poolPairArcs } from '../../standalone/svmerge';
 
 /** Longest cryptic exon that two facing alternative-site arcs are paired into a pseudo-exon event. */
 export const PSEUDO_EXON_MAX_BP = 500;
@@ -84,11 +84,6 @@ export function poolSpanning(samples: { spanning?: BoundarySpanning }[]): Bounda
 export function poolStructural(samples: { structural?: StructuralEvidence }[]): StructuralEvidence | undefined {
   const withData = samples.map(s => s.structural).filter((x): x is StructuralEvidence => !!x);
   if (!withData.length) return undefined;
-  const sumArcs = (lists: JunctionArc[][]) => {
-    const m = new Map<string, JunctionArc>();
-    for (const l of lists) for (const j of l) { const k = `${j.start}-${j.end}`; const p = m.get(k); if (p) p.count += j.count; else m.set(k, { ...j }); }
-    return [...m.values()].sort((a, b) => a.start - b.start || a.end - b.end);
-  };
   const clips = new Map<string, StructuralEvidence['clips'][number]>(), elsewhere = new Map<string, StructuralEvidence['elsewhere'][number]>(), ins = new Map<number, StructuralEvidence['insertions'][number]>();
   for (const s of withData) {
     for (const c of s.clips) { const k = `${c.side}${c.pos}`; const p = clips.get(k); if (p) p.count += c.count; else clips.set(k, { ...c }); }
@@ -98,7 +93,7 @@ export function poolStructural(samples: { structural?: StructuralEvidence }[]): 
   const medians = withData.map(s => s.insertMedian).filter((x): x is number => x != null).sort((a, b) => a - b);
   return {
     // events of the members pooled with the same breakpoint tolerance as within a sample (svmerge.ts)
-    deletions: mergeSvArcs(withData.map(s => [...s.deletions, ...s.splits])), splits: [], duplications: mergeSvArcs(withData.map(s => s.duplications ?? [])), inversions: mergeSvArcs(withData.map(s => s.inversions ?? [])), discordant: sumArcs(withData.map(s => s.discordant)),
+    deletions: mergeSvArcs(withData.map(s => [...s.deletions, ...s.splits])), splits: [], duplications: mergeSvArcs(withData.map(s => s.duplications ?? [])), inversions: mergeSvArcs(withData.map(s => s.inversions ?? [])), discordant: poolPairArcs(withData.map(s => s.discordant)),
     insertions: [...ins.values()].sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].sort((a, b) => a.pos - b.pos), elsewhere: [...elsewhere.values()].sort((a, b) => a.pos - b.pos),
     insertMedian: medians.length ? medians[medians.length >> 1] : null, reads: withData.reduce((a, s) => a + s.reads, 0),

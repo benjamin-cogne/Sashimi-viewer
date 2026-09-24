@@ -27,8 +27,11 @@ export interface ArcSupport {
 /** Soft or hard clip after which an alignment end counts as a break (as the rescue of clipped reads: alignments.ts). */
 const MIN_CLIP = 8;
 const MIN_DELETION = 50;
-/** Discordant arcs join 500 bp bins within one bin of each other: a mate's start lies within two bins of the arc's end. */
-const PAIR_SLACK = 1000;
+/**
+ * A discordant arc's ends are where its pairs' reads point (or, in files exported before, the edges of 500 bp bins
+ * joined within one bin): a supporting pair has a read starting within this of each end.
+ */
+const PAIR_SLACK = 1500;
 
 /** What the tests need of a read, from a record (CIGAR string) or from a decoded read. */
 interface ArcRead {
@@ -99,7 +102,11 @@ export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
     case 'discordant': {
       if (r.matePos == null || !r.mateChrom || !sameChrom(r.mateChrom, chrom) || !(r.flags & 1)) return false;
       const lo = Math.min(r.start, r.matePos), hi = Math.max(r.start, r.matePos);
-      if (lo < a.start || lo >= a.start + PAIR_SLACK || hi > a.end || hi < a.end - PAIR_SLACK - 500) return false;
+      if (Math.abs(lo - a.start) > PAIR_SLACK || Math.abs(hi - a.end) > PAIR_SLACK) return false;
+      // as far apart as the evidence asks (alignments.ts: 1 kb for mates facing each other, 300 bp facing away) and
+      // spanning at least half the arc: an ordinary pair between the two ends is none of its
+      const cls0 = r.rev === r.mateRev ? 'inversion' : (r.start <= r.matePos ? r.rev : r.mateRev) ? 'duplication' : 'deletion';
+      if (hi - lo < Math.max(cls0 === 'duplication' ? 300 : 1000, 0.5 * (a.end - a.start))) return false;
       const leftRev = r.start <= r.matePos ? r.rev : r.mateRev, rightRev = r.start <= r.matePos ? r.mateRev : r.rev;
       const cls = r.rev === r.mateRev ? 'inversion' : leftRev && !rightRev ? 'duplication' : 'deletion';
       return !a.pairKind || cls === a.pairKind;

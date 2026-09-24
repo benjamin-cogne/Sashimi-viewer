@@ -467,6 +467,14 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   // every arc before merging, with its evidence units by source and the names of the reads behind them
   const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>();
   const discKind = { deletion: new Map<string, SvMember>(), duplication: new Map<string, SvMember>(), inversion: new Map<string, SvMember>() };
+  /**
+   * The breakpoints each discordant pair points to, from its reads (the bins only group the pairs): mates facing away
+   * (duplication) lie inside the duplicated stretch, so its ends are at or before the left mates' starts and at or after
+   * the right mates' ends; mates facing each other (deletion) lie outside, the ends at or after the left mates' ends and
+   * at or before the right mates' starts; same-strand mates (inversion) end before (→ →) or start after (← ←) the
+   * breakpoints.
+   */
+  const pairEnds = new Map<SvMember, [number, number][]>();
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
@@ -493,7 +501,15 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   // primary records of each pair among `reads`: a pair is counted from its leftmost mate, or from the other one when the
   // leftmost is not among them (a mate beyond the window: the reads of a duplication's far side, 4 kb away, were all lost)
   const primaries = new Map<string, number>();
-  for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
+  // where each primary record's alignment ends, by name and start: a mate's real end, when its record is here (a mate
+  // clipped at the junction ends there, not a read length after its start)
+  const alignedEnd = new Map<string, number>();
+  for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) {
+    primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
+    let e = r.start;
+    for (const [len, op] of parseCigar(r.cigar)) if ('MDN=X'.includes(op)) e += len;
+    alignedEnd.set(`${r.name}:${r.start}`, e);
+  }
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
   // Deleted and skipped bases (CIGAR D, N) inside the primary records of each pair, by read name. The template length
@@ -553,7 +569,17 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
           : span > farInsert ? 'deletion' : null;
         if (kind) {
           const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
-          if (b > a) add(discKind[kind], a, b, 1, 'pair', r.name);
+          if (b > a) {
+            add(discKind[kind], a, b, 1, 'pair', r.name);
+            // where the breakpoints lie from this pair's reads (see pairEnds): the arc is drawn there, not at the bins
+            const mateEnd = (r.name ? alignedEnd.get(`${r.name}:${r.matePos}`) : undefined) ?? r.matePos + readLen;
+            const leftEnd = leftmost ? alnEnd : mateEnd, rightStart = Math.max(r.start, r.matePos), rightEnd = leftmost ? mateEnd : alnEnd;
+            const est: [number, number] = kind === 'duplication' ? [lo, rightEnd] : kind === 'deletion' ? [leftEnd, rightStart]
+              : !rev ? [leftEnd, rightEnd] : [lo, rightStart];
+            const m = discKind[kind].get(`${a}-${b}`)!;
+            const e = pairEnds.get(m);
+            if (e) e.push(est); else pairEnds.set(m, [est]);
+          }
         }
       }
     }
@@ -660,7 +686,18 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     for (const x of bins) {
       if (used.has(x)) continue;
       const arc: DiscordantArc = { start: x.start, end: x.end, count: 0, kind };
-      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) { used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end); }
+      const ests: [number, number][] = [];
+      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) {
+        used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end);
+        ests.push(...(pairEnds.get(y) ?? []));
+      }
+      // the arc at the breakpoints the pairs point to: the outermost reads of a duplication's pairs, the innermost of a
+      // deletion's (the breakpoint lies beyond them, within an insert size), the median of an inversion's
+      if (ests.length) {
+        const as = ests.map(e => e[0]).sort((p, q) => p - q), bs = ests.map(e => e[1]).sort((p, q) => p - q);
+        const [s0, e0] = kind === 'duplication' ? [as[0], bs[bs.length - 1]] : kind === 'deletion' ? [as[as.length - 1], bs[0]] : [as[as.length >> 1], bs[bs.length >> 1]];
+        if (e0 > s0) { arc.start = s0; arc.end = e0; }
+      }
       out.push(arc);
     }
     return out;

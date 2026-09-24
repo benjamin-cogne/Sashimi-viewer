@@ -178,8 +178,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   - a **split-read, duplication or inversion arc**: a read broken at either end, meaning an
     alignment end followed by a clip of 8 bases or more, or an end of another part of the read
     (SA tag). Ends count within the arc's merge tolerance: 5 % of its length, 20–100 bp.
-  - **discordant pairs**: pairs of the arc's class (→ ←, ← →, one strand) with one mate in each
-    of its end bins.
+  - **discordant pairs**: pairs of the arc's class (→ ←, ← →, one strand), with one mate starting
+    near each end (within 1.5 kb). The mates must be as far apart as the class asks (1 kb, or 300 bp
+    for mates facing away) and span at least half the arc.
 
   Every read of the window is tested before any downsampling. At most 300 supporting reads are
   kept (every k-th past that), then their mates are added. The header gives the count
@@ -235,8 +236,17 @@ the two inversion junctions) and the spread of the merged breakpoints. A deletio
 arc when only CIGARs carry it, dashed when split or clipped reads support it. The panel matches
 the event in the other samples with the same tolerance, and the Groups view pools the members'
 events the same way.
-**Discordant pairs** are dashed arcs between 500 bp bins (neighbouring bins of one class joined),
-coloured by what the orientation of the mates says, as IGV colours pairs:
+**Discordant pairs** are dashed arcs. The pairs of an event are grouped in 500 bp bins (neighbouring
+bins of one class joined). The arc is drawn where their reads place the breakpoints:
+- **duplication**: the outermost reads (the start of the leftmost left mate, the end of the
+  rightmost right mate);
+- **deletion**: the innermost reads;
+- **inversion**: the median.
+
+The true breakpoint lies within an insert size of these ends. On an LDLR capture the arc of a
+duplication fell at 11,229,087–11,233,051, at the feet of its supporting reads, where bin edges had
+drawn it at 11,229,000–11,233,500. Samples and group members are matched with both ends within 1 kb.
+The arcs are coloured by what the orientation of the mates says, as IGV colours pairs:
 - **red, deletion-type**: mates facing each other (→ ←) more than five times the window's median
   insert apart (at least 1 kb);
 - **green, duplication-type**: mates facing away (← →), at least 300 bp and twice the median apart.

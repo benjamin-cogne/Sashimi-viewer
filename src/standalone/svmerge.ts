@@ -95,3 +95,40 @@ export function mergeSvArcs(lists: SvArc[][]): SvArc[] {
   const members: SvMember[] = lists.flat().map(a => ({ start: a.start, end: a.end, count: a.count, src: { ...(a.sources ?? {}) }, names: new Set<string>(), anon: a.count, ...(a.spread ? { spread: a.spread } : {}) }));
   return clusterSv(members).map(x => x.event).sort((a, b) => a.start - b.start || a.end - b.end);
 }
+
+/**
+ * Discordant-pair arcs of one event, in several samples or passes: their ends come from the pairs' reads, which lie
+ * within an insert size of the breakpoints, so the same event lands up to a few hundred bases apart. Same class and
+ * both ends within PAIR_MATCH_BP.
+ */
+export const PAIR_MATCH_BP = 1000;
+type PairArc = { start: number; end: number; count: number; kind?: 'deletion' | 'duplication' | 'inversion' };
+export function samePairEvent(a: PairArc, b: { start: number; end: number; kind?: PairArc['kind'] }): boolean {
+  return (a.kind ?? 'deletion') === (b.kind ?? 'deletion') && Math.abs(a.start - b.start) <= PAIR_MATCH_BP && Math.abs(a.end - b.end) <= PAIR_MATCH_BP;
+}
+/** The discordant arc of `list` that is the event `j`, nearest first. */
+export function findPairEvent<T extends PairArc>(list: T[], j: { start: number; end: number; kind?: PairArc['kind'] }): T | undefined {
+  let best: T | undefined, bestD = Infinity;
+  for (const x of list) {
+    if (!samePairEvent(x, j)) continue;
+    const d = Math.abs(x.start - j.start) + Math.abs(x.end - j.end);
+    if (d < bestD) { best = x; bestD = d; }
+  }
+  return best;
+}
+/**
+ * Discordant arcs of several samples pooled: the strongest first, the others of the same event added to it, the ends
+ * widened as the reads of each class place them (the outermost for a duplication, the innermost for a deletion).
+ */
+export function poolPairArcs<T extends PairArc>(lists: T[][]): T[] {
+  const all = lists.flat().sort((a, b) => b.count - a.count);
+  const out: T[] = [];
+  for (const x of all) {
+    const p = out.find(o => samePairEvent(o, x));
+    if (!p) { out.push({ ...x }); continue; }
+    p.count += x.count;
+    if ((p.kind ?? 'deletion') === 'duplication') { p.start = Math.min(p.start, x.start); p.end = Math.max(p.end, x.end); }
+    else if ((p.kind ?? 'deletion') === 'deletion' && Math.max(p.start, x.start) < Math.min(p.end, x.end)) { p.start = Math.max(p.start, x.start); p.end = Math.min(p.end, x.end); }
+  }
+  return out.sort((a, b) => a.start - b.start || a.end - b.end);
+}
