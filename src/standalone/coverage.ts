@@ -130,7 +130,7 @@ class Counts {
   junc = new Map<number, number>();
   reads = 0;
   spliced = 0;
-  /** aligned and deleted bases (not the introns): their mean per read tells a long-read library */
+  /** aligned bases (not the introns nor the deletions): their mean per read tells a long-read library */
   bases = 0;
   /** |template length| of proper pairs, for the median insert the structural evidence measures discordance against */
   inserts = new Map<number, number>();
@@ -163,7 +163,7 @@ class Counts {
         const key = pos * JUNC_LEN + Math.min(len, JUNC_LEN - 1);
         this.junc.set(key, (this.junc.get(key) ?? 0) + 1);
         pos += len; spliced = true;
-      } else if (op === 2) { pos += len; this.bases += len; }
+      } else if (op === 2) pos += len;
     }
     this.reads++;
     if (spliced) this.spliced++;

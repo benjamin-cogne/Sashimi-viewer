@@ -38,6 +38,8 @@ interface ArcRead {
   start: number; end: number;
   /** introns (N) and deletions (D) as [start, end, 'N' | 'D'] */
   gaps: [number, number, 'N' | 'D'][];
+  /** positions of the insertions of MIN_DELETION or more */
+  bigIns: number[];
   clipL: number; clipR: number;
   sa: string | null;
   flags: number;
@@ -46,7 +48,7 @@ interface ArcRead {
 }
 
 export function arcReadFromCigar(r: { start: number; cigar: string; flags: number; sa?: string | null; matePos?: number; mateChrom?: string }): ArcRead {
-  const gaps: [number, number, 'N' | 'D'][] = [];
+  const gaps: [number, number, 'N' | 'D'][] = [], bigIns: number[] = [];
   let pos = r.start, clipL = 0, clipR = 0, seen = false;
   const re = /(\d+)([MIDNSHP=X])/g;
   let m: RegExpExecArray | null;
@@ -55,9 +57,9 @@ export function arcReadFromCigar(r: { start: number; cigar: string; flags: numbe
     if (op === 'S' || op === 'H') { if (seen) clipR += len; else clipL += len; continue; }
     if (op === 'M' || op === '=' || op === 'X') { pos += len; seen = true; }
     else if (op === 'N' || op === 'D') { gaps.push([pos, pos + len, op]); pos += len; seen = true; }
-    else if (op === 'I') seen = true;
+    else if (op === 'I') { seen = true; if (len >= MIN_DELETION) bigIns.push(pos); }
   }
-  return { start: r.start, end: pos, gaps, clipL, clipR, sa: r.sa ?? null, flags: r.flags, rev: (r.flags & 16) !== 0, mateRev: (r.flags & 32) !== 0, matePos: r.matePos, mateChrom: r.mateChrom };
+  return { start: r.start, end: pos, gaps, bigIns, clipL, clipR, sa: r.sa ?? null, flags: r.flags, rev: (r.flags & 16) !== 0, mateRev: (r.flags & 32) !== 0, matePos: r.matePos, mateChrom: r.mateChrom };
 }
 
 export function arcReadFromAligned(r: AlignedRead, chrom: string): ArcRead {
@@ -66,7 +68,7 @@ export function arcReadFromAligned(r: AlignedRead, chrom: string): ArcRead {
     const be = r.b[k][1], ns = r.b[k + 1][0];
     if (ns > be && !r.d.some(([a, b]) => a === be && b === ns)) gaps.push([be, ns, 'N']);
   }
-  return { start: r.s, end: r.e, gaps, clipL: r.c[0] + (r.h?.[0] ?? 0), clipR: r.c[1] + (r.h?.[1] ?? 0), sa: r.sa ?? null, flags: r.f, rev: r.r === 1, mateRev: (r.f & 32) !== 0,
+  return { start: r.s, end: r.e, gaps, bigIns: r.i.filter(([, l]) => l >= MIN_DELETION).map(([p]) => p), clipL: r.c[0] + (r.h?.[0] ?? 0), clipR: r.c[1] + (r.h?.[1] ?? 0), sa: r.sa ?? null, flags: r.f, rev: r.r === 1, mateRev: (r.f & 32) !== 0,
     matePos: r.mp, mateChrom: r.mp == null ? undefined : (r.mc ?? chrom) };
 }
 
@@ -78,6 +80,7 @@ function breakpoints(r: ArcRead, chrom: string): number[] {
   const out: number[] = [];
   if (r.clipL >= MIN_CLIP) out.push(r.start);
   if (r.clipR >= MIN_CLIP) out.push(r.end);
+  out.push(...r.bigIns);
   if (r.sa) for (const part of r.sa.split(';')) {
     const f = part.split(',');
     if (f.length < 4 || !sameChrom(f[0], chrom)) continue;
@@ -101,15 +104,22 @@ export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
       return breakpoints(r, chrom).some(p => near(p, a.start, a.tol) || near(p, a.end, a.tol));
     case 'discordant': {
       if (r.matePos == null || !r.mateChrom || !sameChrom(r.mateChrom, chrom) || !(r.flags & 1)) return false;
+      // the event in the read's alignment: not a discordant pair (alignments.ts)
+      if (r.bigIns.length || r.gaps.some(([s, e, op]) => op === 'D' && e - s >= MIN_DELETION)) return false;
       const lo = Math.min(r.start, r.matePos), hi = Math.max(r.start, r.matePos);
       if (Math.abs(lo - a.start) > PAIR_SLACK || Math.abs(hi - a.end) > PAIR_SLACK) return false;
       // as far apart as the evidence asks (alignments.ts: 1 kb for mates facing each other, 300 bp facing away) and
       // spanning at least half the arc: an ordinary pair between the two ends is none of its
-      const cls0 = r.rev === r.mateRev ? 'inversion' : (r.start <= r.matePos ? r.rev : r.mateRev) ? 'duplication' : 'deletion';
-      if (hi - lo < Math.max(cls0 === 'duplication' ? 300 : 1000, 0.5 * (a.end - a.start))) return false;
-      const leftRev = r.start <= r.matePos ? r.rev : r.mateRev, rightRev = r.start <= r.matePos ? r.mateRev : r.rev;
-      const cls = r.rev === r.mateRev ? 'inversion' : leftRev && !rightRev ? 'duplication' : 'deletion';
-      return !a.pairKind || cls === a.pairKind;
+      if (hi - lo < Math.max(a.pairKind === 'duplication' ? 300 : 1000, 0.5 * (a.end - a.start))) return false;
+      // facing away: the reverse mate ends before the forward one starts (the mate's end taken as its start plus this
+      // read's aligned length: its record is not at hand)
+      const aligned = r.end - r.start - r.gaps.reduce((n, [s, e]) => n + (e - s), 0);
+      const revStart = r.rev ? r.start : r.matePos, revEnd = r.rev ? r.end : r.matePos + aligned, fwdStart = r.rev ? r.matePos : r.start;
+      const cls = r.rev === r.mateRev ? 'inversion' : revStart < fwdStart && revEnd <= fwdStart + 20 ? 'duplication' : 'deletion';
+      // a mate clipped at its outer end may belong to a pair across the junction, whose class reads the other way round
+      // (alignments.ts): its mate's clips are not at hand, so either class of mates facing apart or away is taken
+      const outerClip = r.rev ? r.clipR : r.clipL;
+      return !a.pairKind || cls === a.pairKind || (outerClip >= 10 && cls !== 'inversion' && a.pairKind !== 'inversion');
     }
   }
 }

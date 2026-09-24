@@ -229,7 +229,7 @@ const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
 /** the evidence an SV event gathers, as named in its tooltip and panel */
-const SV_SOURCE_LABEL: Record<string, string> = { cigar: 'CIGAR D', split: 'split reads (SA)', clip: 'clipped reads placed by realignment', rescued: 'clipped reads rescued at the breakpoint', '+/-': 'split reads, junction + → −', '-/+': 'split reads, junction − → +', pair: 'discordant pairs' };
+const SV_SOURCE_LABEL: Record<string, string> = { cigar: 'CIGAR D', split: 'split reads (SA)', clip: 'clipped reads placed by realignment', rescued: 'clipped reads rescued at the breakpoint', '+/-': 'split reads, junction + → −', '-/+': 'split reads, junction − → +', pair: 'discordant pairs', insertion: 'reads with an insertion in their CIGAR whose bases are the reference just before (or after) it: a tandem copy, as realigners such as ABRA2 write it' };
 /** "CIGAR D 8 · split reads (SA) 4" for an event, and the spread of the breakpoints it merged */
 const svEvidenceText = (j: SvArc, approx: string): string => {
   const src = Object.entries(j.sources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${SV_SOURCE_LABEL[k] ?? k} ${approx}${Math.round(n).toLocaleString('en-US')}`);
@@ -806,6 +806,10 @@ const PAIR_CLASS_LINE: Record<PairClass, string> = { deletion: '#b91c1c', duplic
 const PAIR_CLASS_LABEL: Record<PairClass, string> = { deletion: 'mates → ← far apart (deletion-type)', duplication: 'mates ← → facing away (tandem duplication-type)', inversion: 'mates on one strand (inversion-type)', other: 'mate elsewhere, or not a proper pair' };
 /** Mates facing away at least this far apart (and twice the median insert) are a duplication's (alignments.ts, OUTWARD_MIN_BP). */
 const OUTWARD_MIN = 300;
+/** Bases the reverse mate of an outward pair may reach past the forward mate's start (alignments.ts, OUTWARD_OVERLAP_BP). */
+const OUTWARD_OVERLAP = 20;
+/** Clip at the outer end of each mate for a pair to be read as one molecule across a junction (alignments.ts, CROSSING_MIN_CLIP). */
+const CROSSING_MIN_CLIP = 10;
 /**
  * What a duplicated or deleted stretch holds of the transcript drawn: the whole exons inside, their coding bases and the
  * frame the change leaves (a tandem copy of exons 13–14 of LDLR, 141 + 152 = 293 coding bases, shifts it), and the
@@ -2846,11 +2850,27 @@ export default function SashimiViewer({
       // the template length runs across the deletions and introns the two reads carry: those are not a long insert
       const mate = mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
       const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
+      // a mate carrying a deletion or an insertion of 50 bp or more in its CIGAR: the event is in the alignment (drawn as
+      // such), and the pair's positions, taken without it, would read as another (alignments.ts)
+      const carries = (x: AlignedRead | null) => !!x && (x.d.some(([a, b]) => b - a >= 50) || x.i.some(([, l]) => l >= 50));
+      if (dnaTrack && (carries(r) || carries(mate))) return !(r.f & 2) ? { text: 'not a proper pair (the event is in the alignment of the pair: a deletion or insertion of 50 bp or more in its CIGAR)', cls: 'other' } : null;
       if (dnaTrack) {
         // orientation first (genomic DNA only: on RNA, mates facing away are back-splicing, circular RNA)
         const rev = r.r === 1, mateRev = (r.f & 32) !== 0, apart = Math.abs(r.mp - r.s);
         if (rev === mateRev) return { text: `both mates on the ${rev ? '−' : '+'} strand, ${apart.toLocaleString('en-US')} bp apart: inversion-type`, cls: 'inversion' };
-        if ((rev ? r.s < r.mp : r.mp < r.s) && apart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString('en-US')} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
+        // facing away: the reverse mate ends before the forward one starts (its end, not its start: a reverse mate with a
+        // deletion in its CIGAR starts before a forward mate clipped at the junction, and ends past it)
+        const mateEnd = mate ? mate.e : r.mp + (r.e - r.s - innerGap(r));
+        const revStart = rev ? r.s : r.mp, revEnd = rev ? r.e : mateEnd, fwdStart = rev ? r.mp : r.s;
+        // both mates across one junction, each aligned on its own side (forward mate clipped at its start, reverse mate at
+        // its end): the junction goes from the reverse mate's end to the forward mate's start (alignments.ts)
+        if (mate && Math.abs(fwdStart - revEnd) >= 50) {
+          const fwd = rev ? mate : r, rv = rev ? r : mate;
+          if (fwd.c[0] + (fwd.h?.[0] ?? 0) >= CROSSING_MIN_CLIP && rv.c[1] + (rv.h?.[1] ?? 0) >= CROSSING_MIN_CLIP) return fwdStart > revEnd
+            ? { text: `both mates across one junction (forward mate clipped at its start, reverse mate at its end): the molecule jumps ${(fwdStart - revEnd).toLocaleString('en-US')} bp forward, deletion-type`, cls: 'deletion' }
+            : { text: `both mates across one junction (forward mate clipped at its start, reverse mate at its end): the molecule goes back ${(revEnd - fwdStart).toLocaleString('en-US')} bp, the junction of a tandem duplication`, cls: 'duplication' };
+        }
+        if (revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP && fwdStart - revStart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString('en-US')} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
         if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString('en-US')} bp, far above the median (${medianInsert.toLocaleString('en-US')} bp): deletion-type`, cls: 'deletion' };
       }
       if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };

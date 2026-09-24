@@ -244,6 +244,12 @@ export function exonDepth(reads: AlignedRead[], start: number, end: number): { m
 export const SV_MIN_DELETION = 50, SV_MIN_CLIP = 20, SV_MIN_SUPPORT = 3;
 /** Mates facing away from each other (← →) at least this far apart (and twice the median insert) are duplication-type. */
 export const OUTWARD_MIN_BP = 300;
+/** Bases the reverse mate of an outward pair may reach past the forward mate's start (soft-clip placement). */
+export const OUTWARD_OVERLAP_BP = 20;
+/** Clip at the outer end of each mate for a pair to be read as one molecule across a junction. */
+export const CROSSING_MIN_CLIP = 10;
+/** A CIGAR insertion is a tandem copy when its first and last TANDEM_PROBE bases are the reference at the copy's ends, within TANDEM_SLACK. */
+const TANDEM_PROBE = 24, TANDEM_SLACK = 60;
 const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32, FLAG_SUPPLEMENTARY = 2048;
 
 const cigarRefLen = (cigar: string) => parseCigar(cigar).reduce((n, [len, op]) => n + ('MDN=X'.includes(op) ? len : 0), 0);
@@ -319,6 +325,12 @@ export function placeClip(consensus: string, side: 'left' | 'right', ref: { star
 /** True when some read of the scan is soft-clipped by 20 bases or more without an SA tag and carries its sequence: the window is worth a reference for realignment. */
 export function hasRealignableClips(reads: RawRead[]): boolean {
   return reads.some(r => !r.sa && r.seq && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
+}
+/** The longest insertion of SV_MIN_DELETION or more whose bases a read carries (0: none): the reference around it tells a tandem copy. */
+export function longestPlaceableInsertion(reads: RawRead[]): number {
+  let max = 0;
+  for (const r of reads) if (r.seq) for (const [len, op] of parseCigar(r.cigar)) if (op === 'I' && len >= SV_MIN_DELETION && len > max) max = len;
+  return max;
 }
 /** True when some read is soft-clipped by RESCUE_MIN_CLIP bases or more without an SA tag and carries its sequence: a known breakpoint could rescue it. */
 export function hasRescuableClips(reads: RawRead[]): boolean {
@@ -475,6 +487,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
    * breakpoints.
    */
   const pairEnds = new Map<SvMember, [number, number][]>();
+  const cigarIns: { pos: number; len: number; seq: string; name: string }[] = [];
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
@@ -504,11 +517,26 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   // where each primary record's alignment ends, by name and start: a mate's real end, when its record is here (a mate
   // clipped at the junction ends there, not a read length after its start)
   const alignedEnd = new Map<string, number>();
+  /** soft and hard clips at the left and right ends of each primary record, by name and start */
+  const clipsOf = new Map<string, [number, number]>();
+  const clipEndsOf = (cigar: string): [number, number] => {
+    const ops = parseCigar(cigar);
+    let l = 0, r = 0, k = 0;
+    for (; k < ops.length && (ops[k][1] === 'S' || ops[k][1] === 'H'); k++) l += ops[k][0];
+    for (let q = ops.length - 1; q >= k && (ops[q][1] === 'S' || ops[q][1] === 'H'); q--) r += ops[q][0];
+    return [l, r];
+  };
+  // pairs a mate of which carries a deletion or an insertion of SV_MIN_DELETION or more in its CIGAR: the event is in
+  // the alignment already (counted as a deletion, or an insertion / tandem copy below), and the mates' positions and
+  // orientation, taken without it, say something else (an 8 kb deletion read as a duplication by its short fragments)
+  const eventInAlignment = new Set<string>();
   for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) {
+    if (parseCigar(r.cigar).some(([len, op]) => (op === 'D' || op === 'I') && len >= SV_MIN_DELETION)) eventInAlignment.add(r.name);
     primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
     let e = r.start;
     for (const [len, op] of parseCigar(r.cigar)) if ('MDN=X'.includes(op)) e += len;
     alignedEnd.set(`${r.name}:${r.start}`, e);
+    clipsOf.set(`${r.name}:${r.start}`, clipEndsOf(r.cigar));
   }
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
@@ -533,7 +561,11 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     ops.forEach(([len, op]) => {
       if (op === 'S') { if (!seenAligned) leftClip += len; else rightClip += len; qLen += len; }
       else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
-      else if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
+      else if ('MI=X'.includes(op)) {
+        // an insertion of SV_MIN_DELETION or more in the CIGAR (realigners such as ABRA2 write a tandem duplication so)
+        if (op === 'I' && len >= SV_MIN_DELETION && pos >= start && pos < end) cigarIns.push({ pos, len, seq: r.seq ? r.seq.substring(qLen, qLen + len) : '', name: r.name });
+        qLen += len; seenAligned = true;
+      }
       if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len, 1, 'cigar', r.name);
       if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
     });
@@ -552,6 +584,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     // base), and from primary records only (a supplementary record repeats its primary's mate fields)
     if (r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
+      else if (r.name && eventInAlignment.has(r.name)) { /* the event is in the alignment */ }
       else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2)) || (r.name && primaries.get(r.name) === 1)) {
         const rev = (r.flags & FLAG_REVERSE) !== 0, mateRev = (r.flags & FLAG_MATE_REVERSE) !== 0;
         const leftmost = r.start <= r.matePos;
@@ -562,10 +595,27 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
         const lo = Math.min(r.start, r.matePos);
         const hi = r.matePos >= r.start ? Math.max(alnEnd, r.matePos + readLen) : alnEnd;
         const span = hi - lo - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
-        // orientation of the leftmost mate and of the other: → ← normal, ← → outward (duplication), same strand (inversion)
-        const leftRev = leftmost ? rev : mateRev, rightRev = leftmost ? mateRev : rev;
+        // orientation: → ← normal, ← → outward (duplication), same strand (inversion). Outward means the reverse mate lies
+        // wholly before the forward one: its END before the other's start. Comparing starts took for outward the pairs
+        // of a short fragment across a deletion: the reverse mate aligned with the deletion in its CIGAR starts left of
+        // it and ends past it, while the forward mate, its few bases before the junction soft-clipped, starts after it
+        // (a VWF deletion drew a duplication arc of 103 pairs over its 288 deletion reads)
+        const knownMateEnd = r.name ? alignedEnd.get(`${r.name}:${r.matePos}`) : undefined;
+        const revStart = rev ? r.start : r.matePos, revEnd = rev ? alnEnd : knownMateEnd ?? r.matePos + readLen;
+        const fwdStart = rev ? r.matePos : r.start;
+        // A short fragment whose two mates both cross a junction, each aligned on its own side: the forward mate after it
+        // (its first bases clipped), the reverse mate before it (its last bases clipped). The molecule reads the reverse
+        // mate's aligned part, then the forward mate's: a split read seen through two mates, the junction going from the
+        // reverse mate's end to the forward mate's start, forward along the genome (a deletion) or back (a duplication).
+        // By orientation alone such pairs read the other way round: a deletion's as mates facing away, a duplication's as
+        // mates facing each other far apart (33 of them on an LDLR duplication).
+        const selfClips = clipEndsOf(r.cigar), mateClips = r.name ? clipsOf.get(`${r.name}:${r.matePos}`) : undefined;
+        const fwdClipL = rev ? mateClips?.[0] : selfClips[0], revClipR = rev ? selfClips[1] : mateClips?.[1];
+        const crossing = rev !== mateRev && fwdClipL != null && revClipR != null && fwdClipL >= CROSSING_MIN_CLIP && revClipR >= CROSSING_MIN_CLIP
+          && Math.abs(fwdStart - revEnd) >= SV_MIN_DELETION;
         const kind: 'deletion' | 'duplication' | 'inversion' | null = rev === mateRev ? 'inversion'
-          : leftRev && !rightRev ? (Math.abs(r.matePos - r.start) > outwardMin ? 'duplication' : null)
+          : crossing ? (fwdStart > revEnd ? 'deletion' : 'duplication')
+          : revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP_BP ? (fwdStart - revStart > outwardMin ? 'duplication' : null)
           : span > farInsert ? 'deletion' : null;
         if (kind) {
           const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
@@ -634,6 +684,30 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       placedKeys.add(key);
       clips.delete(key);
     }
+  }
+  // CIGAR insertions, grouped (position within 5 bp, length within 10 %): a tandem copy when the inserted bases are the
+  // reference just before the insertion point (or just after it), placed on the window's reference, else an insertion
+  const insGroups: { pos: number; len: number; seq: string; names: string[] }[] = [];
+  for (const x of cigarIns) {
+    const g = insGroups.find(y => Math.abs(y.pos - x.pos) <= 5 && Math.abs(y.len - x.len) <= 0.1 * y.len);
+    if (g) { g.names.push(x.name); if (!g.seq && x.seq) g.seq = x.seq; } else insGroups.push({ pos: x.pos, len: x.len, seq: x.seq, names: [x.name] });
+  }
+  for (const g of insGroups) {
+    let copy: [number, number] | null = null;
+    if (ref?.seq && g.seq.length >= 2 * TANDEM_PROBE) {
+      const head = g.seq.slice(0, TANDEM_PROBE).toUpperCase(), tail = g.seq.slice(-TANDEM_PROBE).toUpperCase(), refSeq = ref.seq.toUpperCase();
+      // the copy before the insertion point: its first bases at pos − len, its last just before pos (within TANDEM_SLACK)
+      for (const [from, to] of [[g.pos - g.len, g.pos], [g.pos, g.pos + g.len]] as const) {
+        const i = refSeq.indexOf(head, Math.max(0, from - TANDEM_SLACK - ref.start));
+        if (i < 0 || Math.abs(ref.start + i - from) > TANDEM_SLACK) continue;
+        const j = refSeq.indexOf(tail, Math.max(0, to - TANDEM_PROBE - TANDEM_SLACK - ref.start));
+        if (j < 0 || Math.abs(ref.start + j + TANDEM_PROBE - to) > TANDEM_SLACK) continue;
+        copy = [ref.start + i, ref.start + j + TANDEM_PROBE];
+        break;
+      }
+    }
+    if (copy) for (const n of g.names) add(dups, copy[0], copy[1], 1, 'insertion', n);
+    else { const k = r5(g.pos); const x = insertions.get(k); if (x) { x.count += g.names.length; x.len = Math.round((x.len * (x.count - g.names.length) + g.len * g.names.length) / x.count); } else insertions.set(k, { pos: k, len: g.len, count: g.names.length }); }
   }
   // clipped reads rescued at the sample's own breakpoints (arcs from chains, deletions and placed clusters): their clipped
   // bases must match the reference at the other end; reads of a placed cluster are already counted and stay out

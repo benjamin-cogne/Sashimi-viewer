@@ -13,7 +13,7 @@ import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
-import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
@@ -171,6 +171,11 @@ const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: nu
 /** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
+/** Widest insertion checked as a tandem copy (the reference read around the window grows by as much). */
+const TANDEM_MAX_BP = 50_000;
+/** A CIGAR insertion of SV_MIN_DELETION or more: its bases are kept too, to tell a tandem copy (alignments.ts). */
+const INS_RE = /(\d+)I/g;
+const bigInsertion = (cigar: string) => { INS_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = INS_RE.exec(cigar))) if (parseInt(m[1]) >= SV_MIN_DELETION) return true; return false; };
 /** BAM 4-bit base codes (SAM spec: =ACMGRSVTWYHKDBN) as character codes. */
 const NIBBLE_CODES = Uint8Array.from('=ACMGRSVTWYHKDBN', c => c.charCodeAt(0));
 const BAM_VIEW: RecordView<any> = {
@@ -188,7 +193,7 @@ const BAM_VIEW: RecordView<any> = {
   mods: r => modTags(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(r.CIGAR));
+    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(r.CIGAR)) || bigInsertion(r.CIGAR)));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -217,7 +222,7 @@ const CRAM_VIEW: RecordView<any> = {
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && typeof sa !== 'string' && bigClip(cigar));
+    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(cigar)) || bigInsertion(cigar)));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -286,14 +291,14 @@ function withMate(a: AlignedRead, r: RawRead, own: string): AlignedRead {
 }
 
 /**
- * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned and deleted bases, not the
- * skipped introns (N): a 2×100 RNA-seq read spliced over a 3 kb intron spans 3.2 kb of the genome but is a short
- * read, and counting its intron took most RNA-seq tracks of multi-exon genes for long reads (20 % Min VAF, long-read
- * homopolymer thresholds, tolerant grouping).
+ * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned bases only, not the skipped
+ * introns (N) nor the deletions (D): a 2×100 RNA-seq read spliced over a 3 kb intron spans 3.2 kb of the genome but is
+ * a short read (counting its intron took most RNA-seq tracks of multi-exon genes for long reads), and so is a 2×150 read
+ * carrying an 8 kb deletion (the supporting reads of a deletion, shown alone, were taken for long reads).
  */
 export function isLongRead(reads: { b: [number, number][]; d: [number, number][] }[]): boolean {
   if (!reads.length) return false;
-  const lens = reads.map(r => { let n = 0; for (const [a, b] of r.b) n += b - a; for (const [a, b] of r.d) n += b - a; return n; }).sort((a, b) => a - b);
+  const lens = reads.map(r => { let n = 0; for (const [a, b] of r.b) n += b - a; return n; }).sort((a, b) => a - b);
   return lens[lens.length >> 1] > 1000;
 }
 
@@ -758,8 +763,8 @@ export class LocalDataSource implements SashimiDataSource {
         layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r));
         if (st.longReads == null) {
           let span = 0;
-          // aligned and deleted bases, not the introns (N): see isLongRead
-          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 7 || op === 8) span += ops[k] >>> 4; }
+          // aligned bases, not the introns (N) nor the deletions (D): see isLongRead
+          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 7 || op === 8) span += ops[k] >>> 4; }
           st.spans.push(span);
         }
       };
@@ -884,7 +889,7 @@ export class LocalDataSource implements SashimiDataSource {
     for (let k = 0; k < ops.length; k++) {
       const len = ops[k] >>> 4, op = ops[k] & 15;
       if ((op === 4 || op === 5) && len >= RESCUE_MIN_CLIP) keep = true;
-      else if (op === 2 && len >= SV_MIN_DELETION) keep = true;
+      else if ((op === 2 || op === 1) && len >= SV_MIN_DELETION) keep = true;
       if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) refLen += len;
     }
     if (!keep && (flags & 1) && !(flags & 8)) {
@@ -1054,10 +1059,14 @@ export class LocalDataSource implements SashimiDataSource {
         let ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, null, sl.insertMedian);
         if (this.reference.fasta || w.end - w.start <= REALIGN_MAX_BP) {
           const hasArcs = ev.splits.length + ev.deletions.length + (ev.duplications?.length ?? 0) + (ev.inversions?.length ?? 0) > 0;
-          if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv))) {
+          // an insertion in a CIGAR is a tandem copy when its bases are the reference next to it: the reference is read
+          // that much further on each side (up to TANDEM_MAX_BP), so that a copy starting before the window is found
+          const insLen = Math.min(TANDEM_MAX_BP, longestPlaceableInsertion(sl.sv));
+          if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv)) || insLen) {
             try {
-              const seq = await this.getReferenceSeq(chrom, w.start, w.end);
-              if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: w.start, seq }, sl.insertMedian);
+              const rs = Math.max(0, w.start - (insLen ? insLen + 200 : 0)), re = w.end + (insLen ? insLen + 200 : 0);
+              const seq = await this.getReferenceSeq(chrom, rs, re);
+              if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian);
             } catch (e) { console.warn('reference for clip realignment not available:', e); }
             // outside the catch: a reference that cannot be fetched is not fatal, a caller that gave up is
             throwIfAborted(signal);

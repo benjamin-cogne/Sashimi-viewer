@@ -255,6 +255,28 @@ The arcs are coloured by what the orientation of the mates says, as IGV colours 
   stand about 1.5 times the flanks' (one extra copy);
 - **blue, inversion-type**: both mates on one strand.
 
+The orientation is read with care, because short fragments and realigned reads mislead it:
+- **Facing away** means the reverse mate *ends* before the forward mate starts, not merely starts
+  before it. A reverse mate aligned with a deletion in its CIGAR starts left of the deletion and
+  ends past it. When its forward mate, clipped at the junction, starts just after the deletion,
+  their starts alone read as a duplication. On a VWF deletion that drew a duplication arc of 103
+  pairs over 288 deletion reads.
+- **Both mates across one junction.** A fragment shorter than two reads can have each mate aligned
+  on its own side of the junction: the forward mate after it, its first bases clipped, and the
+  reverse mate before it, its last bases clipped. The molecule then reads the reverse mate's part
+  and then the forward mate's. Such a pair is a split read seen through two mates: deletion-type
+  when the junction jumps forward, duplication-type when it goes back. By orientation alone it
+  reads the other way round.
+- **The event in the alignment.** A pair a mate of which carries a deletion or an insertion of 50 bp
+  or more in its CIGAR is not counted as discordant. The event is already drawn from that alignment,
+  and the mates' positions, taken without it, would describe another event.
+- **CIGAR insertions** of 50 bp or more are evidence of their own. Some pipelines (realigners such
+  as ABRA2) write a tandem duplication as an insertion of the copy's bases. When the first and last
+  24 inserted bases are the reference just before (or just after) the insertion point, within
+  60 bp, the reads count on a duplication arc over the copied stretch (source "CIGAR insertion").
+  Otherwise they count as an insertion pill. The reference is read that much further around the
+  window, up to 50 kb.
+
 A pair is counted once, from its leftmost mate, or from the other one when the leftmost lies
 beyond the window. The two ends of a duplication are often far apart (4 kb for a copy of two exons),
 and counting only from the left used to lose every pair whose left mate was off screen. The extent
@@ -342,8 +364,9 @@ are structural evidence, not sequencing noise, and the reads of one large deleti
 its breakpoint a few bases apart, so no single site would gather them.
 
 **Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets one
-more noise control. The aligned length counts aligned and deleted bases, not the skipped introns: a
-2×100 RNA-seq read spliced over a 3 kb intron is a short read. Counting the intron wrongly took most
+more noise control. The aligned length counts aligned bases only, not the skipped introns nor the
+deletions: a 2×100 RNA-seq read spliced over a 3 kb intron is a short read, and so is a 2×150 read
+carrying an 8 kb deletion. Counting the intron wrongly took most
 RNA-seq tracks of multi-exon genes for long reads, with the long-read thresholds and grouping.
 The control is *Min VAF (long)* (20 %), the allele fraction a site needs on long reads, above the
 short-read *Min VAF*. It appears next to *Collapse* when such reads are shown and is saved
