@@ -19,8 +19,9 @@
  * other). Sites that do not split are listed (a mis-phased or mosaic site, a third haplotype, a collapsed
  * duplication), and reads whose allele contradicts their haplotype's are counted (tagging errors, chimeras).
  */
-import type { AlignedRead, HaplotypeConsensus, HaplotypeSet, HaplotypeView, PhaseResult, VariantSite } from '../components/sashimi/types';
-import { callSites } from './collapse';
+import type { AlignedRead, AllelicJunction, HapJunction, HaplotypeConsensus, HaplotypeSet, HaplotypeView, PhaseResult, VariantSite } from '../components/sashimi/types';
+import { fisher } from '../components/sashimi/siteQuality';
+import { callSites, jKey, junctionSnap, readJunctions } from './collapse';
 import { HET_MAX, HET_MIN, alleleAt, fragmentsOf } from './phasing';
 
 /** Reads of one haplotype needed for a stretch to count as covered, and for a site to be judged. */
@@ -39,7 +40,7 @@ export function haplotagCounts(reads: AlignedRead[]): { tagged: number; sets: nu
 }
 
 interface Group { key: string; ps: number | null; hap: number; frags: AlignedRead[][] }
-interface Options { start: number; end: number; ref: string | null; refStart: number; minBq: number; minIndel: number; minAlt: number; minVaf: number; /** the window's sites over all reads, when the caller has them */ sites?: VariantSite[] }
+interface Options { start: number; end: number; ref: string | null; refStart: number; minBq: number; minIndel: number; minAlt: number; minVaf: number; /** the window's sites over all reads, when the caller has them */ sites?: VariantSite[]; /** long reads: junctions a few bases off taken for the common one (collapse.ts, junctionSnap) */ longReads?: boolean }
 
 /** Haplotypes from the HP / PS tags: one group per (phase set, haplotype); a fragment takes the tag of the mate that has one. */
 export function haplotypesFromTags(reads: AlignedRead[], o: Options): HaplotypeView {
@@ -66,21 +67,30 @@ export function haplotypesFromTags(reads: AlignedRead[], o: Options): HaplotypeV
 export function haplotypesFromPhase(reads: AlignedRead[], phase: PhaseResult, o: Options): HaplotypeView {
   const frags = fragmentsOf(reads);
   const sets = phase.blocks.map(b => ({ id: b.id, ps: null as number | null, groups: [1, 2].map(hap => ({ key: `${b.id}:${hap}`, ps: null, hap, frags: [] as AlignedRead[][] })) }));
+  // the phased sites in position order (block, index in it): each fragment looks only at those inside its span, not
+  // at every site of every block
+  const phased = phase.blocks.flatMap((b, bi) => b.sites.map((si, k) => ({ pos: phase.sites[si].pos, bi, k, s: phase.sites[si] }))).sort((x, y) => x.pos - y.pos);
+  const firstAt = (pos: number) => { let lo = 0, hi = phased.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (phased[mid].pos < pos) lo = mid + 1; else hi = mid; } return lo; };
   let assigned = 0, unassigned = 0;
   for (const fr of frags) {
     let best = -1, bestMargin = 0, bestHap = 0;
-    phase.blocks.forEach((b, bi) => {
-      let m1 = 0, m2 = 0;
-      b.sites.forEach((si, k) => {
-        const s = phase.sites[si];
-        let a = -1;
-        for (const r of fr) { const x = alleleAt(r, s, o.minBq); if (x < 0) continue; if (a < 0) a = x; else if (a !== x) { a = -1; break; } }
-        if (a < 0) return;
-        if ((a === 1) === (b.h1[k] === 'alt')) m1++; else m2++;
-      });
+    let lo = Infinity, hi = -Infinity;
+    for (const r of fr) { if (r.s < lo) lo = r.s; if (r.e > hi) hi = r.e; }
+    const tally = new Map<number, [number, number]>();
+    for (let x = firstAt(lo); x < phased.length && phased[x].pos < hi; x++) {
+      const { bi, k, s } = phased[x];
+      let a = -1;
+      for (const r of fr) { const y = alleleAt(r, s, o.minBq); if (y < 0) continue; if (a < 0) a = y; else if (a !== y) { a = -1; break; } }
+      if (a < 0) continue;
+      let t = tally.get(bi);
+      if (!t) tally.set(bi, t = [0, 0]);
+      if ((a === 1) === (phase.blocks[bi].h1[k] === 'alt')) t[0]++; else t[1]++;
+    }
+    // the block where the fragment is the most clearly on one side (the first one on a tie, as before)
+    for (const [bi, [m1, m2]] of [...tally].sort((x, y) => x[0] - y[0])) {
       const margin = Math.abs(m1 - m2);
       if (margin > bestMargin) { best = bi; bestMargin = margin; bestHap = m1 > m2 ? 1 : 2; }
-    });
+    }
     if (best < 0) { unassigned += fr.length; continue; }
     sets[best].groups[bestHap - 1].frags.push(fr);
     assigned += fr.length;
@@ -96,8 +106,10 @@ function build(source: HaplotypeView['source'], sets: { id: string; ps: number |
   const conflicting = new Set<AlignedRead>();
   // heterozygous sites of the window, over all reads, with the sample's thresholds
   const all = o.sites ?? callSites(reads, o.start, o.end, o.ref, o.refStart, o.minAlt, o.minVaf, o.minBq, o.minIndel);
-  const het = all.filter(s => s.vaf >= HET_MIN && s.vaf <= HET_MAX);
+  const het = all.filter(s => s.vaf >= HET_MIN && s.vaf <= HET_MAX).sort((a, b) => a.pos - b.pos);
+  const hetFirst = (pos: number) => { let lo = 0, hi = het.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (het[mid].pos < pos) lo = mid + 1; else hi = mid; } return lo; };
   const windowKeys = new Set(all.map(siteKey));
+  const snap = o.longReads ? junctionSnap(reads) : null;
   for (const set of sets) {
     const setReads = set.groups.flatMap(g => g.frags.flat());
     if (!setReads.length) continue;
@@ -117,29 +129,82 @@ function build(source: HaplotypeView['source'], sets: { id: string; ps: number |
       const pcs = rs.map(r => r.pc).filter((x): x is number => x != null).sort((a, b) => a - b);
       return { hap: g.hap, reads: countReads ? rs.length : g.frags.length, covered, sites, ...(pcs.length ? { pc: pcs[pcs.length >> 1] } : {}) };
     });
-    out.push({ id: set.id, ps: set.ps, start: s0, end: e0, haps });
+    const withReads = set.groups.filter(g => g.frags.length);
+    const { per, allelic } = haplotypeJunctions(withReads, snap);
+    per.forEach((js, k) => { if (js.length) haps[k].junctions = js; });
+    out.push({ id: set.id, ps: set.ps, start: s0, end: e0, haps, ...(allelic.length ? { allelic } : {}) });
     // the split check needs two haplotypes
     const [g1, g2] = set.groups;
     if (!g1 || !g2 || !g1.frags.length || !g2.frags.length) continue;
-    for (const s of het) {
-      if (s.pos < s0 || s.pos >= e0) continue;
-      const frac = [g1, g2].map(g => {
-        let alt = 0, n = 0;
-        for (const fr of g.frags) { const a = fragAllele(fr, s, o.minBq); if (a < 0) continue; n++; if (a === 1) alt++; }
-        return n >= HAP_MIN_DEPTH ? alt / n : NaN;
-      });
-      if (frac.some(Number.isNaN)) continue;
+    // each fragment's alleles at the heterozygous sites inside its span (and the set's): not every site × every fragment
+    const seen = [g1, g2].map(g => g.frags.map(fr => {
+      let lo = Infinity, hi = -Infinity;
+      for (const r of fr) { if (r.s < lo) lo = r.s; if (r.e > hi) hi = r.e; }
+      const out: [number, number][] = [];
+      for (let x = hetFirst(Math.max(lo, s0)); x < het.length && het[x].pos < Math.min(hi, e0); x++) { const a = fragAllele(fr, het[x], o.minBq); if (a >= 0) out.push([x, a]); }
+      return out;
+    }));
+    const counts = seen.map(fs => { const m = new Map<number, [number, number]>(); for (const f of fs) for (const [x, a] of f) { const c = m.get(x) ?? [0, 0]; c[1]++; if (a === 1) c[0]++; m.set(x, c); } return m; });
+    const altOnSite = new Map<number, number>();
+    for (const x of [...counts[0].keys()].sort((a, b) => a - b)) {
+      const c = [counts[0].get(x), counts[1].get(x)];
+      if (!c[0] || !c[1] || c[0][1] < HAP_MIN_DEPTH || c[1][1] < HAP_MIN_DEPTH) continue;
+      const frac = c.map(t => t![0] / t![1]);
       checked++;
       const altOn = frac[0] >= SPLIT_MAJOR && frac[1] <= 1 - SPLIT_MAJOR ? 0 : frac[1] >= SPLIT_MAJOR && frac[0] <= 1 - SPLIT_MAJOR ? 1 : -1;
-      if (altOn < 0) { notSplit.push({ pos: s.pos, kind: s.kind, alt: s.alt, fractions: frac, set: set.id }); continue; }
-      [g1, g2].forEach((g, gi) => {
-        const expect = gi === altOn ? 1 : 0;
-        for (const fr of g.frags) { const a = fragAllele(fr, s, o.minBq); if (a >= 0 && a !== expect) for (const r of fr) conflicting.add(r); }
-      });
+      const s = het[x];
+      if (altOn < 0) notSplit.push({ pos: s.pos, kind: s.kind, alt: s.alt, fractions: frac, set: set.id });
+      else altOnSite.set(x, altOn);
     }
+    [g1, g2].forEach((g, gi) => g.frags.forEach((fr, fi) => {
+      for (const [x, a] of seen[gi][fi]) { const on = altOnSite.get(x); if (on !== undefined && a !== (gi === on ? 1 : 0)) { for (const r of fr) conflicting.add(r); break; } }
+    }));
   }
   out.sort((a, b) => a.start - b.start || a.end - b.end);
   return { source, sets: out, assigned, unassigned, notSplit, checked, conflicting: countReads ? conflicting.size : new Set([...conflicting].map(r => r.n + r.s)).size };
+}
+
+/** Fisher p-value and difference of the two shares for a junction to count as used differently by the haplotypes. */
+const ALLELIC_P = 1e-3, ALLELIC_DELTA = 0.2;
+
+/**
+ * Splice junctions of a set's haplotypes (RNA): the junctions carried by at least HAP_MIN_DEPTH fragments of the set,
+ * and for each haplotype the fragments that carry one and those that go another way at one of its ends (another
+ * junction from its donor or to its acceptor, an exon skip included, or aligned bases across the exon–intron
+ * boundary). Fragments, not reads: two mates over one junction are one molecule. Junctions whose share differs
+ * between the two haplotypes are tested (Fisher's exact test, two-sided) and listed.
+ */
+function haplotypeJunctions(groups: Group[], snap: Map<number, [number, number]> | null): { per: HapJunction[][]; allelic: AllelicJunction[] } {
+  const none = { per: groups.map(() => []), allelic: [] };
+  const units = groups.map(g => g.frags.map(fr => {
+    const u: { fr: AlignedRead[]; js: Map<number, [number, number]> | null } = { fr, js: null };
+    for (const r of fr) readJunctions(r, (_, a, b) => { const j = snap?.get(jKey(a, b)) ?? [a, b]; (u.js ??= new Map()).set(jKey(j[0], j[1]), j); });
+    return u;
+  }));
+  const total = new Map<number, { s: number; e: number; n: number }>();
+  for (const us of units) for (const u of us) if (u.js) for (const [k, [a, b]] of u.js) { const t = total.get(k); if (t) t.n++; else total.set(k, { s: a, e: b, n: 1 }); }
+  const cand = [...total.entries()].filter(([, t]) => t.n >= HAP_MIN_DEPTH).sort((x, y) => x[1].s - y[1].s || x[1].e - y[1].e);
+  if (!cand.length) return none;
+  // bases p − 1 and p aligned in one block: the exon goes on into the intron (or the intron into the exon) at p
+  const across = (fr: AlignedRead[], p: number) => fr.some(r => r.s < p && p < r.e && r.b.some(([a, b]) => a < p && p < b));
+  const per = units.map(us => cand.map(([k, t]): HapJunction => {
+    let n = 0, other = 0;
+    for (const u of us) {
+      if (u.js?.has(k)) { n++; continue; }
+      let alt = false;
+      if (u.js) for (const [a, b] of u.js.values()) if (a === t.s || b === t.e) { alt = true; break; }
+      if (alt || across(u.fr, t.s) || across(u.fr, t.e)) other++;
+    }
+    return { start: t.s, end: t.e, n, other, psi: n + other ? n / (n + other) : 0 };
+  }));
+  const allelic: AllelicJunction[] = [];
+  if (per.length >= 2) cand.forEach((_, i) => {
+    const a = per[0][i], b = per[1][i];
+    if (a.n + a.other < HAP_MIN_DEPTH || b.n + b.other < HAP_MIN_DEPTH) return;
+    const p = fisher(a.n, a.other, b.n, b.other, 'two');
+    if (p < ALLELIC_P && Math.abs(a.psi - b.psi) >= ALLELIC_DELTA) allelic.push({ start: a.start, end: a.end, n: [a.n, b.n], other: [a.other, b.other], psi: [a.psi, b.psi], p });
+  });
+  return { per: per.map(l => l.filter(j => j.n > 0)), allelic };
 }
 
 /** A fragment's allele at a site: its reads agreeing, unknown otherwise. */
@@ -172,8 +237,8 @@ function coveredStretches(reads: AlignedRead[], start: number, end: number): [nu
  * caller asks for the reads' own phasing), else the in-page read-based phasing, whose blocks are also returned.
  */
 export function windowHaplotypes(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minVaf: number, minIndel: number, source: 'auto' | 'reads', phaseReads: () => PhaseResult, sites?: VariantSite[]): { phase?: PhaseResult; haplotypes: HaplotypeView } {
-  const o: Options = { start, end, ref, refStart, minBq: 20, minIndel, minAlt: 3, minVaf, sites };
+  minVaf: number, minIndel: number, source: 'auto' | 'reads', phaseReads: () => PhaseResult, sites?: VariantSite[], longReads = false): { phase?: PhaseResult; haplotypes: HaplotypeView } {
+  const o: Options = { start, end, ref, refStart, minBq: 20, minIndel, minAlt: 3, minVaf, sites, longReads };
   if (source !== 'reads' && reads.some(r => r.hp)) return { haplotypes: haplotypesFromTags(reads, o) };
   const phase = phaseReads();
   return { phase, haplotypes: haplotypesFromPhase(reads, phase, o) };

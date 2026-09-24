@@ -215,9 +215,27 @@ export interface HaplotypeConsensus {
   sites: VariantSite[];
   /** median PC (assignment confidence) of its tagged reads, when the file gives one */
   pc?: number;
+  /** splice junctions of its reads (RNA): see HapJunction */
+  junctions?: HapJunction[];
 }
+/**
+ * A splice junction as one haplotype uses it: `n` reads (tags) or fragments (in-page phasing) of the haplotype carry
+ * it, `other` go another way at one of its ends (another junction from its donor or to its acceptor, or the exon
+ * continuing into the intron); `psi` = n / (n + other), the junction's share where the haplotype decides.
+ */
+export interface HapJunction { start: number; end: number; n: number; other: number; psi: number }
+/**
+ * A junction used differently by the two haplotypes of a set: Fisher's exact test of [[n1, other1], [n2, other2]]
+ * (two-sided), flagged at p < 0.001 with at least 20 points between the two shares. The splice change of a variant
+ * in cis (a donor or acceptor variant, a created cryptic site) is on one haplotype only.
+ */
+export interface AllelicJunction { start: number; end: number; n: [number, number]; other: [number, number]; psi: [number, number]; p: number }
 /** A phase set: haplotypes linked within it, not across (H1 here is unrelated to H1 of the next set). */
-export interface HaplotypeSet { id: string; ps: number | null; start: number; end: number; haps: HaplotypeConsensus[] }
+export interface HaplotypeSet {
+  id: string; ps: number | null; start: number; end: number; haps: HaplotypeConsensus[];
+  /** junctions whose use differs between the set's two haplotypes (RNA) */
+  allelic?: AllelicJunction[];
+}
 /** The haplotypes of a reads window, from the file's haplotags or from the in-page read-based phasing. */
 export interface HaplotypeView {
   source: 'tags' | 'reads';

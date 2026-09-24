@@ -16,10 +16,12 @@
  *  5. Fragments are assigned to the haplotype they match best inside each block; support and disagreement counted.
  */
 import type { AlignedRead, VariantSite, PhaseBlock, PhaseResult, UnphasedSite } from '../components/sashimi/types';
-import { callSites, inBlocks, mismatchAt } from './collapse';
+import { callSites, fragmentsOf, inBlocks, mismatchAt } from './collapse';
 
 export const HET_MIN = 0.25, HET_MAX = 0.75;
 export const MIN_LINK = 2, MAX_CONFLICT = 0.2;
+/** Sites after each one (in a fragment) that it is linked to. */
+const LINK_AHEAD = 32;
 
 export type Allele = 0 | 1 | -1;   // 0 ref, 1 alt, -1 unknown
 
@@ -39,21 +41,8 @@ export function alleleAt(r: AlignedRead, s: VariantSite, minBq: number): Allele 
   return inBlocks(r, s.pos) ? 0 : -1;
 }
 
-/** Reads joined into fragments: a read and its mate (both in the set) count once. */
-export function fragmentsOf(reads: AlignedRead[]): AlignedRead[][] {
-  const byStart = new Map<number, number[]>();
-  reads.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
-  const mate = new Int32Array(reads.length).fill(-1);
-  reads.forEach((r, i) => {
-    if (mate[i] >= 0 || r.mp == null || r.mc) return;
-    for (const j of byStart.get(r.mp) ?? []) {
-      if (j !== i && mate[j] < 0 && reads[j].mp === r.s && (reads[j].f & 192) !== (r.f & 192)) { mate[i] = j; mate[j] = i; break; }
-    }
-  });
-  const out: AlignedRead[][] = [];
-  reads.forEach((r, i) => { if (mate[i] >= 0 && mate[i] < i) return; out.push(mate[i] >= 0 ? [r, reads[mate[i]]] : [r]); });
-  return out;
-}
+/** Reads joined into fragments: a read and its mate (both in the set) count once (shared with the consensus groups). */
+export { fragmentsOf };
 
 export function phaseReads(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
   minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1, called?: VariantSite[]): PhaseResult {
@@ -63,30 +52,30 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
   const hom = sites.map((s, i) => i).filter(i => sites[i].vaf > HET_MAX);
   const unphased: UnphasedSite[] = sites.map((s, i) => i).filter(i => sites[i].vaf < HET_MIN).map(i => ({ site: i, reason: 'low' as const }));
   const frags = fragmentsOf(reads);
-  // allele matrix: fragment × heterozygous site, evaluated only at the sites inside the fragment's span
+  // each fragment's known alleles at the heterozygous sites inside its span, sparse (indices into `het`, in order):
+  // a dense fragment × site matrix took gigabytes on a window with thousands of sites
   const hetPos = het.map(si => sites[si].pos);
   const lowerBound = (pos: number) => { let lo = 0, hi = hetPos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (hetPos[mid] < pos) lo = mid + 1; else hi = mid; } return lo; };
-  const alleles: Allele[][] = frags.map(fr => {
-    const row: Allele[] = new Array(het.length).fill(-1);
+  const rows: { k: number[]; a: Allele[] }[] = frags.map(fr => {
+    const row = { k: [] as number[], a: [] as Allele[] };
     let lo = Infinity, hi = -Infinity;
     for (const r of fr) { if (r.s < lo) lo = r.s; if (r.e > hi) hi = r.e; }
     for (let k = lowerBound(lo); k < het.length && hetPos[k] < hi; k++) {
       let a: Allele = -1;
       for (const r of fr) { const x = alleleAt(r, sites[het[k]], minBq); if (x < 0) continue; if (a < 0) a = x; else if (a !== x) { a = -1; break; } }
-      row[k] = a;
+      if (a >= 0) { row.k.push(k); row.a.push(a); }
     }
     return row;
   });
   // links between pairs of heterozygous sites (indices into `het`)
-  const same = new Map<string, number>(), diff = new Map<string, number>();
-  const key = (a: number, b: number) => `${a},${b}`;
-  const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
-  for (const row of alleles) {
-    const covered: number[] = []; row.forEach((a, k) => { if (a >= 0) covered.push(k); });
-    for (let x = 0; x < covered.length; x++) for (let y = x + 1; y < covered.length; y++) {
-      const i = covered[x], j = covered[y];
-      bump(row[i] === row[j] ? same : diff, key(i, j));
-    }
+  // (numeric keys; each site linked to the LINK_AHEAD next ones a fragment covers: a long read over hundreds of sites
+  // made tens of thousands of pairs, and the blocks are built from neighbouring sites anyway)
+  const same = new Map<number, number>(), diff = new Map<number, number>();
+  const H = het.length;
+  const key = (a: number, b: number) => a * H + b;
+  const bump = (m: Map<number, number>, k: number) => m.set(k, (m.get(k) ?? 0) + 1);
+  for (const row of rows) {
+    for (let x = 0; x < row.k.length; x++) for (let y = x + 1; y < row.k.length && y <= x + LINK_AHEAD; y++) bump(row.a[x] === row.a[y] ? same : diff, key(row.k[x], row.k[y]));
   }
   // greedy blocks; phase[k] = 0 when the alt allele of het site k is on H1, 1 when on H2
   const phase = new Int8Array(het.length).fill(0);
@@ -125,17 +114,27 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
   }
   close();
   unphased.push(...skipped);
-  // fragments on haplotypes, per block; links kept for the tooltips
+  // fragments on haplotypes, per block (each fragment through its own sites only); links kept for the tooltips
   const hetIndex = new Map(het.map((si, k) => [si, k]));
-  for (const b of blocks) {
-    const ks = b.sites.map(si => hetIndex.get(si)!);
-    for (const row of alleles) {
-      let m1 = 0, m2 = 0, n = 0;
-      for (const k of ks) { const a = row[k]; if (a < 0) continue; n++; const alt1 = phase[k] === 0; if ((a === 1) === alt1) m1++; else m2++; }
-      if (!n) continue;
+  const blockOf = new Int32Array(het.length).fill(-1);
+  blocks.forEach((b, bi) => { for (const si of b.sites) blockOf[hetIndex.get(si)!] = bi; });
+  for (const row of rows) {
+    const tally = new Map<number, [number, number]>();
+    row.k.forEach((k, x) => {
+      const bi = blockOf[k];
+      if (bi < 0) return;
+      let t = tally.get(bi);
+      if (!t) tally.set(bi, t = [0, 0]);
+      if ((row.a[x] === 1) === (phase[k] === 0)) t[0]++; else t[1]++;
+    });
+    for (const [bi, [m1, m2]] of tally) {
+      const b = blocks[bi];
       if (m1 === m2) b.ambiguous++;
       else { b.support[m1 > m2 ? 0 : 1]++; if (Math.min(m1, m2) > 0) b.conflicting++; }
     }
+  }
+  for (const b of blocks) {
+    const ks = b.sites.map(si => hetIndex.get(si)!);
     for (let x = 0; x < ks.length; x++) for (let y = x + 1; y < ks.length; y++) {
       const s = same.get(key(ks[x], ks[y])) ?? 0, d = diff.get(key(ks[x], ks[y])) ?? 0;
       if (s + d) b.links.push({ a: b.sites[x], b: b.sites[y], same: s, diff: d });

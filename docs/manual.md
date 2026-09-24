@@ -56,7 +56,7 @@ Nothing is stored between sessions. Close the tab and the data is gone.
 |---|---|
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
-| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
+| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -282,8 +282,11 @@ are structural evidence, not sequencing noise, and the reads of one large deleti
 its breakpoint a few bases apart, so no single site would gather them.
 
 **Long reads (ONT, PacBio).** A reads track whose median aligned length is above 1 kb gets one
-more noise control: *Min VAF (long)* (20 %), the allele fraction a site needs on long reads, above
-the short-read *Min VAF*. It appears next to *Collapse* when such reads are shown and is saved
+more noise control. The aligned length counts aligned and deleted bases, not the skipped introns: a
+2×100 RNA-seq read spliced over a 3 kb intron is a short read. Counting the intron wrongly took most
+RNA-seq tracks of multi-exon genes for long reads, with the long-read thresholds and grouping.
+The control is *Min VAF (long)* (20 %), the allele fraction a site needs on long reads, above the
+short-read *Min VAF*. It appears next to *Collapse* when such reads are shown and is saved
 with the session. Indels of every size are called. Random homopolymer indels stay out of sight
 because *Consensus* draws indels only at called sites. A homopolymer indel common enough to be
 called is flagged by the variants track's HP check. (An earlier *Min indel* option hid the indels
@@ -333,6 +336,20 @@ mosaic site, a third haplotype, or a collapsed duplication. Reads whose allele c
 haplotype's are counted in the header (tagging errors, chimeras). With the in-page source, the
 sites it could not phase are listed on that row too, with the reason.
 
+**Junctions of each haplotype (RNA).** On RNA-seq, each haplotype row shows its splice junctions. A
+line crosses each intron, and an arc spans a junction that skips over others (an exon skip). Each
+carries the number of the haplotype's fragments that use it; fainter means used less where the
+haplotype decides. For every junction carried by at least 3 fragments of a phase set, the viewer
+counts each haplotype's fragments that go another way at one of its ends: another junction from its
+donor or to its acceptor, or aligned bases across the exon–intron boundary. The two haplotypes' shares
+are compared with Fisher's exact test (two-sided). A junction with p < 0.001 and at least 20 points
+between the shares is drawn in the colour of each haplotype and counted in the header ("junctions used
+differently by the haplotypes"). Its tooltip gives both shares and the p-value. That is the splice
+change of a variant in *cis*: a donor or acceptor variant, or a created cryptic site, acts on its own
+haplotype only. Counts are in fragments (a read and its mate are one molecule). On long reads, a
+junction placed a few bases off is taken for the common one next to it, as in the consensus groups
+below.
+
 **Group by haplotype.** When the reads carry haplotags, *Group: haplotype (HP)* on the raw reads
 track packs them per haplotag, like IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher
 copy labels), then the untagged reads. Each group has a label row and a coloured band. Mates and the
@@ -340,16 +357,45 @@ parts of a split read stay together. A read's tooltip gives its HP, PS and PC.
 
 *Haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
 one row per local haplotype × splice pattern with its read count, groups below *Min reads* folded
-into a minor bucket. The two kinds of reads are grouped differently:
-- **Short reads** are grouped by identical patterns of alleles and splice junctions, seeded by
-  patterns seen in at least *Min reads* reads.
-- **Long reads** are clustered with a tolerance. No two long reads carry the same pattern: each
-  covers its own run of sites, with its own sequencing errors. The reads are taken left to right,
-  and each joins the group whose consensus it agrees with at their shared sites, up to 20 % of them
-  disagreeing. A read agreeing with two groups goes to the one it agrees with by 2 more sites, and
-  is ambiguous otherwise. Groups that agree where they overlap are then merged. A diploid window
-  thus gives its two haplotypes as two groups, whatever the number of groups the other alleles
-  (mosaic, a paralogue, a third copy) add.
+into a minor bucket. A read and its mate count as one **fragment**, one molecule: together they see
+sites and junctions further apart than either read, and *Min reads* counts fragments. Reads fitting
+several groups make ambiguous rows, labelled with those groups ("H1|H2 ?"). Two kinds of grouping
+are used:
+- **Unspliced short reads (DNA)** are grouped by identical patterns of alleles, seeded by patterns
+  seen in at least *Min reads* fragments. Every pattern is then placed on the one seed it fits,
+  or made ambiguous when it fits several.
+- **Long reads, and spliced short reads (RNA-seq)**, are clustered with a tolerance. No two long reads
+  carry the same pattern: each covers its own run of sites, with its own sequencing errors. On
+  RNA-seq, short fragments see different pieces of the same transcript (exons 2–3, 3–4, …), which as
+  exact patterns split one isoform of one haplotype into dozens of rows.
+  - The fragments are taken left to right. Each joins the group whose consensus it agrees with at
+    their shared sites, up to 20 % of them disagreeing, and whose splicing it never contradicts:
+    - a junction of one crossed by aligned bases of the other (a skipped exon, a retained intron);
+    - two different junctions overlapping (another donor or acceptor).
+  - A shared junction counts as agreement. A fragment with calls meets groups through its sites only,
+    since junctions that both haplotypes splice say nothing of the phase.
+  - A fragment agreeing with two groups goes to the one it agrees with by 2 more sites or junctions,
+    and is ambiguous otherwise.
+  - Groups are then merged when they agree where they overlap: at least 2 shared sites, or at least
+    2 fragments linking them (a mate pair that agrees with each at a site of its own). A group that
+    could join two groups that differ from each other (two isoforms, or two haplotypes where it sees
+    no site of either) stays apart, because the reads cannot say which.
+  - Every fragment is finally placed again against the final groups.
+  - Homozygous sites (above 90 % alternate) are shown but not used, because every read agrees there.
+  - On long reads, a junction seen in few reads within 6 bp of one seen at least four times as often
+    is taken for it. ONT reads place junctions a few bases off where the bases next to them carry
+    errors. IsoQuant corrects within 6 bp on ONT data, FLAIR within 15.
+  - When most fragments agree with nobody (a wrong reference, a junk window), the exact patterns are
+    used instead.
+
+A diploid DNA window thus gives its two haplotypes as two groups, whatever the number of groups the
+other alleles (mosaic, a paralogue, a third copy) add. An RNA window gives one group per haplotype ×
+isoform where the reads show both. On a simulated gene (9 exons, one haplotype skipping exon 5 in
+cis with its alleles, an alternative acceptor on both), every group was pure:
+- **ONT-like cDNA** (4 % errors, 10 % of junctions shifted by 1–4 bp): the five haplotype ×
+  isoform classes as five groups.
+- **2×100 pairs**: the exon-skipping reads as one group of the alternate haplotype. The pieces the
+  reads cannot assign to one isoform are rows of their own, or ambiguous rows.
 
 **Allele fractions of the reads track.** Every alternate base counts in a site's fraction,
 whatever its base quality, as in the variants track. Before, the bases under Q20 were left out of
@@ -360,7 +406,11 @@ uses only alleles of Q20 or more.
 
 **Speed.** A collapsed window (up to 40,000 reads decoded, then phased or grouped) is computed in
 the background worker, and only its answer, not the reads, comes back to the page. A 1,000×
-capture, which used to freeze the page for half a second while collapsing, no longer holds it up. These choices are saved with the session. Exported pages keep the haplotags of
+capture, which used to freeze the page for half a second while collapsing, no longer holds it up.
+Alleles are kept per fragment only at the sites it covers, and each fragment is compared only with
+the groups and phase blocks it overlaps. A window of thousands of apparent sites (reads against the
+wrong reference) used to take 1–2 minutes and gigabytes to collapse, and over ten minutes on 1.5
+million reads. It now takes about 6 s. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
 **Layers.** Four layers make a DNA track, switched in the toolbar by one colour-coded control,

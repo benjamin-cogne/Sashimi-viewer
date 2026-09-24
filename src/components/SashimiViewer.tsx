@@ -2427,6 +2427,26 @@ export default function SashimiViewer({
             const x1 = scale.x(cs), x2 = scale.x(ce);
             parts.push(<rect key={`c${cs}`} x={Math.min(x1, x2)} y={top + 3} width={Math.max(1, Math.abs(x2 - x1))} height={GROUP_ROW_H - 6} fill={READ_FILL} rx={1} />);
           }
+          // splice junctions of the haplotype (RNA): a line across each intron, an arc over the introns of another
+          // junction (an exon skip); in the haplotype's colour where the two haplotypes use it differently
+          const js = (h.junctions ?? []).filter(j => j.end > viewStart && j.start < viewEnd);
+          for (const j of js) {
+            const x1 = scale.x(j.start), x2 = scale.x(j.end), l = Math.min(x1, x2), r = Math.max(x1, x2);
+            const al = st.allelic?.find(a => a.start === j.start && a.end === j.end);
+            const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
+            const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
+            const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
+            const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString()}): ${j.n.toLocaleString()} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString()} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
+              (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
+            const peak = top + 1;
+            parts.push(
+              <g key={`j${j.start}-${j.end}`}><title>{tip}</title>
+                {nested
+                  ? <path d={`M${l},${mid} Q${(l + r) / 2},${peak - 6} ${r},${mid}`} fill="none" stroke={stroke} strokeWidth={sw} opacity={op} />
+                  : <line x1={l} y1={mid} x2={r} y2={mid} stroke={stroke} strokeWidth={sw} opacity={op} />}
+                {r - l > 26 && <text x={(l + r) / 2} y={nested ? peak + 1 : mid - 2.5} textAnchor="middle" fill={al ? color : INK.muted} fontSize={8} fontWeight={al ? 700 : 400}>{j.n}</text>}
+              </g>);
+          }
           for (const x of h.sites) {
             const tip = `${siteTxt(x)} · carried by ${x.alt_count} of ${x.depth} reads of H${h.hap}`;
             if (x.kind === 'del') {
@@ -2481,8 +2501,10 @@ export default function SashimiViewer({
       if (!sets.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{!current.total ? 'no reads in this window' : hv.source === 'tags' ? 'no haplotagged read in this window' : `no phase block in this window (heterozygous sites ${HET_MIN * 100}–${HET_MAX * 100} %, linked by at least 2 fragments)`}</text>);
       const bodyHeight = Math.max(1, ri) * rowStep + 6;
       const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
+      const nAllelic = sets.reduce((n, st) => n + (st.allelic?.filter(a => a.end > viewStart && a.start < viewEnd).length ?? 0), 0);
       const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString()} reads on a haplotype, ${hv.unassigned.toLocaleString()} not` +
         (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString()} ${unit} against their haplotype` : '') +
+        (nAllelic ? ` · ${nAllelic} junction${nAllelic === 1 ? '' : 's'} used differently by the haplotypes` : '') +
         (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + commonInfo;
       return wrap(height, info, rows, bodyHeight);
     }

@@ -315,7 +315,7 @@ export class EmbeddedDataSource extends LocalDataSource {
         // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
         const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
         const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites, longReads);
         return { ...base, reads: [], sites, groups: [], phase, haplotypes };
       }
       const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);

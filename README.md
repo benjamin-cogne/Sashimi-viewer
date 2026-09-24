@@ -55,7 +55,9 @@ from a FASTA you add. Nothing is kept when the tab closes.
 - **Exon usage** across the open files, **ψ** of a junction against its canonical form, **GTEx**
   tissues next to your samples.
 - **Reads track** with mismatches, mates joined, clipped and inserted bases; **Collapse** into two
-  phased haplotypes or consensus groups.
+  phased haplotypes, each with its own junctions, and the junctions the two haplotypes use differently
+  flagged (Fisher's exact test: a splice change in *cis* with the variant); or into consensus groups,
+  one per haplotype × isoform the reads support (short and long reads).
 
 **Genomic DNA** (short or long reads)
 - **Layers** switched for every DNA sample by one colour-coded control, **C · V · M · R**: coverage (on

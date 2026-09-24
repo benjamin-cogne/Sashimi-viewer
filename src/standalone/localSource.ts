@@ -278,9 +278,15 @@ function withMate(a: AlignedRead, r: RawRead, own: string): AlignedRead {
   return a;
 }
 
-export function isLongRead(reads: { s: number; e: number }[]): boolean {
+/**
+ * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned and deleted bases, not the
+ * skipped introns (N): a 2×100 RNA-seq read spliced over a 3 kb intron spans 3.2 kb of the genome but is a short
+ * read, and counting its intron took most RNA-seq tracks of multi-exon genes for long reads (20 % Min VAF, long-read
+ * homopolymer thresholds, tolerant grouping).
+ */
+export function isLongRead(reads: { b: [number, number][]; d: [number, number][] }[]): boolean {
   if (!reads.length) return false;
-  const lens = reads.map(r => r.e - r.s).sort((a, b) => a - b);
+  const lens = reads.map(r => { let n = 0; for (const [a, b] of r.b) n += b - a; for (const [a, b] of r.d) n += b - a; return n; }).sort((a, b) => a - b);
   return lens[lens.length >> 1] > 1000;
 }
 
@@ -744,7 +750,8 @@ export class LocalDataSource implements SashimiDataSource {
         layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r));
         if (st.longReads == null) {
           let span = 0;
-          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) span += ops[k] >>> 4; }
+          // aligned and deleted bases, not the introns (N): see isLongRead
+          for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 7 || op === 8) span += ops[k] >>> 4; }
           st.spans.push(span);
         }
       };
@@ -1081,7 +1088,7 @@ export class LocalDataSource implements SashimiDataSource {
         // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
         const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
         const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites);
+        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites, longReads);
         return { ...base, reads: [], sites, groups: [], phase, haplotypes };
       }
       const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
