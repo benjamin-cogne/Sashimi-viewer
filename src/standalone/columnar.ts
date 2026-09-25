@@ -17,7 +17,7 @@
 import { inflateSync, deflateSync } from 'fflate';
 import type { AlignedRead, CoverageRun, JunctionArc } from '../components/sashimi/types';
 
-export const COLUMNAR_VERSION = 4;
+export const COLUMNAR_VERSION = 5;
 export const READS_PER_BLOCK = 1000;
 
 // ======================== variable-length integers ========================
@@ -144,11 +144,12 @@ export interface Directory {
  * is written as NAME_ESCAPE followed by the name itself, so a section added later still travels; a reader that meets
  * a code it does not know names the section `#code` and skips it (its length is in the directory).
  *
- * `mods` (5) and `methylation` (9) are companion sections written by other producers of these streams; this viewer
- * does not write them and skips them unless the caller of decodeReads decodes them itself. Code 10 is the escape,
+ * `mods` (5), `methylation` (9) and `seq` (12, whole read sequences) are companion sections written by other
+ * producers of these streams; this viewer does not write them and skips them unless the caller of decodeReads decodes
+ * them itself. Code 10 is the escape,
  * fixed for good, so growing the table never moves it; the empty name at 10 only keeps the codes in place.
  */
-const SECTION_NAMES = ['core', 'pairs', 'clips', 'inserts', 'sa', 'mods', 'reference', 'runs', 'junctions', 'methylation', '', 'hap'];
+const SECTION_NAMES = ['core', 'pairs', 'clips', 'inserts', 'sa', 'mods', 'reference', 'runs', 'junctions', 'methylation', '', 'hap', 'seq'];
 const NAME_ESCAPE = 10;
 const F_BLOCK = 1, F_START = 2, F_END = 4, F_N = 8;
 const M_WINDOW = 1, M_TOTAL = 2, M_READS = 4, M_SOURCE = 8;
@@ -248,28 +249,71 @@ export interface ReadsPayload {
 const BASE_CODE: Record<string, number> = { A: 0, C: 1, G: 2, T: 3, N: 4 };
 const CODE_BASE = 'ACGTN';
 
+/** Op codes of the alignment shape (version 5): the CIGAR operations the reads keep, =/X counted as M. */
+const OP_M = 0, OP_I = 1, OP_D = 2, OP_N = 3;
+
 /**
- * One block of reads as columns. Reads are sorted by start; each column lists one field for every read of the
- * block, the variable-length lists (blocks, deletions, insertions, mismatches) as a count per read followed by
- * their values, every position relative to the read start (blocks and mismatches chained: each relative to the
- * previous one).
+ * The alignment shape of a read as CIGAR-like ops, from its blocks, deletions and insertions: one M per block, an
+ * insertion before the reference base at its position (inside a block, or at a block's edge), and the gap between
+ * two blocks as its deletions and, around them, skipped bases (N). A trailing gap (a CIGAR ending in D or N) is kept
+ * from the read's end. `encodeRead` makes one block per M op, so this gives back the CIGAR the read came from, clips
+ * aside.
+ */
+function opsOf(r: AlignedRead): number[] {
+  const out: number[] = [];                          // op, length, op, length…
+  const ins = r.i.length > 1 ? [...r.i].sort((a, b) => a[0] - b[0]) : r.i;
+  let ii = 0, di = 0;
+  const dels = r.d;
+  const gap = (from: number, to: number) => {        // the bases between two blocks: deletions, skips, and an insertion between them
+    let pos = from;
+    while (di < dels.length && dels[di][0] < from) di++;
+    for (;;) {
+      const a = di < dels.length && dels[di][0] < to ? dels[di][0] : Infinity;
+      const ip = ii < ins.length && ins[ii][0] < to ? ins[ii][0] : Infinity;
+      if (a === Infinity && ip === Infinity) break;
+      if (ip <= a) { if (ip > pos) { out.push(OP_N, ip - pos); pos = ip; } out.push(OP_I, ins[ii++][1]); }
+      else { if (a > pos) out.push(OP_N, a - pos); out.push(OP_D, dels[di][1] - a); pos = dels[di++][1]; }
+    }
+    if (to > pos) out.push(OP_N, to - pos);
+  };
+  for (let k = 0; k < r.b.length; k++) {
+    const [bs, be] = r.b[k];
+    let p = bs;
+    for (; ii < ins.length && ins[ii][0] <= be; ii++) {
+      const [ip, il] = ins[ii];
+      if (ip > p) { out.push(OP_M, ip - p); p = ip; }
+      out.push(OP_I, il);
+    }
+    if (be > p) out.push(OP_M, be - p);
+    const next = k + 1 < r.b.length ? r.b[k + 1][0] : r.e;
+    if (next > be) gap(be, next);
+  }
+  for (; ii < ins.length; ii++) out.push(OP_I, ins[ii][1]);   // a read with no block (unmapped) has none; kept anyway
+  return out;
+}
+
+/**
+ * One block of reads as columns (version 5). Reads are sorted by start; each column lists one field for every read
+ * of the block. The alignment shape is a stream of ops, split into four columns so that each holds one kind of number:
+ * how many ops a read has, their codes (one byte each), the lengths of the M ops, and those of the others (I, D, N).
+ * Blocks, deletions, insertions and the read's end are all rebuilt from it; up to version 4 they were stored apart
+ * (the end, the first block, each later block as gap and length, each deletion and insertion again with its offset),
+ * which for a long read with hundreds of indels cost three times the ops (1,726 against 562 bytes per ONT read).
+ * Mismatches are chained positions from the read start, then base and quality; soft-clip lengths close the block.
  */
 function encodeReadBlock(reads: AlignedRead[]): Uint8Array {
   const w = new Writer();
   w.u(reads.length);
   let prev = 0;
   for (const r of reads) { w.u(r.s - prev); prev = r.s; }                 // starts (deltas)
-  for (const r of reads) w.u(r.e - r.s);                                  // aligned length
   for (const r of reads) w.u(r.f);                                        // flags
   for (const r of reads) w.u(r.q);                                        // MAPQ
   for (const r of reads) w.s(r.nh == null ? -1 : r.nh);                   // NH (-1 = absent)
-  for (const r of reads) {                                                // aligned blocks after the first: gap then length
-    w.u(r.b.length - 1);
-    for (let k = 1; k < r.b.length; k++) { w.u(r.b[k][0] - r.b[k - 1][1]); w.u(r.b[k][1] - r.b[k][0]); }
-  }
-  for (const r of reads) { w.u(r.b.length ? r.b[0][1] - r.b[0][0] : 0); }  // first block length
-  for (const r of reads) { w.u(r.d.length); for (const [a, b] of r.d) { w.u(a - r.s); w.u(b - a); } }
-  for (const r of reads) { w.u(r.i.length); for (const [p, len] of r.i) { w.u(p - r.s); w.u(len); } }
+  const ops = reads.map(opsOf);
+  for (const o of ops) w.u(o.length >> 1);                                // op counts
+  for (const o of ops) for (let k = 0; k < o.length; k += 2) w.byte(o[k]);                     // op codes
+  for (const o of ops) for (let k = 0; k < o.length; k += 2) if (o[k] === OP_M) w.u(o[k + 1]); // M lengths
+  for (const o of ops) for (let k = 0; k < o.length; k += 2) if (o[k] !== OP_M) w.u(o[k + 1]); // I, D, N lengths
   for (const r of reads) {
     w.u(r.m.length);
     let mp = r.s;
@@ -278,7 +322,48 @@ function encodeReadBlock(reads: AlignedRead[]): Uint8Array {
   for (const r of reads) { w.u(r.c[0]); w.u(r.c[1]); }                    // soft clips
   return w.done();
 }
-function decodeReadBlock(bytes: Uint8Array, names: (i: number) => string): AlignedRead[] {
+function decodeReadBlock(bytes: Uint8Array, names: (i: number) => string, version: number): AlignedRead[] {
+  if (version < 5) return decodeReadBlockV4(bytes, names);
+  const rd = new Reader(bytes);
+  const n = rd.u();
+  const s = new Array<number>(n), f = new Array<number>(n), q = new Array<number>(n), nh = new Array<number | null>(n), cnt = new Array<number>(n);
+  let prev = 0;
+  for (let i = 0; i < n; i++) { prev += rd.u(); s[i] = prev; }
+  for (let i = 0; i < n; i++) f[i] = rd.u();
+  for (let i = 0; i < n; i++) q[i] = rd.u();
+  for (let i = 0; i < n; i++) { const v = rd.s(); nh[i] = v < 0 ? null : v; }
+  let total = 0;
+  for (let i = 0; i < n; i++) { cnt[i] = rd.u(); total += cnt[i]; }
+  const codes = new Uint8Array(total);
+  for (let k = 0; k < total; k++) codes[k] = rd.byte();
+  const lens = new Array<number>(total);
+  for (let k = 0; k < total; k++) if (codes[k] === OP_M) lens[k] = rd.u();
+  for (let k = 0; k < total; k++) if (codes[k] !== OP_M) lens[k] = rd.u();
+  const out: AlignedRead[] = new Array(n);
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    const b: [number, number][] = [], d: [number, number][] = [], ins: [number, number][] = [];
+    let pos = s[i];
+    for (const end = k + cnt[i]; k < end; k++) {
+      const len = lens[k];
+      switch (codes[k]) {
+        case OP_M: b.push([pos, pos + len]); pos += len; break;
+        case OP_I: ins.push([pos, len]); break;
+        case OP_D: d.push([pos, pos + len]); pos += len; break;
+        default: pos += len;
+      }
+    }
+    out[i] = { n: names(i), s: s[i], e: pos, r: (f[i] & 16) ? 1 : 0, q: q[i], f: f[i], nh: nh[i], b, d, i: ins, m: [], c: [0, 0] };
+  }
+  for (let i = 0; i < n; i++) {
+    const c = rd.u(); let mp = s[i];
+    for (let j = 0; j < c; j++) { mp += rd.u(); const base = CODE_BASE[rd.byte()] ?? 'N'; out[i].m.push([mp, base, rd.byte()]); }
+  }
+  for (let i = 0; i < n; i++) out[i].c = [rd.u(), rd.u()];
+  return out;
+}
+/** The core block of versions 1–4: the end, the blocks, then deletions and insertions with their offsets. */
+function decodeReadBlockV4(bytes: Uint8Array, names: (i: number) => string): AlignedRead[] {
   const rd = new Reader(bytes);
   const n = rd.u();
   const s = new Array<number>(n), len = new Array<number>(n), f = new Array<number>(n), q = new Array<number>(n), nh = new Array<number | null>(n);
@@ -355,8 +440,11 @@ function pairLinks(reads: AlignedRead[]): Int32Array {
 }
 
 /**
- * Pair fields of a block (docs/embedded-format.md 3.2): mate chromosome (dictionary), the link, and then a mate
- * start only for the reads that have no link, and a template length — residual or verbatim — for the paired ones.
+ * Pair fields of a block (docs/embedded-format.md 3.2, version 5): the links first, each with a bit saying whether the
+ * read it points to, later in the same block, links back; such a read then has no entry of its own (its link is the
+ * way back). Then, for the reads with no link, the mate chromosome (dictionary) and the mate start; and a template
+ * length, residual or verbatim, for every paired read. A link to another block is written by both reads, so that a
+ * block decodes without the ones before it.
  *
  * `all` is the whole stream and `base` the index of `block[0]` in it, because a link may cross a block boundary.
  */
@@ -364,19 +452,28 @@ function encodePairBlock(block: AlignedRead[], all: AlignedRead[], base: number,
   const w = new Writer();
   const chroms: string[] = []; const idx = new Map<string, number>();
   const chromIdx = (c: string) => { let i = idx.get(c); if (i == null) { i = chroms.length; chroms.push(c); idx.set(c, i); } return i; };
-  const codes = block.map(r => (r.mp == null ? -1 : r.mc ? chromIdx(r.mc) + 1 : 0));   // -1 no mate, 0 same chromosome, k+1 = chroms[k]
+  const n = block.length;
+  const implied = new Uint8Array(n);                 // the second read of a mutual link inside the block: nothing written
+  for (let i = 0; i < n; i++) {
+    const d = links[base + i];
+    if (d > 0 && i + d < n && links[base + i + d] === -d) implied[i + d] = 1;
+  }
+  const codes = block.map((r, i) => (links[base + i] ? 0 : r.mp == null ? -1 : r.mc ? chromIdx(r.mc) + 1 : 0));   // -1 no mate, 0 same chromosome, k+1 = chroms[k]
   w.u(chroms.length); for (const c of chroms) w.str(c);
-  for (let i = 0; i < block.length; i++) w.s(codes[i]);
-  for (let i = 0; i < block.length; i++) w.s(links[base + i]);
-  for (let i = 0; i < block.length; i++) if (codes[i] >= 0 && !links[base + i]) w.s(block[i].mp! - block[i].s);
-  for (let i = 0; i < block.length; i++) {
+  for (let i = 0; i < n; i++) {
+    if (implied[i]) continue;
+    const d = links[base + i];
+    w.u(d ? (zz(d) << 1) | (d > 0 && i + d < n && implied[i + d] ? 1 : 0) : 0);
+  }
+  for (let i = 0; i < n; i++) if (!links[base + i]) w.s(codes[i]);
+  for (let i = 0; i < n; i++) if (!links[base + i] && codes[i] >= 0) w.s(block[i].mp! - block[i].s);
+  for (let i = 0; i < n; i++) {
     if (codes[i] < 0) continue;
     const d = links[base + i];
     w.s(d ? (block[i].tl ?? 0) - derivedTlen(block[i], all[base + i + d]) : (block[i].tl ?? 0));
   }
   return w.done();
 }
-
 /** Where a linked mate is read from: the read at that index in the stream, decoding its block if it is not out yet. */
 type MateLookup = (index: number) => Promise<{ s: number; e: number } | null>;
 
@@ -384,7 +481,7 @@ type MateLookup = (index: number) => Promise<{ s: number; e: number } | null>;
 async function decodePairBlock(bytes: Uint8Array, reads: AlignedRead[], version: number, base: number, mateAt: MateLookup): Promise<Int32Array | null> {
   const rd = new Reader(bytes);
   const k = rd.u(); const chroms: string[] = []; for (let i = 0; i < k; i++) chroms.push(rd.str());
-  const codes = reads.map(() => rd.s());
+  const codes = version < 5 ? reads.map(() => rd.s()) : new Array<number>(reads.length);
   if (version < 3) {
     const mp = reads.map(() => rd.s());
     const tl = reads.map(() => rd.s());
@@ -395,7 +492,23 @@ async function decodePairBlock(bytes: Uint8Array, reads: AlignedRead[], version:
     });
     return null;
   }
-  const links = reads.map(() => rd.s());
+  let links: number[];
+  if (version < 5) {
+    links = reads.map(() => rd.s());
+  } else {
+    // the links first; a mutual one also gives the read it points to its link back, which that read then omits
+    links = new Array(reads.length).fill(0);
+    const implied = new Uint8Array(reads.length);
+    for (let i = 0; i < reads.length; i++) {
+      if (implied[i]) continue;
+      const v = rd.u();
+      if (!v) continue;
+      const d = unzz(v >> 1);
+      links[i] = d;
+      if (v & 1) { links[i + d] = -d; implied[i + d] = 1; }
+    }
+    for (let i = 0; i < reads.length; i++) codes[i] = links[i] ? 0 : rd.s();
+  }
   const mp = reads.map((_, i) => (codes[i] >= 0 && !links[i] ? rd.s() : 0));
   const tl = reads.map((_, i) => (codes[i] >= 0 ? rd.s() : 0));
   const targets = new Int32Array(reads.length).fill(-1);
@@ -559,7 +672,7 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
     const si = coreAt.get(b);
     if (si == null) return null;
     const s = dir.sections[si];
-    const out = decodeReadBlock(await inflate(stream.subarray(offsets[si], offsets[si] + s.bytes)), k => `read ${k + 1}`);
+    const out = decodeReadBlock(await inflate(stream.subarray(offsets[si], offsets[si] + s.bytes)), k => `read ${k + 1}`, dir.v);
     decoded.set(b, out);
     return out;
   };
@@ -577,7 +690,7 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
       const base = counted; counted += s.n ?? 0;
       if (onlyBlock != null && s.block !== onlyBlock) continue;
       if (range && (s.end! <= range.start || s.start! >= range.end)) continue;
-      const block = await blockOf(s.block!) ?? decodeReadBlock(await inflate(bytes()), k => `read ${k + 1}`);
+      const block = await blockOf(s.block!) ?? decodeReadBlock(await inflate(bytes()), k => `read ${k + 1}`, dir.v);
       block.forEach((r, k) => { r.n = `read ${base + k + 1}`; });   // named now: a mate lookup may have decoded it first
       // the block's companion sections follow it: pairs, clips, inserts, sa, hap, then any the caller decodes itself
       // (`opts.sections`); the rest are skipped
