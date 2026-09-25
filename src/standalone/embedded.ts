@@ -22,7 +22,7 @@ import type { SessionFile } from './session';
 import type { GenomeBuild } from './ensembl';
 
 export const EMBEDDED_APP = 'sashimi-viewer-export';
-export const EMBEDDED_VERSION = 2;
+export const EMBEDDED_VERSION = 3;
 export const EMBEDDED_TAG_ID = 'sashimi-embedded';
 
 /** Coverage of one sample over one window, compact: run lengths and depths instead of one object per run. */

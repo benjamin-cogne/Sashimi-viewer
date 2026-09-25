@@ -1,17 +1,18 @@
-# Columnar storage of reads and coverage (exported pages, version 2)
+# Columnar storage of reads and coverage (exported pages)
 
 An exported page (`Export HTML`) carries, for every registered view and sample, the coverage,
 the junctions and, when the reads track was on, the reads of the window. Since version 2 of the
 export these are stored in a compact binary form instead of JSON: about 24 times smaller for
 reads, 5 times for coverage, and decoded only when a view is shown. This document is the
-specification, written so that another program (the command-line converter of a whole BAM, a
-reader in another language) can produce or read the same bytes. The reference implementation is
+specification, written so that another program (a writer of whole files, a reader in another
+language) can produce or read the same bytes. The reference implementation is
 `src/standalone/columnar.ts`; a round-trip test lives next to the simulation scripts.
 
 The page payload itself stays a JSON object in a `<script id="sashimi-embedded"
 type="application/json">` tag (`EmbeddedExport` in `src/standalone/embedded.ts`). In version 2,
 `views[i].coverage[sampleId]` and `views[i].reads[sampleId]` hold `{ "bin": "<base64>", ... }`
-objects; version 1 pages held the JSON forms and are still read.
+objects; version 1 pages held the JSON forms and are still read. Version 3 of the export writes
+the streams of columnar version 4 (below) and reads every earlier one.
 
 ## 1. Primitives
 
@@ -30,21 +31,60 @@ objects; version 1 pages held the JSON forms and are still read.
 
 ```
 u32 little-endian   length L of the directory
-L bytes             directory, JSON (UTF-8)
+L bytes             directory: varints from version 4, JSON (UTF-8) up to version 3
 section 1 bytes     as many bytes as the directory says
 section 2 bytes
 …
 ```
 
-Directory:
+The directory says what the stream holds. Its content, whatever the encoding:
 
 ```json
-{ "v": 1, "kind": "reads" | "coverage",
+{ "v": 4, "kind": "reads" | "coverage",
   "sections": [ { "name": "core", "block": 0, "start": 5001, "end": 9222, "n": 1000, "bytes": 4381 }, … ],
   "meta": { … } }
 ```
 
-- `v` is the format version of this document (1). A reader refuses a higher version.
+From version 4 it is written as varints (§1). A reader tells the two apart by the first byte: a
+JSON directory starts with `{` (0x7b), a binary one with its version, which is 4 or more.
+
+```
+u   v
+u   kind                       0 reads, 1 coverage
+u   number of sections
+per section:
+  u   name code                0 core, 1 pairs, 2 clips, 3 inserts, 4 sa, 5 mods, 6 reference,
+                               7 runs, 8 junctions, 9 methylation, 11 hap;
+                               10 = escape: a string with the name follows
+  [string name]                only for code 10
+  u   fields                   bit 1 block, 2 start, 4 end, 8 n: which of them follow
+  u   bytes
+  [u block]
+  [s start]                    minus the start of the previous section that has one (0 at first)
+  [s end]                      minus this section's start
+  [u n]
+u   meta fields                bit 1 window, 2 total, 4 reads, 8 reference_source
+  [u window start, s window end - window start]
+  [u total] [u reads]
+  [string reference_source]    empty for null
+string  the other meta keys as JSON, empty when there are none
+```
+
+The codes are append-only: a code never changes meaning, and the escape stays 10 however long
+the list grows, so a section a reader does not know still travels under code 10 with its name.
+A reader that meets a code it does not know skips that section by its length, like an unknown
+name. `mods` (5) and `methylation` (9) are sections written by other producers of these streams;
+this viewer neither writes nor reads them. JSON cost about 226 bytes a stream, the varints about
+25: most of a small window's stream, and it adds up over the many windows of a page.
+
+- `v` is the format version of this document (4). A reader refuses a higher version, and must
+  decode each section the way the version it reads asks for:
+  - **4** writes the directory as varints (above); the sections are unchanged;
+  - **3** links a read's mate to another read of the stream and stores the template length as a
+    residual (§3.2);
+  - **2** changed only the `mods` section of other producers; the sections of this document
+    read as in version 1;
+  - **1** is the original.
 - `sections` lists the compressed sections in stream order with their compressed byte length.
   A reader that does not know a section name skips it by its length. This is how fields are
   added later without breaking older readers.
@@ -98,9 +138,49 @@ The read's strand is bit 0x10 of the flags. A read with one aligned block has `k
 u   c                         number of distinct mate chromosomes other than the read's own
 c × string                    their names
 n × s   code                  -1 no mate stored, 0 mate on the same chromosome, k+1 = names[k]
-n × s   mate start delta      mate start minus the read start (0 when no mate)
-n × s   template length       TLEN as the aligner set it (0 when no mate)
+n × s   link                  0 none, else the signed distance to the mate's read in this stream (version 3+)
+m × s   mate start delta      mate start minus the read start, for the reads with code ≥ 0 and link 0
+k × s   template length       for the reads with code ≥ 0: TLEN minus the derived span when linked, else TLEN
 ```
+
+Version 3 links a read to its mate instead of repeating where it is. The link is the signed
+distance, in reads of this stream, from the read to one whose start equals the mate start; the
+stream's reads are numbered from 0 across all its blocks, so `block × reads_per_block + i`, and
+a link may point into another block. Where there is a link, the mate position is read back from
+that read and the template length is stored as the residual against the span the aligner would
+have written,
+
+```
+derived TLEN = (max(read end, mate end) − min(read start, mate start)) × (read start ≤ mate start ? 1 : −1)
+```
+
+which is zero for all but a handful of reads (3 in 245,613 measured). A read with no link keeps
+the version 1–2 columns: the mate start as a delta and the template length verbatim. That is the
+escape for a mate outside the stream's window, on another chromosome, or simply not written —
+about 2% of the reads of a paired file cut into 100 kb windows.
+
+For the position and the template length, the link only has to point at a read whose start
+equals the mate start: that reproduces the mate position exactly and the residual absorbs the
+rest. But a link is also how a reader tells which read *is* the mate, so the writer links the
+true one when it is in the stream — the read with the same name, the other pair bit (64/128) and
+a primary record — and only otherwise the read whose residual vanishes, then the nearest.
+
+A reader takes two reads **linked to each other**, one of each pair bit, as a pair: the viewer
+gives both the same mate key (`mk`, the stream's window start and the lower of the two indices,
+so it is the same every time a stream is decoded and never shared across streams) and joins them
+on it instead of by position. A one-way link is not a pairing and is left to the positional rule.
+This matters where fragments share their starts: position alone then joins the first read it
+finds, and a stream sorts reads by start *and end*, so that is often another fragment's mate
+— 37 % of the pairs on a fixture made of such look-alikes, against none with the links. A pair
+split across two streams has no link and is still joined by position (`src/standalone/mates.ts`:
+same name first, then the opposite template length).
+
+Measured on 300,000 paired 71 bp reads, the section falls from 3.54 to 1.35 bytes per read (−62%).
+A reader that filters blocks out has to inflate the `core` of a block it is skipping when a link
+points into it; `core` is the cheapest section to inflate, and a reader decoding a whole stream —
+the usual case — never pays for it at all.
+
+Versions 1 and 2 have no link column and carry the mate start and template length for every read.
 
 ### 3.3 `clips` section (per block, present when any read of the block has a soft or hard clip)
 
@@ -111,6 +191,11 @@ n × ( string left, string right, u hard left, u hard right )
 The soft-clipped bases at each end of the alignment, as the record stores them (reference
 strand), empty when the sequence was not available; then the hard-clipped lengths (bases the
 record does not carry: they sit in the read's primary record).
+
+A string may be shorter than the clip's length in `core`: a writer may keep only the bases next
+to the alignment, which are the *end* of a left clip and the *start* of a right one. A reader
+places them from the alignment outwards, and treats the rest of the clip as bases not stored (the
+viewer draws that part as a plain bar). The viewer's page export stores clips whole.
 
 ### 3.4 `inserts` section (per block, present when any read of the block has an inserted sequence)
 
@@ -124,7 +209,7 @@ for each read, for each insertion of the core section, in order:   string bases
 n × string     the SA tag as the aligner wrote it ("rname,pos,strand,CIGAR,mapQ,NM;" per part), empty otherwise
 ```
 
-### 3.5b `hap` section (per block, present when any read of the block carries a haplotag)
+### 3.6 `hap` section (per block, present when any read of the block carries a haplotag)
 
 ```
 per read:  varint  HP     haplotype (1, 2, …) written by the phasing tool; 0 = untagged, nothing follows
@@ -132,7 +217,7 @@ per read:  varint  HP     haplotype (1, 2, …) written by the phasing tool; 0 =
            varint  PC+1   assignment confidence (Phred) + 1, 0 when absent       (tagged reads only)
 ```
 
-### 3.6 `reference` section
+### 3.7 `reference` section
 
 ```
 u   start                     0-based start of the reference window
@@ -141,9 +226,9 @@ string                        bases, upper case
 
 ## 4. Coverage stream (`kind: "coverage"`)
 
-Two sections, `runs` and `junctions`; `meta` is empty. The rest of a coverage answer (window,
-boundary-spanning counts, sampling facts, structural evidence, error) stays in the JSON next to
-the stream.
+Two sections, `runs` and `junctions`; `meta` is empty.
+The rest of a coverage answer (window, boundary-spanning counts, sampling facts, structural
+evidence, error) stays in the JSON next to the stream.
 
 `runs` (run-length depth, 0-based half-open runs that abut):
 
@@ -173,13 +258,20 @@ n × u  count         reads
 | coverage as JSON (7,060 runs) | 35,508 |
 | coverage stream in the page | 6,692 |
 
+Version 3's mate links take about 8 % off a window of this shape, the `pairs` sections going from
+1.25 to 0.96 bytes per read. That is the small end of the range: in a simulation every pair has
+the same shape, so the mate deltas and template lengths are drawn from a narrow distribution and
+deflate had already squeezed them to 1.25 bytes. Real mates vary, and there the links matter
+much more — 3.54 to 1.35 bytes per read on a real paired RNA-seq file.
+
 Encoding took 52 ms and decoding 36 ms in Node with the streaming codec; the page decodes each
 view the first time it is shown, off the main thread, the active view first and the others in
 idle moments.
 
 ## 6. Extending the format
 
-Add a section with a new name; never change the meaning of an existing one. A field that
+Add a section with a new name, and give it the next code in the list (12); never change the
+meaning of an existing one. A field that
 concerns every read (names, base qualities, full sequence, tags) becomes a per-block section
 next to `core` and `pairs`, with one entry per read in block order, so the reader can decode it
 only when a feature needs it. Bump `v` only when a reader of the previous version would

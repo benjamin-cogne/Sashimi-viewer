@@ -168,6 +168,11 @@ export interface AlignedRead {
   /** SA tag of a split read: "rname,pos,strand,CIGAR,mapQ,NM;" per other part */
   sa?: string;
   /**
+   * mate key: set on the two reads of a pair when the source links them to each other (a v3+ columnar stream does),
+   * so they are joined on it rather than by the mate position, which several reads may share
+   */
+  mk?: string;
+  /**
    * haplotag written by a phasing tool (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN): HP the haplotype (1, 2;
    * DRAGEN's "copy label" may go higher), PS the phase set it belongs to, PC the Phred-scaled confidence; absent when untagged
    */

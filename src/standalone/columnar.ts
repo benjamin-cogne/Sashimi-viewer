@@ -1,5 +1,5 @@
 /**
- * Compact storage of reads and coverage for exported pages (and, later, converted files).
+ * Compact storage of reads and coverage for exported pages.
  *
  * Three layers, each simple on its own:
  *  1. columns of small integers: every field of the reads is one array across all reads (starts as deltas from the
@@ -17,7 +17,7 @@
 import { inflateSync, deflateSync } from 'fflate';
 import type { AlignedRead, CoverageRun, JunctionArc } from '../components/sashimi/types';
 
-export const COLUMNAR_VERSION = 1;
+export const COLUMNAR_VERSION = 4;
 export const READS_PER_BLOCK = 1000;
 
 // ======================== variable-length integers ========================
@@ -139,9 +139,81 @@ export interface Directory {
   meta: Record<string, unknown>;
 }
 
-/** Stream = [u32 little-endian directory length][directory JSON][section bytes in directory order]. */
+/**
+ * Section names of the binary directory, by code. Append only: a code never changes meaning. A name that is not here
+ * is written as NAME_ESCAPE followed by the name itself, so a section added later still travels; a reader that meets
+ * a code it does not know names the section `#code` and skips it (its length is in the directory).
+ *
+ * `mods` (5) and `methylation` (9) are companion sections written by other producers of these streams; this viewer
+ * does not write them and skips them unless the caller of decodeReads decodes them itself. Code 10 is the escape,
+ * fixed for good, so growing the table never moves it; the empty name at 10 only keeps the codes in place.
+ */
+const SECTION_NAMES = ['core', 'pairs', 'clips', 'inserts', 'sa', 'mods', 'reference', 'runs', 'junctions', 'methylation', '', 'hap'];
+const NAME_ESCAPE = 10;
+const F_BLOCK = 1, F_START = 2, F_END = 4, F_N = 8;
+const M_WINDOW = 1, M_TOTAL = 2, M_READS = 4, M_SOURCE = 8;
+
+/**
+ * The directory as varints (version 4, docs/embedded-format.md 2). Version 1-3 wrote it as JSON, about 226 bytes a
+ * stream, which is most of a small window's stream (a few dozen reads) and adds up over the many windows of a
+ * page. This is about a tenth of it.
+ */
+function encodeDirectory(dir: Directory): Uint8Array {
+  const w = new Writer();
+  w.u(dir.v); w.u(dir.kind === 'reads' ? 0 : 1); w.u(dir.sections.length);
+  let prev = 0;
+  for (const s of dir.sections) {
+    const code = s.name ? SECTION_NAMES.indexOf(s.name) : -1;
+    w.u(code >= 0 ? code : NAME_ESCAPE);
+    if (code < 0) w.str(s.name);
+    const flags = (s.block != null ? F_BLOCK : 0) | (s.start != null ? F_START : 0) | (s.end != null ? F_END : 0) | (s.n != null ? F_N : 0);
+    w.u(flags); w.u(s.bytes);
+    if (s.block != null) w.u(s.block);
+    if (s.start != null) { w.s(s.start - prev); prev = s.start; }
+    if (s.end != null) w.s(s.end - (s.start ?? prev));
+    if (s.n != null) w.u(s.n);
+  }
+  // meta: the fields every reads stream has, then whatever else as JSON (empty when nothing)
+  const { window, total, reads, reference_source, ...rest } = dir.meta as { window?: { start: number; end: number }; total?: number; reads?: number; reference_source?: string | null };
+  const mask = (window ? M_WINDOW : 0) | (total != null ? M_TOTAL : 0) | (reads != null ? M_READS : 0) | (reference_source !== undefined ? M_SOURCE : 0);
+  w.u(mask);
+  if (window) { w.u(window.start); w.s(window.end - window.start); }
+  if (total != null) w.u(total);
+  if (reads != null) w.u(reads);
+  if (reference_source !== undefined) w.str(reference_source ?? '');
+  w.str(Object.keys(rest).length ? JSON.stringify(rest) : '');
+  return w.done();
+}
+function decodeDirectory(bytes: Uint8Array): Directory {
+  const rd = new Reader(bytes);
+  const v = rd.u(), kind = rd.u() === 0 ? 'reads' : 'coverage', n = rd.u();
+  const sections: SectionEntry[] = [];
+  let prev = 0;
+  for (let i = 0; i < n; i++) {
+    const code = rd.u();
+    const name = code === NAME_ESCAPE ? rd.str() : SECTION_NAMES[code] ?? `#${code}`;
+    const flags = rd.u();
+    const s: SectionEntry = { name, bytes: rd.u() };
+    if (flags & F_BLOCK) s.block = rd.u();
+    if (flags & F_START) { s.start = prev + rd.s(); prev = s.start; }
+    if (flags & F_END) s.end = (s.start ?? prev) + rd.s();
+    if (flags & F_N) s.n = rd.u();
+    sections.push(s);
+  }
+  const mask = rd.u();
+  const meta: Record<string, unknown> = {};
+  if (mask & M_WINDOW) { const start = rd.u(); meta.window = { start, end: start + rd.s() }; }
+  if (mask & M_TOTAL) meta.total = rd.u();
+  if (mask & M_READS) meta.reads = rd.u();
+  if (mask & M_SOURCE) meta.reference_source = rd.str() || null;
+  const rest = rd.str();
+  if (rest) Object.assign(meta, JSON.parse(rest));
+  return { v, kind, sections, meta };
+}
+
+/** Stream = [u32 little-endian directory length][directory][section bytes in directory order]. */
 function packSections(dir: Directory, parts: Uint8Array[]): Uint8Array {
-  const head = new TextEncoder().encode(JSON.stringify(dir));
+  const head = encodeDirectory(dir);
   const total = 4 + head.length + parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);
   new DataView(out.buffer).setUint32(0, head.length, true);
@@ -150,9 +222,11 @@ function packSections(dir: Directory, parts: Uint8Array[]): Uint8Array {
   for (const p of parts) { out.set(p, o); o += p.length; }
   return out;
 }
+/** The directory of a stream: JSON up to version 3 (it starts with "{"), varints from version 4. */
 export function readDirectory(stream: Uint8Array): { dir: Directory; offsets: number[] } {
   const headLen = new DataView(stream.buffer, stream.byteOffset, stream.byteLength).getUint32(0, true);
-  const dir = JSON.parse(new TextDecoder().decode(stream.subarray(4, 4 + headLen))) as Directory;
+  const head = stream.subarray(4, 4 + headLen);
+  const dir = head[0] === 0x7b ? JSON.parse(new TextDecoder().decode(head)) as Directory : decodeDirectory(head);
   if (typeof dir.v !== 'number' || dir.v > COLUMNAR_VERSION) throw new Error(`unknown columnar version ${dir.v}`);
   const offsets: number[] = []; let o = 4 + headLen;
   for (const s of dir.sections) { offsets.push(o); o += s.bytes; }
@@ -234,29 +308,111 @@ function decodeReadBlock(bytes: Uint8Array, names: (i: number) => string): Align
   return out;
 }
 
-/** Pair fields of a block: mate start as a delta from the read start, template length, mate chromosome (dictionary). */
-function encodePairBlock(reads: AlignedRead[]): Uint8Array {
+/** Span of a read pair as the aligner writes TLEN: leftmost to rightmost mapped base, negative for the right read. */
+const derivedTlen = (r: { s: number; e: number }, m: { s: number; e: number }) =>
+  (r.s <= m.s ? 1 : -1) * (Math.max(r.e, m.e) - Math.min(r.s, m.s));
+
+/**
+ * For each read of a stream, the signed distance to a read of the SAME stream that starts where its mate starts,
+ * or 0 when there is none.
+ *
+ * Both halves of a pair are nearly always in the same window (98.2% measured on 100 kb windows of a paired RNA-seq
+ * file), and the mate
+ * then carries its own start and end: storing where it is costs a small signed distance instead of a position, and
+ * the template length becomes a residual that is zero for all but a handful of reads. That is what makes `pairs`,
+ * the bulkiest section of paired data, about a third of its former size.
+ *
+ * For the position and the template length, the link only has to land on a read whose start equals `mp`: that
+ * reproduces the mate position exactly and the residual absorbs the rest. But a link that runs both ways is also
+ * taken as *the* pairing of the two reads (`mk`, see decodeReads), which is what joins the right two when several
+ * reads share a start — so the true mate is preferred: the read carrying the same mate key, or the same name, the
+ * other pair bit and a primary record. Then the read whose residual vanishes, then the nearest, the shortest varint.
+ */
+function pairLinks(reads: AlignedRead[]): Int32Array {
+  const byStart = new Map<number, number[]>();
+  for (let i = 0; i < reads.length; i++) {
+    const list = byStart.get(reads[i].s);
+    if (list) list.push(i); else byStart.set(reads[i].s, [i]);
+  }
+  const links = new Int32Array(reads.length);
+  for (let i = 0; i < reads.length; i++) {
+    const r = reads[i];
+    if (r.mp == null || r.mc) continue;             // unpaired, or a mate on another chromosome: not in this stream
+    const cands = byStart.get(r.mp);
+    if (!cands) continue;
+    let best = 0, bestKey = Infinity;
+    for (const j of cands) {
+      if (j === i) continue;
+      const m = reads[j];
+      const mate = r.mk != null ? m.mk === r.mk
+        : m.n === r.n && (m.f & 192) !== (r.f & 192) && !(m.f & 0x900);
+      const key = (mate ? 0 : 2e9) + ((r.tl ?? 0) === derivedTlen(r, m) ? 0 : 1e9) + Math.abs(j - i);
+      if (key < bestKey) { bestKey = key; best = j - i; }
+    }
+    links[i] = best;
+  }
+  return links;
+}
+
+/**
+ * Pair fields of a block (docs/embedded-format.md 3.2): mate chromosome (dictionary), the link, and then a mate
+ * start only for the reads that have no link, and a template length — residual or verbatim — for the paired ones.
+ *
+ * `all` is the whole stream and `base` the index of `block[0]` in it, because a link may cross a block boundary.
+ */
+function encodePairBlock(block: AlignedRead[], all: AlignedRead[], base: number, links: Int32Array): Uint8Array {
   const w = new Writer();
   const chroms: string[] = []; const idx = new Map<string, number>();
   const chromIdx = (c: string) => { let i = idx.get(c); if (i == null) { i = chroms.length; chroms.push(c); idx.set(c, i); } return i; };
-  const codes = reads.map(r => (r.mp == null ? -1 : r.mc ? chromIdx(r.mc) + 1 : 0));   // -1 no mate, 0 same chromosome, k+1 = chroms[k]
+  const codes = block.map(r => (r.mp == null ? -1 : r.mc ? chromIdx(r.mc) + 1 : 0));   // -1 no mate, 0 same chromosome, k+1 = chroms[k]
   w.u(chroms.length); for (const c of chroms) w.str(c);
-  for (let i = 0; i < reads.length; i++) w.s(codes[i]);
-  for (const r of reads) w.s(r.mp == null ? 0 : r.mp - r.s);
-  for (const r of reads) w.s(r.tl ?? 0);
+  for (let i = 0; i < block.length; i++) w.s(codes[i]);
+  for (let i = 0; i < block.length; i++) w.s(links[base + i]);
+  for (let i = 0; i < block.length; i++) if (codes[i] >= 0 && !links[base + i]) w.s(block[i].mp! - block[i].s);
+  for (let i = 0; i < block.length; i++) {
+    if (codes[i] < 0) continue;
+    const d = links[base + i];
+    w.s(d ? (block[i].tl ?? 0) - derivedTlen(block[i], all[base + i + d]) : (block[i].tl ?? 0));
+  }
   return w.done();
 }
-function decodePairBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+
+/** Where a linked mate is read from: the read at that index in the stream, decoding its block if it is not out yet. */
+type MateLookup = (index: number) => Promise<{ s: number; e: number } | null>;
+
+/** Decodes a block's pair fields; from version 3 also returns, per read, the stream index its link points to (-1 none). */
+async function decodePairBlock(bytes: Uint8Array, reads: AlignedRead[], version: number, base: number, mateAt: MateLookup): Promise<Int32Array | null> {
   const rd = new Reader(bytes);
   const k = rd.u(); const chroms: string[] = []; for (let i = 0; i < k; i++) chroms.push(rd.str());
   const codes = reads.map(() => rd.s());
-  const mp = reads.map(() => rd.s());
-  const tl = reads.map(() => rd.s());
-  reads.forEach((r, i) => {
-    if (codes[i] < 0) return;
-    r.mp = r.s + mp[i]; r.tl = tl[i];
-    if (codes[i] > 0) r.mc = chroms[codes[i] - 1];
-  });
+  if (version < 3) {
+    const mp = reads.map(() => rd.s());
+    const tl = reads.map(() => rd.s());
+    reads.forEach((r, i) => {
+      if (codes[i] < 0) return;
+      r.mp = r.s + mp[i]; r.tl = tl[i];
+      if (codes[i] > 0) r.mc = chroms[codes[i] - 1];
+    });
+    return null;
+  }
+  const links = reads.map(() => rd.s());
+  const mp = reads.map((_, i) => (codes[i] >= 0 && !links[i] ? rd.s() : 0));
+  const tl = reads.map((_, i) => (codes[i] >= 0 ? rd.s() : 0));
+  const targets = new Int32Array(reads.length).fill(-1);
+  for (let i = 0; i < reads.length; i++) {
+    const r = reads[i];
+    if (codes[i] < 0) continue;
+    if (codes[i] > 0) r.mc = chroms[codes[i] - 1];   // a linked mate is in this stream, so on this chromosome
+    if (links[i]) {
+      const m = await mateAt(base + i + links[i]);
+      if (!m) continue;                              // the mate's block is gone: better no mate than a wrong one
+      r.mp = m.s; r.tl = tl[i] + derivedTlen(r, m);
+      targets[i] = base + i + links[i];
+    } else {
+      r.mp = r.s + mp[i]; r.tl = tl[i];
+    }
+  }
+  return targets;
 }
 
 /** Clip fields of a block: soft-clipped bases at each end and hard-clipped lengths. */
@@ -293,7 +449,6 @@ function decodeSaBlock(bytes: Uint8Array, reads: AlignedRead[]) {
   const rd = new Reader(bytes);
   for (const r of reads) { const v = rd.str(); if (v) r.sa = v; }
 }
-
 /** Haplotags of a block: per read HP (0 when untagged), then for a tagged read PS + 1 and PC + 1 (0 when absent). */
 function encodeHapBlock(reads: AlignedRead[]): Uint8Array {
   const w = new Writer();
@@ -317,13 +472,15 @@ export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
   const sorted = [...p.reads].sort((a, b) => a.s - b.s || a.e - b.e);
   const sections: SectionEntry[] = []; const parts: Uint8Array[] = [];
   const anyPair = sorted.some(r => r.mp != null);
+  const links = anyPair ? pairLinks(sorted) : new Int32Array(0);
   for (let b = 0; b * READS_PER_BLOCK < sorted.length; b++) {
-    const block = sorted.slice(b * READS_PER_BLOCK, (b + 1) * READS_PER_BLOCK);
+    const base = b * READS_PER_BLOCK;
+    const block = sorted.slice(base, base + READS_PER_BLOCK);
     const core = await deflate(encodeReadBlock(block));
     sections.push({ name: 'core', block: b, start: block[0].s, end: Math.max(...block.map(r => r.e)), n: block.length, bytes: core.length });
     parts.push(core);
     if (anyPair) {
-      const pairs = await deflate(encodePairBlock(block));
+      const pairs = await deflate(encodePairBlock(block, sorted, base, links));
       sections.push({ name: 'pairs', block: b, bytes: pairs.length }); parts.push(pairs);
     }
     if (block.some(r => r.cs || r.h)) {
@@ -359,39 +516,97 @@ export function readsInfo(stream: Uint8Array): { window: { start: number; end: n
   return { window: meta.window, total: meta.total, reads: meta.reads, blocks: dir.sections.filter(s => s.name === 'core').map(s => ({ start: s.start!, end: s.end!, n: s.n! })) };
 }
 
+/** What a caller of decodeReads may ask for beyond the reads themselves. */
+export interface DecodeReadsOptions {
+  /** decode this block alone (its number in the directory), whatever the range */
+  onlyBlock?: number;
+  /**
+   * Decoders of companion sections this module does not know, by name: each gets the inflated bytes, the reads of the
+   * block the section belongs to (in stream order) and the stream's version, and adds what it reads to those reads.
+   */
+  sections?: Record<string, (bytes: Uint8Array, block: AlignedRead[], version: number) => void>;
+}
+
 /**
  * Decodes the reads of a stream, only the blocks overlapping [start, end) when a range is given. Read names are
  * synthetic ("read N", N counted over the whole stream) since the export drops them.
+ *
+ * From version 3 a read's mate is stored as a link to another read of the stream, which may sit in a block this
+ * call is filtering out; such a block is then inflated on the side, for its starts and ends alone, and cached in
+ * case the reader asks for it next. Decoding a whole stream, the usual case, never pays for it: every block it
+ * needs is one it was going to decode anyway.
+ *
+ * Two returned reads whose links point at each other, one of each pair bit, get the same mate key `mk`, and the
+ * viewer joins them on it rather than by position (`pairMates`). The key is the stream's window start and the lower
+ * of the two indices, so decoding the same stream twice gives the same keys and reads of different streams never share
+ * one. A one-way link is not a pairing — the writer may have linked a read to another that merely starts where its
+ * mate does — and is left to the positional rule, as is every read of a stream before version 3.
  */
-export async function decodeReads(stream: Uint8Array, range?: { start: number; end: number }): Promise<ReadsPayload> {
+export async function decodeReads(stream: Uint8Array, range?: { start: number; end: number }, opts?: DecodeReadsOptions): Promise<ReadsPayload> {
+  const onlyBlock = opts?.onlyBlock;
   const { dir, offsets } = readDirectory(stream);
   const meta = dir.meta as { window: { start: number; end: number }; total: number; reference_source: ReadsPayload['reference_source'] };
   const reads: AlignedRead[] = [];
   let reference: ReadsPayload['reference'] = null;
   let counted = 0;
+
+  const coreAt = new Map<number, number>();          // block number → its section index
+  for (let i = 0; i < dir.sections.length; i++) if (dir.sections[i].name === 'core') coreAt.set(dir.sections[i].block!, i);
+  const decoded = new Map<number, AlignedRead[]>();  // block number → its reads, whether or not they are being returned
+  const blockOf = async (b: number): Promise<AlignedRead[] | null> => {
+    const have = decoded.get(b);
+    if (have) return have;
+    const si = coreAt.get(b);
+    if (si == null) return null;
+    const s = dir.sections[si];
+    const out = decodeReadBlock(await inflate(stream.subarray(offsets[si], offsets[si] + s.bytes)), k => `read ${k + 1}`);
+    decoded.set(b, out);
+    return out;
+  };
+  const mateAt: MateLookup = async index => {
+    const block = await blockOf(Math.floor(index / READS_PER_BLOCK));
+    return block?.[index % READS_PER_BLOCK] ?? null;
+  };
+  const returned = new Map<number, AlignedRead>();   // stream index → read, for the reads this call returns
+  const linkOf = new Map<number, number>();          // stream index → the stream index its link points to
+
   for (let i = 0; i < dir.sections.length; i++) {
     const s = dir.sections[i];
     const bytes = () => stream.subarray(offsets[i], offsets[i] + s.bytes);
     if (s.name === 'core') {
       const base = counted; counted += s.n ?? 0;
+      if (onlyBlock != null && s.block !== onlyBlock) continue;
       if (range && (s.end! <= range.start || s.start! >= range.end)) continue;
-      const block = decodeReadBlock(await inflate(bytes()), k => `read ${base + k + 1}`);
-      // the block's companion sections follow it: pairs, clips, inserts, sa, hap (any order; unknown names skipped)
+      const block = await blockOf(s.block!) ?? decodeReadBlock(await inflate(bytes()), k => `read ${k + 1}`);
+      block.forEach((r, k) => { r.n = `read ${base + k + 1}`; });   // named now: a mate lookup may have decoded it first
+      // the block's companion sections follow it: pairs, clips, inserts, sa, hap, then any the caller decodes itself
+      // (`opts.sections`); the rest are skipped
       for (let j = i + 1; j < dir.sections.length && dir.sections[j].name !== 'core' && dir.sections[j].block === s.block; j++) {
         const c = dir.sections[j];
         const data = () => inflate(stream.subarray(offsets[j], offsets[j] + c.bytes));
-        if (c.name === 'pairs') decodePairBlock(await data(), block);
+        if (c.name === 'pairs') {
+          const targets = await decodePairBlock(await data(), block, dir.v, s.block! * READS_PER_BLOCK, mateAt);
+          targets?.forEach((t, k) => { if (t >= 0) linkOf.set(s.block! * READS_PER_BLOCK + k, t); });
+        }
         else if (c.name === 'clips') decodeClipBlock(await data(), block);
         else if (c.name === 'inserts') decodeInsertBlock(await data(), block);
         else if (c.name === 'sa') decodeSaBlock(await data(), block);
         else if (c.name === 'hap') decodeHapBlock(await data(), block);
+        else if (opts?.sections?.[c.name]) opts.sections[c.name](await data(), block, dir.v);
       }
+      block.forEach((r, k) => returned.set(s.block! * READS_PER_BLOCK + k, r));
       reads.push(...block);
     } else if (s.name === 'reference') {
       const rd = new Reader(await inflate(bytes()));
       reference = { start: rd.u(), seq: rd.str() };
     }
     // unknown sections (written by a newer version) are skipped
+  }
+  for (const [g, t] of linkOf) {
+    if (t <= g || linkOf.get(t) !== g) continue;
+    const a = returned.get(g), b = returned.get(t);
+    if (!a || !b || (a.f & 192) === (b.f & 192)) continue;
+    a.mk = b.mk = `${meta.window.start}:${g}`;
   }
   return { window: meta.window, total: meta.total, reads, reference, reference_source: meta.reference_source ?? null };
 }
@@ -421,8 +636,10 @@ export async function encodeCoverage(p: CoveragePayload): Promise<Uint8Array> {
   for (const j of js) wj.u(j.end - j.start);
   for (const j of js) wj.u(Math.round(j.count));
   const junctions = await deflate(wj.done());
-  const dir: Directory = { v: COLUMNAR_VERSION, kind: 'coverage', sections: [{ name: 'runs', bytes: runs.length }, { name: 'junctions', bytes: junctions.length }], meta: {} };
-  return packSections(dir, [runs, junctions]);
+  const sections: SectionEntry[] = [{ name: 'runs', bytes: runs.length }, { name: 'junctions', bytes: junctions.length }];
+  const parts = [runs, junctions];
+  const dir: Directory = { v: COLUMNAR_VERSION, kind: 'coverage', sections, meta: {} };
+  return packSections(dir, parts);
 }
 export async function decodeCoverage(stream: Uint8Array): Promise<CoveragePayload> {
   const { dir, offsets } = readDirectory(stream);
@@ -441,6 +658,7 @@ export async function decodeCoverage(stream: Uint8Array): Promise<CoveragePayloa
       const counts = new Array<number>(n); for (let k = 0; k < n; k++) counts[k] = rd.u();
       for (let k = 0; k < n; k++) out.junctions.push({ start: starts[k], end: starts[k] + lens[k], count: counts[k] });
     }
+    // other sections (a newer version's, or another producer's) are skipped
   }
   return out;
 }
