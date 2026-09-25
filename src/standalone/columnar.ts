@@ -463,7 +463,9 @@ function encodePairBlock(block: AlignedRead[], all: AlignedRead[], base: number,
   for (let i = 0; i < n; i++) {
     if (implied[i]) continue;
     const d = links[base + i];
-    w.u(d ? (zz(d) << 1) | (d > 0 && i + d < n && implied[i + d] ? 1 : 0) : 0);
+    // the bit: the read linked to links back to THIS read. Another read may link to it too (look-alike reads at one
+    // start); up to now that one got the bit as well, and the target decoded with its mate instead of its own
+    w.u(d ? (zz(d) << 1) | (d > 0 && i + d < n && links[base + i + d] === -d ? 1 : 0) : 0);
   }
   for (let i = 0; i < n; i++) if (!links[base + i]) w.s(codes[i]);
   for (let i = 0; i < n; i++) if (!links[base + i] && codes[i] >= 0) w.s(block[i].mp! - block[i].s);
