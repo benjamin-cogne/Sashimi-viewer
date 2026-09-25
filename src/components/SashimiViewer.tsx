@@ -2597,7 +2597,7 @@ export default function SashimiViewer({
       if (flagged.length) {
         const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
         ri++;
-        const parts = flagged.map(f => { const { left, w } = basePx(f.pos); const ww = Math.max(w, 7); return <g key={`f${f.pos}`}><title>{f.text}</title><rect x={left + w / 2 - ww / 2} y={top + 2} width={ww} height={GROUP_ROW_H - 4} fill={INK.bg} stroke={INK.muted} strokeWidth={1} strokeDasharray="2 1.5" rx={2} /></g>; });
+        const parts = flagged.map((f, k) => { const { left, w } = basePx(f.pos); const ww = Math.max(w, 7); return <g key={`f${f.pos}-${k}`}><title>{f.text}</title><rect x={left + w / 2 - ww / 2} y={top + 2} width={ww} height={GROUP_ROW_H - 4} fill={INK.bg} stroke={INK.muted} strokeWidth={1} strokeDasharray="2 1.5" rx={2} /></g>; });
         const label = `${hv.notSplit.length ? 'not split' : 'unphased'} · ${flagged.length}`;
         parts.push(<g key="lab"><rect x={PLOT_LEFT + 3} y={mid - 7} width={label.length * 5.6 + 8} height={14} rx={3} fill={INK.bg} opacity={0.9} /><text x={PLOT_LEFT + 7} y={mid + 3.5} fill={INK.muted} fontSize={9} fontWeight={700}>{label}</text></g>);
         rows.push(<g key="flagged">{parts}</g>);
@@ -4027,18 +4027,36 @@ export default function SashimiViewer({
   /**
    * Where each site of a variants track is drawn, for the view: centre and width of its bar, the width of a base, and
    * the room its neighbours leave. An SNV or a deletion spans its bases (3 px at least); an insertion, between two
-   * bases, stays thin: 3 px, or 30 % of a base zoomed in.
+   * bases, stays thin: 3 px, or 30 % of a base zoomed in. The alleles of one position (two alternate bases, two
+   * deletion lengths, or both) are stacked: `below` is the fraction of the earlier ones, drawn under this one, and the
+   * first (`lead`) carries the position's reference share, label and cells for all of them (`group`).
    */
   const variantMarks = (sites: VariantSite[]) => {
     const bp = Math.abs(scale.x(viewStart + 1) - scale.x(viewStart));
     const marks = sites.filter(s => s.pos + (s.kind === 'del' ? s.length : 1) > viewStart && s.pos < viewEnd).map(s => {
       const xa = scale.x(s.pos), xb = scale.x(s.pos + (s.kind === 'del' ? s.length : s.kind === 'ins' ? 0 : 1));
       const cx = (xa + xb) / 2, w = s.kind === 'ins' ? Math.max(3, 0.3 * bp) : Math.max(3, Math.abs(xb - xa));
-      return { s, cx, w, bp, room: Infinity };
-    }).sort((a, b) => a.cx - b.cx);
-    for (let i = 0; i < marks.length; i++) marks[i].room = Math.min(i ? marks[i].cx - marks[i - 1].cx : Infinity, i + 1 < marks.length ? marks[i + 1].cx - marks[i].cx : Infinity);
-    return marks;
+      return { s, cx, w, bp, room: Infinity, below: 0, lead: true, group: [s] };
+    });
+    const stacks = new Map<number, typeof marks>();
+    for (const m of marks) {
+      if (m.s.kind === 'ins') continue;
+      const st = stacks.get(m.s.pos);
+      if (!st) { stacks.set(m.s.pos, [m]); continue; }
+      m.below = st.reduce((a, o) => a + o.s.vaf, 0); m.lead = false;
+      st.push(m); st[0].group.push(m.s);
+    }
+    // the room between positions, not between the alleles of one: a stacked allele has its lead's
+    const leads = marks.filter(m => m.lead).sort((a, b) => a.cx - b.cx);
+    for (let i = 0; i < leads.length; i++) leads[i].room = Math.min(i ? leads[i].cx - leads[i - 1].cx : Infinity, i + 1 < leads.length ? leads[i + 1].cx - leads[i].cx : Infinity);
+    for (const st of stacks.values()) for (const m of st) m.room = st[0].room;
+    return marks.sort((a, b) => a.cx - b.cx);
   };
+  /** The label of a position's alleles: their fractions (`33`, `33+30`) and, once wide, the changes too. */
+  const siteLabel2 = (group: VariantSite[], pct: (s: VariantSite) => string, unit = '') => ({
+    short: group.map(pct).join('+'),
+    named: group.map(s => `${siteShort(s)} · ${pct(s)}${unit}`).join(' / '),
+  });
   const siteShort = (s: VariantSite) => s.kind === 'snv' ? `${s.ref}>${s.alt}` : s.kind === 'ins' ? `ins ${s.length} bp` : `del ${s.length} bp`;
   const siteColor = (s: VariantSite) => s.kind === 'snv' ? (BASE_COLORS[s.alt] || BASE_COLORS.N) : s.kind === 'ins' ? INSERTION_COLOR : DEL_COLOR;
 
@@ -4069,21 +4087,28 @@ export default function SashimiViewer({
       }
       flush();
     }
-    for (const { s, cx, w, bp, room } of marks) {
+    for (const { s, cx, w, bp, room, below, lead, group } of marks) {
       const h = Math.max(1, s.vaf * VAR_BAR_H), x = (cx - w / 2).toFixed(1), ww = w.toFixed(1);
-      push(bars, siteColor(s), `M${x},${(barBottom - h).toFixed(1)}h${ww}v${h.toFixed(1)}h-${ww}z`);
-      if (h < VAR_BAR_H) refs.push(`M${x},${barTop}h${ww}v${(VAR_BAR_H - h).toFixed(1)}h-${ww}z`);
+      const bottom = barBottom - Math.min(1, below) * VAR_BAR_H, total = group.reduce((a, o) => a + o.vaf, 0);
+      push(bars, siteColor(s), `M${x},${(bottom - h).toFixed(1)}h${ww}v${h.toFixed(1)}h-${ww}z`);
+      // the reference share of the position, over all its alleles
+      const hAll = Math.min(VAR_BAR_H, group.length > 1 ? total * VAR_BAR_H : h);
+      if (lead && hAll < VAR_BAR_H) refs.push(`M${x},${barTop}h${ww}v${(VAR_BAR_H - hAll).toFixed(1)}h-${ww}z`);
       const { checks, worst } = cachedChecks(s, long);
       verdicts[worst]++;
-      // the four cells across the site's bases once they are wider than the cluster, else the cluster centred on it
+      if (!lead) continue;
+      // the four cells across the site's bases once they are wider than the cluster, else the cluster centred on it;
+      // stacked alleles share one cell, in the worst colour of their checks
+      const gChecks = group.length > 1 ? group.flatMap(o => cachedChecks(o, long).checks) : checks, gw = group.length > 1 ? worstLevel(gChecks) : worst;
       const cw = s.kind !== 'ins' && w >= VAR_CELLS_PX ? (w - 3) / 4 : 3, c0 = cw > 3 ? cx - w / 2 : cx - 7.5;
-      if (checks.length && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(c0 + k * (cw + 1)).toFixed(1)},${cellY}h${cw.toFixed(1)}v${VAR_CELL_H}h-${cw.toFixed(1)}z`));
-      else if (checks.length) push(cells, worst, `M${x},${cellY}h${ww}v${VAR_CELL_H}h-${ww}z`);
+      if (checks.length && group.length === 1 && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(c0 + k * (cw + 1)).toFixed(1)},${cellY}h${cw.toFixed(1)}v${VAR_CELL_H}h-${cw.toFixed(1)}z`));
+      else if (gChecks.length) push(cells, gw, `M${x},${cellY}h${ww}v${VAR_CELL_H}h-${ww}z`);
       // the label grows with the site (an insertion's with the base it sits on) and names the change once it is wide
-      const size = Math.min(12, Math.max(8, (s.kind === 'ins' ? bp : w) / 3)), pct = Math.round(s.vaf * 100);
-      const named = `${siteShort(s)} · ${pct} %`, widthOf = (t: string) => t.length * size * 0.62 + 4;
-      const text = (s.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= Math.max(30, widthOf(String(pct))) ? String(pct) : null;
-      if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - h - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
+      const size = Math.min(12, Math.max(8, (s.kind === 'ins' ? bp : w) / 3));
+      const { short, named } = group.length > 1 ? siteLabel2(group, o => `${Math.round(o.vaf * 100)}`, ' %') : { short: String(Math.round(s.vaf * 100)), named: `${siteShort(s)} · ${Math.round(s.vaf * 100)} %` };
+      const widthOf = (t: string) => t.length * size * 0.62 + 4;
+      const text = (s.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= Math.max(30, widthOf(short)) ? short : null;
+      if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - hAll - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
     }
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const status = span > VARIANTS_MAX_VIEW_BP && !(e && e.fetched.start <= viewStart && e.fetched.end >= viewEnd)
@@ -4378,25 +4403,37 @@ export default function SashimiViewer({
                 strokeDasharray={a.dashed ? '5 3.5' : undefined} opacity={0.92} />
             </g>
           ))}
-          {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.sites.length > 0 && !isDnaTrack(track) && L.sites.map(st => {
-            const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
-            let left = Math.min(xa, xb), w = Math.abs(xb - xa);
-            if (w < 3) { left += w / 2 - 1.5; w = 3; }
-            const d = Math.max(depthAt(track.coverage, st.pos), st.depth);
-            const top = depthToY(d), full = baseline - top, altH = full * st.vaf;
-            const colr = st.kind === 'snv' ? (BASE_COLORS[st.alt] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-            const pct = `${(st.vaf * 100).toFixed(st.vaf < 0.1 ? 1 : 0)}%`;
-            return (
-              <g key={`vaf${st.pos}${st.kind}`}>
-                <title>{siteLabel(st)}</title>
-                <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />
-                <rect x={left} y={top} width={w} height={Math.max(0, full - altH)} fill="#9ca3af" />
-                <rect x={left} y={baseline - altH} width={w} height={altH} fill={colr} />
-                <text x={left + w / 2} y={top - 5} textAnchor="middle" fontSize={9} fontWeight={700} fill={colr} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{pct}</text>
-              </g>
-            );
-          })}
+          {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share. Placed as
+              on a DNA track's variants (variantMarks): a deletion over its bases, an insertion thin between two, the
+              alleles of one position stacked under one label, which grows with the zoom and shows where there is room */}
+          {L.sites.length > 0 && !isDnaTrack(track) && (() => {
+            const marks = variantMarks(L.sites);
+            const heightOf = new Map<number, { top: number; full: number }>();
+            for (const m of marks) if (m.lead && m.s.kind !== 'ins') {
+              const top = depthToY(Math.max(depthAt(track.coverage, m.s.pos), ...m.group.map(o => o.depth)));
+              heightOf.set(m.s.pos, { top, full: baseline - top });
+            }
+            const pctOf = (o: VariantSite) => `${(o.vaf * 100).toFixed(o.vaf < 0.1 ? 1 : 0)}%`;
+            return marks.map(({ s: st, cx, w, bp, room, below, lead, group }) => {
+              const { top, full } = st.kind === 'ins' ? (() => { const t = depthToY(Math.max(depthAt(track.coverage, st.pos), st.depth)); return { top: t, full: baseline - t }; })() : heightOf.get(st.pos)!;
+              const left = cx - w / 2, altH = full * st.vaf, under = full * Math.min(1, below);
+              const total = group.reduce((a, o) => a + o.vaf, 0);
+              const colr = siteColor(st);
+              const size = Math.min(12, Math.max(9, (st.kind === 'ins' ? bp : w) / 3));
+              const { short, named } = siteLabel2(group, pctOf);
+              const widthOf = (t: string) => t.length * size * 0.62 + 4;
+              const text = !lead ? null : (st.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= widthOf(short) ? short : null;
+              return (
+                <g key={`vaf${st.pos}${st.kind}${st.alt}`}>
+                  <title>{siteLabel(st)}</title>
+                  {lead && <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />}
+                  {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#9ca3af" />}
+                  <rect x={left} y={baseline - under - altH} width={w} height={altH} fill={colr} />
+                  {text && <text x={cx} y={top - 5} textAnchor="middle" fontSize={size} fontWeight={700} fill={colr} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{text}</text>}
+                </g>
+              );
+            });
+          })()}
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
             const sc = a.labelScale, w = pillWidth(a) * sc, h = LABEL_H * sc;
@@ -5623,10 +5660,11 @@ export default function SashimiViewer({
               <g key={`sites-${L.track.sampleId}`} fontFamily={FONT}>
                 <text x={PLOT_LEFT + 8} y={cy + 3.5} fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>VARIANT SITES</text>
                 {L.sites.map(st => {
-                  const cx = scale.x(st.pos + 0.5);
+                  // on the site's bar: an insertion's boundary, the middle of a deletion's bases, an SNV's base
+                  const cx = scale.x(st.kind === 'ins' ? st.pos : st.kind === 'del' ? st.pos + st.length / 2 : st.pos + 0.5);
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (
-                    <g key={`site${st.pos}${st.kind}`}>
+                    <g key={`site${st.pos}${st.kind}${st.alt}`}>
                       <title>{siteLabel(st)}</title>
                       <line x1={cx} y1={cy + 7} x2={cx} y2={bottom} stroke={STAR_COLOR} strokeWidth={1} strokeDasharray="2 3" opacity={0.75} />
                       {knownSnp(st) && <circle cx={cx} cy={cy} r={9.5} fill="none" stroke={SNP_KNOWN_RING} strokeWidth={1.6} />}
