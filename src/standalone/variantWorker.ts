@@ -11,6 +11,7 @@
  * cancel {req}, release {what}. Out: progress, done, error.
  * The CpG methylation of long reads (methylation.ts) is counted here too, for the same reason.
  */
+import '../plugins';   // registered file kinds (fileKinds.ts): their samples are read here too
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import type { ReadsOptions, VariantScanOptions } from '../components/sashimi/datasource';
 

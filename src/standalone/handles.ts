@@ -9,6 +9,7 @@
  * the folder in a later page load after one permission click. Firefox and Safari expose no
  * handles, so there the folder is dropped or picked again.
  */
+import { kindExtensions } from './fileKinds';
 
 /** Minimal typing of the WICG permission methods, which lib.dom does not declare. */
 type Permissioned = { queryPermission?(o: { mode: 'read' | 'readwrite' }): Promise<PermissionState>; requestPermission?(o: { mode: 'read' | 'readwrite' }): Promise<PermissionState> };
@@ -77,12 +78,14 @@ export async function pickFolder(): Promise<FSDirHandle> {
 export async function pickFiles(): Promise<{ file: File; handle: FSHandle }[]> {
   const handles: FSHandle[] = await (window as any).showOpenFilePicker({
     multiple: true,
-    types: [{ description: 'Alignments, indexes, reference', accept: { 'application/octet-stream': ['.bam', '.bai', '.cram', '.crai', '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'] } }],
+    types: [{ description: 'Alignments, indexes, reference', accept: { 'application/octet-stream': ['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'] } }],
   });
   return Promise.all(handles.map(async h => ({ file: await h.getFile(), handle: h })));
 }
 
 const KEEP = /\.(bam|bai|cram|crai|fa|fasta|fna|fai|gzi|gz)$/i;
+/** a file the viewer reads: alignments, indexes, reference, and the files of registered kinds (asked each time: plugins register at load) */
+const keep = (name: string) => KEEP.test(name) || kindExtensions().some(x => name.toLowerCase().endsWith(x));
 const MAX_DEPTH = 4, MAX_FILES = 5000;
 
 /** Alignment-related files of a folder handle with their relative paths (metadata only; bounded depth and count). */
@@ -92,7 +95,7 @@ export async function filesInFolder(dir: FSDirHandle): Promise<PathedFile[]> {
     for await (const [name, h] of (d as any).entries() as AsyncIterable<[string, FileSystemHandle]>) {
       if (out.length >= MAX_FILES) return;
       if (h.kind === 'directory') { if (depth < MAX_DEPTH) await walk(h as FileSystemDirectoryHandle, `${prefix}${name}/`, depth + 1); }
-      else if (KEEP.test(name)) out.push({ file: await (h as FileSystemFileHandle).getFile(), path: `${prefix}${name}` });
+      else if (keep(name)) out.push({ file: await (h as FileSystemFileHandle).getFile(), path: `${prefix}${name}` });
     }
   };
   await walk(dir, '', 0);
@@ -120,8 +123,8 @@ export function filesFromFolderInput(list: FileList): { folder: string | null; f
     if (rel && rel.includes('/')) {
       const [top, ...rest] = rel.split('/');
       folder = folder ?? top;
-      if (KEEP.test(f.name)) files.push({ file: f, path: rest.join('/') });
-    } else if (KEEP.test(f.name)) files.push({ file: f });
+      if (keep(f.name)) files.push({ file: f, path: rest.join('/') });
+    } else if (keep(f.name)) files.push({ file: f });
   }
   return { folder, files };
 }
@@ -151,7 +154,7 @@ export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string 
   const walk = async (e: FileSystemEntry, prefix: string, depth: number) => {
     if (files.length >= MAX_FILES) return;
     if (e.isDirectory) { if (depth < MAX_DEPTH) for (const c of await readDir(e as FileSystemDirectoryEntry)) await walk(c, `${prefix}${e.name}/`, depth + 1); }
-    else if (KEEP.test(e.name)) files.push({ file: await toFile(e as FileSystemFileEntry), path: `${prefix}${e.name}` });
+    else if (keep(e.name)) files.push({ file: await toFile(e as FileSystemFileEntry), path: `${prefix}${e.name}` });
   };
   const handles = await Promise.all(handlePromises);
   for (let i = 0; i < items.length; i++) {
@@ -164,10 +167,10 @@ export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string 
     } else {
       const f = plain[i];
       if (!f) continue;
-      if (KEEP.test(f.name)) { files.push({ file: f }); if (h && h.kind === 'file') fileHandles.set(f.name, h as FSHandle); }
+      if (keep(f.name)) { files.push({ file: f }); if (h && h.kind === 'file') fileHandles.set(f.name, h as FSHandle); }
       else others.push(f);
     }
   }
-  if (!items.length) for (const f of fallback) { if (KEEP.test(f.name)) files.push({ file: f }); else others.push(f); }
+  if (!items.length) for (const f of fallback) { if (keep(f.name)) files.push({ file: f }); else others.push(f); }
   return { folder, folderHandle, files, fileHandles, others };
 }

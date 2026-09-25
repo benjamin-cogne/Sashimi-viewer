@@ -4,12 +4,14 @@
  * decoded in the browser; only gene lookups (RefSeq models from the UCSC API, Ensembl REST as
  * fallback) and reference sequence (when no FASTA is given) are fetched from the network.
  */
+import '../plugins';   // registered file kinds (fileKinds.ts), before anything asks which files it reads
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
+import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
@@ -75,7 +77,7 @@ const INDEX_EXT = /\.(bai|crai)$/i;
 const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
-type PairedSample = { name: string; kind: 'bam' | 'cram'; file: File; index: File; path?: string; indexPath?: string };
+type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
 function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
   const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
@@ -86,8 +88,22 @@ function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unm
   const lookup = (n: string) => lookupIn('', n)?.file;
   const samples: PairedSample[] = [];
   const unmatched: string[] = [];
+  const taken = new Set<string>();
   for (const x of items) {
     const f = x.file;
+    // a registered file kind (fileKinds.ts): paired with its index, or alone when it indexes itself
+    const k = fileKindOf(f.name);
+    if (k) {
+      const dir = dirOf(x), key = `${dir}|${f.name.toLowerCase()}`;
+      if (taken.has(key)) continue;   // a self-indexed file comes back twice from a session's reopening
+      taken.add(key);
+      const ext = k.extensions.find(e => f.name.toLowerCase().endsWith(e))!;
+      const stem = f.name.slice(0, f.name.length - ext.length);
+      const idx = k.index ? k.index.map(i => lookupIn(dir, `${f.name}${i}`) || lookupIn(dir, `${stem}${i}`)).find(Boolean) : x;
+      if (idx) samples.push({ name: stem, kind: k.id, file: f, index: idx.file, path: x.path, indexPath: idx.path });
+      else unmatched.push(f.name);
+      continue;
+    }
     if (!ALIGN_EXT.test(f.name)) continue;
     const kind = f.name.toLowerCase().endsWith('.cram') ? 'cram' : 'bam';
     const stem = f.name.replace(ALIGN_EXT, '');
@@ -735,7 +751,7 @@ function App() {
         <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Fold this panel away (notes, build, files, session, known variants): only the logo, the search box and the views stay, so the plot takes the rest of the window; Show panel brings it back" aria-label="Hide the upper panel">
           ▲ Hide panel
         </button>
-        <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
         {intake && (
           <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs border border-indigo-300 bg-indigo-50 text-indigo-800" role="status" data-intake>
             <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
@@ -745,7 +761,7 @@ function App() {
         <div className="flex flex-wrap items-center gap-1.5">
           {samples.map((s, i) => (
             <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
-              title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+              title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
               onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
               onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
               {i === 0 && <span title="primary sample">★</span>}

@@ -19,12 +19,13 @@ import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } 
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
 import { answerReads, isLongRead } from './readsWindow';
+import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
-export interface LocalSample { id: number; name: string; kind: 'bam' | 'cram'; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean }
+export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean }
 export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
 
 type Opened =
@@ -250,7 +251,8 @@ const yieldToUi = (): Promise<void> => {
   return s?.yield ? s.yield() : new Promise<void>(resolve => { setTimeout(resolve, 0); });
 };
 
-function resolveName(names: string[], chrom: string): string | null {
+/** The name a file gives `chrom` among its `names`: as asked, or with the "chr" prefix added or dropped; null when absent. */
+export function resolveName(names: string[], chrom: string): string | null {
   if (names.includes(chrom)) return chrom;
   const alt = chrom.startsWith('chr') ? chrom.slice(3) : `chr${chrom}`;
   return names.includes(alt) ? alt : null;
@@ -320,6 +322,7 @@ export class LocalDataSource implements SashimiDataSource {
   setReference(reference: ReferenceChoice) {
     this.reference = reference;
     this.fasta = null;
+    for (const p of this.providers.values()) p.setReference?.(reference);
     // CRAM decoding depends on the reference: reopen files, and forget what was counted from them
     for (const [id, s] of this.samples) if (s.kind === 'cram') { this.opened.delete(id); this.coverage.delete(id); }
     // mismatches are read against the reference: every sample's allele counts depend on it
@@ -331,9 +334,31 @@ export class LocalDataSource implements SashimiDataSource {
   knownVariants: KnownVariant[] = [];
   async getKnownVariants(_sampleId: number): Promise<KnownVariant[]> { return this.knownVariants; }
 
-  addSample(s: LocalSample) { this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
+  // ---- samples of a registered file kind (fileKinds.ts): every request goes to the kind's provider ----
+  private providers = new Map<number, SampleProvider>();
+  private readonly host: ProviderHost = (() => {
+    const self = this;
+    return {
+      getReferenceSeq: (chrom: string, start: number, end: number) => self.getReferenceSeq(chrom, start, end),
+      get referenceSource() { return self.lastReferenceSource; },
+      get reference() { return self.reference; },
+    };
+  })();
+  /** the provider of a sample of a registered kind, or undefined for BAM, CRAM and exported samples */
+  private providerOf(id: number): { p: SampleProvider; s: LocalSample } | undefined {
+    const p = this.providers.get(id), s = this.samples.get(id);
+    return p && s ? { p, s } : undefined;
+  }
+
+  addSample(s: LocalSample) {
+    this.providers.get(s.id)?.dispose?.(); this.providers.delete(s.id);
+    if (!s.embedded && s.kind !== 'bam' && s.kind !== 'cram') {
+      const k = fileKind(s.kind);
+      if (k) this.providers.set(s.id, k.open(s, this.host));
+    }
+    this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
+  removeSample(id: number) { this.providers.get(id)?.dispose?.(); this.providers.delete(id); this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
   /** one byte budget for the decoded records of every alignment file of this source (see RECORD_CACHE_BYTES) */
   private recordBudget = new SharedBudget(RECORD_CACHE_BYTES);
   /**
@@ -342,6 +367,7 @@ export class LocalDataSource implements SashimiDataSource {
    * reads track was closed, or the coverage they were decoded for is counted).
    */
   release(what: 'methylation' | 'variants' | 'records') {
+    for (const p of this.providers.values()) p.release?.(what);
     if (what === 'records') { this.clearRecordCaches(); return; }
     if (what === 'methylation') this.methylStates.clear(); else this.alleleStates.clear();
     this.variantScanner?.release?.(what);
@@ -425,6 +451,7 @@ export class LocalDataSource implements SashimiDataSource {
     if (!s) return Promise.reject(new Error('Sample not found'));
     if (!this.opened.has(id)) {
       this.opened.set(id, (async (): Promise<Opened> => {
+        if (s.kind !== 'bam' && s.kind !== 'cram') throw new Error(`${s.file.name}: no reader for ${s.kind} files in this viewer`);
         if (s.kind === 'bam') {
           const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget });
           await bam.getHeader();
@@ -494,7 +521,7 @@ export class LocalDataSource implements SashimiDataSource {
    */
   private tileSize(id: number, start: number, end: number, bytes: number): number {
     const s = this.samples.get(id);
-    const bpr = this.bytesPerRead.get(id) ?? BYTES_PER_READ[s?.kind ?? 'bam'];
+    const bpr = this.bytesPerRead.get(id) ?? BYTES_PER_READ[s?.kind === 'cram' ? 'cram' : 'bam'];
     const records = bytes / Math.max(1, bpr);
     if (!(records > TILE_RECORDS)) return MAX_TILE_BP;
     const span = Math.max(1, end - start);
@@ -551,7 +578,7 @@ export class LocalDataSource implements SashimiDataSource {
     const loc = await this.locate(id, chrom);
     const s = this.samples.get(id);
     if (!loc || !s) return { start, end };
-    const bpr = this.bytesPerRead.get(id) ?? BYTES_PER_READ[s.kind];
+    const bpr = this.bytesPerRead.get(id) ?? BYTES_PER_READ[s.kind === 'cram' ? 'cram' : 'bam'];
     const coreStart = Math.max(start, Math.min(end, core.start)), coreEnd = Math.max(coreStart, Math.min(end, core.end));
     let left = coreStart - start, right = end - coreEnd;
     let win = { start, end };
@@ -568,6 +595,8 @@ export class LocalDataSource implements SashimiDataSource {
   /** Clipped reads of this sample rescued at breakpoints seen in other samples: only the reads around the breakpoint ends are read. */
   async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]> {
     if (!breakpoints.length) return [];
+    const k = this.providerOf(sampleId);
+    if (k) return (await k.p.rescueClips?.(k.s, chrom, breakpoints, uniqueOnly)) ?? [];
     const loc = await this.locate(sampleId, chrom);
     if (!loc) return [];
     const ends = [...new Set(breakpoints.flatMap(b => [b.start, b.end]))].sort((a, b) => a - b);
@@ -589,6 +618,8 @@ export class LocalDataSource implements SashimiDataSource {
     return [...found].map(([k, n]) => { const [kind, span] = k.split(':'); const [a, b] = span.split('-').map(Number); return { start: a, end: b, kind: kind as Breakpoint['kind'], count: n.count, hard: n.hard, own: false }; });
   }
   async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null> {
+    const k = this.providerOf(sampleId);
+    if (k) return (await k.p.getPrimaryRecord?.(k.s, chrom, start, name)) ?? null;
     const { kept } = await this.scan(sampleId, chrom, start, start + 1, false, Number.MAX_SAFE_INTEGER, false, { structural: true });
     const r = kept.find(x => x.start === start && x.name === name && !(x.flags & 2048) && x.seq);
     return r ? { seq: r.seq, flags: r.flags, cigar: r.cigar } : null;
@@ -671,6 +702,8 @@ export class LocalDataSource implements SashimiDataSource {
    * counted against the CpGs of the reference under them, then reads the window back with the filter threshold.
    */
   countMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.countMethylation ? k.p.countMethylation(k.s, chrom, start, end, opts) : Promise.reject(new Error(`no methylation calls in ${k.s.file.name}`));
     const signal = opts?.signal;
     return this.locked(this.methylLocks, sampleId, async () => {
       throwIfAborted(signal);
@@ -718,6 +751,8 @@ export class LocalDataSource implements SashimiDataSource {
 
   /** The allele counting itself: grows the sample's allele state over [start, end), then reads the sites back. */
   countVariants(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.countVariants ? k.p.countVariants(k.s, chrom, start, end, uniqueOnly, minVaf, opts) : Promise.reject(new Error(`no variant scan for ${k.s.file.name}`));
     const signal = opts?.signal;
     return this.locked(this.alleleLocks, sampleId, async () => {
       throwIfAborted(signal);
@@ -776,6 +811,8 @@ export class LocalDataSource implements SashimiDataSource {
 
   async getLibraryType(sampleId: number): Promise<LibraryEvidence> {
     if (!this.samples.has(sampleId)) return { type: 'unknown', source: 'none', note: 'sample not found' };
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.getLibraryType ? k.p.getLibraryType(k.s) : { type: 'unknown', source: 'none', note: 'the file does not say' };
     return classifyHeader(await this.headerText(sampleId));
   }
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> { return getTranscript(this.reference.build, geneName, geneId, hint); }
@@ -805,7 +842,9 @@ export class LocalDataSource implements SashimiDataSource {
     for (const s of this.list()) {
       try {
         const perExon: Scan[] = [];
-        for (const [a, b] of exons) perExon.push(await this.scan(s.id, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS, true));
+        const k = this.providerOf(s.id);
+        if (k && !k.p.exonReads) throw new Error('exon depths are not available for this file');
+        for (const [a, b] of exons) perExon.push(k ? await k.p.exonReads!(k.s, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS) : await this.scan(s.id, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS, true));
         let strandness = this.strandCalls.get(s.id), fraction: number | null = null;
         if (!strandness) {
           const call = detectStrandness(perExon.flatMap(x => x.kept), geneStrand);
@@ -996,6 +1035,8 @@ export class LocalDataSource implements SashimiDataSource {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString('en-US')} bp); maximum is ${MAX_REGION_BP.toLocaleString('en-US')} bp`);
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.getCoverage(k.s, chrom, start, end, uniqueOnly, boundaries, opts);
     const signal = opts?.signal;
     const loc = await this.locate(sampleId, chrom);
     const result = (w: { start: number; end: number }, sl: CoverageSlice): SampleCoverage => ({
@@ -1083,6 +1124,8 @@ export class LocalDataSource implements SashimiDataSource {
     // a collapsed window decodes up to 40 000 reads and groups or phases them, which froze the page on deep data: the
     // worker does it, and only the answer (sites, groups, haplotypes; no read) comes back
     if (collapsed && this.variantScanner?.collapse && !s.embedded) return this.variantScanner.collapse(sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts);
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.getReads(k.s, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
     const support = !collapsed ? opts?.support : undefined;
     const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;

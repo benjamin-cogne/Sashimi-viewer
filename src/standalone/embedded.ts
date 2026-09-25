@@ -16,6 +16,7 @@ import { LocalDataSource, type LocalSample, type ReferenceChoice } from './local
 import { answerReads, supportAndCap } from './readsWindow';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
+import type { SampleKind } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 
 export const EMBEDDED_APP = 'sashimi-viewer-export';
@@ -92,7 +93,7 @@ export interface EmbeddedExport {
   version: number;
   saved: string;
   build: GenomeBuild;
-  samples: { id: number; name: string; kind: 'bam' | 'cram'; file: string; index: string; library?: LibraryEvidence }[];
+  samples: { id: number; name: string; kind: SampleKind; file: string; index: string; library?: LibraryEvidence }[];
   /** the session (views, options, groups) to restore; its sample names match `samples` */
   session: SessionFile;
   views: EmbeddedView[];
