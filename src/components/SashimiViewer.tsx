@@ -383,7 +383,9 @@ const READ_FILL = '#c8cdd6';
  * Under the coverage of a DNA track, one mark per called site: a bar as high as its alternate-allele fraction (0–100 %,
  * the reference share in grey above it) in the colour of the allele, and under it four quality cells (base quality or
  * homopolymer, mapping quality, strand, read position; siteQuality.ts) in green, amber or red. Where neighbouring
- * sites leave less than VAR_CELLS_PX, the four cells give way to one in the colour of the worst.
+ * sites leave less than VAR_CELLS_PX, the four cells give way to one in the colour of the worst. Zoomed in, a site
+ * grows with its bases as the reads do: the bar and the four cells span the changed bases (an insertion stays a thin
+ * mark between two bases) and the label grows, naming the change once there is room.
  */
 const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7, VAR_MAF_H = 14;
 const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 4 + VAR_MAF_H + 5;
@@ -4022,12 +4024,17 @@ export default function SashimiViewer({
     );
   };
 
-  /** Where each site of a variants track is drawn, for the view: centre and width of its bar, and the room its neighbours leave. */
+  /**
+   * Where each site of a variants track is drawn, for the view: centre and width of its bar, the width of a base, and
+   * the room its neighbours leave. An SNV or a deletion spans its bases (3 px at least); an insertion, between two
+   * bases, stays thin: 3 px, or 30 % of a base zoomed in.
+   */
   const variantMarks = (sites: VariantSite[]) => {
+    const bp = Math.abs(scale.x(viewStart + 1) - scale.x(viewStart));
     const marks = sites.filter(s => s.pos + (s.kind === 'del' ? s.length : 1) > viewStart && s.pos < viewEnd).map(s => {
       const xa = scale.x(s.pos), xb = scale.x(s.pos + (s.kind === 'del' ? s.length : s.kind === 'ins' ? 0 : 1));
-      const cx = (xa + xb) / 2, w = Math.max(3, Math.abs(xb - xa));
-      return { s, cx, w, room: Infinity };
+      const cx = (xa + xb) / 2, w = s.kind === 'ins' ? Math.max(3, 0.3 * bp) : Math.max(3, Math.abs(xb - xa));
+      return { s, cx, w, bp, room: Infinity };
     }).sort((a, b) => a.cx - b.cx);
     for (let i = 0; i < marks.length; i++) marks[i].room = Math.min(i ? marks[i].cx - marks[i - 1].cx : Infinity, i + 1 < marks.length ? marks[i + 1].cx - marks[i].cx : Infinity);
     return marks;
@@ -4062,15 +4069,21 @@ export default function SashimiViewer({
       }
       flush();
     }
-    for (const { s, cx, w, room } of marks) {
+    for (const { s, cx, w, bp, room } of marks) {
       const h = Math.max(1, s.vaf * VAR_BAR_H), x = (cx - w / 2).toFixed(1), ww = w.toFixed(1);
       push(bars, siteColor(s), `M${x},${(barBottom - h).toFixed(1)}h${ww}v${h.toFixed(1)}h-${ww}z`);
       if (h < VAR_BAR_H) refs.push(`M${x},${barTop}h${ww}v${(VAR_BAR_H - h).toFixed(1)}h-${ww}z`);
       const { checks, worst } = cachedChecks(s, long);
       verdicts[worst]++;
-      if (checks.length && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(cx - 7.5 + k * 4).toFixed(1)},${cellY}h3v${VAR_CELL_H}h-3z`));
+      // the four cells across the site's bases once they are wider than the cluster, else the cluster centred on it
+      const cw = s.kind !== 'ins' && w >= VAR_CELLS_PX ? (w - 3) / 4 : 3, c0 = cw > 3 ? cx - w / 2 : cx - 7.5;
+      if (checks.length && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(c0 + k * (cw + 1)).toFixed(1)},${cellY}h${cw.toFixed(1)}v${VAR_CELL_H}h-${cw.toFixed(1)}z`));
       else if (checks.length) push(cells, worst, `M${x},${cellY}h${ww}v${VAR_CELL_H}h-${ww}z`);
-      if (room >= 30) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - h - 2)} textAnchor="middle" fontSize={8} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{Math.round(s.vaf * 100)}</text>);
+      // the label grows with the site (an insertion's with the base it sits on) and names the change once it is wide
+      const size = Math.min(12, Math.max(8, (s.kind === 'ins' ? bp : w) / 3)), pct = Math.round(s.vaf * 100);
+      const named = `${siteShort(s)} · ${pct} %`, widthOf = (t: string) => t.length * size * 0.62 + 4;
+      const text = (s.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= Math.max(30, widthOf(String(pct))) ? String(pct) : null;
+      if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - h - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
     }
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const status = span > VARIANTS_MAX_VIEW_BP && !(e && e.fetched.start <= viewStart && e.fetched.end >= viewEnd)
