@@ -354,6 +354,13 @@ which an aligner may set on the pairs of a duplication. On RNA-seq, mates facing
 back-splicing (circular RNA), so only the amber class applies. The header counts the discordant
 reads by class.
 The pairs are kept in exported pages.
+Two reads are mates when each starts where the other says its mate starts, with the other pair
+bit. Where several reads fit (fragments sharing their starts, frequent in amplicon and deep
+panels), the one with the same name is taken, which makes the pairing of a BAM or CRAM exact;
+then the one with the opposite template length; position alone last. Exported pages store which
+read is whose mate, so they are paired exactly too (pages exported by earlier versions number
+their reads instead of naming them and rely on the template length). The same pairing makes the
+fragments of phasing and consensus groups.
 
 **Clipped, inserted and split-read sequences.** The reads keep the bases their alignment leaves
 out: the soft-clipped bases at each end, the inserted bases, the lengths of the hard clips and the

@@ -14,6 +14,7 @@
 import type { AlignedRead, ReadGroup, VariantSite } from '../components/sashimi/types';
 import { depthArray } from './alignments';
 import { snapJunctions } from './junctionSnap';
+import { pairMates } from './mates';
 
 const BASE_CODE: Record<string, number> = { A: 0, C: 1, G: 2, T: 3, N: 4 };
 const CODE_BASE = 'ACGTN';
@@ -127,20 +128,12 @@ function readAlleles(r: AlignedRead, sites: VariantSite[], sitePos: Int32Array, 
 }
 
 /**
- * Pairs a read with its mate (same start as the mate's recorded position and the reverse, first/second of pair
- * flags differing): a fragment is one molecule, whose two mates together link sites and junctions further apart
+ * Pairs a read with its mate (pairMates: mate key, else position with the same name first, then the opposite
+ * template length): a fragment is one molecule, whose two mates together link sites and junctions further apart
  * than either read does.
  */
 export function fragmentsOf(reads: AlignedRead[]): AlignedRead[][] {
-  const byStart = new Map<number, number[]>();
-  reads.forEach((r, i) => { const l = byStart.get(r.s); if (l) l.push(i); else byStart.set(r.s, [i]); });
-  const mate = new Int32Array(reads.length).fill(-1);
-  reads.forEach((r, i) => {
-    if (mate[i] >= 0 || r.mp == null || r.mc) return;
-    for (const j of byStart.get(r.mp) ?? []) {
-      if (j !== i && mate[j] < 0 && reads[j].mp === r.s && (reads[j].f & 192) !== (r.f & 192)) { mate[i] = j; mate[j] = i; break; }
-    }
-  });
+  const mate = pairMates(reads);
   const out: AlignedRead[][] = [];
   reads.forEach((r, i) => { if (mate[i] >= 0 && mate[i] < i) return; out.push(mate[i] >= 0 ? [r, reads[mate[i]]] : [r]); });
   return out;

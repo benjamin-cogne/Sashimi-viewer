@@ -23,6 +23,7 @@ import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, bre
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { HAP_MIN_DEPTH } from '../standalone/haplotypes';
 import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
+import { pairMates } from '../standalone/mates';
 import type { ArcSupport } from '../standalone/arcSupport';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
@@ -2827,12 +2828,7 @@ export default function SashimiViewer({
       const parent = new Int32Array(visible.length); for (let i = 0; i < parent.length; i++) parent[i] = i;
       const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
       const union = (a: number, b: number) => { const x = find(a), y = find(b); if (x !== y) parent[x] = y; };
-      if (pairMode) visible.forEach((r, i) => {
-        if (mateOf[i] >= 0 || r.mp == null || r.mc) return;
-        for (const j of byStart.get(r.mp) ?? []) {
-          if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; union(i, j); break; }
-        }
-      });
+      if (pairMode) pairMates(visible).forEach((j, i) => { if (j > i) { mateOf[i] = j; mateOf[j] = i; union(i, j); } });
       if (splitMode) partsOf.forEach((list, i) => { for (const j of list) union(i, j); });
       const unitIndex = new Map<number, number>();
       const units: { s: number; e: number }[] = [];
