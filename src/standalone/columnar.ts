@@ -622,6 +622,53 @@ export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
   return packSections(dir, parts);
 }
 
+/**
+ * Walks the alignment shapes of a reads stream without building a read: for each read of the blocks overlapping
+ * `range` (every block without one), `visit(start, flags, mapq, nh, ops)` with `ops` the read's CIGAR ops, clips aside,
+ * packed as a BAM record packs them (length × 16 + op: M 0, I 1, D 2, N 3). `ops` is valid during the call only.
+ *
+ * This is what a coverage, a junction count or the reads through an exon boundary need of a read, and in version 5 it
+ * is the first columns of the core section: the mismatches, the clips and every other section are not read. A reader
+ * counting depth this way decodes about as many bytes as the reads' starts and shapes, a fraction of a full decode.
+ * Returns false, having visited nothing, for a stream before version 5, whose shape a caller takes from decodeReads.
+ */
+export async function scanShapes(stream: Uint8Array, range: { start: number; end: number } | undefined,
+  visit: (start: number, flags: number, mapq: number, nh: number | null, ops: Uint32Array) => void): Promise<boolean> {
+  const { dir, offsets } = readDirectory(stream);
+  if (dir.v < 5) return false;
+  let ops = new Uint32Array(256);
+  for (let i = 0; i < dir.sections.length; i++) {
+    const s = dir.sections[i];
+    if (s.name !== 'core' || (range && (s.end! <= range.start || s.start! >= range.end))) continue;
+    const rd = new Reader(await inflate(stream.subarray(offsets[i], offsets[i] + s.bytes)));
+    const n = rd.u();
+    const st = new Float64Array(n), f = new Int32Array(n), q = new Int32Array(n), nh = new Int32Array(n), cnt = new Int32Array(n);
+    let prev = 0, total = 0;
+    for (let k = 0; k < n; k++) { prev += rd.u(); st[k] = prev; }
+    for (let k = 0; k < n; k++) f[k] = rd.u();
+    for (let k = 0; k < n; k++) q[k] = rd.u();
+    for (let k = 0; k < n; k++) nh[k] = rd.s();
+    for (let k = 0; k < n; k++) { cnt[k] = rd.u(); total += cnt[k]; }
+    const codes = rd.bytes(total);
+    const lens = new Float64Array(total);
+    for (let k = 0; k < total; k++) if (codes[k] === OP_M) lens[k] = rd.u();
+    for (let k = 0; k < total; k++) if (codes[k] !== OP_M) lens[k] = rd.u();
+    for (let r = 0, k = 0; r < n; r++) {
+      const c = cnt[r];
+      if (c > ops.length) ops = new Uint32Array(Math.max(c, ops.length * 2));
+      let end = st[r];
+      for (let j = 0; j < c; j++, k++) {
+        const len = lens[k], op = codes[k];
+        ops[j] = len * 16 + op;
+        if (op !== OP_I) end += len;
+      }
+      if (range && (end <= range.start || st[r] >= range.end) && !(end === st[r] && st[r] >= range.start && st[r] < range.end)) continue;
+      visit(st[r], f[r], q[r], nh[r] < 0 ? null : nh[r], ops.subarray(0, c));
+    }
+  }
+  return true;
+}
+
 /** Facts of an encoded reads stream, without decoding a read. */
 export function readsInfo(stream: Uint8Array): { window: { start: number; end: number }; total: number; reads: number; blocks: { start: number; end: number; n: number }[] } {
   const { dir } = readDirectory(stream);
