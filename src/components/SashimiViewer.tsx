@@ -219,6 +219,8 @@ interface TrackData {
   spanning?: BoundarySpanning;
   /** The source decoded one read in `rate` of this window: depths and counts are scaled estimates. */
   sampled?: { rate: number; total: number; decoded: number };
+  /** Stretches the source holds no data for, hatched (SampleCoverage.unavailable). */
+  unavailable?: SampleCoverage['unavailable'];
   /** Structural evidence of a DNA sample's window (deletions, split reads, clips, discordant pairs). */
   structural?: StructuralEvidence;
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
@@ -1556,7 +1558,7 @@ export default function SashimiViewer({
         if (reqSeq.current.get(sid) !== seq || !p.window) return;
         const part: FetchWindow = { ...win, start: p.window.start, end: p.window.end };
         setTracks(prev => prev.map(t => t.sampleId !== sid || (!t.partial && t.coverage.length && covers(t.fetched, view) && !covers(part, view)) ? t
-          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, fetched: part, partial: true }));
+          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, unavailable: p.unavailable, fetched: part, partial: true }));
       };
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
         { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && wantsStructuralRef.current(sid), signal: ctl.signal, onProgress });
@@ -1565,7 +1567,7 @@ export default function SashimiViewer({
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
       if (data.spliced) onLibraryEvidenceRef.current?.(sid, { ...data.spliced, multiExon: (txRef.current?.exons.length ?? 0) > 1 });
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched, partial: false,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, unavailable: data.unavailable, structural: data.structural, loading: false, error: data.error, fetched, partial: false,
       } : t));
       // the coverage is counted and kept: the records decoded for it would only serve a reads track, so with none shown
       // and no other coverage still reading, they are let go now rather than at the libraries' idle timeout
@@ -1972,7 +1974,12 @@ export default function SashimiViewer({
     (['left', 'right'] as const).forEach((side, k) => {
       if (!r.c[k]) return;
       const seq = r.cs?.[k];
-      items.push({ label: `${side} soft clip · ${r.c[k]} bp`, seq: seq || undefined, note: seq ? undefined : 'sequence not available' });
+      const partial = !!seq && seq.length < r.c[k];
+      items.push({
+        label: `${side} soft clip · ${r.c[k].toLocaleString('en-US')} bp`, seq: seq || undefined,
+        note: !seq ? 'sequence not available'
+          : partial ? `the ${seq.length.toLocaleString('en-US')} bases next to the alignment only: the source keeps no more of a clip; the rest of a long clip is usually the read's other part` : undefined,
+      });
     });
     r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString('en-US')}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
     const sa = parseSa(r.sa);
@@ -2999,19 +3006,30 @@ export default function SashimiViewer({
           const hard = r.h?.[side] ?? 0;
           const from = side === 0 ? r.s - len : r.e;   // genomic start of the soft clip
           if (len) {
+            // A source may keep only the clipped bases next to the alignment (docs/embedded-format.md 3.3): the end of a
+            // left clip, the start of a right one. They are drawn where they are, and only within the view (a long
+            // read's clip can be tens of kb); the rest of the clip, whose bases are not stored, as a plain bar.
+            const known = Math.min(seq.length, len);
+            const kFrom = side === 0 ? r.s - known : r.e;          // genomic start of the stored bases
             if (seq && pxb >= 2.5) {
-              for (let k = 0; k < len; k++) {
-                const pos = from + k, base = seq[k] ?? 'N';
+              for (let pos = Math.max(kFrom, viewStart), end = Math.min(kFrom + known, viewEnd); pos < end; pos++) {
+                const base = seq[pos - kFrom] ?? 'N';
                 const { left, w } = basePx(pos);
                 const same = !!ref && ref.seq[pos - ref.start] === base;
-                parts.push(<rect key={`c${side}${k}`} x={left} y={top} width={Math.max(1, w - (w > 3 ? 0.5 : 0))} height={rowH} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={same ? 0.28 : 0.95} rx={0.5} />);
-                if (showLetters && w >= 7) parts.push(<text key={`ct${side}${k}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+                parts.push(<rect key={`c${side}${pos}`} x={left} y={top} width={Math.max(1, w - (w > 3 ? 0.5 : 0))} height={rowH} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={same ? 0.28 : 0.95} rx={0.5} />);
+                if (showLetters && w >= 7) parts.push(<text key={`ct${side}${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+              }
+              if (known < len) {
+                const ua = side === 0 ? from : r.e + known, ub = ua + (len - known);
+                const xa = scale.x(ua), xb = scale.x(ub);
+                parts.push(<rect key={`cu${side}`} x={Math.min(xa, xb)} y={top + 1} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 2)} fill={HARD_CLIP_FILL} opacity={0.45} rx={1} />);
               }
             } else {
               const xa = scale.x(from), xb = scale.x(from + len);
               parts.push(<rect key={`c${side}`} x={Math.min(xa, xb)} y={top + 1} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 2)} fill={seq ? CLIP_FILL : HARD_CLIP_FILL} opacity={seq ? 0.6 : 0.45} rx={1} />);
             }
-            clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len} bp${seq ? `: ${seq.length > 40 ? `${seq.slice(0, 40)}…` : seq}` : ''}`);
+            const kept = seq && known < len ? ` (the ${known.toLocaleString('en-US')} bases next to the alignment are stored)` : '';
+            clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len.toLocaleString('en-US')} bp${kept}${seq ? `: ${seq.length > 40 ? (side === 0 ? `…${seq.slice(-40)}` : `${seq.slice(0, 40)}…`) : seq}` : ''}`);
           }
           if (hard && partsOf[idx].length) {
             const hs = side === 0 ? r.s - len - hard : r.e + len;
@@ -4285,6 +4303,28 @@ export default function SashimiViewer({
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
+          {/* stretches the source holds no data for: hatched, since they are not a depth of 0 */}
+          {track.unavailable && (() => {
+            const spans = track.unavailable.spans.filter(([a, b]) => b > viewStart && a < viewEnd);
+            if (!spans.length) return null;
+            return (
+              <g data-unavailable="">
+                <defs>
+                  <pattern id={`${clipId}-na`} patternUnits="userSpaceOnUse" width={7} height={7} patternTransform="rotate(45)">
+                    <line x1={0} y1={0} x2={0} y2={7} stroke={INK.gridStrong} strokeWidth={1.4} />
+                  </pattern>
+                </defs>
+                {spans.map(([a, b]) => {
+                  const xa = scale.x(Math.max(a, viewStart)), xb = scale.x(Math.min(b, viewEnd));
+                  return (
+                    <rect key={`na${a}`} x={Math.min(xa, xb)} y={yOff + TRACK_LABEL_H} width={Math.abs(xb - xa)} height={height - TRACK_LABEL_H} fill={`url(#${clipId}-na)`} opacity={0.85}>
+                      <title>{`${track.unavailable!.note} (${currentChrom}:${(a + 1).toLocaleString('en-US')}-${b.toLocaleString('en-US')}). No data, which is not a depth of 0.`}</title>
+                    </rect>
+                  );
+                })}
+              </g>
+            );
+          })()}
           {/* a stretch the reads say is duplicated (split reads going back, mates facing away), shaded under the depth: its
               depth should stand about 1.5 times the flanks' (one extra copy of two) */}
           {covOn && svHints && isDnaTrack(track) && track.structural && (() => {

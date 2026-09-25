@@ -80,8 +80,8 @@ export function parseModTags(mm: string, ml: ArrayLike<number> | null, codes: Ui
       const q = sc.cIdx[p];
       if (!sc.listed[q]) { sc.listed[q] = 1; sc.pm[q] = 0; sc.ph[q] = 0; }
       if (ml) {
-        if (im >= 0) sc.pm[q] = (ml[mlAt + (k - 1) * per + im] + 0.5) / 256;
-        if (ih >= 0) sc.ph[q] = (ml[mlAt + (k - 1) * per + ih] + 0.5) / 256;
+        if (im >= 0) sc.pm[q] = mlProb(ml[mlAt + (k - 1) * per + im]);
+        if (ih >= 0) sc.ph[q] = mlProb(ml[mlAt + (k - 1) * per + ih]);
       }
       any = true;
     }
@@ -89,6 +89,9 @@ export function parseModTags(mm: string, ml: ArrayLike<number> | null, codes: Ui
   }
   return any || implicit ? implicit : null;
 }
+
+/** Probability of an ML byte (SAM tags specification: N ↦ (N + 0.5) / 256). */
+export const mlProb = (n: number) => (n + 0.5) / 256;
 
 /** The 5mC call of one base: whether it is modified, and the call's confidence (5hmC set aside, the two others renormalised). */
 export function callOf(pm: number, ph: number): { mod: boolean; conf: number } | null {
@@ -121,6 +124,18 @@ export function countRead(out: MethylCounts, start: number, ops: ArrayLike<numbe
   mm: string, ml: ArrayLike<number> | null, cpgs: Int32Array, hap: number, sc: ModScratch): number {
   const h = hap > 0 && hap <= 2 ? hap : 0;
   return visitReadCalls(start, ops, codes, n, reverse, mm, ml, cpgs, sc, (cpg, mod, conf) => out.add(cpg, h, mod, conf));
+}
+
+/**
+ * One CpG call a source holds in its own form rather than as MM / ML tags: `pm` / `ph` the 5mC / 5hmC probabilities at
+ * the C of the CpG `cpg`. Counted into `out` (when given) exactly as countRead counts a call, and returned as the
+ * read's P(5mC) against unmodified, 5hmC set aside (what a read's `me` holds, × 255); null when there is no call.
+ */
+export function addCall(out: MethylCounts | null, cpg: number, hap: number, pm: number, ph: number): number | null {
+  const call = callOf(pm, ph);
+  if (!call) return null;
+  out?.add(cpg, hap > 0 && hap <= 2 ? hap : 0, call.mod, call.conf);
+  return call.mod ? call.conf : 1 - call.conf;
 }
 
 /**

@@ -12,11 +12,8 @@
  */
 import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
-import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
-import { callSites, collapseReads } from './collapse';
-import { arcReadFromAligned, supportsArc } from './arcSupport';
-import { phaseReads } from './phasing';
-import { haplotagCounts, windowHaplotypes } from './haplotypes';
+import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
+import { answerReads, supportAndCap } from './readsWindow';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
 import type { GenomeBuild } from './ensembl';
@@ -38,6 +35,7 @@ export interface EncodedCoverage {
   sampled?: { rate: number; total: number; decoded: number };
   spliced?: { reads: number; fraction: number };
   structural?: StructuralEvidence;
+  unavailable?: SampleCoverage['unavailable'];
   error?: string;
 }
 /**
@@ -51,6 +49,7 @@ export interface EncodedCoverageV2 {
   sampled?: { rate: number; total: number; decoded: number };
   spliced?: { reads: number; fraction: number };
   structural?: StructuralEvidence;
+  unavailable?: SampleCoverage['unavailable'];
   error?: string;
 }
 /** Reads of one sample in the columnar form: the stream carries the window, the reads with their pairs and the reference bases. */
@@ -58,7 +57,7 @@ export interface EncodedReadsV2 { bin: string; window: { start: number; end: num
 const isBin = (x: unknown): x is { bin: string } => !!x && typeof (x as any).bin === 'string';
 
 export async function encodeCoverageV2(c: SampleCoverage, window: { start: number; end: number }): Promise<EncodedCoverageV2> {
-  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, error: c.error };
+  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error };
 }
 export async function encodeReadsV2(p: ReadsPayload): Promise<EncodedReadsV2> {
   return { bin: toBase64(await encodeReadsColumns(p)), window: p.window };
@@ -106,7 +105,7 @@ export function encodeCoverage(c: SampleCoverage, window: { start: number; end: 
     start: runs.length ? runs[0].start : window.start,
     len: runs.map(r => r.end - r.start), depth: runs.map(r => r.depth),
     junctions: c.junctions.map(j => [j.start, j.end, j.count]),
-    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, structural: c.structural, error: c.error,
+    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error,
   };
 }
 export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName: string): SampleCoverage {
@@ -116,7 +115,7 @@ export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName:
   return {
     sample_id: sampleId, sample_name: sampleName, coverage,
     junctions: e.junctions.map(([start, end, count]) => ({ start, end, count })),
-    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, structural: e.structural, error: e.error,
+    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, structural: e.structural, unavailable: e.unavailable, error: e.error,
   };
 }
 
@@ -285,7 +284,7 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
-    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural: b.structural, error: b.error };
+    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural: b.structural, unavailable: b.unavailable, error: b.error };
   }
   override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
@@ -302,40 +301,11 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
-    let reads = best.reads.filter(r => r.e > start && r.s < end);
     const support = !collapsed ? opts?.support : undefined;
-    let total = reads.length, mates = 0;
-    if (support) {
-      // the supporting reads (every k-th past maxReads), then their mates in the window
-      let hits = reads.filter(r => supportsArc(arcReadFromAligned(r, chrom), chrom, support));
-      total = hits.length;
-      const cap = Math.max(1, maxReads);
-      if (hits.length > cap) { const step = hits.length / cap; hits = Array.from({ length: cap }, (_, i) => hits[Math.floor(i * step)]); }
-      const kept = new Set(hits), names = new Set(hits.filter(r => r.mp != null).map(r => r.n));
-      const extra = reads.filter(r => !kept.has(r) && names.has(r.n));
-      mates = extra.length;
-      reads = [...hits, ...extra].sort((a, b) => a.s - b.s);
-    } else {
-      const cap = collapsed ? 40000 : Math.max(100, maxReads);
-      if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
-    }
-    const ref = best.reference?.seq ?? null, refStart = best.reference?.start ?? 0;
-    const longReads = isLongRead(reads);
-    const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
-    const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), long_reads: longReads, reference: best.reference, reference_source: best.reference_source, haplotags: haplotagCounts(reads) };
-    if (collapsed) {
-      if (opts?.haplotypes !== 'any') {
-        // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
-        const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites, longReads);
-        return { ...base, reads: [], sites, groups: [], phase, haplotypes };
-      }
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
-      return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
-    }
-    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
+    // the supporting reads (every k-th past maxReads), then their mates in the window; or every k-th read past the cap
+    const { reads, total, mates } = supportAndCap(best.reads.filter(r => r.e > start && r.s < end), chrom, maxReads, collapsed, support);
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
+    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts);
   }
   override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
     const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };

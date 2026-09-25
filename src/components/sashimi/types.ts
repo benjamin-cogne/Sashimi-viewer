@@ -141,6 +141,11 @@ export interface SampleCoverage {
   /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
   sampled?: { rate: number; total: number; decoded: number };
   /**
+   * stretches of the window the source holds no data for (0-based half-open, sorted), drawn hatched rather than as a
+   * depth of 0; `note` says why, in the source's words
+   */
+  unavailable?: { spans: [number, number][]; note: string };
+  /**
    * Reads counted and the fraction of them carrying a splice gap (CIGAR N): library-type evidence. A source that keeps its
    * counts between requests gives it over everything it has counted for the sample on this chromosome, not just the window.
    */

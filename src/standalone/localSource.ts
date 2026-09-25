@@ -17,10 +17,8 @@ import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, 
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
-import { callSites, collapseReads } from './collapse';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
-import { phaseReads } from './phasing';
-import { haplotagCounts, windowHaplotypes } from './haplotypes';
+import { answerReads, isLongRead } from './readsWindow';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
 import { getCommonSnps } from './snps';
@@ -290,17 +288,7 @@ function withMate(a: AlignedRead, r: RawRead, own: string): AlignedRead {
   return a;
 }
 
-/**
- * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned bases only, not the skipped
- * introns (N) nor the deletions (D): a 2×100 RNA-seq read spliced over a 3 kb intron spans 3.2 kb of the genome but is
- * a short read (counting its intron took most RNA-seq tracks of multi-exon genes for long reads), and so is a 2×150 read
- * carrying an 8 kb deletion (the supporting reads of a deletion, shown alone, were taken for long reads).
- */
-export function isLongRead(reads: { b: [number, number][]; d: [number, number][] }[]): boolean {
-  if (!reads.length) return false;
-  const lens = reads.map(r => { let n = 0; for (const [a, b] of r.b) n += b - a; return n; }).sort((a, b) => a - b);
-  return lens[lens.length >> 1] > 1000;
-}
+export { isLongRead };
 
 /** Runs full variant scans away from the page's thread (see variantClient.ts); the data source hands them over. */
 export interface VariantScanner {
@@ -1120,22 +1108,8 @@ export class LocalDataSource implements SashimiDataSource {
     throwIfAborted(opts?.signal);
     const reads: AlignedRead[] = raw.map(r => withMate(encodeRead(r, ref, refStart), r, ownName));
     if (opts?.methylation && !collapsed && ref) readMethylation(reads, raw, cpgSites(refStart, ref));
-    const longReads = isLongRead(reads);
-    const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
-    const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), long_reads: longReads,
-      reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null, haplotags: haplotagCounts(reads) };
-    if (collapsed) {
-      if (opts?.haplotypes !== 'any') {
-        // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them
-        const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        const phaseOf = () => phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites);
-        const { phase, haplotypes } = windowHaplotypes(reads, start, end, ref, refStart, vaf, minIndel, opts?.phaseSource ?? 'auto', phaseOf, sites, longReads);
-        return { ...base, reads: [], sites, groups: [], phase, haplotypes };
-      }
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
-      return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
-    }
-    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
+    const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}),
+      reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null };
+    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts);
   }
 }
