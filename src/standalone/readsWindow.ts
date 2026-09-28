@@ -25,9 +25,11 @@ export function isLongRead(reads: { b: [number, number][]; d: [number, number][]
 
 /**
  * The reads a window answer keeps, from all the reads a source holds over it: with `support`, the reads supporting
- * that arc (every k-th past `maxReads`) and then their mates in the window; otherwise every k-th read past the cap
- * (40,000 in collapsed mode, at least 100 else). `total` counts the reads before the cap (the supporting ones with
- * `support`), `mates` the mates added.
+ * that arc (every k-th past `maxReads`) and then their mates in the window; otherwise every k-th fragment past the cap
+ * (40,000 reads in collapsed mode, at least 100 else), with all its reads: the two mates of a pair are kept or dropped
+ * together, as IGV's downsampling does, where every k-th read would have kept a read's mate about once in k. A fragment
+ * is the reads of one mate key (`mk`, two reads a stream links to each other) or else of one name. `total` counts the
+ * reads before the cap (the supporting ones with `support`), `mates` the mates added.
  */
 export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: number, collapsed: boolean, support: ReadsOptions['support'] | undefined):
   { reads: AlignedRead[]; total: number; mates: number } {
@@ -44,7 +46,14 @@ export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: numbe
     reads = [...hits, ...extra].sort((a, b) => a.s - b.s);
   } else {
     const cap = collapsed ? 40000 : Math.max(100, maxReads);
-    if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
+    if (reads.length > cap) {
+      const key = (r: AlignedRead) => r.mk ?? r.n;
+      const order = new Map<string, number>();
+      for (const r of reads) if (!order.has(key(r))) order.set(key(r), order.size);
+      const want = Math.max(1, Math.round(order.size * cap / reads.length)), step = order.size / want;
+      const chosen = new Set(Array.from({ length: want }, (_, i) => Math.floor(i * step)));
+      reads = reads.filter(r => chosen.has(order.get(key(r))!));
+    }
   }
   return { reads, total, mates };
 }

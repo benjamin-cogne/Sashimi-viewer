@@ -18,6 +18,7 @@ import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from '
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
+import { nameHash } from './mates';
 import { answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
@@ -131,6 +132,8 @@ const RECORD_CACHE_BYTES = 128 * 1024 * 1024, RECORD_CACHE_IDLE_MS = 45_000;
 interface RecordView<R> {
   start(r: R): number;
   flags(r: R): number;
+  /** the read name (QNAME) */
+  name(r: R): string;
   mapq(r: R): number;
   nh(r: R): number | null;
   /** the CIGAR packed as BAM stores it (length << 4 | op) */
@@ -178,7 +181,7 @@ const bigInsertion = (cigar: string) => { INS_RE.lastIndex = 0; let m: RegExpExe
 /** BAM 4-bit base codes (SAM spec: =ACMGRSVTWYHKDBN) as character codes. */
 const NIBBLE_CODES = Uint8Array.from('=ACMGRSVTWYHKDBN', c => c.charCodeAt(0));
 const BAM_VIEW: RecordView<any> = {
-  start: r => r.start, flags: r => r.flags, mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  start: r => r.start, flags: r => r.flags, name: r => r.name ?? '', mapq: r => r.mq ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => r.NUMERIC_CIGAR, mateRef: r => r.next_refid, matePos: r => r.next_pos, tlen: r => r.template_length, sa: r => r.getTag('SA'),
   seqCodes: (r, buf) => {
     const n = r.seq_length ?? 0;
@@ -205,7 +208,7 @@ const BAM_VIEW: RecordView<any> = {
  */
 const cramBases = (r: any): string => (typeof r.getReadBases === 'function' ? r.getReadBases() : r.readBases) ?? '';
 const CRAM_VIEW: RecordView<any> = {
-  start: r => r.start, flags: r => r.flags, mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
+  start: r => r.start, flags: r => r.flags, name: r => r.readName ?? '', mapq: r => r.mappingQuality ?? 255, nh: r => tagNumber(r.getTag('NH')),
   ops: r => packCigar(cramCigar(r.readFeatures, r.readLength, r.lengthOnRef ?? 0)),
   mateRef: r => r.nextSequenceId ?? -1, matePos: r => r.nextStart ?? 0, tlen: r => r.templateLength ?? r.templateSize ?? 0, sa: r => r.getTag('SA'),
   seqCodes: (r, buf) => {
@@ -236,6 +239,8 @@ interface ScanOptions {
   structural?: boolean; signal?: AbortSignal;
   /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
   filter?: (light: RawRead) => boolean;
+  /** sample fragments rather than reads: the two mates of a pair are kept or dropped together (see `scan`) */
+  pairs?: boolean;
 }
 
 /** Rejects with the standard AbortError once the caller has given up on the request. */
@@ -532,17 +537,22 @@ export class LocalDataSource implements SashimiDataSource {
    * Reads of [start, end) passing the flag (and uniqueness) filters, decoded tile by tile, at most about `cap`
    * of them: when the kept reads outgrow the cap they are thinned to every other one and the rate doubles, so
    * `kept` is always the reads whose rank (among the passing reads, in file order) is a multiple of `rate` — a
-   * systematic sample that is exact (rate 1) whenever the region holds no more than `cap` reads. A read spanning
+   * systematic sample that is exact (rate 1) whenever the region holds no more than `cap` reads. With `opts.pairs` the
+   * sample is drawn by read name instead: a read is kept when the hash of its name (`nameHash`) is a multiple of
+   * `rate`, so the two mates of a pair share their fate, as in IGV's downsampling and `samtools view --subsample`. A
+   * systematic sample by rank takes each mate on its own: above the cap only about 1 kept read in `rate` kept its mate.
+   * The sample is then pseudo-random rather than evenly spaced, of the same expected size. A read spanning
    * two tiles is counted in the tile holding its start (or the first tile when it starts before the window).
    * The tile width comes from the index, and the thread is handed back between tiles, so neither the memory
    * nor the pauses grow with the depth of the library. `opts.signal` drops the decoding and the fetch in flight.
    */
   private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean, opts: ScanOptions = {}): Promise<Scan> {
-    const { structural = false, signal, filter } = opts;
+    const { structural = false, signal, filter, pairs = false } = opts;
     const loc = await this.locate(id, chrom);
     if (!loc) return { total: 0, rate: 1, kept: [] };
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     let kept: RawRead[] = [], total = 0, rate = 1, seen = 0;
+    let hashes: number[] = [];   // with `pairs`: the name hash of each kept read
     const bytes = await this.indexBytes(loc, start, end, signal);
     const tileBp = this.tileSize(id, start, end, bytes);
     for (let ts = start; ts < end; ts += tileBp) {
@@ -557,7 +567,18 @@ export class LocalDataSource implements SashimiDataSource {
         if (!keepFlags(view.flags(r))) continue;
         if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
         if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
-        if (total % rate === 0) {
+        if (pairs) {
+          // a record without a name (a CRAM written without them) is a fragment of its own
+          const h = nameHash(view.name(r) || `#${total}`);
+          if ((h & (rate - 1)) === 0) {
+            kept.push(view.raw(r, light, structural, loc.o.refNames)); hashes.push(h);
+            if (kept.length > cap && rate < 2 ** 30) {
+              rate *= 2;
+              kept = kept.filter((_, i) => (hashes[i] & (rate - 1)) === 0);
+              hashes = hashes.filter(x => (x & (rate - 1)) === 0);
+            }
+          }
+        } else if (total % rate === 0) {
           kept.push(view.raw(r, light, structural, loc.o.refNames));
           if (kept.length > cap) { kept = kept.filter((_, i) => i % 2 === 0); rate *= 2; }
         }
@@ -1129,10 +1150,12 @@ export class LocalDataSource implements SashimiDataSource {
     const support = !collapsed ? opts?.support : undefined;
     const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
-    // filtered and sampled before names, sequences and qualities are decoded: only the reads shown pay for them; the
-    // pair fields (mate position, template length) come along so that mates can be drawn linked
+    // filtered and sampled before sequences and qualities are decoded: only the reads shown pay for them; the pair
+    // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
+    // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
+    // are sampled as reads, and their mates in the window added afterwards
     const scanned = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false,
-      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined });
+      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
     if (support) {
