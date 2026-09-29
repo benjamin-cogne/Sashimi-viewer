@@ -6,8 +6,6 @@ interface ImportMetaEnv {
   readonly VITE_DEV_BRANCH?: string;
   readonly VITE_DEV_SHA?: string;
   readonly VITE_DEV_DATE?: string;
-  /** "1" shows the structural-variant hints on a build without the DEV MODE banner (they otherwise need ?sv=1). */
-  readonly VITE_SV_HINTS?: string;
   /** URL of the stable build, linked from the DEV MODE banner. */
   readonly VITE_STABLE_URL?: string;
 }

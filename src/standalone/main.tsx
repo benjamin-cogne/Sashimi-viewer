@@ -27,13 +27,13 @@ const VERSION = __APP_VERSION__;
 /** short version for the badge: v1.1 */
 const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
 /**
- * Structural-variant hints on DNA tracks (arcs, pills, panel): hidden everywhere in 1.1 until they mature, including on
- * the dev page. Set SV_HINTS_IN_DEV to true on the dev branch after the 1.1 merge to show them on dev builds again;
- * ?sv=1 on the URL shows them on any build, and VITE_SV_HINTS=1 at build time on a page built without the DEV MODE banner.
+ * Structural-variant hints on DNA tracks (arcs, pills, panel): shown by default on the dev branch, whatever the build
+ * (the dev page, a page built locally); ?sv=0 on the URL hides them, ?sv=1 shows them. The release hides them until
+ * they mature: set SV_HINTS_DEFAULT to false when dev is merged into main for a release.
  */
-const SV_HINTS_IN_DEV = true;
-const SV_HINTS = (import.meta.env.VITE_DEV_MODE === '1' && SV_HINTS_IN_DEV) || import.meta.env.VITE_SV_HINTS === '1'
-  || new URLSearchParams(location.search).get('sv') === '1';
+const SV_HINTS_DEFAULT = true;
+const svParam = new URLSearchParams(location.search).get('sv');
+const SV_HINTS = svParam === '1' || (svParam !== '0' && SV_HINTS_DEFAULT);
 const DEV = import.meta.env.VITE_DEV_MODE === '1'
   ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
   : null;
