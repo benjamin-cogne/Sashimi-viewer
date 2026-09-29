@@ -9,6 +9,18 @@ import type { Breakpoint, RescuedClips, TranscriptData, SampleCoverage, Boundary
 
 export interface SampleRef { id: number; name: string }
 
+/**
+ * Widest views whose reads the reads track loads (IGV's "visibility window"), chosen in the viewer; the default first.
+ * The track draws at most a fixed number of reads, sampled over the window, so a wider window shows them sparser.
+ */
+export const READS_WINDOW_CHOICES_BP = [100_000, 250_000, 500_000, 1_000_000, 2_000_000] as const;
+export const READS_WINDOW_DEFAULT_BP = READS_WINDOW_CHOICES_BP[0];
+/** Widest region a reads request may cover: the widest view plus the pan margins the viewer adds (a quarter of it each side). */
+export const READS_REGION_MAX_BP = READS_WINDOW_CHOICES_BP[READS_WINDOW_CHOICES_BP.length - 1] * 3 / 2;
+/** A saved reads window, when it is one of the choices; otherwise the default. */
+export const readsWindowOf = (bp: number | undefined): number =>
+  (READS_WINDOW_CHOICES_BP as readonly number[]).includes(bp ?? 0) ? bp! : READS_WINDOW_DEFAULT_BP;
+
 /** Noise handling of a reads request. */
 export interface ReadsOptions {
   /** for long reads (median aligned length above 1 kb): indels shorter than this are neither called nor collapsed on */

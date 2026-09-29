@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { LibraryType, StructuralEvidence } from './sashimi/types';
-import type { SashimiDataSource } from './sashimi/datasource';
+import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
@@ -121,6 +121,8 @@ export interface ViewerSettings {
   clippedBases?: boolean;
   /** reads track: inserted bases written inside the insertion marks (default off) */
   insertedBases?: boolean;
+  /** reads track: widest view whose reads are loaded, bp (one of READS_WINDOW_CHOICES_BP; absent = 100 kb) */
+  readsWindow?: number;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
   /**
@@ -345,7 +347,6 @@ function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number
 }
 
 // Reads track (IGV-like alignment view)
-const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
 const READS_MAX_ROWS = 120;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
@@ -1053,6 +1054,7 @@ export default function SashimiViewer({
   const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
   const [phaseSource, setPhaseSource] = useState<'auto' | 'reads'>(init.phaseSource === 'reads' ? 'reads' : 'auto');
   const [readsGroup, setReadsGroup] = useState<'none' | 'hp'>(init.readsGroup === 'hp' ? 'hp' : 'none');
+  const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
@@ -1701,7 +1703,7 @@ export default function SashimiViewer({
     if (!readsSampleIds.length) return;
     const v = viewRef.current;
     const span = v.end - v.start;
-    if (span > READS_MAX_VIEW_BP) return;
+    if (span > readsWindow) return;
     const mode = collapseReads ? 'collapsed' : 'reads';
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
@@ -1750,7 +1752,7 @@ export default function SashimiViewer({
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow]); // eslint-disable-line react-hooks/exhaustive-deps
   // a filter on the supporting reads of an arc belongs to its chromosome
   useEffect(() => { setReadsSupport(null); }, [currentChrom]);
 
@@ -2388,7 +2390,7 @@ export default function SashimiViewer({
     );
     const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[], loaded: false });
 
-    if (span > READS_MAX_VIEW_BP) return message(`zoom in below ${formatBp(READS_MAX_VIEW_BP)} to load reads (window is ${formatBp(span)})`);
+    if (span > readsWindow) return message(`zoom in below ${formatBp(readsWindow)} to load reads (window is ${formatBp(span)}), or widen the reads window`);
     const mode = collapseReads ? 'collapsed' : 'reads';
     const entry = readsData[sid];
     const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
@@ -3182,7 +3184,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -5205,14 +5207,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -5332,7 +5334,7 @@ export default function SashimiViewer({
                       { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
                       { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
                       ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
-                      { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.` },
+                      { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set next to it).` },
                     ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map((l, i) => (
                       <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
                         onClick={() => l.set(!l.on)}
@@ -5349,7 +5351,15 @@ export default function SashimiViewer({
                 </>
               ) : (
                 <Toggle checked={showReads} onChange={setShowReads} label="Reads"
-                  title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
+                  title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set next to it).`} />
+              )}
+              {showReads && (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}>
+                  ≤
+                  <select value={readsWindow} onChange={e => setReadsWindow(readsWindowOf(Number(e.target.value)))} className={`${t.inp} px-1 py-0.5 text-xs rounded border`} aria-label="Reads window">
+                    {READS_WINDOW_CHOICES_BP.map(bp => <option key={bp} value={bp}>{formatBp(bp)}</option>)}
+                  </select>
+                </label>
               )}
               {showReads && tracks.length > 1 && (
                 <select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')}

@@ -343,6 +343,13 @@ Arcs can be hidden, resized and dragged like junction arcs, and DNA groups pool 
 their members. Long reads carry deletions, split reads and clips; short-read pairs add the
 discordant pairs (CRAM mate fields are read when the file records them).
 
+**Reads window.** The reads track loads the reads of views up to 100 kb wide by default (IGV's
+*visibility window*); wider, it asks to zoom in. The **≤** menu next to the *Reads* switch widens it
+to 250 kb, 500 kb, 1 Mb or 2 Mb, to follow a large structural variant, or long reads, across a wider
+view. The track still draws at most the same number of reads, sampled over the window, so a wider
+window shows them sparser; each move of the view reads that much more of the file. The setting is
+kept with the view, in sessions and in the HTML export.
+
 **Pairs.** In the reads track the two mates of a pair share one row and are joined by a line
 (*Pairs*, on by default, next to *Reads*); the tooltip of a read gives its mate's position and the
 insert size. Reads of a **discordant pair** are coloured by class (the fill, and the line to the
@@ -837,10 +844,10 @@ coverage or reads) with a bar over the total number of steps; the download start
 closes, so the tab should stay open. The dialog that opens on *Export HTML* chooses the window exported around each view, for the
 coverage, junctions and retention counts as much as for the reads (the view as shown; the view with
 a half-width margin on each side, the default; or the widest window the viewer itself loads, up to
-2 Mb for coverage and 100 kb for reads) and the number of reads per sample (up to 20,000 as
+2 Mb for coverage and the view's reads window for reads, 100 kb unless widened) and the number of reads per sample (up to 20,000 as
 displayed, about 150 kB per sample and view; up to 100,000 for deep windows, under 1 MB; or every
-read of the window, a few MB for a deep window). Views wider than 100 kb have no reads track and
-are skipped.
+read of the window, a few MB for a deep window). Views wider than their reads window have no reads track
+and are skipped.
 
 What the export does not carry: the exon-depth statistics (they need the alignments; the recipient
 can add the BAM/CRAM files and the page then reads them as usual), reads of views whose reads track
@@ -904,7 +911,7 @@ proxy (proxies usually allow browsers while blocking servers):
 **Browsers.** Current Microsoft Edge, Google Chrome or Firefox. Internet Explorer and very old
 browsers show a plain notice instead of a blank page.
 
-**Limits.** Coverage windows up to 5 Mb, reads track up to 250 kb, 10,000 drawn reads (40,000 when
+**Limits.** Coverage windows up to 5 Mb, reads track up to 2 Mb (100 kb unless widened; see *Reads window*), 10,000 drawn reads (40,000 when
 collapsing). Deep genes over large windows take a few seconds because decoding runs in the page.
 Files can be tens of gigabytes: only the indexed slices of the window are read.
 

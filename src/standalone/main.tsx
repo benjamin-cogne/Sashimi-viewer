@@ -8,6 +8,7 @@ import '../plugins';   // registered file kinds (fileKinds.ts), before anything 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
+import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
@@ -67,8 +68,8 @@ const stateOfTab = (t: ViewTab): ViewerState => t.state ?? {
 const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? null });
 /** Largest window fetched around a view (the viewer's own rule), for the export. */
 const MAX_FETCH_BP = 2_000_000;
-/** The reads track exists below this window size (the viewer's rule); the export follows it. */
-const READS_MAX_VIEW_BP = 100_000;
+/** The reads track of a view exists below its reads window (the viewer's rule, 100 kb unless set otherwise); the export follows it. */
+const readsWindowOfView = (st: ViewerState) => readsWindowOf(st.readsWindow);
 /** Choices of the export dialog: the window exported around each view (coverage, junctions, retention and reads alike) and the reads per sample. */
 interface ExportOptions { window: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
 const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 20000, dense: 100000, all: Number.MAX_SAFE_INTEGER };
@@ -448,7 +449,7 @@ function App() {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
       // one step per view (annotation), per sample coverage, per sample reads when exported, plus the file itself
-      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= READS_MAX_VIEW_BP ? samples.length : 0), 0);
+      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= readsWindowOfView(t.state!) ? samples.length : 0), 0);
       progress('Preparing…');
       const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
@@ -494,9 +495,10 @@ function App() {
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
         if (st.reads) {
-          if (span > READS_MAX_VIEW_BP) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above the ${READS_MAX_VIEW_BP / 1000} kb reads limit)`);
+          const readsMax = readsWindowOfView(st);
+          if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
           else {
-            const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((READS_MAX_VIEW_BP - span) / 2);
+            const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
             const rs = Math.max(0, vs - half), re = ve + half;
             reads = {};
             for (const smp of samples) {
@@ -963,12 +965,12 @@ function App() {
             <div className="px-4 py-3 space-y-3">
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Window exported around each view · coverage, junctions, retention counts and reads</legend>
-                {([['view', 'the view as shown: the recipient cannot pan outside it'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest window: what the viewer itself loads around the view (up to ${MAX_FETCH_BP / 1e6} Mb for coverage and junctions, ${READS_MAX_VIEW_BP / 1000} kb for reads)`]] as const).map(([v, label]) => (
+                {([['view', 'the view as shown: the recipient cannot pan outside it'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest window: what the viewer itself loads around the view (up to ${MAX_FETCH_BP / 1e6} Mb for coverage and junctions, the view's reads window for reads, 100 kb unless set otherwise)`]] as const).map(([v, label]) => (
                   <label key={v} className="flex items-center gap-2"><input type="radio" name="exportWindow" checked={exportDialog.window === v} onChange={() => setExportDialog({ ...exportDialog, window: v })} />{label}</label>
                 ))}
               </fieldset>
               <div className="font-semibold">Reads track · {viewsWithReads ? `${viewsWithReads} view${viewsWithReads === 1 ? '' : 's'} with the reads track on` : 'no view has the reads track on'}</div>
-              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
+              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views wider than their reads window (100 kb unless set otherwise, next to the Reads switch) have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Reads per sample in that window</legend>
                 {([['shown', 'as displayed: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (

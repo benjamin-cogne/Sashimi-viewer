@@ -11,7 +11,7 @@ import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
 import { BlobFile } from 'generic-filehandle2';
 import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
-import type { CoverageOptions, ReadsOptions, SashimiDataSource, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
+import { READS_REGION_MAX_BP, type CoverageOptions, type ReadsOptions, type SashimiDataSource, type SampleRef, type VariantScan, type VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
@@ -54,7 +54,7 @@ const pgName = (pg: string[]): string => {
 };
 
 const MAX_REGION_BP = 5_000_000;
-const MAX_READS_REGION_BP = 250_000;
+const MAX_READS_REGION_BP = READS_REGION_MAX_BP;
 
 // ---------------- Deep regions ----------------
 // A very deep library (targeted RNA-seq, a highly expressed gene) can hold millions of records over one gene,
