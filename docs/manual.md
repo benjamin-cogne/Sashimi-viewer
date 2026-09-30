@@ -180,8 +180,8 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   viewer reads both:
   - split reads;
   - clusters of reads clipped at one position, whose clipped bases it places by realignment on the
-    reference. The search reaches 1 Mb on each side of the window with a FASTA, or 500 kb in all through
-    the web APIs.
+    reference. The search reaches 1 Mb on each side of the window with a FASTA. Through the web APIs it
+    covers 500 kb in all, centred on the view, so a fusion stays drawn when the view widens.
 
   A placed junction is drawn as a solid fuchsia arc with its reads on the pill. Each end sits on the
   exon boundary within 5 bp of the evidence: breakpoints are rounded to 5 bp, and the bases two partners
@@ -191,6 +191,11 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   - inversion;
   - duplication-type: a fusion, or within one gene a back-splice (circular RNA) or a tandem duplication;
   - deletion-type: kept only when it joins two genes, since within one gene it is splicing.
+
+  A junction shorter than 1 kb, or with neither end on an exon boundary, is left out. RNA libraries carry
+  fold-back and template-switch chimeras: reads whose clipped bases are the reverse complement of the
+  sequence a few bases to a few hundred bases away, which would otherwise read as dozens of tiny
+  inversions.
 
   Split alignments on another chromosome show as `→ chr` pills. Clicking an arc gives every sample's
   reads. Pairs are left out on RNA tracks, because the introns between two mates make them look

@@ -1112,26 +1112,31 @@ export class LocalDataSource implements SashimiDataSource {
       const out = result(w, sl);
       if (structural) {
         // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
-        // breakpoints seen: fetched when the window has something to place or rescue, always with a FASTA, up to
-        // REALIGN_MAX_BP through the web APIs
+        // breakpoints seen: fetched when the window has something to place or rescue, the whole window with a FASTA;
+        // through the web APIs REALIGN_MAX_BP of it at most, around the view (a wide view then keeps its placed clips,
+        // those of its margins beyond it staying unplaced)
         const rna = structural === 'rna';
         let ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, null, sl.insertMedian, rna);
-        if (this.reference.fasta || w.end - w.start <= REALIGN_MAX_BP) {
+        {
           const hasArcs = ev.splits.length + ev.deletions.length + (ev.duplications?.length ?? 0) + (ev.inversions?.length ?? 0) > 0;
           // an insertion in a CIGAR is a tandem copy when its bases are the reference next to it: the reference is read
           // that much further on each side (up to TANDEM_MAX_BP), so that a copy starting before the window is found
           const insLen = Math.min(TANDEM_MAX_BP, longestPlaceableInsertion(sl.sv));
           if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv)) || insLen) {
             try {
-              const flank = Math.max(insLen ? insLen + 200 : 0,
-                !rna ? 0 : this.reference.fasta ? RNA_REALIGN_FLANK_BP : Math.floor((REALIGN_MAX_BP - (w.end - w.start)) / 2));
+              const flank = Math.max(insLen ? insLen + 200 : 0, !rna ? 0 : this.reference.fasta ? RNA_REALIGN_FLANK_BP : REALIGN_MAX_BP);
               let rs = Math.max(0, w.start - flank), re = w.end + flank;
+              if (!this.reference.fasta && re - rs > REALIGN_MAX_BP) {
+                const mid = Math.floor((core.start + core.end) / 2);
+                rs = Math.max(0, mid - REALIGN_MAX_BP / 2); re = rs + REALIGN_MAX_BP;
+              }
               let wideErr = '';
+              const asked = `${chrom}:${rs + 1}-${re}`;
               let seq = await this.getReferenceSeq(chrom, rs, re).catch(e => { wideErr = String(e?.message ?? e); return null; });
               // the window alone when the wider stretch cannot be had: a tandem copy is still told by its end next to the insertion
-              if (!seq && (rs < w.start || re > w.end)) { rs = w.start; re = w.end; seq = await this.getReferenceSeq(chrom, rs, re); }
+              if (!seq && (rs < w.start || re > w.end) && (this.reference.fasta || w.end - w.start <= REALIGN_MAX_BP)) { rs = w.start; re = w.end; seq = await this.getReferenceSeq(chrom, rs, re); }
               if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian, rna);
-              if (wideErr && ev.diagnostics) ev.diagnostics.referenceError = `${chrom}:${Math.max(0, w.start - flank) + 1}-${w.end + flank}: ${wideErr}`;
+              if (wideErr && ev.diagnostics) ev.diagnostics.referenceError = `${asked}: ${wideErr}`;
             } catch (e) {
               console.warn('reference for clip realignment not available:', e);
               if (ev.diagnostics) ev.diagnostics.referenceError = String((e as Error)?.message ?? e);

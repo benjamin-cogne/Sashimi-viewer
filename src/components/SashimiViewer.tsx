@@ -239,6 +239,13 @@ const PSEUDO_EXON_COLOR = '#7c3aed';
 const LONG_RANGE_COLOR = '#c026d3';
 /** Fusion junctions of an RNA track from split reads and clipped reads placed by realignment (an end within this many bases of an exon boundary is drawn on it). */
 const FUSION_SNAP_BP = 5;
+/**
+ * Shortest fusion junction drawn on an RNA track. RNA libraries carry fold-back and template-switch chimeras: reads
+ * clipped where their clipped bases are the reverse complement of the sequence a few to a few hundred bases away,
+ * which read as tiny inversions (MED25: dozens of them, 5-460 bp, in every sample). A fusion across an inversion,
+ * a deletion or a duplication joins parts far apart.
+ */
+const FUSION_MIN_BP = 1000;
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
@@ -1567,7 +1574,8 @@ export default function SashimiViewer({
    * bases the two partners share at a junction let the aligner place it a few bases either way) of the queried gene, a
    * gene of the view or a gene looked up at the far end, and named after it. The partner whose end is a splice donor
    * comes first (5′). A deletion-type arc is kept only when it joins two genes (or leaves the gene for no gene): inside
-   * one gene it is splicing, which the junction arcs already show. Null when it is left out.
+   * one gene it is splicing, which the junction arcs already show. Arcs under FUSION_MIN_BP (library artefacts) and
+   * those with no end on an exon boundary are left out too. Null when it is left out.
    */
   const fusionOf = useCallback((j: SvArc, kind: 'split' | 'duplication' | 'inversion') => {
     const models: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
@@ -1585,6 +1593,8 @@ export default function SashimiViewer({
     };
     const a = endOf(j.start), b = endOf(j.end);
     if (kind === 'split' && a.gene === b.gene) return null;
+    // a fusion junction joins parts far apart, and at least one of its ends is a splice site of the model
+    if (Math.abs(b.pos - a.pos) < FUSION_MIN_BP || !(a.snapped || b.snapped)) return null;
     const known = (p: number) => (p >= viewStart && p < viewEnd) || farGenes.has(`${currentChrom}:${p}`);
     const name = (e: End) => e.gene
       ? `${e.gene}${e.exon != null ? ` exon ${e.exon}` : ' (off its exons)'}`
