@@ -162,6 +162,19 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   *Min %*, hiding events below that usage; hidden and off-screen junctions still count in the
   denominators, so a canonical arc below 100 % lists in its tooltip the other events at its intron,
   shown or not.
+  **Long-range junctions** are the exception. These are junctions with one end in the gene (its
+  displayed model) and the other outside it, not annotated in another transcript of the gene:
+  read-through or fusion transcripts joining the gene to a neighbour (after a deletion or a tandem
+  duplication), or an unannotated first or last exon. Such a junction holds a tiny share of the reads
+  at the gene's exon end next to its canonical junction (8 fusion reads against 1,500 canonical ones
+  is 0.5 %), so it is shown from its read count (*Min reads*, 3 by default, set in the *Reads* mode)
+  whatever *Min %*. It is drawn as a dashed fuchsia arc labelled with its reads. Its tooltip names the
+  two genes in transcription order with their exons (`GENEA exon 2 → GENEB exon 1`), and whether they
+  lie on the same strand; the gene at the far end is looked up when it lies outside the view. No
+  reading frame is given, since a fusion's frame needs both partners' coding sequences. The viewer
+  sees such a junction only when the aligner wrote it as one spliced read (a CIGAR `N`): STAR does so
+  within its maximum intron size (589,824 bp by default) when chimeric detection is off. Chimeric
+  alignments (supplementary records with an SA tag) are not drawn on RNA tracks.
   With two groups or more, each percentage is followed by its **difference with every other
   group**, in points and in that group's colour (`+10 %`, `−10 %`); the tooltip names the group.
   Group colours are chosen in the *Groups…* dialog (click the swatch; *default* returns to the

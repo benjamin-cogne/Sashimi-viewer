@@ -235,6 +235,8 @@ interface TrackData {
 interface SampleGroup { id: number; name: string; sampleIds: number[]; color?: string }
 const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
 const PSEUDO_EXON_COLOR = '#7c3aed';
+/** Junctions leaving the queried gene (read-through or fusion transcripts): drawn from their reads, whatever their usage share. */
+const LONG_RANGE_COLOR = '#c026d3';
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
@@ -1508,6 +1510,55 @@ export default function SashimiViewer({
     return { model: best.model, info: best.info, foreign: best.foreign };
   }, [tx, neighbours]);
 
+  /**
+   * Genes at the far end of the junctions that leave the queried gene, by position ("chrom:pos", 0-based: the first
+   * base of the exon reached, or the last one of the exon left), looked up once each; an empty list is no gene there.
+   */
+  const [farGenes, setFarGenes] = useState<Map<string, NeighbourModel[]>>(() => new Map());
+  const farPending = useRef(new Set<string>());
+  /**
+   * A junction with one end inside the queried gene (its displayed model) and the other outside: a read-through or
+   * fusion transcript joining the gene to a neighbour (a deletion, a tandem duplication), or an unannotated first or last
+   * exon. Its share of the reads at the gene's exon end is tiny next to the canonical junction, so it is shown from its
+   * read count (Min reads) rather than its usage share, in its own colour. Null for a junction of the gene (both ends
+   * inside, or annotated in another transcript of it) and for the own junctions of an overlapping neighbour gene.
+   */
+  const longRangeOf = useCallback((j: JunctionArc) => {
+    if (!tx) return null;
+    const startIn = j.start > tx.start && j.start <= tx.end, endIn = j.end >= tx.start && j.end < tx.end;
+    if (startIn === endIn || altJunctionIndex.has(junctionKey(j))) return null;
+    const ctx = junctionContext(j);
+    if (ctx.foreign && (ctx.info.cls === 'canonical' || ctx.info.cls === 'exon_skipping')) return null;
+    const farAtStart = !startIn;
+    const farPos = farAtStart ? j.start - 1 : j.end;
+    const nearInfo = classifyJunction(j, tx);
+    const nearExon = farAtStart ? nearInfo.rightExon : nearInfo.leftExon;
+    const genes = farGenes.get(`${currentChrom}:${farPos}`);
+    // the partner: a gene whose exon boundary the junction reaches, else any gene covering the far end
+    let partner: NeighbourModel | null = null, partnerExon: number | null = null;
+    for (const m of genes ?? []) {
+      const info = classifyJunction(j, m);
+      const ex = farAtStart ? info.leftExon : info.rightExon;
+      if (ex != null && partnerExon == null) { partner = m; partnerExon = ex; }
+      else if (!partner) partner = m;
+    }
+    return { farAtStart, farPos, nearExon, partner, partnerExon, known: genes != null };
+  }, [tx, altJunctionIndex, junctionContext, farGenes, currentChrom]);
+  /** The long-range junction of an arc in words: the two genes in transcription order (5′ partner first), with their exons. */
+  const longRangeLabel = useCallback((j: JunctionArc, lr: NonNullable<ReturnType<typeof longRangeOf>>): string => {
+    const me = `${tx?.geneName ?? 'the gene'}${lr.nearExon != null ? ` exon ${lr.nearExon}` : ' (unannotated site)'}`;
+    const farWhere = `${currentChrom}:${(lr.farPos + 1).toLocaleString('en-US')}`;
+    const other = lr.partner
+      ? `${lr.partner.geneName}${lr.partnerExon != null ? ` exon ${lr.partnerExon}` : ' (inside the gene, off its exon boundaries)'}`
+      : lr.known ? `no annotated gene (${farWhere})` : `${farWhere} (looking up the gene there…)`;
+    const [left, right] = lr.farAtStart ? [other, me] : [me, other];
+    const plus = (tx?.strand ?? 1) > 0;
+    const strand = lr.partner && tx ? (lr.partner.strand === tx.strand ? 'same strand' : 'opposite strand: not a sense read-through') : '';
+    return `long-range junction, leaves ${tx?.geneName ?? 'the gene'}: ${plus ? `${left} → ${right}` : `${right} → ${left}`}` +
+      `${strand ? ` (${strand})` : ''} · read-through or fusion transcript?` +
+      `\nshown from its read count (Min reads), whatever its share of the reads at the exon end (Min usage)`;
+  }, [tx, currentChrom]);
+
   // ---- Coverage loading (with margin, stale-response protection) ----
   const viewRef = useRef({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly });
   viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly };
@@ -1541,6 +1592,27 @@ export default function SashimiViewer({
   const wantsStructuralRef = useRef((sid: number) => sampleTypes?.[sid] !== 'rna');
   wantsStructuralRef.current = (sid: number) => sampleTypes?.[sid] !== 'rna';
   const isDnaTrack = useCallback((t: TrackData) => !t.gtex && (t.group ? t.group.dna : isDnaSample(t.sampleId)), [isDnaSample]);
+  // the genes at the far end of the long-range junctions shown (at most 20 lookups at a time; cached by the source)
+  useEffect(() => {
+    if (!tx) return;
+    const want: number[] = [];
+    for (const t of tracks) {
+      if (t.gtex || isDnaTrack(t)) continue;
+      for (const j of t.junctions) {
+        if (j.count < minJunctionCount) continue;
+        const lr = longRangeOf(j);
+        const k = lr && `${currentChrom}:${lr.farPos}`;
+        if (lr && !lr.known && !farPending.current.has(k!) && !want.includes(lr.farPos)) want.push(lr.farPos);
+      }
+    }
+    for (const pos of want.slice(0, 20)) {
+      const k = `${currentChrom}:${pos}`, chrom = currentChrom;
+      farPending.current.add(k);
+      ds.getRegionGenes(chrom, pos + 1, pos + 1, currentGeneName)
+        .then(list => list.map(g => toNeighbourModel(g, chrom)), () => [])
+        .then(models => { farPending.current.delete(k); setFarGenes(prev => new Map(prev).set(k, models)); });
+    }
+  }, [tracks, tx, minJunctionCount, currentChrom, currentGeneName, isDnaTrack, longRangeOf]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
     const view = viewRef.current;
     const win = fetchWindowFor(view);
@@ -3279,6 +3351,8 @@ export default function SashimiViewer({
     frame: FrameInfo | null;
     /** structural evidence arc of a DNA track */
     sv?: SvKind;
+    /** a junction leaving the queried gene (read-through or fusion transcript?) */
+    longRange?: boolean;
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
@@ -3392,7 +3466,7 @@ export default function SashimiViewer({
         if (hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)) return false;
         if (track.gtex) return j.count >= 1;
         const ev = trackEvents?.get(junctionKey(j));
-        if (ev && ev.shares.length) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
+        if (ev && ev.shares.length && !longRangeOf(j)) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
         return j.count >= minJunctionCount;
       };
       const visible = track.junctions.filter(j => passes(j) && j.end > viewStart && j.start < viewEnd);
@@ -3447,12 +3521,14 @@ export default function SashimiViewer({
         const key = junctionKey(j);
         const dragKey = `${track.sampleId}:${key}`;
         const { model, info, foreign } = junctionContext(j);
-        const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
+        const lr = track.gtex ? null : longRangeOf(j);
+        // no reading frame across two genes from one model: a fusion's frame needs both partners' coding sequences
+        const frame = model && info.cls !== 'canonical' && !lr ? junctionFrame(j, model, track.junctions) : null;
         const unique = idx === 0 && rnaOthers.length > 0 && !otherTrackJunctionKeys.has(key);
         const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
-        const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString('en-US')}`) : approx + j.count.toLocaleString('en-US');
+        const text = agg && !lr ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString('en-US')}`) : approx + j.count.toLocaleString('en-US');
         const labelScale = labelScales[`${currentChrom}:${key}`] ?? 1;
         const deltas = share ? otherGroups.map(o => ({ text: deltaText(share.pct - (o.group!.agg.events.get(key)?.shares[0]?.pct ?? 0)), color: o.group!.color, name: o.sampleName })) : [];
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
@@ -3474,6 +3550,7 @@ export default function SashimiViewer({
           const atStart = (side === 'left') !== reverse;
           const pos = atStart ? j.start : j.end;
           const exon = atStart ? info.leftExon : info.rightExon;
+          if (lr && atStart === lr.farAtStart && lr.partner) return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString('en-US')} (${lr.partner.geneName}${lr.partnerExon != null ? ` exon ${lr.partnerExon}` : ''})`;
           return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString('en-US')}${exon != null ? ` (exon ${exon})` : ''}`;
         };
         if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: partner('left') };
@@ -3485,7 +3562,7 @@ export default function SashimiViewer({
             : 'touches no annotated splice site: no share') +
             `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString('en-US')} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
           : null;
-        const title = (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
+        const title = (lr ? `${longRangeLabel(j, lr)}\n` : '') + (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
           `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
           (j.snapped ? `including ${j.snapped.toLocaleString('en-US')} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
@@ -3496,8 +3573,8 @@ export default function SashimiViewer({
           deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join('') +
           '\nclick the × on the pill to hide this arc (it still counts in the percentages)';
         return {
-          j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, labelScale, labelRange, agg,
+          j, key, dragKey, level, color: lr ? LONG_RANGE_COLOR : unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
+          strokeW: agg && !lr ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), longRange: !!lr, geom, label, edge, offset, frame, apexH, text, deltas, labelScale, labelRange, agg,
         };
       });
       // Structural evidence of a DNA track, drawn with the same arcs: deletions, split reads, discordant pairs
@@ -3630,7 +3707,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -3675,6 +3752,7 @@ export default function SashimiViewer({
     });
     if (anyRna) line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
+    if (anyRna && layouts.some(L => L.arcs.some(a => a.longRange))) line(LONG_RANGE_COLOR, true, 'long-range junction: leaves the gene (read-through or fusion?), shown from Min reads', 'l2c');
     if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     if (anyRna && showUsage && includeRetention) items.push({
       w: 38 + 'intron retention: unspliced reads through both boundaries, share of the intron\'s reads'.length * 5.3 + 14, el: (
