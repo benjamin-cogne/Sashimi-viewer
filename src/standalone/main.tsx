@@ -475,8 +475,10 @@ function App() {
         for (const smp of samples) {
           progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
-            // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural: smp.lib?.type === 'dna' }));
+            // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
+            // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
+            const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' && SV_HINTS ? 'rna' as const : false;
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -484,7 +486,7 @@ function App() {
         }
         // clipped reads of each DNA sample rescued at the breakpoints of the others, as the live page does
         if (ds.rescueClips) for (const [sid, c] of raw) {
-          if (!c.structural) continue;
+          if (!c.structural || samples.find(x => x.id === sid)?.lib?.type !== 'dna') continue;
           const others = [...raw].filter(([o, oc]) => o !== sid && oc.structural).flatMap(([, oc]) => breakpointsOf(oc.structural!));
           const mine = new Set(breakpointsOf(c.structural).map(b => `${b.kind}:${b.start}-${b.end}`));
           const cand = others.filter(b => !mine.has(`${b.kind}:${b.start}-${b.end}`));

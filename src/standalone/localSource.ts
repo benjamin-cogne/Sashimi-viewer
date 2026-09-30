@@ -65,6 +65,12 @@ const MAX_READS_REGION_BP = READS_REGION_MAX_BP;
 const EXON_USAGE_MAX_READS = 100_000;
 /** widest window whose reference is fetched from the web APIs to place clipped sequences (a local FASTA has no limit) */
 const REALIGN_MAX_BP = 500_000;
+/**
+ * How far on each side of the window an RNA library's clipped bases are looked for (its fusion partners, a gene the
+ * junction reaches across a deletion, a duplication or an inversion) with a FASTA; through the web APIs the window and
+ * both sides stay within REALIGN_MAX_BP. Beyond STAR's default longest intron (589,824 bp).
+ */
+const RNA_REALIGN_FLANK_BP = 1_000_000;
 /** bases read on each side of a breakpoint end when rescuing another sample's clipped reads (longer than a short read, shorter than most long-read clips matter) */
 const RESCUE_SPAN_BP = 400;
 /**
@@ -924,7 +930,7 @@ export class LocalDataSource implements SashimiDataSource {
    * elsewhere, on the same strand or far away) are kept whole; the others would add nothing to it
    * but their insert size, which the layer histograms instead.
    */
-  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean): void {
+  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna'): void {
     const flags = view.flags(r);
     if (!keepFlags(flags)) return;
     const unique = this.isUnique(id, view, r);
@@ -937,10 +943,11 @@ export class LocalDataSource implements SashimiDataSource {
     for (let k = 0; k < ops.length; k++) {
       const len = ops[k] >>> 4, op = ops[k] & 15;
       if ((op === 4 || op === 5) && len >= RESCUE_MIN_CLIP) keep = true;
-      else if ((op === 2 || op === 1) && len >= SV_MIN_DELETION) keep = true;
+      else if ((op === 2 || op === 1) && len >= SV_MIN_DELETION && structural !== 'rna') keep = true;
       if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) refLen += len;
     }
-    if (!keep && (flags & 1) && !(flags & 8)) {
+    // an RNA library's pairs are left out: the introns between two mates make most of them look discordant
+    if (!keep && structural !== 'rna' && (flags & 1) && !(flags & 8)) {
       const mate = view.mateRef(r);
       const rev = (flags & 16) !== 0, mp = view.matePos(r);
       // the mate elsewhere, on the same strand, far away, or facing away (← →: the reverse mate on the left), from the
@@ -1025,10 +1032,11 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean): CoverageState {
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna'): CoverageState {
     let st = this.coverage.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
-    if (!st || st.chrom !== chrom || (structural && !st.structural)
+    // records kept for a genomic library include those of an RNA library (split and clipped reads), not the reverse
+    if (!st || st.chrom !== chrom || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
       || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
       st = new CoverageState(chrom, structural);
@@ -1068,7 +1076,7 @@ export class LocalDataSource implements SashimiDataSource {
       throwIfAborted(signal);
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
-      const structural = !!opts?.structural;
+      const structural = opts?.structural || false;
       const st = this.coverageState(sampleId, loc.name, start, end, structural);
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
@@ -1106,7 +1114,8 @@ export class LocalDataSource implements SashimiDataSource {
         // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
         // breakpoints seen: fetched when the window has something to place or rescue, always with a FASTA, up to
         // REALIGN_MAX_BP through the web APIs
-        let ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, null, sl.insertMedian);
+        const rna = structural === 'rna';
+        let ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, null, sl.insertMedian, rna);
         if (this.reference.fasta || w.end - w.start <= REALIGN_MAX_BP) {
           const hasArcs = ev.splits.length + ev.deletions.length + (ev.duplications?.length ?? 0) + (ev.inversions?.length ?? 0) > 0;
           // an insertion in a CIGAR is a tandem copy when its bases are the reference next to it: the reference is read
@@ -1114,13 +1123,15 @@ export class LocalDataSource implements SashimiDataSource {
           const insLen = Math.min(TANDEM_MAX_BP, longestPlaceableInsertion(sl.sv));
           if (hasRealignableClips(sl.sv) || (hasArcs && hasRescuableClips(sl.sv)) || insLen) {
             try {
-              let rs = Math.max(0, w.start - (insLen ? insLen + 200 : 0)), re = w.end + (insLen ? insLen + 200 : 0);
+              const flank = Math.max(insLen ? insLen + 200 : 0,
+                !rna ? 0 : this.reference.fasta ? RNA_REALIGN_FLANK_BP : Math.floor((REALIGN_MAX_BP - (w.end - w.start)) / 2));
+              let rs = Math.max(0, w.start - flank), re = w.end + flank;
               let wideErr = '';
               let seq = await this.getReferenceSeq(chrom, rs, re).catch(e => { wideErr = String(e?.message ?? e); return null; });
               // the window alone when the wider stretch cannot be had: a tandem copy is still told by its end next to the insertion
               if (!seq && (rs < w.start || re > w.end)) { rs = w.start; re = w.end; seq = await this.getReferenceSeq(chrom, rs, re); }
-              if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian);
-              if (wideErr && ev.diagnostics) ev.diagnostics.referenceError = `${chrom}:${Math.max(0, w.start - insLen - 200) + 1}-${w.end + insLen + 200}: ${wideErr}`;
+              if (seq) ev = structuralEvidence(sl.sv, loc.name, w.start, w.end, 1, { start: rs, seq }, sl.insertMedian, rna);
+              if (wideErr && ev.diagnostics) ev.diagnostics.referenceError = `${chrom}:${Math.max(0, w.start - flank) + 1}-${w.end + flank}: ${wideErr}`;
             } catch (e) {
               console.warn('reference for clip realignment not available:', e);
               if (ev.diagnostics) ev.diagnostics.referenceError = String((e as Error)?.message ?? e);

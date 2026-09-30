@@ -237,6 +237,8 @@ const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - 
 const PSEUDO_EXON_COLOR = '#7c3aed';
 /** Junctions leaving the queried gene (read-through or fusion transcripts): drawn from their reads, whatever their usage share. */
 const LONG_RANGE_COLOR = '#c026d3';
+/** Fusion junctions of an RNA track from split reads and clipped reads placed by realignment (an end within this many bases of an exon boundary is drawn on it). */
+const FUSION_SNAP_BP = 5;
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
@@ -1559,6 +1561,43 @@ export default function SashimiViewer({
       `\nshown from its read count (Min reads), whatever its share of the reads at the exon end (Min usage)`;
   }, [tx, currentChrom]);
 
+  /**
+   * A structural arc of an RNA track (split reads, clipped reads placed by realignment) read as a fusion junction. Each
+   * end is drawn on the nearest exon boundary within FUSION_SNAP_BP (the evidence rounds breakpoints to 5 bp, and the
+   * bases the two partners share at a junction let the aligner place it a few bases either way) of the queried gene, a
+   * gene of the view or a gene looked up at the far end, and named after it. The partner whose end is a splice donor
+   * comes first (5′). A deletion-type arc is kept only when it joins two genes (or leaves the gene for no gene): inside
+   * one gene it is splicing, which the junction arcs already show. Null when it is left out.
+   */
+  const fusionOf = useCallback((j: SvArc, kind: 'split' | 'duplication' | 'inversion') => {
+    const models: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
+    for (const p of [j.start, j.end]) for (const m of farGenes.get(`${currentChrom}:${p}`) ?? []) if (!models.some(x => x.geneName === m.geneName)) models.push(m);
+    type End = { pos: number; gene: string; exon: number | null; role: 'donor' | 'acceptor' | null; strand: number | null; snapped: boolean };
+    const endOf = (p: number): End => {
+      let best: End | null = null, bestD = FUSION_SNAP_BP + 1;
+      for (const m of models) for (const e of m.exons) for (const [b, side] of [[e.start, 'start'], [e.end, 'end']] as const) {
+        const dist = Math.abs(b - p);
+        if (dist < bestD) { bestD = dist; best = { pos: b, gene: m.geneName, exon: e.rank, role: (m.strand > 0) === (side === 'end') ? 'donor' : 'acceptor', strand: m.strand, snapped: true }; }
+      }
+      if (best) return best;
+      const inside = models.find(m => p >= m.start && p < m.end);
+      return { pos: p, gene: inside?.geneName ?? '', exon: null, role: null, strand: inside?.strand ?? null, snapped: false };
+    };
+    const a = endOf(j.start), b = endOf(j.end);
+    if (kind === 'split' && a.gene === b.gene) return null;
+    const known = (p: number) => (p >= viewStart && p < viewEnd) || farGenes.has(`${currentChrom}:${p}`);
+    const name = (e: End) => e.gene
+      ? `${e.gene}${e.exon != null ? ` exon ${e.exon}` : ' (off its exons)'}`
+      : `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')}${known(e.pos) ? ' (no gene)' : ''}`;
+    const rightFirst = b.role === 'donor' || a.role === 'acceptor';
+    const [first, second] = rightFirst ? [b, a] : [a, b];
+    const what = kind === 'inversion' ? 'inversion junction: a fusion transcript across an inversion (the read continues on the other strand)'
+      : kind === 'duplication' ? (a.gene && a.gene === b.gene ? 'duplication-type junction (the read goes back): a back-splice (circular RNA) or a tandem duplication' : 'duplication-type junction (the read goes back): a fusion transcript')
+      : 'deletion-type junction joining two genes: a read-through or fusion transcript';
+    return { start: Math.min(a.pos, b.pos), end: Math.max(a.pos, b.pos), label: `${name(first)} → ${name(second)}`, what, ends: [a, b] as const,
+      oriented: first.role === 'donor' || second.role === 'acceptor' };
+  }, [tx, neighbours, farGenes, currentChrom, viewStart, viewEnd]);
+
   // ---- Coverage loading (with margin, stale-response protection) ----
   const viewRef = useRef({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly });
   viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly };
@@ -1587,10 +1626,11 @@ export default function SashimiViewer({
    * Structural evidence is asked for with the coverage of every sample not known to be RNA. A sample whose type is still
    * unknown (no aligner in the header) is often recognised as DNA only from the reads of that first coverage: asked for
    * DNA only, the evidence then needed a second request, and the source, which cannot add it to counts made without it,
-   * read the whole window again. The evidence of a sample that turns out to be RNA is simply not drawn.
+   * read the whole window again. An RNA sample asks for the evidence of an RNA library: split reads and clipped reads
+   * placed by realignment only (its fusion junctions), not the pairs, which introns make look discordant.
    */
-  const wantsStructuralRef = useRef((sid: number) => sampleTypes?.[sid] !== 'rna');
-  wantsStructuralRef.current = (sid: number) => sampleTypes?.[sid] !== 'rna';
+  const wantsStructuralRef = useRef((sid: number): true | 'rna' => (sampleTypes?.[sid] === 'rna' ? 'rna' : true));
+  wantsStructuralRef.current = (sid: number) => (sampleTypes?.[sid] === 'rna' ? 'rna' : true);
   const isDnaTrack = useCallback((t: TrackData) => !t.gtex && (t.group ? t.group.dna : isDnaSample(t.sampleId)), [isDnaSample]);
   // the genes at the far end of the long-range junctions shown (at most 20 lookups at a time; cached by the source)
   useEffect(() => {
@@ -1604,15 +1644,24 @@ export default function SashimiViewer({
         const k = lr && `${currentChrom}:${lr.farPos}`;
         if (lr && !lr.known && !farPending.current.has(k!) && !want.includes(lr.farPos)) want.push(lr.farPos);
       }
+      // the ends of an RNA track's structural arcs outside the genes of the view (fusion partners)
+      if (svHints && t.structural) for (const j of [...t.structural.splits, ...(t.structural.duplications ?? []), ...(t.structural.inversions ?? [])]) {
+        if (j.count < minJunctionCount) continue;
+        for (const p of [j.start, j.end]) {
+          const k = `${currentChrom}:${p}`;
+          if ((p >= viewStart && p < viewEnd) || farGenes.has(k) || farPending.current.has(k) || want.includes(p)) continue;
+          want.push(p);
+        }
+      }
     }
     for (const pos of want.slice(0, 20)) {
       const k = `${currentChrom}:${pos}`, chrom = currentChrom;
       farPending.current.add(k);
-      ds.getRegionGenes(chrom, pos + 1, pos + 1, currentGeneName)
+      ds.getRegionGenes(chrom, Math.max(1, pos + 1 - FUSION_SNAP_BP), pos + 1 + FUSION_SNAP_BP, currentGeneName)
         .then(list => list.map(g => toNeighbourModel(g, chrom)), () => [])
         .then(models => { farPending.current.delete(k); setFarGenes(prev => new Map(prev).set(k, models)); });
     }
-  }, [tracks, tx, minJunctionCount, currentChrom, currentGeneName, isDnaTrack, longRangeOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, tx, minJunctionCount, currentChrom, currentGeneName, isDnaTrack, longRangeOf, svHints, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
     const view = viewRef.current;
     const win = fetchWindowFor(view);
@@ -3353,6 +3402,8 @@ export default function SashimiViewer({
     sv?: SvKind;
     /** a junction leaving the queried gene (read-through or fusion transcript?) */
     longRange?: boolean;
+    /** a fusion junction of an RNA track, from split reads and placed clips */
+    fusion?: boolean;
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
@@ -3622,6 +3673,44 @@ export default function SashimiViewer({
           arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
         }
       }
+      // Fusion junctions of an RNA track: its split reads and clipped reads placed by realignment (fusionOf), drawn above
+      // its junction arcs, each end on the exon boundary it names; the pill gives the reads, the popover every sample's
+      if (!dnaTrack && !track.gtex && track.structural && svHints) {
+        const sv = track.structural;
+        const approx = track.sampled ? '≈' : '';
+        const cands = ([['split', sv.splits], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []]] as const)
+          .flatMap(([kind, list]) => list.map(j => ({ j, kind, f: j.count >= minJunctionCount ? fusionOf(j, kind) : null })))
+          .filter(x => x.f && x.f.end > viewStart && x.f.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(x.j)}`));
+        const fLevels = layerJunctions(cands.map(x => ({ start: x.f!.start, end: x.f!.end, count: x.j.count })));
+        const base = levels.size ? Math.max(...levels.values()) : 0;
+        for (const { j, kind, f } of cands) {
+          const g = { start: f!.start, end: f!.end, count: j.count };
+          const key = `${kind}:${junctionKey(j)}`, dragKey = `${track.sampleId}:${key}`;
+          const x1 = scale.x(g.start), x2 = scale.x(g.end);
+          const y1 = depthToY(depthAt(track.coverage, g.start - 1)), y2 = depthToY(depthAt(track.coverage, g.end));
+          const level = base + (fLevels.get(junctionKey(g)) || 1);
+          const offset = junctionOffsets[dragKey] || 0;
+          const apexH = Math.max(6, 18 + (level - 1) * JUNC_LEVEL_STEP - offset);
+          const geom = arcGeom(x1, y1, x2, y2, apexH);
+          const lo = Math.min(x1, x2), hi = Math.max(x1, x2), visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
+          const labelX = (visLo + visHi) / 2;
+          const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
+          const endText = (atStart: boolean) => {
+            const e = f!.ends[atStart ? 0 : 1];
+            return `continues to ${currentChrom}:${(atStart ? e.pos + 1 : e.pos).toLocaleString('en-US')}${e.gene ? ` (${e.gene}${e.exon != null ? ` exon ${e.exon}` : ''})` : ''}`;
+          };
+          let edge: ArcRender['edge'] = null;
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: endText(!reverse) };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: endText(reverse) };
+          const snapped = f!.ends.some(e => e.snapped) ? `\nends drawn on the exon boundaries within ${FUSION_SNAP_BP} bp of the evidence (${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')})` : '';
+          const title = `fusion junction? ${f!.label}${f!.oriented ? '' : ' (orientation unknown: no end on a splice site)'}\n${f!.what}\n` +
+            `${approx}${j.count.toLocaleString('en-US')} read${j.count > 1 ? 's' : ''}: split reads (SA tags) and reads clipped at the junction whose clipped bases align at the other end` +
+            `\n${currentChrom}:${(g.start + 1).toLocaleString('en-US')}-${g.end.toLocaleString('en-US')} · ${formatBp(g.end - g.start)} apart` + snapped +
+            svEvidenceText(j, approx) + '\nevidence, not a call: open the reads (with Clipped on) to check it; click for the other samples';
+          arcs.push({ j, key, dragKey, level, color: LONG_RANGE_COLOR, dashed: false, unique: false, title, strokeW: Math.min(4.5, 1.5 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH,
+            text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind, fusion: true });
+        }
+      }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
       // right of the midpoint, to the nearest free spot, so it stays on the arc even when enlarged; only when the
       // whole visible arc is taken is it pushed upward.
@@ -3696,6 +3785,15 @@ export default function SashimiViewer({
             title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
+      if (!dnaTrack && !track.gtex && track.structural && svHints) {
+        const approx = track.sampled ? '≈' : '';
+        // split alignments on another chromosome (interchromosomal fusion partners), as on DNA tracks
+        for (const e of track.structural.elsewhere) {
+          if (e.kind !== 'split' || e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
+          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString('en-US')}`, deltas: [], color: LONG_RANGE_COLOR,
+            title: `split alignments on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads at ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (an interchromosomal fusion partner?)\nevidence, not a call: open the reads to check it` });
+        }
+      }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
       const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites ? VAR_TRACK_H : 0;
       // the coverage layer switched off: a DNA track keeps its label band, then its other layers
@@ -3707,7 +3805,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -3752,6 +3850,7 @@ export default function SashimiViewer({
     });
     if (anyRna) line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
+    if (anyRna && layouts.some(L => L.arcs.some(a => a.fusion))) line(LONG_RANGE_COLOR, false, 'fusion junction: split or clipped reads placed across genes (inversion, duplication-type, or joining two genes)', 'l2d');
     if (anyRna && layouts.some(L => L.arcs.some(a => a.longRange))) line(LONG_RANGE_COLOR, true, 'long-range junction: leaves the gene (read-through or fusion?), shown from Min reads', 'l2c');
     if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     if (anyRna && showUsage && includeRetention) items.push({

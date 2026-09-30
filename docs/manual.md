@@ -173,8 +173,29 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   lie on the same strand; the gene at the far end is looked up when it lies outside the view. No
   reading frame is given, since a fusion's frame needs both partners' coding sequences. The viewer
   sees such a junction only when the aligner wrote it as one spliced read (a CIGAR `N`): STAR does so
-  within its maximum intron size (589,824 bp by default) when chimeric detection is off. Chimeric
-  alignments (supplementary records with an SA tag) are not drawn on RNA tracks.
+  within its maximum intron size (589,824 bp by default) when chimeric detection is off.
+  **Fusion junctions** (with the structural hints) are the ones no CIGAR can hold. A read that crosses
+  an inversion continues on the other strand. With chimeric detection off, STAR soft-clips such reads;
+  with `--chimOutType WithinBAM`, it splits them into records joined by an SA tag. On an RNA track the
+  viewer reads both:
+  - split reads;
+  - clusters of reads clipped at one position, whose clipped bases it places by realignment on the
+    reference. The search reaches 1 Mb on each side of the window with a FASTA, or 500 kb in all through
+    the web APIs.
+
+  A placed junction is drawn as a solid fuchsia arc with its reads on the pill. Each end sits on the
+  exon boundary within 5 bp of the evidence: breakpoints are rounded to 5 bp, and the bases two partners
+  share at a junction let the aligner place it a few bases either way. The tooltip names the partners in
+  transcription order, the one whose end is a splice donor first (`RAB27A exon 6 → PIGB exon 11`), and
+  says which junction it is:
+  - inversion;
+  - duplication-type: a fusion, or within one gene a back-splice (circular RNA) or a tandem duplication;
+  - deletion-type: kept only when it joins two genes, since within one gene it is splicing.
+
+  Split alignments on another chromosome show as `→ chr` pills. Clicking an arc gives every sample's
+  reads. Pairs are left out on RNA tracks, because the introns between two mates make them look
+  discordant, and so are CIGAR deletions. An exported page carries these junctions; a page exported
+  before them computes them from its exported reads, over their window.
   With two groups or more, each percentage is followed by its **difference with every other
   group**, in points and in that group's colour (`+10 %`, `−10 %`); the tooltip names the group.
   Group colours are chosen in the *Groups…* dialog (click the swatch; *default* returns to the

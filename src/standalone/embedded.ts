@@ -14,6 +14,7 @@ import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpa
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { answerReads, supportAndCap } from './readsWindow';
+import { keepFlags, rawOfRead, structuralEvidence, uniqueFrom } from './alignments';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
 import type { SampleKind } from './fileKinds';
@@ -285,7 +286,31 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
-    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural: b.structural, unavailable: b.unavailable, error: b.error };
+    const structural = b.structural ?? (opts?.structural === 'rna' ? await this.fusionEvidence(bestVi, sampleId, chrom, uniqueOnly, b.spliced?.reads) : undefined);
+    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural, unavailable: b.unavailable, error: b.error };
+  }
+  /**
+   * The fusion junctions of an RNA sample exported without them (a page exported before they existed, or without the
+   * hints): from its exported reads, which keep their clipped bases and the reference of the window, as the live page
+   * reads them from the file (split reads and clipped reads placed by realignment). Over the reads window only.
+   */
+  private fusionCache = new Map<string, Promise<StructuralEvidence | undefined>>();
+  private fusionEvidence(vi: number, sid: number, chrom: string, uniqueOnly: boolean, spliced?: number): Promise<StructuralEvidence | undefined> {
+    const key = `${vi}|${sid}|${uniqueOnly ? 'u' : 'a'}`;
+    let p = this.fusionCache.get(key);
+    if (!p) {
+      p = (async () => {
+        if (!this.payload.views[vi].reads?.[String(sid)]) return undefined;
+        const rp = await this.decodedReads(vi, sid);
+        const kept = rp.reads.filter(r => keepFlags(r.f) && (!uniqueOnly || uniqueFrom(r.nh, r.q)));
+        // an export capped below the window's reads holds one in `rate` of them: the counts are scaled back
+        const rate = kept.length && rp.total > kept.length ? rp.total / kept.length : 1;
+        const raw = kept.map(r => rawOfRead(r, chrom, rp.reference));
+        return { ...structuralEvidence(raw, chrom, rp.window.start, rp.window.end, rate, rp.reference, null, true), reads: spliced ?? rp.total };
+      })().catch(() => undefined);
+      this.fusionCache.set(key, p);
+    }
+    return p;
   }
   override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {

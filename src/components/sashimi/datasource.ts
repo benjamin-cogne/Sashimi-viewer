@@ -64,8 +64,12 @@ export interface CoverageOptions {
    * went. The core is read in full whatever its depth. (A source that samples instead says so in `sampled`.)
    */
   maxReads?: number;
-  /** also collect the structural evidence of a genomic library (deletions, split reads, soft clips, discordant pairs) */
-  structural?: boolean;
+  /**
+   * also collect the structural evidence: of a genomic library (true: deletions, split reads, soft clips, discordant
+   * pairs), or of an RNA library ('rna': split reads and clipped reads placed by realignment only, its fusion junctions;
+   * introns make its pairs look discordant and its CIGARs carry no structural deletion)
+   */
+  structural?: boolean | 'rna';
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
   /**

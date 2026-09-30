@@ -110,6 +110,67 @@ export function encodeRead(r: RawRead, ref: string | null, refStart: number): Al
   return out;
 }
 
+/**
+ * A CIGAR string rebuilt from an aligned read (blocks, deletions, introns, insertions, soft and hard clips), for the
+ * passes that read CIGARs when the source kept aligned reads only (an exported page, a converted file). An insertion
+ * sits before the reference base at its position: inside a block, at a block's end (before a deletion or intron, or the
+ * right clip) or at its start (after one); each is written once.
+ */
+export function cigarOfRead(r: AlignedRead): string {
+  const ins = [...r.i].sort((a, b) => a[0] - b[0]);
+  const used = new Uint8Array(ins.length);
+  const dels = new Set(r.d.map(d => d[0]));
+  let out = (r.h?.[0] ? `${r.h[0]}H` : '') + (r.c[0] ? `${r.c[0]}S` : '');
+  for (let k = 0; k < r.b.length; k++) {
+    const [bs, be] = r.b[k];
+    let p = bs;
+    for (let j = 0; j < ins.length; j++) {
+      const [ip, il] = ins[j];
+      if (used[j] || ip < bs || ip > be) continue;
+      if (ip > p) out += `${ip - p}M`;
+      out += `${il}I`; p = ip; used[j] = 1;
+    }
+    if (be > p) out += `${be - p}M`;
+    if (k + 1 < r.b.length) { const gap = r.b[k + 1][0] - be; if (gap > 0) out += `${gap}${dels.has(be) ? 'D' : 'N'}`; }
+  }
+  if (r.c[1]) out += `${r.c[1]}S`;
+  if (r.h?.[1]) out += `${r.h[1]}H`;
+  return /[MX=]/.test(out) ? out : `${r.e - r.s}M`;
+}
+
+/**
+ * The RawRead view of an aligned read, for the structural evidence. Its bases are rebuilt when it has soft clips or
+ * insertions whose bases were kept (`cs`, `is`), so that clips can be placed by realignment and insertions told apart
+ * from tandem copies: the clips as kept (N for the part of a long clip a source did not keep, away from the alignment),
+ * the inserted bases, and over its aligned blocks the reference with the read's mismatches (N where the reference is
+ * not given). Otherwise its bases are left out, as a light scan of a BAM does.
+ */
+export function rawOfRead(r: AlignedRead, chrom: string, ref?: { start: number; seq: string } | null): RawRead {
+  const cigar = cigarOfRead(r);
+  let seq = '';
+  if ((r.cs && (r.c[0] || r.c[1])) || r.is) {
+    const cs = r.cs ?? ['', ''];
+    const mm = new Map<number, string>();
+    for (const [pos, base] of r.m) mm.set(pos, base);
+    let pos = r.s, k = 0, first = true;
+    for (const [len, op] of parseCigar(cigar)) {
+      if (op === 'S') {
+        const kept = first ? cs[0] : cs[1];
+        seq += first ? 'N'.repeat(Math.max(0, len - kept.length)) + kept.slice(-len) : kept.slice(0, len) + 'N'.repeat(Math.max(0, len - kept.length));
+      } else if (op === 'M' || op === '=' || op === 'X') {
+        for (let q = pos; q < pos + len; q++) seq += mm.get(q) ?? (ref && q >= ref.start && q < ref.start + ref.seq.length ? ref.seq[q - ref.start] : 'N');
+        pos += len;
+      } else if (op === 'I') { const b = r.is?.[k] ?? ''; seq += b.length === len ? b : 'N'.repeat(len); k++; }
+      else if (op === 'D' || op === 'N') pos += len;
+      if (op !== 'H') first = false;
+    }
+  }
+  return {
+    name: r.n, start: r.s, cigar, seq, qual: null, flags: r.f, mapq: r.q, nh: r.nh,
+    tlen: r.tl, mateChrom: r.mp == null ? '' : r.mc ?? chrom, matePos: r.mp, sa: r.sa ?? null, hp: r.hp ?? null, ps: r.ps ?? null, pc: r.pc ?? null,
+  };
+}
+
 /** The SA tag parsed: the other parts of a split read (0-based starts). */
 export function parseSa(sa: string | undefined): { chrom: string; start: number; strand: '+' | '-'; cigar: string; mapq: number }[] {
   if (!sa) return [];
@@ -475,7 +536,12 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
  * `insertMedian`, when given, is the median |template length| of the proper pairs of the window, for callers that
  * pass only the records carrying structural evidence (the others would count for that median alone).
  */
-export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null): StructuralEvidence {
+/**
+ * `rna`: the evidence of an RNA library, its fusion junctions: split reads and clipped reads placed by realignment only.
+ * Its CIGAR deletions and insertions are left out (a long D there is rare and no structural event), and so are its
+ * pairs, which the introns between two mates make look discordant.
+ */
+export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null, rna = false): StructuralEvidence {
   // every arc before merging, with its evidence units by source and the names of the reads behind them
   const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>();
   const discKind = { deletion: new Map<string, SvMember>(), duplication: new Map<string, SvMember>(), inversion: new Map<string, SvMember>() };
@@ -570,10 +636,10 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
       else if ('MI=X'.includes(op)) {
         // an insertion of SV_MIN_DELETION or more in the CIGAR (realigners such as ABRA2 write a tandem duplication so)
-        if (op === 'I' && len >= SV_MIN_DELETION && pos >= start && pos < end) cigarIns.push({ pos, len, seq: r.seq ? r.seq.substring(qLen, qLen + len) : '', name: r.name });
+        if (!rna && op === 'I' && len >= SV_MIN_DELETION && pos >= start && pos < end) cigarIns.push({ pos, len, seq: r.seq ? r.seq.substring(qLen, qLen + len) : '', name: r.name });
         qLen += len; seenAligned = true;
       }
-      if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len, 1, 'cigar', r.name);
+      if (!rna && op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len, 1, 'cigar', r.name);
       if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
     });
     const alnEnd = pos;
@@ -589,7 +655,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
     // discordant pairs, counted once per pair: from the leftmost mate (the first of the pair when both start at the same
     // base), and from primary records only (a supplementary record repeats its primary's mate fields)
-    if (r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
+    if (!rna && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
       else if (r.name && eventInAlignment.has(r.name)) { if (r.start <= r.matePos) diag.pairsWithDeletion++; /* the event is in the alignment */ }
       else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2)) || (r.name && primaries.get(r.name) === 1)) {

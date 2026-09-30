@@ -358,7 +358,7 @@ export class CoverageState {
   ps = 0;
   pe = 0;
   lastUsed = 0;
-  constructor(readonly chrom: string, readonly structural: boolean) {}
+  constructor(readonly chrom: string, readonly structural: boolean | 'rna') {}
   get empty(): boolean { return this.pe <= this.ps; }
   get bytes(): number { return this.owned.bytes + this.spill.bytes; }
   covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }
