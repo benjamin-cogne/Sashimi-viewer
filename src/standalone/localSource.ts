@@ -19,7 +19,7 @@ import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } 
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
 import { nameHash } from './mates';
-import { answerReads, isLongRead } from './readsWindow';
+import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
@@ -1164,7 +1164,9 @@ export class LocalDataSource implements SashimiDataSource {
     const k = this.providerOf(sampleId);
     if (k) return k.p.getReads(k.s, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
     const support = !collapsed ? opts?.support : undefined;
-    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : Math.max(100, maxReads);
+    // reads phased in reads mode: more of them read for the phasing, `maxReads` of them returned (answerReads)
+    const phased = !collapsed && !support && !!opts?.phase;
+    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
     // filtered and sampled before sequences and qualities are decoded: only the reads shown pay for them; the pair
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
@@ -1192,6 +1194,6 @@ export class LocalDataSource implements SashimiDataSource {
     if (opts?.methylation && !collapsed && ref) readMethylation(reads, raw, cpgSites(refStart, ref));
     const base = { sample_id: sampleId, sample_name: s.name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}),
       reference: ref != null ? { start: refStart, seq: ref } : null, reference_source: ref != null ? this.lastReferenceSource : null };
-    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts);
+    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts, phased ? Math.max(100, maxReads) : undefined);
   }
 }

@@ -13,7 +13,7 @@
 import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
-import { answerReads, supportAndCap } from './readsWindow';
+import { READS_PHASE_CAP, answerReads, supportAndCap } from './readsWindow';
 import { keepFlags, rawOfRead, structuralEvidence, uniqueFrom } from './alignments';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
@@ -329,9 +329,11 @@ export class EmbeddedDataSource extends LocalDataSource {
     const collapsed = mode === 'collapsed';
     const support = !collapsed ? opts?.support : undefined;
     // the supporting reads (every k-th past maxReads), then their mates in the window; or every k-th read past the cap
-    const { reads, total, mates } = supportAndCap(best.reads.filter(r => r.e > start && r.s < end), chrom, maxReads, collapsed, support);
+    // reads phased in reads mode: phased over more of them, `maxReads` returned (answerReads)
+    const phased = !collapsed && !support && !!opts?.phase;
+    const { reads, total, mates } = supportAndCap(best.reads.filter(r => r.e > start && r.s < end), chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support);
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
-    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts);
+    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts, phased ? maxReads : undefined);
   }
   override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
     const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };

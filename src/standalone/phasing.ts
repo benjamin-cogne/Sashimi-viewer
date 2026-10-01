@@ -44,8 +44,13 @@ export function alleleAt(r: AlignedRead, s: VariantSite, minBq: number): Allele 
 /** Reads joined into fragments: a read and its mate (both in the set) count once (shared with the consensus groups). */
 export { fragmentsOf };
 
+/**
+ * `stamp`: each read is also given its fragment's haplotype (`ph` 1 or 2) and phase block (`pb`, its start): the block
+ * where the fragment covers the most phased sites, and the haplotype it matches better there; none when it matches both
+ * alike or covers no site of a block of two sites or more.
+ */
 export function phaseReads(reads: AlignedRead[], start: number, end: number, ref: string | null, refStart: number,
-  minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1, called?: VariantSite[]): PhaseResult {
+  minAlt = 3, minVaf = 0.05, minBq = 20, minIndel = 1, called?: VariantSite[], stamp = false): PhaseResult {
   // the window's sites, called by the caller already or here
   const sites = called ?? callSites(reads, start, end, ref, refStart, minAlt, minVaf, minBq, minIndel);
   const het = sites.map((s, i) => i).filter(i => sites[i].vaf >= HET_MIN && sites[i].vaf <= HET_MAX);
@@ -118,7 +123,8 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
   const hetIndex = new Map(het.map((si, k) => [si, k]));
   const blockOf = new Int32Array(het.length).fill(-1);
   blocks.forEach((b, bi) => { for (const si of b.sites) blockOf[hetIndex.get(si)!] = bi; });
-  for (const row of rows) {
+  const fragBest: { bi: number; hap: 1 | 2 }[] = new Array(rows.length);
+  rows.forEach((row, fi) => {
     const tally = new Map<number, [number, number]>();
     row.k.forEach((k, x) => {
       const bi = blockOf[k];
@@ -127,12 +133,21 @@ export function phaseReads(reads: AlignedRead[], start: number, end: number, ref
       if (!t) tally.set(bi, t = [0, 0]);
       if ((row.a[x] === 1) === (phase[k] === 0)) t[0]++; else t[1]++;
     });
+    let best = -1, bestN = 0;
     for (const [bi, [m1, m2]] of tally) {
       const b = blocks[bi];
       if (m1 === m2) b.ambiguous++;
-      else { b.support[m1 > m2 ? 0 : 1]++; if (Math.min(m1, m2) > 0) b.conflicting++; }
+      else {
+        b.support[m1 > m2 ? 0 : 1]++; if (Math.min(m1, m2) > 0) b.conflicting++;
+        if (b.sites.length >= 2 && m1 + m2 > bestN) { bestN = m1 + m2; best = bi; }
+      }
     }
-  }
+    if (best >= 0) { const [m1, m2] = tally.get(best)!; fragBest[fi] = { bi: best, hap: m1 > m2 ? 1 : 2 }; }
+  });
+  if (stamp) frags.forEach((fr, fi) => {
+    const x = fragBest[fi];
+    for (const r of fr) { if (x) { r.ph = x.hap; r.pb = blocks[x.bi].start; } else { delete r.ph; delete r.pb; } }
+  });
   for (const b of blocks) {
     const ks = b.sites.map(si => hetIndex.get(si)!);
     for (let x = 0; x < ks.length; x++) for (let y = x + 1; y < ks.length; y++) {

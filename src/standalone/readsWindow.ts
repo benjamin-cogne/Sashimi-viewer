@@ -10,6 +10,7 @@ import { callSites, collapseReads } from './collapse';
 import { arcReadFromAligned, supportsArc } from './arcSupport';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
+import { nameHash } from './mates';
 
 /**
  * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned bases only, not the skipped
@@ -61,9 +62,28 @@ export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: numbe
 /** What the source says of the window besides its reads. */
 export type ReadsAnswerBase = Pick<ReadsResponse, 'sample_id' | 'sample_name' | 'total' | 'shown' | 'supporting' | 'reference' | 'reference_source'>;
 
-/** The answer for `reads` (already filtered and capped): sites, and in collapsed mode groups or haplotypes instead of reads. */
+/**
+ * Reads a window phased in reads mode (`phase`) is read for: the phasing links sites through every read of the window
+ * it can, then the reads drawn are thinned to the usual cap. The collapsed mode reads 40 000 in a worker; this runs on
+ * the page, hence fewer.
+ */
+export const READS_PHASE_CAP = 10_000;
+
+/** At most `max` of the reads, whole fragments: those whose name hash is a multiple of the smallest power of two that fits, as the scans sample. */
+export function thinFragments(reads: AlignedRead[], max: number): AlignedRead[] {
+  if (reads.length <= max) return reads;
+  for (let rate = 2; ; rate *= 2) {
+    const kept = reads.filter(r => (nameHash(r.n) & (rate - 1)) === 0);
+    if (kept.length <= max || rate >= 2 ** 30) return kept;
+  }
+}
+
+/**
+ * The answer for `reads` (already filtered and capped): sites, and in collapsed mode groups or haplotypes instead of
+ * reads. Reads mode with `phase`: every read phased (`ph`, `pb`) and the phasing returned, then `show` of them kept.
+ */
 export function answerReads(base: ReadsAnswerBase, reads: AlignedRead[], start: number, end: number, mode: 'reads' | 'collapsed',
-  minSupport: number, minVaf: number, opts?: ReadsOptions): ReadsResponse {
+  minSupport: number, minVaf: number, opts?: ReadsOptions, show?: number): ReadsResponse {
   const ref = base.reference?.seq ?? null, refStart = base.reference?.start ?? 0;
   const longReads = isLongRead(reads);
   const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
@@ -79,6 +99,12 @@ export function answerReads(base: ReadsAnswerBase, reads: AlignedRead[], start: 
     }
     const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel, longReads);
     return { ...full, reads: [], sites: summary.sites, groups: summary.groups };
+  }
+  if (opts?.phase && !opts.support) {
+    const sites = callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
+    const phase = phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel, sites, true);
+    const shown = show != null ? thinFragments(reads, show) : reads;
+    return { ...full, shown: shown.length, reads: shown, sites, groups: [], phase };
   }
   return { ...full, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
 }

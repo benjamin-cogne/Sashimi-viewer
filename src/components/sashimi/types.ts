@@ -182,6 +182,11 @@ export interface AlignedRead {
    * DRAGEN's "copy label" may go higher), PS the phase set it belongs to, PC the Phred-scaled confidence; absent when untagged
    */
   hp?: number; ps?: number; pc?: number;
+  /**
+   * haplotype from the page's own read-based phasing (a reads window asked with `phase`): 1 or 2 within the phase block
+   * starting at `pb` (0-based); absent when the read's fragment covers no phased site or matches both haplotypes alike
+   */
+  ph?: 1 | 2; pb?: number;
   /** CpG calls of a long read with base-modification tags, when asked for: position of the CpG's C, P(5mC) × 255, flat */
   me?: number[];
 }

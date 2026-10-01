@@ -21,6 +21,7 @@ import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sash
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
+import { READS_PHASE_CAP } from '../standalone/readsWindow';
 import { HAP_MIN_DEPTH } from '../standalone/haplotypes';
 import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
 import { pairMates } from '../standalone/mates';
@@ -115,8 +116,11 @@ export interface ViewerSettings {
   haplotypes?: 2 | 'any';
   /** two haplotypes from the file's haplotags (HP/PS) when the window has tagged reads ('auto', default), or always from the reads' own phasing */
   phaseSource?: 'auto' | 'reads';
-  /** raw reads grouped by their haplotag (HP 1, HP 2, …, untagged), like IGV's Group by tag (default none) */
-  readsGroup?: 'none' | 'hp';
+  /**
+   * raw reads grouped by haplotype: by their haplotag (HP 1, HP 2, …, untagged), like IGV's Group by tag, or by the page's
+   * own read-based phasing (the collapsed mode's, H1 / H2 per phase block, unphased last); default none
+   */
+  readsGroup?: 'none' | 'hp' | 'phase';
   /** reads track: soft-clipped bases drawn beyond the read ends, hard clips as stubs, the parts of a split read joined (default off) */
   clippedBases?: boolean;
   /** reads track: inserted bases written inside the insertion marks (default off) */
@@ -1064,7 +1068,7 @@ export default function SashimiViewer({
   const [showPairs, setShowPairs] = useState(init.pairs ?? true);
   const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
   const [phaseSource, setPhaseSource] = useState<'auto' | 'reads'>(init.phaseSource === 'reads' ? 'reads' : 'auto');
-  const [readsGroup, setReadsGroup] = useState<'none' | 'hp'>(init.readsGroup === 'hp' ? 'hp' : 'none');
+  const [readsGroup, setReadsGroup] = useState<'none' | 'hp' | 'phase'>(init.readsGroup === 'hp' || init.readsGroup === 'phase' ? init.readsGroup : 'none');
   const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
@@ -1094,7 +1098,7 @@ export default function SashimiViewer({
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
   const [tracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
   /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
   const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string } | null>(null);
   const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}` : undefined;
@@ -1857,10 +1861,12 @@ export default function SashimiViewer({
      * (≤ METHYL_READS_MAX_BP): parsing the MM / ML tags of long reads over a wide window would cost the page a pause
      */
     const wantMethyl = (sid: number) => showMethyl && mode === 'reads' && span <= METHYL_READS_MAX_BP && isDnaSample(sid) && !!ds.getMethylation;
+    // raw reads grouped by the page's phasing: the source phases the window's reads and says each one's haplotype
+    const wantPhase = mode === 'reads' && readsGroup === 'phase' && !readsSupport;
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
       return !(cur && cur.mode === mode && cur.support === supportKey && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
-        && !(wantMethyl(sid) && !cur.methyl));
+        && !(wantMethyl(sid) && !cur.methyl) && !(wantPhase && !cur.phased));
     });
     if (!stale.length) return;
     const timer = setTimeout(() => {
@@ -1873,8 +1879,8 @@ export default function SashimiViewer({
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
         const support = mode === 'reads' ? readsSupport?.arc : undefined;
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), support, signal: ctl.signal })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), support: support ? supportKey : undefined } })); })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, support, signal: ctl.signal })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: support ? supportKey : undefined } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => {
             if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
@@ -1883,7 +1889,7 @@ export default function SashimiViewer({
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow, readsGroup]); // eslint-disable-line react-hooks/exhaustive-deps
   // a filter on the supporting reads of an arc belongs to its chromosome
   useEffect(() => { setReadsSupport(null); }, [currentChrom]);
 
@@ -2962,8 +2968,11 @@ export default function SashimiViewer({
       ? { s: r.s - r.c[0] - (partsOf[i].length ? r.h?.[0] ?? 0 : 0), e: r.e + r.c[1] + (partsOf[i].length ? r.h?.[1] ?? 0 : 0) }
       : { s: r.s, e: r.e });
     let rows: Int32Array, nRows: number, hidden: number;
-    // Group by haplotype: the reads of each haplotag (HP 1, HP 2, …) packed under a label row of their own, untagged last
-    const grouped = readsGroup === 'hp' && visible.some(r => r.hp);
+    // Group by haplotype: the reads of each haplotag (HP 1, HP 2, …), or of each haplotype of the page's phasing (H1, H2),
+    // packed under a label row of their own, untagged or unphased last
+    const byPhase = readsGroup === 'phase';
+    const hapOf = (r: AlignedRead) => (byPhase ? r.ph : r.hp), setOf = (r: AlignedRead) => (byPhase ? r.pb : r.ps);
+    const grouped = readsGroup !== 'none' && visible.some(r => hapOf(r));
     const groupRows: { row: number; rows: number; hp: number; reads: number; sets: number }[] = [];
     if (pairMode || splitMode || grouped) {
       // union-find over the reads: mates and split parts end up in one unit
@@ -2986,7 +2995,7 @@ export default function SashimiViewer({
       if (grouped) {
         // a unit (pair, split read) takes the haplotag of its first tagged read
         const hpOf = new Int32Array(units.length);
-        visible.forEach((r, i) => { if (r.hp && !hpOf[unitOf[i]]) hpOf[unitOf[i]] = r.hp; });
+        visible.forEach((r, i) => { const h = hapOf(r); if (h && !hpOf[unitOf[i]]) hpOf[unitOf[i]] = h; });
         const keys = [...new Set(hpOf)].sort((a, b) => (a || Infinity) - (b || Infinity));
         rows = new Int32Array(visible.length).fill(-1); hidden = 0;
         let next = 0;
@@ -2997,7 +3006,7 @@ export default function SashimiViewer({
           const packed = packReads(members.map(u => units[u]), READS_MAX_ROWS - next - 1);
           const rowOfUnit = new Map(members.map((u, j) => [u, packed.rows[j] < 0 ? -1 : next + 1 + packed.rows[j]]));
           for (const i of inGroup) { rows[i] = rowOfUnit.get(unitOf[i])!; if (rows[i] < 0) hidden++; }
-          groupRows.push({ row: next, rows: 1 + packed.nRows, hp: k, reads: inGroup.length, sets: new Set(inGroup.map(i => visible[i].ps).filter(x => x != null)).size });
+          groupRows.push({ row: next, rows: 1 + packed.nRows, hp: k, reads: inGroup.length, sets: new Set(inGroup.map(i => setOf(visible[i])).filter(x => x != null)).size });
           next += 1 + packed.nRows;
         }
         nRows = next;
@@ -3264,10 +3273,12 @@ export default function SashimiViewer({
 
     const groupEls = groupRows.map(g => {
       const top = readsTop + g.row * (rowH + 1), color = g.hp ? HAP_COLORS[(g.hp - 1) % HAP_COLORS.length] : INK.faint;
-      const label = `${g.hp ? `HP ${g.hp}` : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} phase set${g.sets === 1 ? '' : 's'}` : ''}`;
+      const label = `${g.hp ? `${byPhase ? 'H' : 'HP '}${g.hp}` : byPhase ? 'unphased' : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} ${byPhase ? 'block' : 'phase set'}${g.sets === 1 ? '' : 's'}` : ''}`;
       return (
         <g key={`grp${g.hp}`}>
-          <title>{g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally'}</title>
+          <title>{byPhase
+            ? (g.hp ? `reads on haplotype ${g.hp} of the page's read-based phasing: the alleles they carry at the heterozygous sites of their phase block match haplotype ${g.hp} better (H1 of one block is not tied to H1 of the next one: the blocks are listed in the collapsed mode)` : 'reads the phasing leaves unassigned: they cover no phased site, or match both haplotypes alike')
+            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}</title>
           <rect x={PLOT_LEFT} y={top} width={plotWidth} height={rowH} fill={color} opacity={0.1} />
           <rect x={PLOT_LEFT} y={top} width={3} height={g.rows * (rowH + 1) - 1} fill={color} />
           <text x={PLOT_LEFT + 7} y={top + rowH - 1} fill={INK.text} fontSize={Math.min(9, rowH + 3)} fontWeight={700}>{label}</text>
@@ -3277,7 +3288,7 @@ export default function SashimiViewer({
     const info = (current.supporting && readsSupport
       ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
       : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
-      (grouped ? ` · grouped by haplotag: ${groupRows.filter(g => g.hp).map(g => `HP ${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, untagged ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
+      (grouped ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString('en-US')} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
@@ -5610,12 +5621,13 @@ export default function SashimiViewer({
                   </select>
                 </label>
               )}
-              {showReads && !collapseReads && anyHaplotagged && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Group the reads by the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged reads last), like IGV's Group alignments by tag HP. Mates and the parts of a split read stay together.">
+              {showReads && !collapseReads && (
+                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}>
                   Group
-                  <select value={readsGroup} onChange={e => setReadsGroup(e.target.value === 'hp' ? 'hp' : 'none')} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
+                  <select value={readsGroup} onChange={e => setReadsGroup(e.target.value === 'hp' || e.target.value === 'phase' ? e.target.value : 'none')} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
                     <option value="none">none</option>
-                    <option value="hp">haplotype (HP)</option>
+                    <option value="phase">haplotype (phased here)</option>
+                    {(anyHaplotagged || readsGroup === 'hp') && <option value="hp">haplotype (HP tags)</option>}
                   </select>
                 </label>
               )}

@@ -34,6 +34,11 @@ export interface ReadsOptions {
   /** reads mode: each read's CpG calls from its MM / ML tags (`me`), for the methylation colours */
   methylation?: boolean;
   /**
+   * reads mode: each read assigned to a haplotype by read-based phasing (`ph`, `pb`), as the collapsed mode phases them;
+   * the source phases more reads than it returns (READS_PHASE_CAP) and returns `maxReads` of them, whole fragments
+   */
+  phase?: boolean;
+  /**
    * reads mode: only the reads supporting this arc (arcSupport.ts), with their mates in the window; `maxReads` then caps
    * the supporting reads (every k-th kept) and `total` counts them all
    */

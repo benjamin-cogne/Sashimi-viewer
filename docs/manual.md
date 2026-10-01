@@ -526,10 +526,19 @@ haplotype only. Counts are in fragments (a read and its mate are one molecule). 
 junction placed a few bases off is taken for the common one next to it, as in the consensus groups
 below.
 
-**Group by haplotype.** When the reads carry haplotags, *Group: haplotype (HP)* on the raw reads
-track packs them per haplotag, like IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher
-copy labels), then the untagged reads. Each group has a label row and a coloured band. Mates and the
-parts of a split read stay together. A read's tooltip gives its HP, PS and PC.
+**Group by haplotype.** The raw reads track can be grouped by haplotype without collapsing it.
+- *Group: haplotype (phased here)* runs the collapsed mode's read-based phasing on the window's reads,
+  up to 10,000 of them, then draws the usual number.
+  - Two haplotypes per phase block, linked through the heterozygous sites the reads and their mates share.
+  - Each fragment goes to the haplotype it matches better in the block where it covers the most sites:
+    H1, H2, then the reads covering no phased site.
+  - H1 of one block is not tied to H1 of the next; the collapsed mode lists the blocks. The label row
+    gives the number of blocks.
+- When the reads carry haplotags, *Group: haplotype (HP tags)* packs them per haplotag instead, like
+  IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher copy labels), then the untagged reads.
+
+Each group has a label row and a coloured band. Mates and the parts of a split read stay together. A
+read's tooltip gives its HP, PS and PC.
 
 *Haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
 one row per local haplotype × splice pattern with its read count, groups below *Min reads* folded
