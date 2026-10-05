@@ -415,6 +415,19 @@ function App() {
   const viewerInit: Partial<ViewerSettings> | undefined = pendingSettingsRef.current ?? (viewerStateRef.current ? { ...viewerStateRef.current } : undefined);
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
   const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [activeId, opened, samples, build, fasta, sessionSeq]);
+  /**
+   * Where the viewer starts when it is mounted. A tab opened or reopened (or a loaded session) starts at its region. The
+   * same tab's viewer remounted (a sample added or removed, the build or the FASTA changed) starts where it was: its gene,
+   * window and pinned locus as it last reported them, as a tab switched back to does. Taken once per mount, so that the
+   * viewer's own moves never feed back into its props.
+   */
+  const mountRef = useRef<{ key: string; opened: Opened | null; tab: number | null; shown: Opened | null }>({ key: '', opened: null, tab: null, shown: null });
+  if (mountRef.current.key !== viewerKey) {
+    const m = mountRef.current, live = viewerStateRef.current;
+    const same = !!opened && m.tab === activeId && m.opened === opened && !pendingSettingsRef.current && !!live?.gene.chrom;
+    mountRef.current = { key: viewerKey, opened, tab: activeId, shown: same ? { ...opened!, ...openedOfState(live!, opened!) } : opened };
+  }
+  const shown = mountRef.current.shown ?? opened;
   /** Every tab with a full state (the active one refreshed from the viewer, never-opened ones from their region and options), and the index of the active one. */
   const currentViews = useCallback(() => {
     const tabs = snapshot(views).map(v => ({ ...v, state: stateOfTab(v) }));
@@ -929,8 +942,8 @@ function App() {
         </div>
       ) : (
         <div className="p-3">
-          <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
+          <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div>
       )}
