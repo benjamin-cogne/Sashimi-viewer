@@ -28,6 +28,7 @@ import { pairMates } from '../standalone/mates';
 import type { ArcSupport } from '../standalone/arcSupport';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
+import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow } from './sashimi/controls';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
@@ -5426,297 +5427,58 @@ export default function SashimiViewer({
     inp: 'bg-white text-gray-800 border-gray-300',
     btn: 'px-2 py-0.5 text-xs rounded border border-gray-200 hover:bg-indigo-50 hover:border-indigo-300 transition-colors',
   };
-  /** Pill-style segmented switch: the active option is a raised white chip with an indigo label. */
-  const Segmented = <T extends string>({ value, onChange, options, disabled, title }: {
-    value: T; onChange: (v: T) => void; disabled?: boolean; title: string;
-    options: { value: T; label: string; icon: JSX.Element; hint?: string }[];
-  }) => (
-    <span title={title} className={`inline-flex items-center rounded-full bg-gray-100 border border-gray-200 p-0.5 text-xs select-none ${disabled ? 'opacity-60' : ''}`}>
-      {options.map(o => {
-        const active = o.value === value;
-        return (
-          <button key={o.value} type="button" disabled={disabled} onClick={() => onChange(o.value)} title={o.hint}
-            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full transition-all ${active ? 'bg-white text-indigo-700 font-semibold shadow-sm ring-1 ring-indigo-200' : 'text-gray-500 hover:text-gray-800'} disabled:cursor-not-allowed`}>
-            <span className={active ? 'text-indigo-600' : 'text-gray-400'}>{o.icon}</span>{o.label}
-          </button>
-        );
-      })}
-    </span>
-  );
-  const ICON = {
-    reads: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M1.5 9.5c0-4 2-7 4.5-7s4.5 3 4.5 7" /><path d="M1 9.5h10" /></svg>,
-    usage: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="3.2" cy="3.2" r="1.7" /><circle cx="8.8" cy="8.8" r="1.7" /><path d="M10 2 2 10" /></svg>,
-    samples: <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1.5" width="10" height="2" rx="1" /><rect x="1" y="5" width="10" height="2" rx="1" /><rect x="1" y="8.5" width="10" height="2" rx="1" /></svg>,
-    groups: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="1" y="1" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="1" width="4.2" height="4.2" rx="1" /><rect x="1" y="6.8" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="6.8" width="4.2" height="4.2" rx="1" /></svg>,
-  };
-  const Toggle = ({ checked, onChange, label, title, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; title: string; disabled?: boolean }) => (
-    <label className={`flex items-center gap-1 text-xs ${disabled ? 'text-gray-300' : t.muted} select-none`} title={title}>
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} className="accent-indigo-600" />
-      {label}
-    </label>
-  );
+  /** The pickers of the title row (samples, GTEx tissues): one list under a search box. */
+  const pickerList = 'max-h-56 overflow-y-auto';
 
   const content = (
     <div className={embedded ? `${t.bg} ${t.text} w-full` : `${t.bg} ${t.text} rounded-xl shadow-2xl w-full max-w-[95vw] border ${t.border}`}>
-      {/* Header */}
-      <div className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3 border-b ${t.border}`}>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <div>
-            <h2 className="text-lg font-bold leading-tight">{currentGeneName} <span className={`text-sm font-normal ${t.muted}`}>Sashimi plot</span></h2>
-            <p className={`text-xs ${t.muted} font-mono`}>{regionStr}</p>
+      {/* Header: the title row (gene, locus, zoom, search; samples on the right), the sectioned toolbar, and the reads strip when the reads track is on */}
+      <div className="border-b border-slate-200">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3.5 pb-2.5">
+          <div className="flex items-baseline gap-2.5 min-w-0">
+            <h2 className="text-xl font-bold tracking-tight leading-tight text-slate-900">{currentGeneName}</h2>
+            {tx && <span className="text-xs text-slate-500 truncate" title="The transcript model the plot is drawn on">{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons</span>}
           </div>
-          <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1">
-            <input type="text" value={geneSearch} onChange={e => { setGeneSearch(e.target.value); setSearchError(null); }}
-              placeholder="Gene, chr:pos, c.234, exon 12…" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
-                + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
-                + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.`}
-              className={`${t.inp} w-40 px-2 py-0.5 text-xs rounded border ${searchError ? 'border-red-400' : ''}`} />
-            <button type="submit" disabled={geneSearchLoading} className={t.btn}>{geneSearchLoading ? '…' : 'Go'}</button>
-            {searchError && <span className="text-[10px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}
-          </form>
-          <div className="flex items-center gap-1.5">
-            <button onClick={() => zoomBy(1 / 1.4)} className={`${t.btn} font-bold`} title="Zoom in (Ctrl + scroll up)">+</button>
-            <button onClick={() => zoomBy(1.4)} className={`${t.btn} font-bold`} title="Zoom out (Ctrl + scroll down)">&minus;</button>
-            <button onClick={resetZoom} className={t.btn} title="Reset to the whole gene (or double-click the plot)">Reset</button>
-          </div>
-          {/* the options always start a new line under the title, search and zoom */}
-          <div className="flex flex-wrap items-center gap-3 basis-full">
-            <Toggle checked={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns"
-              title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
-            {equalIntrons && tx && intronsOf(tx).length > 0 && (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`}
-                title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300. Clear the box for the default.`}>
-                Intron width
-                <input type="number" min={10} max={20000} step={10} value={intronWidth ?? ''} placeholder={String(defaultIntronV(tx))}
-                  onChange={e => setIntronWidth(e.target.value === '' ? null : Math.min(20000, Math.max(10, parseInt(e.target.value) || 10)))}
-                  className={`${t.inp} w-20 px-1.5 py-0.5 text-xs rounded border`} />
-                {intronWidth != null && <button onClick={() => setIntronWidth(null)} className="text-gray-400 hover:text-gray-700" title="Back to the default width">×</button>}
-              </label>
-            )}
-            <Toggle checked={showAllTx} onChange={setShowAllTx} label="All transcripts"
-              title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
-            <Toggle checked={showSnps} onChange={setShowSnps} label="Common SNPs"
-              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
-            {showSnps && (
-              <label className={`flex items-center gap-1 ${t.muted}`} title="Minimum allele frequency (highest over the frequency projects) for a variant to be shown">AF ≥
-                <select value={snpMinAf} onChange={e => setSnpMinAf(parseFloat(e.target.value))} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                  {[[0.001, '0.1%'], [0.01, '1%'], [0.05, '5%']].map(([v, l]) => <option key={String(v)} value={v as number}>{l as string}</option>)}
-                </select>
-              </label>
-            )}
-            {primaryKnown.length > 0 && (
-              <span className="flex items-center gap-1">
-                <Toggle checked={showKnown} onChange={setShowKnown} label="Known variants"
-                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants (those not already in the panel)." />
-                {showKnown && (
-                  <select value="" onChange={e => { const v = primaryKnown.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
-                    className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
-                    <option value="">go to…</option>
-                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString('en-US')}</option>)}
-                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString('en-US')} (opens the gene there)</option>)}
-                  </select>
-                )}
-              </span>
-            )}
-            <label className={`flex items-center gap-1 text-xs ${t.muted} select-none`}
-              title="Depth axis. Shared: one axis for all samples (heights comparable). Per sample: each sample scales to its own maximum, rounded to a round number. Relative: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
-              Depth axis
-              <select value={depthAxis} onChange={e => setDepthAxis(e.target.value as DepthAxis)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                <option value="shared">shared</option>
-                <option value="own">per sample</option>
-                <option value="relative">relative (% of max)</option>
-              </select>
-            </label>
-            <Toggle checked={uniqueOnly} onChange={setUniqueOnly} label="Unique reads"
-              title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
-            <Toggle checked={showSecondary} onChange={v => { setShowSecondary(v); if (v) setUniqueOnly(false); }} label="Secondary"
-              title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs and the reads track, as IGV does by default. Off: primary and supplementary records only. Turning it on turns Unique reads off (a secondary alignment is never unique). Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
-            <span className="flex items-center gap-1">
-              {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
-              {anyDna ? (
-                <>
-                  <span className={`text-xs ${t.muted} font-semibold`} title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">Layers</span>
-                  <span role="group" aria-label="Layers" className="inline-flex overflow-hidden rounded-md border border-gray-300 shadow-sm">
-                    {([
-                      { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
-                      { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
-                      ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
-                      { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set next to it).` },
-                    ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map((l, i) => (
-                      <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
-                        onClick={() => l.set(!l.on)}
-                        className="px-2 py-0.5 text-xs font-bold leading-5 transition-colors"
-                        style={{ background: l.on ? l.color : '#ffffff', color: l.on ? '#ffffff' : l.color, borderLeft: i ? '1px solid #d1d5db' : undefined, minWidth: 26 }}>
-                        {l.key}
-                      </button>
-                    ))}
-                  </span>
-                  {!!ds.getMethylation && showMethyl && (
-                    <Toggle checked={methylIslands} onChange={setMethylIslands} label="CpG islands only"
-                      title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
-                  )}
-                </>
-              ) : (
-                <Toggle checked={showReads} onChange={setShowReads} label="Reads"
-                  title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set next to it).`} />
-              )}
-              {showReads && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}>
-                  ≤
-                  <select value={readsWindow} onChange={e => setReadsWindow(readsWindowOf(Number(e.target.value)))} className={`${t.inp} px-1 py-0.5 text-xs rounded border`} aria-label="Reads window">
-                    {READS_WINDOW_CHOICES_BP.map(bp => <option key={bp} value={bp}>{formatBp(bp)}</option>)}
-                  </select>
-                </label>
-              )}
-              {showReads && tracks.length > 1 && (
-                <select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')}
-                  onChange={e => { if (e.target.value === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(e.target.value)); } }}
-                  className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Sample shown in the reads track, or all samples (one reads track under each coverage track; each sample is decoded separately, so it takes longer)">
-                  {tracks.map(tr => <option key={tr.sampleId} value={tr.sampleId}>{tr.sampleName}</option>)}
-                  <option value="all">All samples</option>
-                </select>
-              )}
-              {(showReads || (anyDna && coverageVariants)) && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">
-                  Min VAF
-                  <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
-                    className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
-                </label>
-              )}
-              {showReads && anyPairs && (
-                <Toggle checked={showPairs} onChange={setShowPairs} label="Pairs"
-                  title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair are coloured by what the pair says, as IGV colours them: on genomic DNA, green when the mates face away from each other (← →, the junction of a tandem duplication), red when they face each other far apart (→ ←, more than 5 times the median insert: a deletion), blue when both are on one strand (an inversion); amber when the mate is on another chromosome or the pair is not proper. Off: every read on its own row." />
-              )}
-              {showReads && !collapseReads && anyClips && (
-                <Toggle checked={showClipped} onChange={setShowClipped} label="Clipped"
-                  title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; the parts of a split read (SA tag) on one row joined by a dashed line, with the hard clips of each part as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); a hard clip whose other part is outside the window is only in the tooltip. Off: the alignment only." />
-              )}
-              {showReads && !collapseReads && anyInserts && (
-                <Toggle checked={showInserted} onChange={setShowInserted} label="Inserted"
-                  title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
-              )}
-              {showReads && (anyLongReads || anyDna) && (
-                <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
-                  title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: for long reads (ONT, PacBio) and for every genomic DNA track, short reads included. Off: every mismatch and indel of every read." />
-              )}
-              {showReads && anyLongReads && (
-                <>
-                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it).">
-                    Min VAF (long)
-                    <input type="number" min={1} max={100} value={longReadMinVafPct} onChange={e => setLongReadMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
-                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
-                  </label>
-                </>
-              )}
-              {showReads && (
-                <Toggle checked={collapseReads} onChange={setCollapseReads} label="Collapse"
-                  title={`Collapse the reads of the window. Haplotypes 2: the consensus of each of the two haplotypes (one row each per phase set), from the file's haplotags (HP, PS) when the reads carry them, else from the in-page read-based phasing (the heterozygous sites, ★ 25–75 % alternate allele, linked by the reads and their mates into phase blocks). Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`} />
-              )}
-              {showReads && collapseReads && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern).">
-                  Haplotypes
-                  <select value={haplotypes} onChange={e => setHaplotypes(e.target.value === 'any' ? 'any' : 2)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                    <option value={2}>2 (phased)</option>
-                    <option value="any">any (consensus groups)</option>
-                  </select>
-                </label>
-              )}
-              {showReads && collapseReads && haplotypes === 2 && (anyHaplotagged || phaseSource === 'reads') && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Where the two haplotypes come from. File tags: the HP (haplotype) and PS (phase set) tags a phasing tool wrote on the reads (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN), phased from the whole genome's variants; used whenever the window has tagged reads. Reads: the in-page phasing of the window's own reads (blocks break where no read links two heterozygous sites).">
-                  Phase
-                  <select value={phaseSource} onChange={e => setPhaseSource(e.target.value === 'reads' ? 'reads' : 'auto')} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                    <option value="auto">file tags (HP, PS)</option>
-                    <option value="reads">reads (in-page)</option>
-                  </select>
-                </label>
-              )}
-              {showReads && !collapseReads && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}>
-                  Group
-                  <select value={readsGroup} onChange={e => setReadsGroup(e.target.value === 'hp' || e.target.value === 'phase' ? e.target.value : 'none')} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                    <option value="none">none</option>
-                    <option value="phase">haplotype (phased here)</option>
-                    {(anyHaplotagged || readsGroup === 'hp') && <option value="hp">haplotype (HP tags)</option>}
-                  </select>
-                </label>
-              )}
+          <span className="font-mono text-[12.5px] text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 whitespace-nowrap" title="The window in view">{regionStr}</span>
+          <span className="inline-flex border border-slate-200 rounded-[9px] overflow-hidden bg-white" role="group" aria-label="Zoom">
+            <button onClick={() => zoomBy(1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50" title="Zoom out (Ctrl + scroll down)" aria-label="Zoom out"><Icon name="minus" /></button>
+            <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Zoom in (Ctrl + scroll up)" aria-label="Zoom in"><Icon name="plus" /></button>
+            <button onClick={resetZoom} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Reset to the whole gene (or double-click the plot)" aria-label="Reset the zoom"><Icon name="reset" size={15} /></button>
+          </span>
+          <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1.5">
+            <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[9px] border bg-white text-slate-400 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
+              <Icon name="search" size={14} />
+              <input type="text" value={geneSearch} onChange={e => { setGeneSearch(e.target.value); setSearchError(null); }}
+                placeholder="Gene, chr:pos, c.234, exon 12…" aria-label="Go to" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
+                  + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
+                  + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.`}
+                className="w-44 bg-transparent outline-none text-[12.5px] text-slate-800 placeholder:text-slate-400" />
+              <button type="submit" disabled={geneSearchLoading} className="h-6 px-2 rounded-md text-[11.5px] font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">{geneSearchLoading ? '…' : 'Go'}</button>
             </span>
-            {anyRna && <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}
-              title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
-              options={[
-                { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
-                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
-              ]} />}
-            {!anyRna && (() => {
-              const first = displayTracks.find(isDnaTrack);
-              const deep = displayTracks.filter(tr => isDnaTrack(tr) && (svDepth.get(tr.sampleId) ?? 0) > SV_DEEP_X);
-              const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
-                (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
-              return (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}>
-                  Min supporting reads
-                  <input type="number" min={1} value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={e => setMinReads(Math.max(1, parseInt(e.target.value) || 1))}
-                    className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-                  {!minReadsSet
-                    ? <span className="text-[10px] text-gray-400">{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
-                    : <button type="button" className="text-[10px] text-indigo-600 hover:underline" title={`Back to the default: ${autoNote}`}
-                        onClick={e => { e.preventDefault(); setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>}
-                </label>
-              );
-            })()}
-            {anyRna && (showUsage ? (
-              <>
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
-                  Min %
-                  <input type="number" min={0} max={100} step={0.5} value={minUsagePct} onChange={e => setMinUsagePct(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
-                    className={`${t.inp} w-16 px-1.5 py-0.5 text-xs rounded border`} />
-                </label>
-                <Toggle checked={includeRetention} onChange={setIncludeRetention} label="Intron retention"
-                  title="Count intron retention in the usage percentages: IR pills on the intron baselines, (R5 + R3) / (R5 + R3 + 2·C) from the reads running unspliced through both boundaries, and retention in the canonical arc's denominator. Off: junction-only percentages, no IR pill." />
-              </>
-            ) : (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
-                Min reads
-                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinReads(Math.max(1, parseInt(e.target.value) || 1))}
-                  className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-              </label>
-            ))}
-            {hiddenHere > 0 && (
-              <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))} className={`${t.btn} px-2 py-1 text-xs`}
-                title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
-                {hiddenHere} hidden arc{hiddenHere === 1 ? '' : 's'} · show
-              </button>
+            {searchError && <span className="text-[11px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}
+          </form>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            {!hideSamplePicker && (
+              <Segmented value={viewMode} title="One track per sample, or one pooled track per sample group"
+                onChange={v => { if (v === 'groups' && !groups.some(g => g.sampleIds.length)) setShowGroupsDialog(true); else setViewMode(v); }}
+                options={[
+                  { value: 'samples', label: 'Samples', icon: 'users', hint: 'One track per sample' },
+                  { value: 'groups', label: groups.length ? `Groups · ${groups.length}` : 'Groups', icon: 'grid', hint: 'One pooled track per sample group, arcs labelled with % usage' },
+                ]} />
             )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {!hideSamplePicker && (
-            <Segmented value={viewMode} title="One track per sample, or one pooled track per sample group"
-              onChange={v => { if (v === 'groups' && !groups.some(g => g.sampleIds.length)) setShowGroupsDialog(true); else setViewMode(v); }}
-              options={[
-                { value: 'samples', label: 'Samples', icon: ICON.samples, hint: 'One track per sample' },
-                { value: 'groups', label: groups.length ? `Groups · ${groups.length}` : 'Groups', icon: ICON.groups, hint: 'One pooled track per sample group, arcs labelled with % usage' },
-              ]} />
-          )}
-          {!hideSamplePicker && (
-            <button onClick={() => setShowGroupsDialog(true)} className={`${t.btn} px-3 py-1 font-medium`} title="Create and edit the sample groups of the aggregate view">Groups…</button>
-          )}
-          {!hideSamplePicker && <div className="relative">
-            <button onClick={e => openDropdown(e, 288, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
-              title="Samples loaded in the page: click one to show it as a track, click it again to remove the track">
-              {runSamples.length ? `Samples · ${tracks.length}/${runSamples.length} shown` : '+ Add sample'}
-            </button>
-            {showPicker && (
-              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-72 overflow-hidden`}>
+            {!hideSamplePicker && (
+              <Popover width={288} open={showPicker} onOpenChange={setShowPicker} flush
+                title="Samples loaded in the page: click one to show it as a track, click it again to remove the track"
+                button={<>{runSamples.length ? `${tracks.length} / ${runSamples.length} shown` : '+ Add sample'}<Icon name="chev" size={13} className="text-slate-400" /></>}>
                 <input type="text" value={pickerSearch} onChange={e => setPickerSearch(e.target.value)}
-                  placeholder="Search samples…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
-                <div className={`px-3 py-1 text-[10px] ${t.muted} border-b border-gray-100`}>click to show as a track · click again to remove</div>
+                  placeholder="Search samples…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
+                <div className="px-3 py-1 text-[10.5px] text-slate-500 border-b border-slate-100">click to show as a track · click again to remove</div>
                 {runSamples.length > 1 && (() => {
                   const hidden = filteredSamples.filter(s => !tracks.some(x => x.sampleId === s.id)).length;
                   const shownHere = filteredSamples.length - hidden;
                   const q = pickerSearch.trim();
                   return (
-                    <div className="flex flex-wrap items-center gap-1 px-2 py-1 border-b border-gray-100">
+                    <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-slate-100">
                       <button onClick={() => showAllSamples(filteredSamples)} disabled={!hidden}
                         title={q ? `Show every sample matching "${q}" as a track (${hidden} more), in the list's order` : `Show every loaded sample as a track (${hidden} more), in the list's order`}
                         className={`${t.btn} px-2 py-0.5 text-[11px] font-medium disabled:opacity-40`}>
@@ -5733,72 +5495,291 @@ export default function SashimiViewer({
                     </div>
                   );
                 })()}
-                <div className="max-h-48 overflow-y-auto">
+                <div className={pickerList}>
                   {filteredSamples.length === 0 ? (
-                    <div className={`px-3 py-2 text-xs ${t.muted}`}>{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>
+                    <div className="px-3 py-2 text-xs text-slate-500">{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>
                   ) : filteredSamples.slice(0, 50).map(s => {
                     const idx = tracks.findIndex(x => x.sampleId === s.id);
                     const shown = idx >= 0;
                     return (
                       <button key={s.id} onClick={() => toggleSample(s)}
                         title={shown ? `Shown as track ${idx + 1}${idx === 0 ? ' (primary)' : ''} · click to remove it from the plot` : 'Click to show this sample as a track'}
-                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : `${t.text} hover:bg-gray-50`}`}>
-                        <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
+                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : 'text-slate-800 hover:bg-slate-50'}`}>
+                        <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
                         <span className="flex-1 truncate">{s.name}</span>
                         {shown && <span className="text-indigo-600 text-[10px] font-medium">✓ shown</span>}
                       </button>
                     );
                   })}
                 </div>
-              </div>
+              </Popover>
             )}
-          </div>}
-          <div className="relative">
-            <button onClick={e => openDropdown(e, 288, setShowGtexPicker)} className={`${t.btn} px-3 py-1 font-medium`}
-              title="Add a GTEx tissue as a track: median junction read counts (arcs) and median exon reads per base (profile) over all samples of the tissue (GTEx v10, hg38)">+ GTEx tissue</button>
-            {showGtexPicker && (() => {
-              const q = gtexSearch.trim().toLowerCase();
-              const all = gtexTissues || [];
-              const match = (x: GtexTissue) => !q || x.name.toLowerCase().includes(q) || x.site.toLowerCase().includes(q) || x.id.toLowerCase().includes(q);
-              const favs = gtexFavourites.map(id => all.find(x => x.id === id)).filter((x): x is GtexTissue => !!x && match(x));
-              const rest = all.filter(x => match(x) && !gtexFavourites.includes(x.id));
-              const loaded = new Set(gtexTracks.map(g => g.gtex?.tissue.id));
-              const row = (x: GtexTissue) => (
-                <button key={x.id} onClick={() => addGtexTissue(x)} disabled={loaded.has(x.id)}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 flex items-center gap-2 ${t.text} disabled:opacity-40`}>
-                  <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: x.color }} />
-                  <span className="flex-1 truncate">{x.name}</span>
-                  <span className={`${t.muted} text-[10px]`}>n={x.samples}</span>
+            <Popover width={288} open={showGtexPicker} onOpenChange={setShowGtexPicker} flush label="Add a GTEx tissue"
+              title="Add a GTEx tissue as a track: median junction read counts (arcs) and median exon reads per base (profile) over all samples of the tissue (GTEx v10, hg38)"
+              button={<><Icon name="globe" size={15} />GTEx</>}>
+              {(() => {
+                const q = gtexSearch.trim().toLowerCase();
+                const all = gtexTissues || [];
+                const match = (x: GtexTissue) => !q || x.name.toLowerCase().includes(q) || x.site.toLowerCase().includes(q) || x.id.toLowerCase().includes(q);
+                const favs = gtexFavourites.map(id => all.find(x => x.id === id)).filter((x): x is GtexTissue => !!x && match(x));
+                const rest = all.filter(x => match(x) && !gtexFavourites.includes(x.id));
+                const loaded = new Set(gtexTracks.map(g => g.gtex?.tissue.id));
+                const row = (x: GtexTissue) => (
+                  <button key={x.id} onClick={() => addGtexTissue(x)} disabled={loaded.has(x.id)}
+                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 flex items-center gap-2 text-slate-800 disabled:opacity-40">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: x.color }} />
+                    <span className="flex-1 truncate">{x.name}</span>
+                    <span className="text-slate-500 text-[10px]">n={x.samples}</span>
+                  </button>
+                );
+                return (
+                  <>
+                    <input type="text" value={gtexSearch} onChange={e => setGtexSearch(e.target.value)} placeholder="Search tissues…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
+                    <div className="max-h-64 overflow-y-auto">
+                      {gtexError ? <div className="px-3 py-2 text-xs text-red-600">{gtexError}</div>
+                        : !gtexTissues ? <div className="px-3 py-2 text-xs text-slate-500">loading GTEx tissues…</div>
+                        : <>
+                          {favs.length > 0 && <div className="px-3 pt-1.5 text-[10px] uppercase tracking-wide text-slate-500">Favourites</div>}
+                          {favs.map(row)}
+                          {rest.length > 0 && <div className="px-3 pt-1.5 text-[10px] uppercase tracking-wide text-slate-500">All tissues</div>}
+                          {rest.map(row)}
+                          {favs.length + rest.length === 0 && <div className="px-3 py-2 text-xs text-slate-500">No tissue matches</div>}
+                        </>}
+                    </div>
+                  </>
+                );
+              })()}
+            </Popover>
+            {onSnapshot && (
+              <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
+                className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border text-[12.5px] font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                title="Add a screenshot of this plot to the basket, together with the region, the options in effect and the outlier effect it was opened from">
+                <Icon name="camera" size={15} />{snapshotState === 'busy' ? '…' : snapshotState === 'done' ? 'Added to basket' : snapshotState === 'error' ? 'Screenshot failed' : 'Basket'}
+              </button>
+            )}
+            <Popover width={260} title="More: sample groups, SVG of this view" label="More"
+              buttonClass="w-[30px] h-[30px] grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              button={<Icon name="more" size={18} />}>
+              {close => (
+                <>
+                  {!hideSamplePicker && <MenuItem icon="grid" label="Sample groups…" hint="Create and edit the groups of the pooled view" onClick={() => { close(); setShowGroupsDialog(true); }} />}
+                  <MenuItem icon="image" label="Export this view as SVG" hint="Vector, publication-ready" onClick={() => { close(); exportSvg(); }} />
+                </>
+              )}
+            </Popover>
+            {!embedded && <button onClick={onClose} className="w-[30px] h-[30px] grid place-items-center rounded-[9px] text-slate-400 hover:text-red-500 hover:bg-red-50" title="Close" aria-label="Close"><Icon name="x" /></button>}
+          </div>
+        </div>
+
+        {/* The toolbar: ARCS (or STRUCTURE on DNA), SHOW, LAYERS (DNA), DEPTH, and the read filters */}
+        <div className="px-5 pb-3"><Bar>
+          {anyRna && (
+            <Section label="Arcs" title="Junction arcs: what their pills say, and which are drawn">
+              <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'} label="Arc labels"
+                title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
+                options={[
+                  { value: 'reads', label: 'Reads', icon: 'arc', hint: 'Spliced reads of each junction' },
+                  { value: 'usage', label: 'Usage', icon: 'pct', hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
+                ]} />
+              {showUsage ? (
+                <>
+                  <Stepper label="min" unit="%" value={minUsagePct} onChange={setMinUsagePct} min={0} max={100} step={0.5} ariaLabel="Min %"
+                    title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators." />
+                  <Pill on={includeRetention} onChange={setIncludeRetention} label="Retention"
+                    title="Count intron retention in the usage percentages: IR pills on the intron baselines, (R5 + R3) / (R5 + R3 + 2·C) from the reads running unspliced through both boundaries, and retention in the canonical arc's denominator. Off: junction-only percentages, no IR pill." />
+                </>
+              ) : (
+                <Stepper label="min" unit="reads" value={minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min reads"
+                  title="Hide junctions supported by fewer spliced reads" />
+              )}
+              {hiddenHere > 0 && (
+                <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
+                  className="inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border border-amber-200 bg-amber-50 text-amber-800 text-[12.5px] font-medium hover:bg-amber-100"
+                  title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
+                  <Icon name="eyeOff" size={14} />{hiddenHere} hidden · show
                 </button>
-              );
+              )}
+            </Section>
+          )}
+          {!anyRna && (() => {
+            const first = displayTracks.find(isDnaTrack);
+            const deep = displayTracks.filter(tr => isDnaTrack(tr) && (svDepth.get(tr.sampleId) ?? 0) > SV_DEEP_X);
+            const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
+              (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
+            return (
+              <Section label="Structure" title="Structural hints over the DNA coverage">
+                <Stepper label="min" unit="reads" value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min supporting reads"
+                  title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}
+                  after={!minReadsSet
+                    ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
+                    : <button type="button" className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title={`Back to the default: ${autoNote}`}
+                        onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
+              </Section>
+            );
+          })()}
+          <Section label="Show">
+            {!anyDna && (
+              <Pill on={showReads} onChange={setShowReads} label="Reads" icon="reads"
+                title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).`} />
+            )}
+            <Pill on={showAllTx} onChange={setShowAllTx} label="All transcripts" icon="tx"
+              title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
+            <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
+              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
+            {showSnps && (
+              <Select label="AF ≥" value={snpMinAf} onChange={v => setSnpMinAf(parseFloat(v))} title="Minimum allele frequency (highest over the frequency projects) for a variant to be shown">
+                {[[0.001, '0.1%'], [0.01, '1%'], [0.05, '5%']].map(([v, l]) => <option key={String(v)} value={v as number}>{l as string}</option>)}
+              </Select>
+            )}
+            <Pill on={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns" icon="equal"
+              title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
+            {equalIntrons && tx && intronsOf(tx).length > 0 && (
+              <Stepper label="intron" unit="bp" value={intronWidth ?? defaultIntronV(tx)} onChange={v => setIntronWidth(Math.round(v))} min={10} max={20000} step={10} width={46} ariaLabel="Intron width"
+                title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300.`}
+                after={intronWidth != null && <button type="button" onClick={() => setIntronWidth(null)} className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title="Back to the default width">auto</button>} />
+            )}
+            {primaryKnown.length > 0 && (
+              <>
+                <Pill on={showKnown} onChange={setShowKnown} label="Known variants" icon="marker"
+                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants (those not already in the panel)." />
+                {showKnown && (
+                  <Select value="" onChange={id => { const v = primaryKnown.find(k => k.id === id); if (v) jumpToVariant(v); }} ariaLabel="Go to a known variant"
+                    title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
+                    <option value="">go to…</option>
+                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString('en-US')}</option>)}
+                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString('en-US')} (opens the gene there)</option>)}
+                  </Select>
+                )}
+              </>
+            )}
+          </Section>
+          {anyDna && (
+              <Section label="Layers" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
+                {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
+                <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px]">
+                  {([
+                    { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
+                    { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
+                    ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
+                    { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).` },
+                  ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map(l => (
+                    <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
+                      onClick={() => l.set(!l.on)}
+                      className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-[7px] text-[12px] font-medium transition-all"
+                      style={l.on ? { background: '#fff', color: '#0f172a', boxShadow: '0 1px 2px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04)' } : { color: '#64748b' }}>
+                      <span className="w-[18px] h-[18px] rounded-[5px] grid place-items-center text-[10.5px] font-bold"
+                        style={l.on ? { background: l.color, color: '#fff' } : { border: `1.5px solid ${l.color}`, color: l.color }}>{l.key}</span>
+                      {l.name}
+                    </button>
+                  ))}
+                </span>
+                {!!ds.getMethylation && showMethyl && (
+                  <Pill on={methylIslands} onChange={setMethylIslands} label="CpG islands only"
+                    title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
+                )}
+                {!showReads && coverageVariants && (
+                  <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                    title="Minimum alternate-allele fraction for a variant site to be shown (bar in the variants track of a DNA sample). Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+                )}
+              </Section>
+          )}
+          <Section label="Depth" title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
+            <Segmented value={depthAxis} onChange={setDepthAxis} size="sm" label="Depth axis"
+              title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth."
+              options={[
+                { value: 'shared', label: 'shared', hint: 'One axis for all samples: heights comparable' },
+                { value: 'own', label: 'own', hint: 'Each sample on its own axis, up to a round number above its maximum' },
+                { value: 'relative', label: '% max', hint: 'Each sample as a percentage of its own maximum in view' },
+              ]} />
+          </Section>
+          <Section><Popover width={340} title="Which alignments are counted, in coverage, arcs and the reads track"
+            button={<><Icon name="filter" size={14} />Filters{(uniqueOnly || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-indigo-600 text-white">{(uniqueOnly ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
+            <SwitchRow on={uniqueOnly} onChange={setUniqueOnly} label="Unique reads" hint="NH:1, or MAPQ ≥ 30 when NH is absent"
+              title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
+            <SwitchRow on={showSecondary} onChange={v => { setShowSecondary(v); if (v) setUniqueOnly(false); }} label="Secondary alignments"
+              hint="The other placements of multi-mapped reads (flag 0x100), as IGV shows them. Turns Unique reads off; the window is read again."
+              title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs and the reads track, as IGV does by default. Off: primary and supplementary records only. Turning it on turns Unique reads off (a secondary alignment is never unique). Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
+            <div className="flex items-center gap-2 mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">
+              <span className="w-[22px] h-[9px] rounded-sm border border-slate-400 bg-white shrink-0" aria-hidden="true" />
+              <span className="flex-1">Reads placed with MAPQ under {LOW_MAPQ} are drawn hollow</span>
+            </div>
+          </Popover></Section>
+        </Bar></div>
+
+        {/* The reads strip: every option of the reads track, shown with it */}
+        {showReads && (
+          <div className="mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2" role="group" aria-label="Reads track options">
+            <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-indigo-700"><Icon name="reads" size={15} />Reads</span>
+            {tracks.length > 1 && (() => {
+              const idx = readsAll ? -1 : tracks.findIndex(tr => tr.sampleId === effectiveReadsSampleId);
               return (
-                <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-72 overflow-hidden`}>
-                  <input type="text" value={gtexSearch} onChange={e => setGtexSearch(e.target.value)} placeholder="Search tissues…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
-                  <div className="max-h-64 overflow-y-auto">
-                    {gtexError ? <div className="px-3 py-2 text-xs text-red-600">{gtexError}</div>
-                      : !gtexTissues ? <div className={`px-3 py-2 text-xs ${t.muted}`}>loading GTEx tissues…</div>
-                      : <>
-                        {favs.length > 0 && <div className={`px-3 pt-1.5 text-[10px] uppercase tracking-wide ${t.muted}`}>Favourites</div>}
-                        {favs.map(row)}
-                        {rest.length > 0 && <div className={`px-3 pt-1.5 text-[10px] uppercase tracking-wide ${t.muted}`}>All tissues</div>}
-                        {rest.map(row)}
-                        {favs.length + rest.length === 0 && <div className={`px-3 py-2 text-xs ${t.muted}`}>No tissue matches</div>}
-                      </>}
-                  </div>
-                </div>
+                <Select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')} dot={idx >= 0 ? TRACK_COLORS[idx % TRACK_COLORS.length] : '#94a3b8'} ariaLabel="Reads of"
+                  onChange={v => { if (v === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(v)); } }}
+                  title="Sample shown in the reads track, or all samples (one reads track under each coverage track; each sample is decoded separately, so it takes longer)">
+                  {tracks.map(tr => <option key={tr.sampleId} value={tr.sampleId}>{tr.sampleName}</option>)}
+                  <option value="all">All samples</option>
+                </Select>
               );
             })()}
+            <Select label="window ≤" value={readsWindow} onChange={v => setReadsWindow(readsWindowOf(Number(v)))} ariaLabel="Reads window"
+              title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}>
+              {READS_WINDOW_CHOICES_BP.map(bp => <option key={bp} value={bp}>{formatBp(bp)}</option>)}
+            </Select>
+            <Segmented value={collapseReads ? 'collapsed' : 'raw'} onChange={v => setCollapseReads(v === 'collapsed')} size="sm" label="Raw or collapsed reads"
+              title={`Raw: every read on its own row. Collapsed: the reads of the window folded into haplotypes. Haplotypes 2: the consensus of each of the two haplotypes (one row each per phase set), from the file's haplotags (HP, PS) when the reads carry them, else from the in-page read-based phasing (the heterozygous sites, ★ 25–75 % alternate allele, linked by the reads and their mates into phase blocks). Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`}
+              options={[
+                { value: 'raw', label: 'Raw', hint: 'Every read on its own row' },
+                { value: 'collapsed', label: 'Collapsed', hint: 'The reads folded into haplotypes or consensus groups' },
+              ]} />
+            {!collapseReads && (
+              <Select label="group" value={readsGroup} onChange={v => setReadsGroup(v === 'hp' || v === 'phase' ? v : 'none')} ariaLabel="Group"
+                title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}>
+                <option value="none">none</option>
+                <option value="phase">haplotype (phased here)</option>
+                {(anyHaplotagged || readsGroup === 'hp') && <option value="hp">haplotype (HP tags)</option>}
+              </Select>
+            )}
+            {collapseReads && (
+              <Select label="haplotypes" value={haplotypes} onChange={v => setHaplotypes(v === 'any' ? 'any' : 2)} ariaLabel="Haplotypes"
+                title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern).">
+                <option value={2}>2 (phased)</option>
+                <option value="any">any (consensus groups)</option>
+              </Select>
+            )}
+            {collapseReads && haplotypes === 2 && (anyHaplotagged || phaseSource === 'reads') && (
+              <Select label="phase" value={phaseSource} onChange={v => setPhaseSource(v === 'reads' ? 'reads' : 'auto')} ariaLabel="Phase"
+                title="Where the two haplotypes come from. File tags: the HP (haplotype) and PS (phase set) tags a phasing tool wrote on the reads (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN), phased from the whole genome's variants; used whenever the window has tagged reads. Reads: the in-page phasing of the window's own reads (blocks break where no read links two heterozygous sites).">
+                <option value="auto">file tags (HP, PS)</option>
+                <option value="reads">reads (in-page)</option>
+              </Select>
+            )}
+            {(anyPairs || (!collapseReads && (anyClips || anyInserts)) || anyLongReads || anyDna) && <Sep />}
+            {anyPairs && (
+              <Pill size="sm" on={showPairs} onChange={setShowPairs} label="Pairs" icon="pair"
+                title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair are coloured by what the pair says, as IGV colours them: on genomic DNA, green when the mates face away from each other (← →, the junction of a tandem duplication), red when they face each other far apart (→ ←, more than 5 times the median insert: a deletion), blue when both are on one strand (an inversion); amber when the mate is on another chromosome or the pair is not proper. Off: every read on its own row." />
+            )}
+            {!collapseReads && anyClips && (
+              <Pill size="sm" on={showClipped} onChange={setShowClipped} label="Clipped" icon="scissors"
+                title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; the parts of a split read (SA tag) on one row joined by a dashed line, with the hard clips of each part as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); a hard clip whose other part is outside the window is only in the tooltip. Off: the alignment only." />
+            )}
+            {!collapseReads && anyInserts && (
+              <Pill size="sm" on={showInserted} onChange={setShowInserted} label="Inserted" icon="insert"
+                title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
+            )}
+            {(anyLongReads || anyDna) && (
+              <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
+                title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: for long reads (ONT, PacBio) and for every genomic DNA track, short reads included. Off: every mismatch and indel of every read." />
+            )}
+            <span className="flex flex-wrap items-center gap-2 ml-auto">
+              <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+              {anyLongReads && (
+                <Stepper label="long reads" unit="%" value={longReadMinVafPct} onChange={v => setLongReadMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF (long)"
+                  title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it)." />
+              )}
+            </span>
           </div>
-          {onSnapshot && (
-            <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
-              className={`${t.btn} px-3 py-1 font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : ''}`}
-              title="Add a screenshot of this plot to the basket, together with the region, the options in effect and the outlier effect it was opened from">
-              {snapshotState === 'busy' ? '📷 …' : snapshotState === 'done' ? '✓ Added to basket' : snapshotState === 'error' ? 'Screenshot failed' : '📷 Basket'}
-            </button>
-          )}
-          <button onClick={exportSvg} className={`${t.btn} px-3 py-1 font-medium`} title="Export the plot as SVG (vector, publication-ready)">SVG</button>
-          {!embedded && <button onClick={onClose} className={`${t.muted} text-2xl leading-none hover:text-red-400 px-2`}>&times;</button>}
-        </div>
+        )}
       </div>
 
       {/* Plot */}

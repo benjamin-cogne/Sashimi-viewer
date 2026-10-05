@@ -47,7 +47,7 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
    read (a few blocks from the start of the file, never the index), and its badge shows the library
    type. The index is read when the first region is requested.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
-   The **Samples · n/N shown** menu of the plot lists every loaded sample: click one to show it as a
+   The **n / N shown** menu of the plot lists every loaded sample: click one to show it as a
    track, click it again to remove it. **Show all** adds every sample not shown yet (with a search
    typed, *Show all matching* adds those that match), in the list's order. The tracks appear at once
    and their coverage is read three samples at a time, so a run of dozens of files stays usable.
@@ -60,13 +60,54 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
 
 Nothing is stored between sessions. Close the tab and the data is gone.
 
+## The screen
+
+The page has three bands, top to bottom.
+
+- **The app bar.** It holds:
+  - the logo;
+  - the sample chips. The ★ marks the primary sample, and the badge is the library type (click it to switch RNA / DNA). Hover a chip for ✎ rename and × remove; click it to make it the primary sample.
+  - the dashed **+ Add** menu (*Run folder…*, *Files…*);
+  - the search box, with the genome build inside it;
+  - **Session ▾** (file name, *Save session*, *Load session*);
+  - **Export ▾** (*Export HTML*, *SVG* of every view);
+  - the ⌃ button that folds the panel.
+
+  A second line holds the *Views* tabs, the **Known variants** menu with its chips, and the clinical note.
+- **The title row of the plot.** It shows:
+  - the gene and its transcript model;
+  - the window in view;
+  - zoom out, zoom in and reset;
+  - a box to go to a gene, a locus, a c. position or an exon.
+
+  On the right are the *Samples | Groups* switch, the **n / N shown** sample menu, **GTEx** tissues and the **⋯** menu (*Sample groups…*, *Export this view as SVG*).
+- **The toolbar.** It is cut into sections, each under a grey capital label.
+  - **Arcs** (RNA): *Reads | Usage*, and the *min reads* or *min %* threshold with its − / + buttons (*Retention* in Usage mode).
+  - **Structure** instead of Arcs when every track is DNA: the reads a structural hint needs.
+  - **Show**: *Reads* (RNA), *All transcripts*, *SNPs*, *Equal introns*, *Known variants*.
+  - **Layers** (DNA): *Coverage*, *Variants*, *Methylation*, *Reads*.
+  - **Depth**: *shared | own | % max*.
+  - **Filters**: *Unique reads* and *Secondary alignments*. A badge counts the filters on.
+
+  A pill tinted indigo is an option that is on. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
+
+When the reads track is on, a **reads strip** tinted indigo appears under the toolbar with every option of that track:
+- the sample whose reads are shown;
+- the *window ≤* of the reads;
+- *Raw | Collapsed*;
+- *group* in raw mode, or *haplotypes* and *phase* when collapsed;
+- *Pairs*, *Clipped*, *Inserted* and *Consensus*;
+- *min VAF* on the right (and the long-read one).
+
+Every control keeps its tooltip, which explains it in full.
+
 ## What it answers
 
 | Clinical question | What the viewer shows |
 |---|---|
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
-| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapse**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
+| Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapsed**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -91,9 +132,9 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   from the UCSC API, which is slower and requires the network. A FASTA also makes the reads track
   (mismatches) work offline for BAM files.
 - **Read filters** follow `samtools` defaults: unmapped, secondary, QC-fail and duplicate reads are
-  ignored, and supplementary records are kept. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or
+  ignored, and supplementary records are kept. **Unique reads** (in *Filters*) keeps `NH:1` reads (STAR/HISAT2) or
   MAPQ ≥ 30 when no `NH` tag is present.
-- **Secondary**: also counts the secondary alignments (flag `0x100`, the other placements of a
+- **Secondary alignments** (in *Filters*): also counts the secondary alignments (flag `0x100`, the other placements of a
   multi-mapped read), in coverage, junction arcs and the reads track, as IGV does by default. A
   junction can then read like IGV's: a fusion read that STAR also places elsewhere is often a
   secondary alignment. Turning it on turns *Unique reads* off and reads the window again.
@@ -132,19 +173,19 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   the file itself is decoded about 20 000 reads at a time, so zooming out past what has been read
   keeps the page moving while the new part is read.
 - **Equal introns** draws every intron at the same width so exons and junctions dominate; the
-  *Intron width* box that appears next to it sets that width in bp-equivalents (default: the
-  model's median exon length, kept between 80 and 300; clear the box to go back to it).
+  *intron* stepper that appears next to it sets that width in bp-equivalents (default: the
+  model's median exon length, kept between 80 and 300; *auto* goes back to it).
 - **Reference model**: the top track shows the MANE Select transcript (RefSeq Select or the
-  longest CDS when there is none). Tick *All transcripts* and click any model in the list to make
+  longest CDS when there is none). Switch on *All transcripts* and click any model in the list to make
   it the reference: exon numbering, junction classes, HGVS and usage percentages follow it, until
   the next gene search. The × at the end of a model's label removes it from the list (a model that
   clutters the panel, a predicted XM_ model…); the panel header then offers *undo*, which brings
   back the last one removed, and *show all*. Removed models are saved with the session.
-- **Depth axis**: *relative* (the default: each sample drawn as a percentage of its own maximum in
+- **Depth axis** (*Depth* in the toolbar): *% max* (the default: each sample drawn as a percentage of its own maximum in
   the current window, axis 0–100 %, the maximum shown next to the sample name, so profiles of a
   shallow and a deep library can be compared by shape), *shared* (one axis for every sample,
-  heights comparable) or *per sample* (each sample scaled to its own maximum, in reads).
-- **Groups (aggregate view)**: *Groups…* creates named sample groups (patients, controls, a
+  heights comparable) or *own* (each sample scaled to its own maximum, in reads).
+- **Groups (aggregate view)**: *Sample groups…* in the ⋯ menu of the plot creates named sample groups (patients, controls, a
   tissue…); the *Samples | Groups* switch then draws one pooled track per group. Coverage and
   junction reads are summed over the group's samples, the coverage is drawn relative to its own
   maximum, and each arc is labelled with a **percentage** instead of a read count. At every intron
@@ -213,7 +254,7 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   before them computes them from its exported reads, over their window.
   With two groups or more, each percentage is followed by its **difference with every other
   group**, in points and in that group's colour (`+10 %`, `−10 %`); the tooltip names the group.
-  Group colours are chosen in the *Groups…* dialog (click the swatch; *default* returns to the
+  Group colours are chosen in the *Sample groups…* dialog (click the swatch; *default* returns to the
   palette) and saved with the session.
 - **Hiding an arc**: hover an arc and click the × at the end of its pill (or *Hide arc* in the
   junction's detail panel) to remove it from every track, for instance the `n=…` junctions of
@@ -393,14 +434,14 @@ their members. Long reads carry deletions, split reads and clips; short-read pai
 discordant pairs (CRAM mate fields are read when the file records them).
 
 **Reads window.** The reads track loads the reads of views up to 100 kb wide by default (IGV's
-*visibility window*); wider, it asks to zoom in. The **≤** menu next to the *Reads* switch widens it
+*visibility window*); wider, it asks to zoom in. The *window ≤* menu of the reads strip widens it
 to 250 kb, 500 kb, 1 Mb or 2 Mb, to follow a large structural variant, or long reads, across a wider
 view. The track still draws at most the same number of reads, sampled over the window, so a wider
 window shows them sparser; each move of the view reads that much more of the file. The setting is
 kept with the view, in sessions and in the HTML export.
 
 **Pairs.** In the reads track the two mates of a pair share one row and are joined by a line
-(*Pairs*, on by default, next to *Reads*); the tooltip of a read gives its mate's position and the
+(*Pairs* in the reads strip, on by default); the tooltip of a read gives its mate's position and the
 insert size. Reads of a **discordant pair** are coloured by class (the fill, and the line to the
 mate). On genomic DNA they are green when the mates face away (← →, duplication-type), red when they
 face each other more than five times the median insert apart (deletion-type), and blue when both
@@ -454,7 +495,7 @@ deletions: a 2×100 RNA-seq read spliced over a 3 kb intron is a short read, and
 carrying an 8 kb deletion. Counting the intron wrongly took most
 RNA-seq tracks of multi-exon genes for long reads, with the long-read thresholds and grouping.
 The control is *Min VAF (long)* (20 %), the allele fraction a site needs on long reads, above the
-short-read *Min VAF*. It appears next to *Collapse* when such reads are shown and is saved
+short-read *Min VAF*. It appears at the right of the reads strip when such reads are shown and is saved
 with the session. Indels of every size are called. Random homopolymer indels stay out of sight
 because *Consensus* draws indels only at called sites. A homopolymer indel common enough to be
 called is flagged by the variants track's HP check. (An earlier *Min indel* option hid the indels
@@ -481,7 +522,7 @@ Deletions of 50 bp or more inside reads remain structural evidence whatever the 
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
 
-**Haplotypes (phasing).** *Collapse* with *Haplotypes: 2* shows the **consensus of each of the
+**Haplotypes (phasing).** *Collapsed* with *haplotypes 2* shows the **consensus of each of the
 two haplotypes**: one row per haplotype and phase set, drawn like a read. Grey marks the stretches
 covered by at least 3 of the haplotype's reads (blank where fewer). Coloured bases, deletion lines
 (large ones included) and insertion marks are the variants at least half of its reads carry, so a
@@ -607,8 +648,8 @@ wrong reference) used to take 1–2 minutes and gigabytes to collapse, and over 
 million reads. It now takes about 6 s. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
-**Layers.** Four layers make a DNA track, switched in the toolbar by one colour-coded control,
-**C · V · M · R**. A filled letter is a layer that is on; a click switches it for every DNA sample
+**Layers.** Four layers make a DNA track, switched in the *Layers* section of the toolbar,
+**C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample
 at once. They are always drawn in this order, top to bottom:
 - **C, coverage** (blue, on by default): the coverage histogram and the structural arcs over it.
   Switched off, a DNA track keeps its label band and the layers under it, for example to compare
@@ -618,7 +659,7 @@ at once. They are always drawn in this order, top to bottom:
 - **V, variants** (amber): the variants track described below;
 - **M, methylation** (red): CpG methylation of long reads (below). *CpG islands only* appears next
   to the control while it is on;
-- **R, reads** (slate): the alignments. The sample chip, or the selector next to the control,
+- **R, reads** (slate): the alignments. The sample chip, or the sample menu of the reads strip,
   picks which sample's reads are shown, or all of them.
 
 A page without a DNA sample shows a plain *Reads* option instead.
@@ -865,16 +906,16 @@ snapshot. × forgets a view. A new view starts with the options of the view you 
 are saved with the session and are what the HTML export carries. **SVG · N views** (header) saves
 every view on one SVG page, stacked vertically under their titles (gene, locus and window), each
 drawn with its own options: each tab is shown in turn while its plot is captured, then the current
-view comes back. The *SVG* button inside the plot still saves the current view alone.
+view comes back. *Export this view as SVG*, in the ⋯ menu of the plot, still saves the current view alone.
 
-**Hide panel** (next to *+ Files…*) folds the upper panel away: the notes, build, files, sample
-chips, session buttons and known variants disappear and one bar stays, with the logo, a **Show
-panel** button, the *Views* tabs and the search box, so a new gene or locus can still be opened
+The **⌃** button at the right end of the app bar folds the panel away: the sample chips, the
+session and export menus and the known variants disappear and one bar stays, with the logo, the
+*Views* tabs, the search box and a **⌄** button that brings the panel back, so a new gene or locus can still be opened
 while the plot gets the rest of the window height. The choice is remembered by the browser.
 
 ## Sharing a view without the alignments
 
-**Export HTML** (next to the session buttons) downloads a copy of the viewer itself with the data of
+**Export HTML** (in the *Export* menu of the app bar) downloads a copy of the viewer itself with the data of
 every registered view embedded: for each view, the gene models (reference transcript, every
 transcript, neighbouring genes) and, for every loaded sample, the coverage, junctions and
 intron-retention counts of a window around it chosen in the export dialog (see below), together
@@ -918,16 +959,16 @@ and view for a gene, more for very deep or very wide windows.
 
 ## Sessions
 
-*Save session* in the header downloads a JSON file (the name is editable, default
+*Save session* (in the *Session* menu of the app bar) downloads a JSON file (the name is editable, default
 `sashimi-session-GENE-DATE.json`) recording the genome build, the run folder and every alignment
 by its path inside that folder (with index name and size), the sample names and order (first =
 primary), the FASTA, the gene and the window shown, and every option of the viewer: depth axis,
 arc labels, thresholds, reads track, groups (by sample name), the chosen reference transcript…
 The variants of interest of the header are saved too.
 
-Give the files through **+ Run folder…** (or drop the folder on the page): the page lists the
+Give the files through **+ Add › Run folder…** (or drop the folder on the page): the page lists the
 BAM/CRAM files with their index and the FASTA found inside, without reading them, and remembers
-their relative paths. **+ Files…** adds individual files as before. Some browsers word their folder
+their relative paths. **+ Add › Files…** adds individual files as before. Some browsers word their folder
 dialog as an *upload* ("this will upload all files from…"): that is the browser's generic
 wording for letting a page read a folder. Nothing is sent anywhere; the viewer has no server and
 reads the files on the computer, as for individually added files.
@@ -979,10 +1020,10 @@ validated pipeline before reporting.
 
 ## Variants of interest (known variants)
 
-The **Known variants** row of the header takes any number of variants to keep in sight: a locus
+The **Known variants** menu, on the second line of the app bar, takes any number of variants to keep in sight: a locus
 (`chr17:43,094,464`, or an interval `chr17:43,094,464-43,094,470`, an HGVS genomic notation such
 as `chr17:g.43094464A>G` or `NC_000017.11:g.43094464A>G`, or a VCF-like line) and a free label
-(`BRCA1 p.Glu23Asp`, a sample name, anything), then **+ Add**. Each becomes a chip (× removes it)
+(`BRCA1 p.Glu23Asp`, a sample name, anything), then **Add**. Each becomes a chip (× removes it)
 and is drawn on every view like the variants of a deep link: the **Known variants** option of the
 viewer, on by default as soon as one exists, shows a panel under the transcript with the labels,
 guide lines through every track, and a *go to…* menu to centre the view on one of them. A variant
@@ -1022,7 +1063,7 @@ the pinned label to remove the highlight (the next search draws a new one).
 | `label` | Text drawn next to the marker, typically the c. or p. notation; one per variant, comma-separated. | the g. notation |
 | `gene` | Symbol used only when no RefSeq gene covers the window (deep intergenic positions). | inferred from the position |
 | `build` | `GRCh38` or `GRCh37` (`hg38` / `hg19` accepted). Only needed when no variant carries an accession; a notation that disagrees with it is flagged in the marker tooltip. | GRCh38 |
-| `reads` | `1` opens with the reads track already on (add it when the link targets a ±100 bp window and the alignments are wanted at once). By default the reads track stays off until *Reads* is ticked in the toolbar or the *reads* chip of a sample is clicked. | off |
+| `reads` | `1` opens with the reads track already on (add it when the link targets a ±100 bp window and the alignments are wanted at once). By default the reads track stays off until *Reads* is switched on in the toolbar or the *reads* chip of a sample is clicked. | off |
 
 Example link for a MobiDetails variant page (Jinja-style template; MobiDetails holds the hg38 and
 hg19 genomic HGVS with the `NC_` accession, the gene and the c./p. notations):

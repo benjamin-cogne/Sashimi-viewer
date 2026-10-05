@@ -21,6 +21,7 @@ import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from 
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
+import { Icon, MenuItem, Popover } from '../components/sashimi/controls';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
@@ -715,16 +716,40 @@ function App() {
   /** Drops are accepted anywhere on the page: files, a folder, or a session .json. */
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); void onDropFiles(e.dataTransfer); };
 
-  /** The gene / locus search: in the title row of the panel, or on the folded bar. */
+  /** The gene / locus search, with the genome build in it: in the app bar, folded or not. */
   const searchForm = (
-    <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1">
-      <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
-      <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+    <form onSubmit={e => { e.preventDefault(); open(); }}
+      className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
+      <label className="relative inline-flex items-center h-7 pl-2 pr-6 rounded-lg bg-white border border-slate-200 text-xs text-slate-700 cursor-pointer" title="Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network">
+        <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} aria-label="Genome build" className="appearance-none bg-transparent outline-none cursor-pointer font-medium">
+          <option value="GRCh38">GRCh38</option>
+          <option value="GRCh37">GRCh37</option>
+        </select>
+        <Icon name="chev" size={12} className="absolute right-1.5 text-slate-400 pointer-events-none" />
+      </label>
+      <Icon name="search" size={15} className="text-slate-400" />
+      <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" aria-label="Gene or locus"
+        title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)"
+        className="flex-1 min-w-0 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400" />
+      <button type="submit" disabled={busy || !gene.trim()} className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
     </form>
   );
+  /** The registered views as tabs: click one to reopen it, × to forget it. */
+  const viewTabs = views.map(v => (
+    <span key={v.id} onClick={() => activateTab(v.id)}
+      className={`inline-flex items-center gap-1.5 h-7 pl-2.5 pr-1.5 rounded-lg text-xs font-medium border cursor-pointer whitespace-nowrap ${v.id === activeId ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
+      title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
+      {v.label}
+      <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={`w-4 h-4 grid place-items-center rounded ${v.id === activeId ? 'text-slate-400 hover:text-white' : 'text-slate-400 hover:text-red-500'}`} title="Forget this view" aria-label="Forget this view"><Icon name="x" size={12} /></button>
+    </span>
+  ));
+  const versionPill = (
+    <span className="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold leading-none bg-indigo-50 text-indigo-600" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
+  );
+  const brandNote = 'Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.';
 
   return (
-    <div className="min-h-screen bg-gray-100 text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+    <div className="min-h-screen bg-[#f6f7fb] text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
       {DEV && (
         <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
           style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
@@ -733,155 +758,152 @@ function App() {
           <a href={DEV.stable} className="underline ml-auto">Go to the stable version →</a>
         </div>
       )}
-      <header className="bg-white border-b border-gray-200 px-5 py-3 space-y-2">
-        {/* Row 1: title, build, gene search. Row 2: files and sample chips, which may wrap over several lines without moving the search. */}
-        {!panelHidden && <>
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div className="flex items-center gap-2.5 flex-1 min-w-[320px]">
-          <Logo size={34} />
-          <div className="min-w-0">
-            <h1 className="text-lg font-bold leading-tight flex items-center gap-2">Sashimi <span className="font-normal">viewer</span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
-            </h1>
-            <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
-            <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
+      <header className="bg-white border-b border-slate-200">
+        {/* Row 1: brand, samples (or the views when the panel is folded), search, session and export. Row 2: views, known variants, the clinical note. */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-2.5">
+          <div className="flex items-center gap-2.5 shrink-0" title={brandNote}>
+            <Logo size={30} />
+            <h1 className="text-base font-bold tracking-tight leading-tight text-slate-900">Sashimi viewer</h1>
+            {versionPill}
+          </div>
+          {!panelHidden ? (
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
+              {samples.map((s, i) => (
+                <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-indigo-50 border-indigo-200 text-slate-900' : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 cursor-pointer'}`}
+                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+                  onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
+                  onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
+                  {i === 0 && <span className="text-indigo-600" title="primary sample"><Icon name="star" size={13} /></span>}
+                  {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
+                  {renaming?.id === s.id ? (
+                    <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
+                      onBlur={() => renameSample(s.id, renaming.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
+                      onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
+                  ) : <span className="font-medium">{s.name}</span>}
+                  <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
+                    className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-100 text-slate-700' : s.lib?.type === 'rna' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}
+                    title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
+                    {s.pending ? '…' : libBadge(s.lib)}
+                  </button>
+                  <span className="hidden group-hover:inline-flex items-center">
+                    <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-slate-400 hover:text-indigo-600 px-0.5" title="Rename">✎</button>
+                    <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-slate-400 hover:text-red-500" title="Remove" aria-label="Remove"><Icon name="x" size={13} /></button>
+                  </span>
+                </span>
+              ))}
+              {fasta && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference FASTA: ${fasta.fa.name}`}>ref · {fasta.fa.name}</span>}
+              <Popover width={300} title="Add alignment files, a run folder or a reference FASTA (or drop them anywhere on the page)"
+                buttonClass="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12.5px] border border-dashed border-slate-300 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 whitespace-nowrap"
+                button={<><Icon name="plus" size={13} />{samples.length ? 'Add' : 'Add files'}</>}>
+                {close => (
+                  <>
+                    <MenuItem icon="folder" label={runFolder ? `Run folder · ${runFolder.name}` : 'Run folder…'} onClick={() => { close(); void chooseFolder(); }}
+                      hint="Every BAM/CRAM (with its index) and FASTA inside it is listed; sessions record the files by their path in it"
+                      title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files." />
+                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" onClick={() => { close(); void chooseFiles(); }}
+                      title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" />
+                    <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. They stay on this computer.</div>
+                  </>
+                )}
+              </Popover>
+              {intake && (
+                <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-xs border border-indigo-200 bg-indigo-50 text-indigo-800" role="status" data-intake>
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                  {intake}
+                </span>
+              )}
+              {samples.some(s => s.pending) && (
+                <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                  Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
+              {views.length === 0 ? <span className="text-xs text-slate-400">no view yet: open a gene or a locus</span> : viewTabs}
+            </div>
+          )}
+          {searchForm}
+          <div className="flex items-center gap-2 ml-auto shrink-0">
+            {!panelHidden && <>
+              <Popover width={340} title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again."
+                button={<><Icon name="save" size={15} />Session<Icon name="chev" size={13} className="text-slate-400" /></>}>
+                {close => (
+                  <div className="p-1 space-y-2">
+                    <label className="block text-[11.5px] text-slate-500">File name
+                      <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false}
+                        className="mt-1 w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white font-mono text-slate-800 outline-none focus:border-indigo-300" title="File name of the session to save (.json)" />
+                    </label>
+                    <div className="flex gap-2">
+                      <button onClick={() => { close(); saveSession(); }} disabled={!samples.length && !opened} className="flex-1 inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40" title="Download the session as a JSON file"><Icon name="download" size={14} />Save session</button>
+                      <label className="flex-1 inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 cursor-pointer" title="Load a session JSON file, then add the alignment files it names">
+                        <Icon name="upload" size={14} />Load session
+                        <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { close(); loadSession(f); } e.target.value = ''; }} />
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </Popover>
+              <Popover width={320} title="Export the views: a self-contained HTML page with the data embedded, or every view on one SVG page"
+                buttonClass="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] text-[12.5px] font-semibold bg-indigo-600 text-white shadow-[0_1px_2px_rgba(79,70,229,.35)] hover:bg-indigo-700"
+                button={<><Icon name="download" size={15} />Export<Icon name="chev" size={13} className="text-indigo-200" /></>}>
+                {close => (
+                  <>
+                    <MenuItem icon="file" label={busy ? 'Export HTML…' : 'Export HTML'} disabled={busy || !opened || pageIsUnbuilt()} onClick={() => { close(); setExportDialog({ window: 'margin', readsCap: 'shown' }); }}
+                      hint="This viewer with the data of every view embedded: opens anywhere, without the alignment files"
+                      title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'} />
+                    <MenuItem icon="image" label={views.length > 1 ? `SVG · ${views.length} views` : 'SVG'} disabled={busy || !views.length} onClick={() => { close(); void exportAllSvg(); }}
+                      hint="Every view on one page, stacked under their titles (vector)"
+                      title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The ⋯ menu of the plot saves the current view alone." />
+                  </>
+                )}
+              </Popover>
+            </>}
+            <button onClick={togglePanel} aria-label={panelHidden ? 'Show the upper panel' : 'Hide the upper panel'}
+              className="w-8 h-8 grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+              title={panelHidden ? 'Show the upper panel again (files, session, known variants)' : 'Fold the panel away (files, session, known variants): the logo, the views and the search box stay on one line, so the plot takes the rest of the window'}>
+              <Icon name={panelHidden ? 'panelDown' : 'panelUp'} size={16} />
+            </button>
           </div>
         </div>
-        <div className="flex items-center gap-4 shrink-0 ml-auto">
-        <label className="flex items-center gap-1 text-xs text-gray-600">Build
-          <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} className="border border-gray-300 rounded px-1 py-0.5 text-xs bg-white">
-            <option value="GRCh38">GRCh38 / hg38</option>
-            <option value="GRCh37">GRCh37 / hg19</option>
-          </select>
-        </label>
-        {searchForm}
-        </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <button onClick={chooseFolder} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium"
-          title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files.">
-          {runFolder ? `Run folder · ${runFolder.name}` : '+ Run folder…'}
-        </button>
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
-        <button onClick={chooseFiles} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium" title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)">
-          + Files…
-        </button>
-        <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Fold this panel away (notes, build, files, session, known variants): only the logo, the search box and the views stay, so the plot takes the rest of the window; Show panel brings it back" aria-label="Hide the upper panel">
-          ▲ Hide panel
-        </button>
         <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-        {intake && (
-          <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs border border-indigo-300 bg-indigo-50 text-indigo-800" role="status" data-intake>
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-            {intake}
-          </span>
-        )}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {samples.map((s, i) => (
-            <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
-              title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
-              onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
-              onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
-              {i === 0 && <span title="primary sample">★</span>}
-              {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
-              <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
-                className={`px-1 rounded text-[9px] font-bold leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-700 text-white' : s.lib?.type === 'rna' ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-700'}`}
-                title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
-                {s.pending ? '…' : libBadge(s.lib)}
-              </button>
-              {renaming?.id === s.id ? (
-                <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
-                  onBlur={() => renameSample(s.id, renaming.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
-                  onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
-              ) : s.name}
-              <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-gray-400 hover:text-indigo-600" title="Rename">✎</button>
-              <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-gray-400 hover:text-red-500" title="Remove">×</button>
-            </span>
-          ))}
-          {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
-          {samples.some(s => s.pending) && (
-            <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-              Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 ml-auto" title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again.">
-          <span className="text-xs text-gray-600">Session</span>
-          <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false}
-            className="border border-gray-300 rounded px-2 py-0.5 text-xs w-64 bg-white font-mono" title="File name of the session to save (.json)" />
-          <button onClick={saveSession} disabled={!samples.length && !opened} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40" title="Download the session as a JSON file">Save session</button>
-          <label className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 cursor-pointer font-medium" title="Load a session JSON file, then add the alignment files it names">
-            Load session
-            <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
-          </label>
-          <button onClick={() => setExportDialog({ window: 'margin', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
-            title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'}>
-            {busy ? '…' : 'Export HTML'}
-          </button>
-          <button onClick={exportAllSvg} disabled={busy || !views.length} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40"
-            title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The SVG button inside the plot saves the current view alone.">
-            {views.length > 1 ? `SVG · ${views.length} views` : 'SVG'}
-          </button>
-        </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
-          <span className="text-xs text-gray-600">Known variants</span>
-          <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="flex items-center gap-1">
-            <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false}
-              className={`border rounded px-2 py-0.5 text-xs w-44 bg-white font-mono ${knownError ? 'border-red-400' : 'border-gray-300'}`}
-              title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
-            <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" className="border border-gray-300 rounded px-2 py-0.5 text-xs w-52 bg-white"
-              title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
-            <button type="submit" disabled={!knownLocus.trim()} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40">+ Add</button>
-          </form>
-          {knownError && <span className="text-xs text-red-600">{knownError}</span>}
-          {knownVars.map(v => (
-            <span key={v.id} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border bg-rose-50 border-rose-300 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
-              <span className="font-medium">{v.label}</span>
-              <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString('en-US')}{v.end > v.start + 1 ? `-${v.end.toLocaleString('en-US')}` : ''}</span>
-              <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove">×</button>
-            </span>
-          ))}
-        </div>
-        </>}
-        {panelHidden && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            <div className="flex items-center gap-2 shrink-0">
-              <Logo size={24} />
-              <span className="text-sm font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
-              <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Show the upper panel again (files, session, known variants)" aria-label="Show the upper panel">
-                ▼ Show panel
-              </button>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
-              <span className="text-xs text-gray-600">Views</span>
-              {views.length === 0 && <span className="text-xs text-gray-400">none yet: open a gene or a locus</span>}
-              {views.map(v => (
-                <span key={v.id} onClick={() => activateTab(v.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400'}`}
-                  title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
-                  {v.label}
-                  <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
+        {!panelHidden && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 pb-2.5">
+            {views.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
+                <span className="text-[10px] font-bold tracking-[.08em] uppercase text-slate-400 mr-0.5">Views</span>
+                {viewTabs}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+              <Popover width={420} title="Add a variant of interest, drawn on every view"
+                buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 whitespace-nowrap"
+                button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-slate-400" /></>}>
+                <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="p-1 space-y-2">
+                  <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false} autoFocus aria-label="Variant locus"
+                    className={`w-full border rounded-lg px-2 py-1.5 text-xs bg-white font-mono outline-none ${knownError ? 'border-red-400' : 'border-slate-200 focus:border-indigo-300'}`}
+                    title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
+                  <div className="flex gap-2">
+                    <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" aria-label="Variant label"
+                      className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white outline-none focus:border-indigo-300"
+                      title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
+                    <button type="submit" disabled={!knownLocus.trim()} className="px-3 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40">Add</button>
+                  </div>
+                  {knownError && <div className="text-[11.5px] text-red-600">{knownError}</div>}
+                </form>
+              </Popover>
+              {knownVars.map(v => (
+                <span key={v.id} className="inline-flex items-center gap-1 h-7 px-2 rounded-lg text-xs border bg-rose-50 border-rose-200 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
+                  <span className="font-medium">{v.label}</span>
+                  <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString('en-US')}{v.end > v.start + 1 ? `-${v.end.toLocaleString('en-US')}` : ''}</span>
+                  <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove" aria-label="Remove"><Icon name="x" size={12} /></button>
                 </span>
               ))}
             </div>
-            <div className="ml-auto shrink-0">{searchForm}</div>
-          </div>
-        )}
-        {!panelHidden && views.length > 1 && (
-          <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
-            <span className="text-xs text-gray-600">Views</span>
-            {views.map(v => (
-              <span key={v.id} onClick={() => activateTab(v.id)}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400 hover:bg-indigo-50'}`}
-                title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
-                {v.label}
-                <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
-              </span>
-            ))}
+            <p className="ml-auto text-[11px] font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
         )}
       </header>
@@ -941,11 +963,11 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="p-3">
+        <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
           <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
             sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
-        </div>
+        </div></div>
       )}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
