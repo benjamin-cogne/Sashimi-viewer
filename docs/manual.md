@@ -91,7 +91,17 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   from the UCSC API, which is slower and requires the network. A FASTA also makes the reads track
   (mismatches) work offline for BAM files.
 - **Read filters** follow `samtools` defaults: unmapped, secondary, QC-fail and duplicate reads are
-  ignored. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or MAPQ ≥ 30 when no `NH` tag is present.
+  ignored, and supplementary records are kept. **Unique reads** keeps `NH:1` reads (STAR/HISAT2) or
+  MAPQ ≥ 30 when no `NH` tag is present.
+- **Secondary**: also counts the secondary alignments (flag `0x100`, the other placements of a
+  multi-mapped read), in coverage, junction arcs and the reads track, as IGV does by default. A
+  junction can then read like IGV's: a fusion read that STAR also places elsewhere is often a
+  secondary alignment. Turning it on turns *Unique reads* off and reads the window again.
+- **Ambiguous placements**: in the reads track, reads with a mapping quality under 10 are drawn
+  hollow, with an outline and no fill, as IGV draws its MAPQ 0 reads. That covers STAR's 3 (2 loci),
+  1 (3–4 loci) and 0 (more), while its 255 (unique) is drawn as usual. Their mismatches stay drawn,
+  and the tooltip says why they are hollow, and whether a read is a secondary or supplementary
+  alignment.
 - **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
   usage statistics.
 - **Very deep libraries** (capture panels at thousands of ×, targeted RNA-seq, highly expressed

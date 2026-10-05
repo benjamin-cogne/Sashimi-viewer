@@ -13,7 +13,7 @@ import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import { READS_REGION_MAX_BP, type CoverageOptions, type ReadsOptions, type SashimiDataSource, type SampleRef, type VariantScan, type VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
-import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
+import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, keepFlagsWith, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
@@ -243,6 +243,8 @@ interface Scan { total: number; rate: number; kept: RawRead[] }
 /** What a scan needs beyond its window: the structural fields of each record, and the caller's abort signal. */
 interface ScanOptions {
   structural?: boolean; signal?: AbortSignal;
+  /** secondary alignments (0x100) kept too */
+  secondary?: boolean;
   /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
   filter?: (light: RawRead) => boolean;
   /** sample fragments rather than reads: the two mates of a pair are kept or dropped together (see `scan`) */
@@ -553,7 +555,7 @@ export class LocalDataSource implements SashimiDataSource {
    * nor the pauses grow with the depth of the library. `opts.signal` drops the decoding and the fetch in flight.
    */
   private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean, opts: ScanOptions = {}): Promise<Scan> {
-    const { structural = false, signal, filter, pairs = false } = opts;
+    const { structural = false, signal, filter, pairs = false, secondary = false } = opts;
     const loc = await this.locate(id, chrom);
     if (!loc) return { total: 0, rate: 1, kept: [] };
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
@@ -570,7 +572,7 @@ export class LocalDataSource implements SashimiDataSource {
       for (const r of recs) {
         if (ts > start && view.start(r) < ts) continue; // already counted in the previous tile
         seen++;
-        if (!keepFlags(view.flags(r))) continue;
+        if (!keepFlagsWith(view.flags(r), secondary)) continue;
         if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
         if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
         if (pairs) {
@@ -930,9 +932,9 @@ export class LocalDataSource implements SashimiDataSource {
    * elsewhere, on the same strand or far away) are kept whole; the others would add nothing to it
    * but their insert size, which the layer histograms instead.
    */
-  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna'): void {
+  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false): void {
     const flags = view.flags(r);
-    if (!keepFlags(flags)) return;
+    if (!keepFlagsWith(flags, secondary)) return;
     const unique = this.isUnique(id, view, r);
     const ops = view.ops(r);
     const start = view.start(r);
@@ -966,7 +968,7 @@ export class LocalDataSource implements SashimiDataSource {
   private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void | Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     return this.fillStretch(id, st, loc, from, to, () => new Layer(),
-      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural), signal, onTile);
+      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary), signal, onTile);
   }
 
   /**
@@ -1032,14 +1034,14 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna'): CoverageState {
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false): CoverageState {
     let st = this.coverage.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
     // records kept for a genomic library include those of an RNA library (split and clipped reads), not the reverse
-    if (!st || st.chrom !== chrom || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
       || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
-      st = new CoverageState(chrom, structural);
+      st = new CoverageState(chrom, structural, secondary);
       this.coverage.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -1077,7 +1079,7 @@ export class LocalDataSource implements SashimiDataSource {
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
       const structural = opts?.structural || false;
-      const st = this.coverageState(sampleId, loc.name, start, end, structural);
+      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary);
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
       // one waits at least PROGRESS_MS and 4× what the last one took, so the partials never take over the reading
@@ -1173,7 +1175,7 @@ export class LocalDataSource implements SashimiDataSource {
     // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
     // are sampled as reads, and their mates in the window added afterwards
     const scanned = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false,
-      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support });
+      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
     if (support) {
@@ -1182,7 +1184,7 @@ export class LocalDataSource implements SashimiDataSource {
       const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
       if (want.size) {
         const extra = await this.scan(sampleId, chrom, start, end, uniqueOnly, Infinity, false,
-          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`) });
+          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`), secondary: !!opts?.secondary });
         mates = extra.kept.length;
         raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);
       }

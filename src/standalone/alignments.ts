@@ -47,6 +47,8 @@ export function cramMismatches(features: CramFeatureLike[] | undefined, qual: Ar
 /** Same filter as pysam count_coverage(read_callback='all'): flags of the records left out. */
 export const DROP_FLAGS = FLAG_UNMAPPED | FLAG_SECONDARY | FLAG_QCFAIL | FLAG_DUP;
 export const keepFlags = (flags: number): boolean => (flags & DROP_FLAGS) === 0;
+/** keepFlags, secondary alignments (0x100, the other placements of a multi-mapped read) kept when `secondary`, as IGV shows them. */
+export const keepFlagsWith = (flags: number, secondary: boolean): boolean => (flags & (secondary ? DROP_FLAGS & ~FLAG_SECONDARY : DROP_FLAGS)) === 0;
 /** Uniquely mapped: NH:1 when the tag is there, else MAPQ ≥ 30. */
 export const uniqueFrom = (nh: number | null, mapq: number): boolean => (nh != null ? nh === 1 : mapq >= 30);
 export function keepRead(r: RawRead): boolean { return keepFlags(r.flags); }

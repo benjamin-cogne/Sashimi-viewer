@@ -38,6 +38,8 @@ export interface ReadsOptions {
    * the source phases more reads than it returns (READS_PHASE_CAP) and returns `maxReads` of them, whole fragments
    */
   phase?: boolean;
+  /** secondary alignments (0x100) among the reads too */
+  secondary?: boolean;
   /**
    * reads mode: only the reads supporting this arc (arcSupport.ts), with their mates in the window; `maxReads` then caps
    * the supporting reads (every k-th kept) and `total` counts them all
@@ -75,6 +77,8 @@ export interface CoverageOptions {
    * introns make its pairs look discordant and its CIGARs carry no structural deletion)
    */
   structural?: boolean | 'rna';
+  /** count secondary alignments (0x100) too, in coverage, junctions and the structural evidence (IGV counts them); default primary and supplementary records only */
+  secondary?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
   /**

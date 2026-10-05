@@ -491,7 +491,7 @@ function App() {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' && SV_HINTS ? 'rna' as const : false;
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural }));
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -520,7 +520,7 @@ function App() {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
               progress(`${t.label}: reads of ${smp.name}`);
               try {
-                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05);
+                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05, { secondary: !!st.secondary });
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
