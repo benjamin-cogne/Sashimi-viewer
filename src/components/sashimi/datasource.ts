@@ -79,6 +79,8 @@ export interface CoverageOptions {
   structural?: boolean | 'rna';
   /** count secondary alignments (0x100) too, in coverage, junctions and the structural evidence (IGV counts them); default primary and supplementary records only */
   secondary?: boolean;
+  /** also split the window by transcript strand (`SampleCoverage.strands`), for a stranded RNA library */
+  strands?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
   signal?: AbortSignal;
   /**

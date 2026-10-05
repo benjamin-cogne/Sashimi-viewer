@@ -46,6 +46,11 @@ export interface EncodedCoverage {
  */
 export interface EncodedCoverageV2 {
   bin: string;
+  /**
+   * the window split by transcript strand under the reverse rule (SampleCoverage.strands), for a stranded sample of a view
+   * exported with its strands shown: each strand's runs and junctions as a coverage stream of their own, like `bin`
+   */
+  strands?: { plus: string; minus: string; spanning?: { plus?: BoundarySpanning; minus?: BoundarySpanning } };
   window: { start: number; end: number };
   spanning?: BoundarySpanning;
   sampled?: { rate: number; total: number; decoded: number };
@@ -59,7 +64,12 @@ export interface EncodedReadsV2 { bin: string; window: { start: number; end: num
 const isBin = (x: unknown): x is { bin: string } => !!x && typeof (x as any).bin === 'string';
 
 export async function encodeCoverageV2(c: SampleCoverage, window: { start: number; end: number }): Promise<EncodedCoverageV2> {
-  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error };
+  const strands = c.strands ? {
+    plus: toBase64(await encodeCoverageColumns({ runs: c.strands.plus.coverage, junctions: c.strands.plus.junctions })),
+    minus: toBase64(await encodeCoverageColumns({ runs: c.strands.minus.coverage, junctions: c.strands.minus.junctions })),
+    spanning: { plus: c.strands.plus.spanning, minus: c.strands.minus.spanning },
+  } : undefined;
+  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), strands, window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error };
 }
 export async function encodeReadsV2(p: ReadsPayload): Promise<EncodedReadsV2> {
   return { bin: toBase64(await encodeReadsColumns(p)), window: p.window };
@@ -200,6 +210,21 @@ export class EmbeddedDataSource extends LocalDataSource {
     }
     return p;
   }
+  /** The two strands of a block exported with them, decoded the first time they are asked for; undefined otherwise. */
+  private strandCache = new Map<string, Promise<SampleCoverage['strands']>>();
+  private decodedStrands(vi: number, sid: number): Promise<SampleCoverage['strands']> {
+    const key = `${vi}|${sid}`;
+    let p = this.strandCache.get(key);
+    if (!p) {
+      const c = this.payload.views[vi].coverage[String(sid)];
+      const st = isBin(c) ? (c as EncodedCoverageV2).strands : undefined;
+      p = !st ? Promise.resolve(undefined) : Promise.all([decodeCoverageColumns(fromBase64(st.plus)), decodeCoverageColumns(fromBase64(st.minus))])
+        .then(([a, b]) => ({ plus: { coverage: a.runs, junctions: a.junctions, spanning: st.spanning?.plus }, minus: { coverage: b.runs, junctions: b.junctions, spanning: st.spanning?.minus } }));
+      p.catch(() => this.strandCache.delete(key));
+      this.strandCache.set(key, p);
+    }
+    return p;
+  }
   private decodedReads(vi: number, sid: number): Promise<ReadsPayload> {
     const key = `${vi}|${sid}`;
     let p = this.readsCache.get(key);
@@ -286,8 +311,9 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
+    const strands = opts?.strands ? await this.decodedStrands(bestVi, sampleId) : undefined;
     const structural = b.structural ?? (opts?.structural === 'rna' ? await this.fusionEvidence(bestVi, sampleId, chrom, uniqueOnly, b.spliced?.reads) : undefined);
-    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural, unavailable: b.unavailable, error: b.error };
+    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural, strands, unavailable: b.unavailable, error: b.error };
   }
   /**
    * The fusion junctions of an RNA sample exported without them (a page exported before they existed, or without the

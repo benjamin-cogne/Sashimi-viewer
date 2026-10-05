@@ -558,11 +558,12 @@ export interface ArcGeom { x1: number; y1: number; x2: number; y2: number; cy: n
 
 /**
  * Arc from (x1,y1) to (x2,y2) whose apex sits exactly `apexHeight` above the
- * higher endpoint. With both control points at height cy the curve's midpoint is
+ * higher endpoint (below the lower one with `down`). With both control points at height cy the curve's midpoint is
  * 0.125·(y1+y2) + 0.75·cy, which is solved for cy here.
  */
-export function arcGeom(x1: number, y1: number, x2: number, y2: number, apexHeight: number): ArcGeom {
-  const apexY = Math.min(y1, y2) - apexHeight;
+export function arcGeom(x1: number, y1: number, x2: number, y2: number, apexHeight: number, down = false): ArcGeom {
+  // `down`: hanging below the lower endpoint instead (the opposite strand, mirrored under the baseline)
+  const apexY = down ? Math.max(y1, y2) + apexHeight : Math.min(y1, y2) - apexHeight;
   const cy = (apexY - 0.125 * (y1 + y2)) / 0.75;
   const f = (n: number) => n.toFixed(1);
   return { x1, y1, x2, y2, cy, d: `M${f(x1)},${f(y1)}C${f(x1)},${f(cy)} ${f(x2)},${f(cy)} ${f(x2)},${f(y2)}` };

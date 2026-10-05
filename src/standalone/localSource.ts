@@ -14,7 +14,7 @@ import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, 
 import { READS_REGION_MAX_BP, type CoverageOptions, type ReadsOptions, type SashimiDataSource, type SampleRef, type VariantScan, type VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, keepFlagsWith, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
-import { CoverageState, Layer, packCigar, readSlice, type CoverageSlice } from './coverage';
+import { CoverageState, Layer, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
@@ -939,7 +939,7 @@ export class LocalDataSource implements SashimiDataSource {
     const ops = view.ops(r);
     const start = view.start(r);
     const insert = (flags & 1) && (flags & 2) ? Math.abs(view.tlen(r)) : 0;
-    layer.add(start, ops, unique, insert);
+    layer.add(start, ops, unique, insert, flags);
     if (!structural) return;
     let keep = false, refLen = 0;
     for (let k = 0; k < ops.length; k++) {
@@ -967,7 +967,7 @@ export class LocalDataSource implements SashimiDataSource {
    */
   private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void | Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-    return this.fillStretch(id, st, loc, from, to, () => new Layer(),
+    return this.fillStretch(id, st, loc, from, to, () => new Layer(st.strands),
       (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary), signal, onTile);
   }
 
@@ -1034,14 +1034,15 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false): CoverageState {
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false, strands = false): CoverageState {
     let st = this.coverage.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
     // records kept for a genomic library include those of an RNA library (split and clipped reads), not the reverse
-    if (!st || st.chrom !== chrom || st.secondary !== secondary || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
+    // counts made with the strands answer a request without them, not the reverse
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || (strands && !st.strands) || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
       || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
-      st = new CoverageState(chrom, structural, secondary);
+      st = new CoverageState(chrom, structural, secondary, strands);
       this.coverage.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -1070,8 +1071,8 @@ export class LocalDataSource implements SashimiDataSource {
     if (k) return k.p.getCoverage(k.s, chrom, start, end, uniqueOnly, boundaries, opts);
     const signal = opts?.signal;
     const loc = await this.locate(sampleId, chrom);
-    const result = (w: { start: number; end: number }, sl: CoverageSlice): SampleCoverage => ({
-      sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced,
+    const result = (w: { start: number; end: number }, sl: CoverageSlice, strands?: SampleCoverage['strands']): SampleCoverage => ({
+      sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced, strands,
     });
     if (!loc) return result({ start, end }, await readSlice([], uniqueOnly, start, end, boundaries));
     return this.locked(this.coverageLocks, sampleId, async () => {
@@ -1079,7 +1080,8 @@ export class LocalDataSource implements SashimiDataSource {
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
       const structural = opts?.structural || false;
-      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary);
+      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands);
+      const strandsOf = (w: { start: number; end: number }) => (opts?.strands ? strandSlices(st, uniqueOnly, w.start, w.end, boundaries) : Promise.resolve(undefined));
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
       // one waits at least PROGRESS_MS and 4× what the last one took, so the partials never take over the reading
@@ -1091,10 +1093,11 @@ export class LocalDataSource implements SashimiDataSource {
         const w = exact();
         if (w.end <= w.start) return;
         const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+        const strands = await strandsOf(w);
         throwIfAborted(signal);
         const t1 = performance.now();
         next = t1 + Math.max(PROGRESS_MS, 4 * (t1 - t0));
-        opts.onProgress(result(w, sl));
+        opts.onProgress(result(w, sl, strands));
       };
       // 1. the view, whatever its depth
       await this.fill(sampleId, st, loc, core.start, core.end, signal, () => progress(false));
@@ -1110,8 +1113,9 @@ export class LocalDataSource implements SashimiDataSource {
       this.trimCoverage(sampleId);
       const w = exact();
       const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+      const strands = await strandsOf(w);
       throwIfAborted(signal);
-      const out = result(w, sl);
+      const out = result(w, sl, strands);
       if (structural) {
         // the reference of the window lets clip clusters be placed by realignment and clipped reads be rescued at the
         // breakpoints seen: fetched when the window has something to place or rescue, the whole window with a FASTA;

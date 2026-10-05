@@ -22,7 +22,7 @@
  *
  * Nothing here decodes: the caller hands over each record's start, packed CIGAR and flags.
  */
-import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc } from '../components/sashimi/types';
+import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc, StrandSlice } from '../components/sashimi/types';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, type RawRead } from './alignments';
 import { DepthIndexBuilder, registerDepthIndex } from '../components/sashimi/geometry';
 import { snapJunctions } from './junctionSnap';
@@ -128,6 +128,8 @@ class Counts {
   shortS: number[] = [];
   shortE: number[] = [];
   junc = new Map<number, number>();
+  /** of `junc`, the reads whose transcript strand under the reverse (dUTP) rule is + (see `plusStrand`): the library's orientation is read from them */
+  juncPlus = new Map<number, number>();
   reads = 0;
   spliced = 0;
   /** aligned bases (not the introns nor the deletions): their mean per read tells a long-read library */
@@ -137,7 +139,7 @@ class Counts {
   /** the short blocks as start × 32 + length, sorted; rebuilt after new reads (a deep RNA gene holds hundreds of thousands) */
   private sortedShort: Float64Array | null = null;
 
-  get bytes(): number { return this.S.bytes + this.E.bytes + this.shortS.length * 24 + this.junc.size * 32 + this.inserts.size * 32; }
+  get bytes(): number { return this.S.bytes + this.E.bytes + this.shortS.length * 24 + (this.junc.size + this.juncPlus.size) * 32 + this.inserts.size * 32; }
 
   shortKeys(): Float64Array {
     if (!this.sortedShort) {
@@ -148,7 +150,7 @@ class Counts {
     return this.sortedShort;
   }
 
-  add(start: number, ops: ArrayLike<number>, insert: number): void {
+  add(start: number, ops: ArrayLike<number>, insert: number, plus: boolean): void {
     let pos = start, spliced = false;
     for (let k = 0; k < ops.length; k++) {
       const v = ops[k], len = v >>> 4, op = v & 15;
@@ -162,6 +164,7 @@ class Counts {
         // then reported bases off its true donor) and made a junction of two deletions in a row.
         const key = pos * JUNC_LEN + Math.min(len, JUNC_LEN - 1);
         this.junc.set(key, (this.junc.get(key) ?? 0) + 1);
+        if (plus) this.juncPlus.set(key, (this.juncPlus.get(key) ?? 0) + 1);
         pos += len; spliced = true;
       } else if (op === 2) pos += len;
     }
@@ -187,25 +190,54 @@ function shortInside(c: Counts, a: number, b: number): number {
   return n;
 }
 
-/** The reads of one part of a scan: every read goes to `all`, a read that is not uniquely mapped to `multi` as well. */
+/**
+ * Transcript strand of a record under the reverse (dUTP, fr-firststrand) rule: read 2 of a pair lies on the
+ * transcript's strand, read 1 or a single read on the opposite one. True for +. A forward-stranded library (read 1 on
+ * the transcript, direct RNA) is the other way round: the viewer turns it over from the library's orientation.
+ */
+export function plusStrand(flags: number): boolean {
+  const reverse = (flags & 16) !== 0, read2 = (flags & 1) !== 0 && (flags & 128) !== 0;
+  return read2 ? !reverse : reverse;
+}
+
+/**
+ * The reads of one part of a scan: every read goes to `all`, a read that is not uniquely mapped to `multi` as well.
+ * With `strands`, the reads on + under the reverse rule also go to `plus` (and `plusMulti`): the − strand is then
+ * `all` − `plus`, so a strand costs one more set of counts, not two.
+ */
 export class Layer {
   all = new Counts();
   multi = new Counts();
+  plus: Counts | null;
+  plusMulti: Counts | null;
   /** records the structural evidence needs (split, clipped, deleted, discordant), when it was asked for */
   sv: { r: RawRead; unique: boolean; end: number }[] = [];
 
-  get bytes(): number { return this.all.bytes + this.multi.bytes + this.sv.length * 400; }
+  constructor(readonly strands = false) {
+    this.plus = strands ? new Counts() : null;
+    this.plusMulti = strands ? new Counts() : null;
+  }
+
+  get bytes(): number { return this.all.bytes + this.multi.bytes + (this.plus?.bytes ?? 0) + (this.plusMulti?.bytes ?? 0) + this.sv.length * 400; }
 
   /**
-   * One alignment. `insert` is the |template length| of a proper pair (0 otherwise). Counting
-   * starts at the record's own start, wherever the caller's window is: the caller decides
-   * which layer owns which reads so that each is counted once.
+   * One alignment. `insert` is the |template length| of a proper pair (0 otherwise), `flags` its SAM flag (its
+   * strand). Counting starts at the record's own start, wherever the caller's window is: the caller decides which
+   * layer owns which reads so that each is counted once.
    */
-  add(start: number, ops: ArrayLike<number>, unique: boolean, insert: number): void {
-    this.all.add(start, ops, insert);
-    if (!unique) this.multi.add(start, ops, insert);
+  add(start: number, ops: ArrayLike<number>, unique: boolean, insert: number, flags: number): void {
+    const plus = plusStrand(flags);
+    this.all.add(start, ops, insert, plus);
+    if (!unique) this.multi.add(start, ops, insert, plus);
+    if (plus && this.plus) {
+      this.plus.add(start, ops, insert, true);
+      if (!unique) this.plusMulti!.add(start, ops, insert, true);
+    }
   }
 }
+
+/** One strand of a slice: the reads on + or on − under the reverse rule. */
+export type StrandPick = 'plus' | 'minus';
 
 export interface CoverageSlice {
   coverage: CoverageRun[];
@@ -258,9 +290,14 @@ const SLICE_STEP_MS = 8;
  * the layers must not change meanwhile (the caller holds the sample's lock).
  */
 export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint,
-  pause?: () => Promise<void>): Promise<CoverageSlice> {
+  pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
   const parts: [Counts, number][] = [];
-  for (const l of layers) { parts.push([l.all, 1]); if (uniqueOnly) parts.push([l.multi, -1]); }
+  for (const l of layers) {
+    if (strand && !l.plus) throw new Error('these counts were made without the strands');
+    // − is everything but +: all − plus, and the same for the multi-mapped reads taken out by uniqueOnly
+    if (strand !== 'plus') { parts.push([l.all, 1]); if (uniqueOnly) parts.push([l.multi, -1]); }
+    if (strand) { const sg = strand === 'plus' ? 1 : -1; parts.push([l.plus!, sg]); if (uniqueOnly) parts.push([l.plusMulti!, -sg]); }
+  }
   /** block starts ≤ x, block ends ≤ x */
   const startsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.S.below(x + 1); return n; };
   const endsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.E.below(x + 1); return n; };
@@ -284,15 +321,18 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
   }
 
   // junctions overlapping the window
-  const junc = new Map<number, number>();
-  for (const [c, sign] of parts) for (const [k, v] of c.junc) junc.set(k, (junc.get(k) ?? 0) + sign * v);
+  const junc = new Map<number, number>(), juncPlus = new Map<number, number>();
+  for (const [c, sign] of parts) {
+    for (const [k, v] of c.junc) junc.set(k, (junc.get(k) ?? 0) + sign * v);
+    for (const [k, v] of c.juncPlus) juncPlus.set(k, (juncPlus.get(k) ?? 0) + sign * v);
+  }
   let reads = 0, spliced = 0, bases = 0;
   for (const [c, sign] of parts) { reads += sign * c.reads; spliced += sign * c.spliced; bases += sign * c.bases; }
   let arcs: JunctionArc[] = [];
   for (const [k, count] of junc) {
     if (count <= 0) continue;
     const js = Math.floor(k / JUNC_LEN);
-    arcs.push({ start: js, end: js + (k % JUNC_LEN), count });
+    arcs.push({ start: js, end: js + (k % JUNC_LEN), count, plus: Math.max(0, juncPlus.get(k) ?? 0) });
   }
   // long reads (mean aligned length over 1 kb, as the reads track tells them): the junctions placed a few bases off a
   // much more common one are counted with it (junctionSnap.ts), instead of a fan of arcs around each true junction
@@ -304,8 +344,8 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
         const to = snap.get(a.start * JUNC_LEN + Math.min(a.end - a.start, JUNC_LEN - 1));
         const [s0, e0] = to ?? [a.start, a.end], k = s0 * JUNC_LEN + (e0 - s0);
         let m = merged.get(k);
-        if (!m) merged.set(k, m = { start: s0, end: e0, count: 0 });
-        m.count += a.count;
+        if (!m) merged.set(k, m = { start: s0, end: e0, count: 0, plus: 0 });
+        m.count += a.count; m.plus! += a.plus ?? 0;
         if (to) m.snapped = (m.snapped ?? 0) + a.count;
       }
       arcs = [...merged.values()];
@@ -353,16 +393,28 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
  * in the new spill when they start before them — so the old spill is dropped whole.
  */
 export class CoverageState {
-  owned = new Layer();
-  spill = new Layer();
+  owned: Layer;
+  spill: Layer;
   ps = 0;
   pe = 0;
   lastUsed = 0;
-  constructor(readonly chrom: string, readonly structural: boolean | 'rna', readonly secondary = false) {}
+  constructor(readonly chrom: string, readonly structural: boolean | 'rna', readonly secondary = false, readonly strands = false) {
+    this.owned = new Layer(strands); this.spill = new Layer(strands);
+  }
   get empty(): boolean { return this.pe <= this.ps; }
   get bytes(): number { return this.owned.bytes + this.spill.bytes; }
   covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }
-  slice(uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>): Promise<CoverageSlice> {
-    return readSlice([this.owned, this.spill], uniqueOnly, start, end, boundaries, pause);
+  slice(uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
+    return readSlice([this.owned, this.spill], uniqueOnly, start, end, boundaries, pause, strand);
   }
 }
+
+/** The two strands of a window, from counts made with the strands (`SampleCoverage.strands`). */
+export async function strandSlices(st: CoverageState, uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint): Promise<{ plus: StrandSlice; minus: StrandSlice }> {
+  const one = async (strand: StrandPick): Promise<StrandSlice> => {
+    const sl = await st.slice(uniqueOnly, start, end, boundaries, yieldStrand, strand);
+    return { coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning };
+  };
+  return { plus: await one('plus'), minus: await one('minus') };
+}
+const yieldStrand = () => new Promise<void>(r => setTimeout(r, 0));

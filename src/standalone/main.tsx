@@ -17,7 +17,7 @@ import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, em
 import type { GenomeBuild } from './ensembl';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { attachVariantWorker } from './variantClient';
-import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from '../components/sashimi/types';
+import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
@@ -74,6 +74,18 @@ const readsWindowOfView = (st: ViewerState) => readsWindowOf(st.readsWindow);
 /** Choices of the export dialog: the window exported around each view (coverage, junctions, retention and reads alike) and the reads per sample. */
 interface ExportOptions { window: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
 const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 20000, dense: 100000, all: Number.MAX_SAFE_INTEGER };
+
+/** Spliced reads of a gene's own introns needed before a library's orientation is called from them. */
+const STRAND_MIN_READS = 50;
+const STRAND_NAMES: Record<LibraryStrand, string> = {
+  reverse: 'reverse-stranded (dUTP, fr-firststrand: read 1 antisense, read 2 sense; Illumina Stranded / TruSeq Stranded, NEB Directional, SMARTer Stranded v2-v3)',
+  forward: 'forward-stranded (read 1 or the single read sense; QuantSeq FWD, SMARTer Stranded v1, direct RNA, oriented long reads)',
+  unstranded: 'unstranded (reads on both strands alike)',
+};
+const strandBadge = (e: StrandEvidence | undefined) => (!e ? '±?' : e.call === 'reverse' ? 'REV' : e.call === 'forward' ? 'FWD' : 'UNS');
+const strandTitle = (e: StrandEvidence | undefined) => `${!e ? 'Library orientation not known yet: it is read from the spliced reads of the first multi-exon gene opened'
+  : `${e.source === 'user' ? 'Chosen by the user' : `Detected: ${Math.round((e.fraction ?? 0) * 100)} % of ${(e.reads ?? 0).toLocaleString('en-US')} spliced reads of the gene's introns on its strand under the reverse rule`} · ${STRAND_NAMES[e.call]}`}`
+  + ' · click to set it (reverse → forward → unstranded); the Strands option of the plot splits the coverage of the stranded samples';
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
@@ -245,7 +257,7 @@ function App() {
     if (added.length) setSamples(prev => [...prev, ...added]);
     // library type from the header (the aligner); the reads of the first gene opened confirm or correct it. The chip pulses until the file is open.
     for (const s of added) {
-      const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? ev : x.lib } : x)));
+      const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...ev, strand: x.lib?.strand } : x.lib } : x)));
       if (ds.getLibraryType) ds.getLibraryType(s.id).then(settle).catch(() => settle(null));
       else settle(null);
     }
@@ -324,7 +336,7 @@ function App() {
     const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString('en-US')} reads spliced`;
     // unchanged samples keep the same array: a new one re-derives the sample types, which the viewer reacts to
     setSamples(prev => {
-      const next: LocalSample[] = prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s));
+      const next: LocalSample[] = prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note, strand: s.lib?.strand } } : s));
       return next.some((s, i) => s !== prev[i]) ? next : prev;
     });
   }, []);
@@ -332,7 +344,34 @@ function App() {
   const cycleLibrary = useCallback((sid: number) => setSamples(prev => prev.map(s => {
     if (s.id !== sid) return s;
     const type: LibraryType = s.lib?.type === 'rna' ? 'dna' : 'rna';
-    return { ...s, lib: { type, source: 'user', note: 'chosen by the user' } };
+    return { ...s, lib: { type, source: 'user', note: 'chosen by the user', strand: s.lib?.strand } };
+  })), []);
+  /** Library orientation of each sample, for the viewer's Strands option. */
+  const sampleStrands = useMemo(() => Object.fromEntries(samples.map(s => [s.id, s.lib?.strand?.call])) as Record<number, LibraryStrand | undefined>, [samples]);
+  /**
+   * Evidence from the spliced reads of a gene's own introns: the share on the gene's strand under the reverse (dUTP)
+   * rule. ≥ 90 % is a reverse library, ≤ 10 % a forward one, anything between unstranded (as RSeQC's infer_experiment
+   * reads it). The call made on the most reads stands, unless the user chose one.
+   */
+  const onStrandEvidence = useCallback((sid: number, ev: { fraction: number; reads: number }) => {
+    if (ev.reads < STRAND_MIN_READS) return;
+    const call: LibraryStrand = ev.fraction >= 0.9 ? 'reverse' : ev.fraction <= 0.1 ? 'forward' : 'unstranded';
+    setSamples(prev => {
+      const next: LocalSample[] = prev.map(s => {
+        const old = s.lib?.strand;
+        if (s.id !== sid || old?.source === 'user' || (old && (old.reads ?? 0) >= ev.reads)) return s;
+        const lib: LibraryEvidence = s.lib ?? { type: 'unknown', source: 'none', note: '' };
+        return { ...s, lib: { ...lib, strand: { call, source: 'reads', fraction: ev.fraction, reads: ev.reads } } };
+      });
+      return next.some((s, i) => s !== prev[i]) ? next : prev;
+    });
+  }, []);
+  /** The user sets the orientation (a click on the strand badge): reverse → forward → unstranded → reverse. */
+  const cycleStrand = useCallback((sid: number) => setSamples(prev => prev.map(s => {
+    if (s.id !== sid) return s;
+    const call: LibraryStrand = s.lib?.strand?.call === 'reverse' ? 'forward' : s.lib?.strand?.call === 'forward' ? 'unstranded' : 'reverse';
+    const lib: LibraryEvidence = s.lib ?? { type: 'unknown', source: 'none', note: '' };
+    return { ...s, lib: { ...lib, strand: { call, source: 'user' } } };
   })), []);
   const libBadge = (lib: LibraryEvidence | undefined) => (lib?.type === 'rna' ? 'RNA' : lib?.type === 'dna' ? 'DNA' : '?');
 
@@ -492,7 +531,9 @@ function App() {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' && SV_HINTS ? 'rna' as const : false;
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary }));
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
+              // a stranded sample of a view showing the strands keeps them split in the page
+              strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -786,6 +827,13 @@ function App() {
                     title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
                     {s.pending ? '…' : libBadge(s.lib)}
                   </button>
+                  {s.lib?.type !== 'dna' && !s.pending && (
+                    <button onClick={e => { e.stopPropagation(); cycleStrand(s.id); }}
+                      className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.lib?.strand ? (s.lib.strand.call === 'unstranded' ? 'bg-gray-100 text-gray-500' : 'bg-violet-50 text-violet-700') : 'bg-gray-50 text-gray-400'}`}
+                      title={strandTitle(s.lib?.strand)}>
+                      {strandBadge(s.lib?.strand)}
+                    </button>
+                  )}
                   <span className="hidden group-hover:inline-flex items-center">
                     <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-slate-400 hover:text-indigo-600 px-0.5" title="Rename">✎</button>
                     <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-slate-400 hover:text-red-500" title="Remove" aria-label="Remove"><Icon name="x" size={13} /></button>
@@ -965,7 +1013,7 @@ function App() {
       ) : (
         <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
           <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} svHints={SV_HINTS}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}

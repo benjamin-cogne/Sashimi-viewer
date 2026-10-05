@@ -28,6 +28,12 @@ export interface JunctionArc {
   start: number; end: number; count: number;
   /** long reads: of `count`, the reads that placed this junction a few bases off and were counted with it (junctionSnap.ts) */
   snapped?: number;
+  /**
+   * of `count`, the reads whose transcript strand under the reverse (dUTP) rule is +: read 2 of a pair mapped on +, read 1
+   * or a single read mapped on −. Against the gene's strand, it tells a stranded library from an unstranded one
+   * (absent from sources that do not count it)
+   */
+  plus?: number;
 }
 /**
  * A structural arc: its breakpoints (0-based half-open) and supporting reads. Arcs of one event whose breakpoints lie
@@ -52,8 +58,16 @@ export interface BoundarySpanning { intronStart: Record<number, number>; intronE
 export interface BoundaryHint { intronStarts: number[]; intronEnds: number[] }
 /** What a library is: RNA-seq (spliced reads, junction arcs) or genomic DNA (exome, genome, long reads). */
 export type LibraryType = 'rna' | 'dna' | 'unknown';
+/**
+ * Orientation of an RNA library: reverse (dUTP / fr-firststrand: read 1 antisense, read 2 sense; Illumina Stranded,
+ * TruSeq Stranded, NEB Directional, SMARTer Stranded v2/v3), forward (read 1 or the single read sense; QuantSeq FWD,
+ * SMARTer Stranded v1, direct RNA) or unstranded.
+ */
+export type LibraryStrand = 'reverse' | 'forward' | 'unstranded';
+/** How a sample's library orientation was decided: from its spliced reads against the gene's introns, or by the user. */
+export interface StrandEvidence { call: LibraryStrand; source: 'reads' | 'user'; /** share of the gene's spliced reads on its strand under the reverse rule */ fraction?: number; reads?: number }
 /** How a sample's library type was decided. */
-export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
+export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string; /** RNA: its orientation, once known */ strand?: StrandEvidence }
 
 /** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
 export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number; /** hard-clipped records without SA tag among the count (no sequence of their own) */ hard?: number }
@@ -152,8 +166,15 @@ export interface SampleCoverage {
   spliced?: { reads: number; fraction: number };
   /** structural evidence, when the caller asked for it (DNA samples) */
   structural?: StructuralEvidence;
+  /**
+   * the window split by transcript strand under the reverse (dUTP) rule, when the caller asked for it (`strands`): + holds
+   * read 2 of the pairs mapped on + and read 1 or single reads mapped on −. The viewer turns it over for a forward library.
+   */
+  strands?: { plus: StrandSlice; minus: StrandSlice };
   error?: string;
 }
+/** Coverage, junctions and boundary counts of the reads of one transcript strand. */
+export interface StrandSlice { coverage: CoverageRun[]; junctions: JunctionArc[]; spanning?: BoundarySpanning }
 
 /** One alignment for the reads track (compact keys, all coordinates 0-based half-open).
  *  n name · s/e reference span · r reverse (1/0) · q MAPQ · f SAM flag · nh NH tag ·
@@ -196,6 +217,8 @@ export interface VariantSite {
   alt_count: number; depth: number; vaf: number;
   /** quality evidence (full variant scans): the alternate reads' shares, each with the same share among the other reads over the site */
   q?: SiteQuality;
+  /** strands shown on a stranded sample: the site is counted on the gene's strand, this is the opposite strand's alternate reads and depth */
+  anti?: { alt: number; depth: number };
 }
 export interface SiteQuality {
   /** on the + strand */

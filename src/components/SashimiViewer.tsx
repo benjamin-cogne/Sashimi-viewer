@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
-import type { LibraryType, StructuralEvidence } from './sashimi/types';
+import type { LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
 import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
@@ -23,6 +23,8 @@ import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, bre
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
 import { READS_PHASE_CAP } from '../standalone/readsWindow';
 import { HAP_MIN_DEPTH } from '../standalone/haplotypes';
+import { plusStrand } from '../standalone/coverage';
+import { callSites } from '../standalone/collapse';
 import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
 import { pairMates } from '../standalone/mates';
 import type { ArcSupport } from '../standalone/arcSupport';
@@ -71,6 +73,13 @@ interface SashimiViewerProps {
   sampleTypes?: Record<number, LibraryType>;
   /** structural-variant hints on DNA tracks (arcs, pills, panel): computed and drawn only when true (development builds, ?sv=1) */
   svHints?: boolean;
+  /** Orientation of each RNA sample's library (reverse, forward, unstranded), by sample id: the Strands option splits the stranded ones. */
+  sampleStrands?: Record<number, LibraryStrand | undefined>;
+  /**
+   * Called once per sample and gene with the spliced reads of the gene's own introns: their number and the share of them
+   * on the gene's strand under the reverse (dUTP) rule, the host's evidence for the library orientation.
+   */
+  onStrandEvidence?: (sampleId: number, evidence: { fraction: number; reads: number }) => void;
   /** Called after each coverage load with the spliced-read fraction of the reads counted (the window or more), the host's evidence for the library type. */
   onLibraryEvidence?: (sampleId: number, evidence: { reads: number; fraction: number; multiExon: boolean }) => void;
   /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
@@ -130,6 +139,11 @@ export interface ViewerSettings {
   readsWindow?: number;
   /** secondary alignments (0x100, the other placements of multi-mapped reads) counted in coverage and junctions and drawn among the reads, as IGV does (default off) */
   secondary?: boolean;
+  /**
+   * stranded RNA samples split by transcript strand: the gene's strand above the baseline (coverage, arcs, usage, variant
+   * sites, reads first), the opposite strand mirrored below it and its reads tinted (default off)
+   */
+  strands?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
   /**
@@ -211,7 +225,7 @@ async function svgToPng(svg: SVGSVGElement, scale = 2): Promise<Blob> {
   }
 }
 
-interface FetchWindow { chrom: string; start: number; end: number; uniqueOnly: boolean; /** secondary alignments counted / drawn too */ secondary?: boolean }
+interface FetchWindow { chrom: string; start: number; end: number; uniqueOnly: boolean; /** secondary alignments counted / drawn too */ secondary?: boolean; /** split by transcript strand too */ strands?: boolean }
 
 interface TrackData {
   sampleId: number;
@@ -232,6 +246,13 @@ interface TrackData {
   unavailable?: SampleCoverage['unavailable'];
   /** Structural evidence of a DNA sample's window (deletions, split reads, clips, discordant pairs). */
   structural?: StructuralEvidence;
+  /** The window split by transcript strand under the reverse rule, when it was asked for (SampleCoverage.strands). */
+  strands?: SampleCoverage['strands'];
+  /**
+   * Strands shown: `coverage`, `junctions` and `spanning` are the gene's strand, this the opposite one, mirrored under
+   * the baseline. Set on the tracks derived for display, never on the loaded ones.
+   */
+  anti?: { coverage: CoverageRun[]; junctions: JunctionArc[] };
   /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
@@ -242,6 +263,12 @@ interface TrackData {
 interface SampleGroup { id: number; name: string; sampleIds: number[]; color?: string }
 const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
 const PSEUDO_EXON_COLOR = '#7c3aed';
+/** the opposite strand of a stranded sample: its mirrored coverage, its arcs and its reads (lighter) */
+const ANTI_COLOR = '#8b5cf6';
+const ANTI_READ_FILL = '#ddd6fe';
+/** smallest band under the baseline for the opposite strand, and its clearance */
+const MIRROR_MIN_H = 14;
+const MIRROR_PAD = 6;
 /** Junctions leaving the queried gene (read-through or fusion transcripts): drawn from their reads, whatever their usage share. */
 const LONG_RANGE_COLOR = '#c026d3';
 /** Fusion junctions of an RNA track from split reads and clipped reads placed by realignment (an end within this many bases of an exon boundary is drawn on it). */
@@ -375,6 +402,8 @@ const READS_HEADER_H = 22;
 const READS_SUPPORT_MAX = 300;
 /** Reads placed with a mapping quality under this are drawn hollow, as IGV draws its MAPQ 0 reads (STAR: 3 for 2 loci, 1 for 3–4, 0 for more; 255 unique). */
 const LOW_MAPQ = 10;
+/** spliced reads of a gene's own introns needed before they are handed to the host as evidence of the library orientation */
+const STRAND_EVIDENCE_MIN_READS = 50;
 /** Coverage requests at once when "Show all" adds many samples (samples picker). */
 const SHOW_ALL_PARALLEL = 3;
 const READS_SEQ_ROW_H = 18;
@@ -997,7 +1026,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, onLibraryEvidence, initialSettings, onStateChange, svHints = false,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false,
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   const ds = dataSource;
@@ -1054,6 +1083,7 @@ export default function SashimiViewer({
   const showUsage = viewMode === 'groups' || arcLabel === 'usage';
   const [uniqueOnly, setUniqueOnly] = useState(init.uniqueOnly ?? false);
   const [showSecondary, setShowSecondary] = useState(init.secondary ?? false);
+  const [showStrands, setShowStrands] = useState(init.strands ?? false);
   const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? MIN_READS_DEFAULT);
   /** the user typed Min reads: it applies as it is, deep DNA tracks included (sessions from before the flag: a value other than the default) */
   const [minReadsSet, setMinReadsSet] = useState(init.minJunctionReadsSet ?? (init.minJunctionReads != null && init.minJunctionReads !== MIN_READS_DEFAULT));
@@ -1102,7 +1132,8 @@ export default function SashimiViewer({
   // ---- Data ----
   const [transcript, setTranscript] = useState<TranscriptData | null>(null);
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
-  const [tracks, setTracks] = useState<TrackData[]>([]);
+  /** the tracks as loaded; `tracks` (below) is what is drawn: with the strands shown, a stranded sample's gene strand */
+  const [rawTracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
   type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
   /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
@@ -1177,6 +1208,27 @@ export default function SashimiViewer({
   const tx: TxModel | null = useMemo(() => (transcript ? toTxModel(transcript) : null), [transcript]);
   const txRef = useRef(tx);
   txRef.current = tx;
+
+  // ---- Strands ----
+  /** a stranded RNA sample, when the strands are shown: its coverage is asked for split by strand */
+  const wantsStrands = useCallback((sid: number) => showStrands && sid > 0 && sampleTypes?.[sid] !== 'dna'
+    && (sampleStrands?.[sid] === 'reverse' || sampleStrands?.[sid] === 'forward'), [showStrands, sampleTypes, sampleStrands]);
+  const wantsStrandsRef = useRef(wantsStrands);
+  wantsStrandsRef.current = wantsStrands;
+  /**
+   * Which strand of the split (reverse rule) is the gene's for a sample: + for a reverse library on a + gene or a forward
+   * library on a − gene. Null when the sample is not split.
+   */
+  const senseOf = useCallback((sid: number): 'plus' | 'minus' | null => {
+    if (!tx || !wantsStrands(sid)) return null;
+    return (sampleStrands?.[sid] === 'reverse') === (tx.strand >= 0) ? 'plus' : 'minus';
+  }, [tx, wantsStrands, sampleStrands]);
+  const tracks = useMemo(() => rawTracks.map(t => {
+    const pick = senseOf(t.sampleId);
+    if (!pick || !t.strands) return t;
+    const sense = t.strands[pick], anti = t.strands[pick === 'plus' ? 'minus' : 'plus'];
+    return { ...t, coverage: sense.coverage, junctions: sense.junctions, spanning: sense.spanning ?? t.spanning, anti: { coverage: anti.coverage, junctions: anti.junctions } };
+  }), [rawTracks, senseOf]);
   // a minus-strand gene is drawn 5′→3′ (coordinates decreasing) for RNA; a page of DNA samples only keeps the genomic orientation
   const dnaOnly = tracks.length > 0 && tracks.every(t => sampleTypes?.[t.sampleId] === 'dna');
   const reverse = tx?.strand === -1 && !dnaOnly;
@@ -1619,7 +1671,7 @@ export default function SashimiViewer({
   }, [tx, neighbours, farGenes, currentChrom, viewStart, viewEnd]);
 
   // ---- Coverage loading (with margin, stale-response protection) ----
-  const viewRef = useRef({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly, secondary: showSecondary });
+  const viewRef = useRef<{ chrom: string; start: number; end: number; uniqueOnly: boolean; secondary: boolean; strands?: boolean }>({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly, secondary: showSecondary });
   viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly, secondary: showSecondary };
   const reqSeq = useRef<Map<number, number>>(new Map());
   /**
@@ -1635,8 +1687,9 @@ export default function SashimiViewer({
     const margin = Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
     return { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly, secondary: !!v.secondary };
   };
-  const covers = (f: FetchWindow | undefined, v: { chrom: string; start: number; end: number; uniqueOnly: boolean; secondary?: boolean }) =>
-    !!f && f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && !!f.secondary === !!v.secondary && f.start <= v.start && f.end >= v.end;
+  /** counts split by strand answer a request without the split, not the reverse */
+  const covers = (f: FetchWindow | undefined, v: { chrom: string; start: number; end: number; uniqueOnly: boolean; secondary?: boolean; strands?: boolean }) =>
+    !!f && f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && !!f.secondary === !!v.secondary && (!v.strands || !!f.strands) && f.start <= v.start && f.end >= v.end;
 
   const onLibraryEvidenceRef = useRef(onLibraryEvidence);
   onLibraryEvidenceRef.current = onLibraryEvidence;
@@ -1683,8 +1736,8 @@ export default function SashimiViewer({
     }
   }, [tracks, tx, minJunctionCount, currentChrom, currentGeneName, isDnaTrack, longRangeOf, svHints, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
-    const view = viewRef.current;
-    const win = fetchWindowFor(view);
+    const view = { ...viewRef.current, strands: wantsStrandsRef.current(sid) };
+    const win: FetchWindow = { ...fetchWindowFor(view), strands: view.strands };
     const seq = (reqSeq.current.get(sid) || 0) + 1;
     reqSeq.current.set(sid, seq);
     covAbort.current.get(sid)?.abort();
@@ -1703,16 +1756,16 @@ export default function SashimiViewer({
         if (reqSeq.current.get(sid) !== seq || !p.window) return;
         const part: FetchWindow = { ...win, start: p.window.start, end: p.window.end };
         setTracks(prev => prev.map(t => t.sampleId !== sid || (!t.partial && t.coverage.length && covers(t.fetched, view) && !covers(part, view)) ? t
-          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, unavailable: p.unavailable, fetched: part, partial: true }));
+          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, unavailable: p.unavailable, strands: p.strands, fetched: part, partial: true }));
       };
       const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && wantsStructuralRef.current(sid), secondary: win.secondary, signal: ctl.signal, onProgress });
+        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && wantsStructuralRef.current(sid), secondary: win.secondary, strands: win.strands, signal: ctl.signal, onProgress });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
       if (data.spliced) onLibraryEvidenceRef.current?.(sid, { ...data.spliced, multiExon: (txRef.current?.exons.length ?? 0) > 1 });
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, unavailable: data.unavailable, structural: data.structural, loading: false, error: data.error, fetched, partial: false,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, unavailable: data.unavailable, structural: data.structural, strands: data.strands, loading: false, error: data.error, fetched, partial: false,
       } : t));
       // the coverage is counted and kept: the records decoded for it would only serve a reads track, so with none shown
       // and no other coverage still reading, they are let go now rather than at the libraries' idle timeout
@@ -1779,11 +1832,31 @@ export default function SashimiViewer({
     if (tracks.length === 0) return;
     const timer = setTimeout(() => {
       for (const t of tracksRef.current) {
-        if (!covers(t.fetched, viewRef.current)) loadCoverage(t.sampleId, t.sampleName);
+        if (!covers(t.fetched, { ...viewRef.current, strands: wantsStrandsRef.current(t.sampleId) })) loadCoverage(t.sampleId, t.sampleName);
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [viewStart, viewEnd, currentChrom, uniqueOnly, showSecondary, reloadTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [viewStart, viewEnd, currentChrom, uniqueOnly, showSecondary, reloadTrigger, wantsStrands]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Library orientation: the spliced reads of the gene's own introns, once per sample and gene ----
+  const onStrandEvidenceRef = useRef(onStrandEvidence);
+  onStrandEvidenceRef.current = onStrandEvidence;
+  const strandReported = useRef(new Map<number, string>());
+  useEffect(() => {
+    if (!tx || !onStrandEvidenceRef.current) return;
+    const introns = intronsOf(tx);
+    if (!introns.length) return;
+    const keys = new Set(introns.map(i => i.start * 1e9 + i.end));
+    for (const t of rawTracks) {
+      if (t.sampleId <= 0 || t.gtex || t.group || t.loading || t.partial || isDnaSample(t.sampleId)) continue;
+      if (strandReported.current.get(t.sampleId) === tx.transcriptId) continue;
+      let total = 0, plus = 0;
+      for (const j of t.junctions) if (j.plus != null && keys.has(j.start * 1e9 + j.end)) { total += j.count; plus += j.plus; }
+      if (total < STRAND_EVIDENCE_MIN_READS) continue;
+      strandReported.current.set(t.sampleId, tx.transcriptId);
+      onStrandEvidenceRef.current(t.sampleId, { fraction: tx.strand >= 0 ? plus / total : 1 - plus / total, reads: Math.round(total) });
+    }
+  }, [rawTracks, tx, isDnaSample]);
 
   // ---- Reads track loading (primary sample by default, or every sample; only below the visibility window) ----
   const effectiveReadsSampleId = tracks.some(t => t.sampleId === readsSampleId) ? readsSampleId : (tracks[0]?.sampleId ?? null);
@@ -2504,7 +2577,8 @@ export default function SashimiViewer({
   const siteLabel = useCallback((st: VariantSite) => {
     const what = st.kind === 'snv' ? `${st.ref}>${st.alt}` : st.kind === 'ins' ? `insertion ${st.alt} bp` : `deletion ${st.alt.slice(1)} bp`;
     const k = knownSnp(st);
-    return `${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)` +
+    return `${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)${st.anti ? ' of the gene\'s strand' : ''}` +
+      (st.anti ? `\nopposite strand: ${st.anti.alt}/${st.anti.depth} reads${st.anti.depth ? ` (${Math.round((100 * st.anti.alt) / st.anti.depth)}%)` : ''}` : '') +
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
@@ -2547,7 +2621,21 @@ export default function SashimiViewer({
       (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource));
 
     const ref = current.reference;
-    const sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
+    // Strands shown on a stranded sample: a read's strand under the library's orientation, the opposite strand's reads
+    // tinted and packed after the others, the variant sites counted on the gene's strand only (the other's in the tooltip)
+    const sensePick = senseOf(sid);
+    const antiOf = sensePick ? (r: AlignedRead) => (plusStrand(r.f) ? 'plus' : 'minus') !== sensePick : null;
+    let sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
+    if (antiOf && fresh && mode === 'reads') {
+      const senseReads = current.reads.filter(r => !antiOf(r)), antiReads = current.reads.filter(antiOf);
+      const long = !!current.long_reads, minVaf = Math.min(1, Math.max(0, (long ? longReadMinVafPct : minVafPct) / 100));
+      sites = callSites(senseReads, viewStart, viewEnd, ref?.seq ?? null, ref?.start ?? 0, 3, minVaf, 20, long ? minIndelBp : 1);
+      if (sites.length) {
+        const altOf = new Map(callSites(antiReads, viewStart, viewEnd, ref?.seq ?? null, ref?.start ?? 0, 1, 0, 20, long ? minIndelBp : 1).map(x => [`${x.pos}\t${x.kind}\t${x.alt}`, x]));
+        const depthAt = (pos: number) => { let n = 0; for (const r of antiReads) if (r.s <= pos && r.e > pos && r.b.some(([bs, be]) => bs <= pos && be > pos)) n++; return n; };
+        sites = sites.map(st => { const a = altOf.get(`${st.pos}\t${st.kind}\t${st.alt}`); return { ...st, anti: { alt: a?.alt_count ?? 0, depth: a?.depth ?? depthAt(st.pos) } }; });
+      }
+    }
     const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
     const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
 
@@ -2979,8 +3067,9 @@ export default function SashimiViewer({
     const byPhase = readsGroup === 'phase';
     const hapOf = (r: AlignedRead) => (byPhase ? r.ph : r.hp), setOf = (r: AlignedRead) => (byPhase ? r.pb : r.ps);
     const grouped = readsGroup !== 'none' && visible.some(r => hapOf(r));
-    const groupRows: { row: number; rows: number; hp: number; reads: number; sets: number }[] = [];
-    if (pairMode || splitMode || grouped) {
+    const strandSplit = !!antiOf && visible.some(antiOf);
+    const groupRows: { row: number; rows: number; hp: number; reads: number; sets: number; anti: boolean; header: boolean }[] = [];
+    if (pairMode || splitMode || grouped || strandSplit) {
       // union-find over the reads: mates and split parts end up in one unit
       const parent = new Int32Array(visible.length); for (let i = 0; i < parent.length; i++) parent[i] = i;
       const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
@@ -2998,23 +3087,38 @@ export default function SashimiViewer({
         else { units[u].s = Math.min(units[u].s, x.s); units[u].e = Math.max(units[u].e, x.e); }
         unitOf[i] = u;
       });
-      if (grouped) {
-        // a unit (pair, split read) takes the haplotag of its first tagged read
-        const hpOf = new Int32Array(units.length);
-        visible.forEach((r, i) => { const h = hapOf(r); if (h && !hpOf[unitOf[i]]) hpOf[unitOf[i]] = h; });
-        const keys = [...new Set(hpOf)].sort((a, b) => (a || Infinity) - (b || Infinity));
+      if (grouped || strandSplit) {
+        // a unit (pair, split read) takes the haplotag of its first tagged read, and the strand of its first read (its
+        // mates agree under the library's orientation); the gene's strand first, then the opposite one
+        const hpOf = new Int32Array(units.length), antiU = new Uint8Array(units.length), seenU = new Uint8Array(units.length);
+        visible.forEach((r, i) => {
+          const u = unitOf[i];
+          if (grouped) { const h = hapOf(r); if (h && !hpOf[u]) hpOf[u] = h; }
+          if (antiOf && !seenU[u]) { seenU[u] = 1; antiU[u] = antiOf(r) ? 1 : 0; }
+        });
+        const keyOf = (u: number) => antiU[u] * 1e6 + (hpOf[u] || 999999);
+        const keys = [...new Set(units.map((_, u) => keyOf(u)))].sort((a, b) => a - b);
         rows = new Int32Array(visible.length).fill(-1); hidden = 0;
+        // the rows are shared out when the groups need more than READS_MAX_ROWS together: each in proportion to what it
+        // needs, with a few at least, so that a small group last (the opposite strand, untagged reads) still shows
+        const want = keys.map(k => (grouped || k >= 1e6 ? 1 : 0) + packReads(units.filter((_, u) => keyOf(u) === k), READS_MAX_ROWS).nRows);
+        const sum = want.reduce((x, y) => x + y, 0);
+        const budget = sum <= READS_MAX_ROWS ? want : want.map(w => Math.max(Math.min(w, 8), Math.floor((READS_MAX_ROWS * w) / sum)));
         let next = 0;
-        for (const k of keys) {
-          const members = units.map((_, u) => u).filter(u => hpOf[u] === k);
-          const inGroup = visible.map((_, i) => i).filter(i => hpOf[unitOf[i]] === k);
-          if (next + 1 >= READS_MAX_ROWS) { hidden += inGroup.length; continue; }
-          const packed = packReads(members.map(u => units[u]), READS_MAX_ROWS - next - 1);
-          const rowOfUnit = new Map(members.map((u, j) => [u, packed.rows[j] < 0 ? -1 : next + 1 + packed.rows[j]]));
+        keys.forEach((k, ki) => {
+          const anti = k >= 1e6, hp = k % 1e6 === 999999 ? 0 : k % 1e6;
+          // a label row over each haplotype, and over the opposite strand's reads; the gene's strand alone needs none
+          const header = grouped || anti, head = header ? 1 : 0;
+          const members = units.map((_, u) => u).filter(u => keyOf(u) === k);
+          const inGroup = visible.map((_, i) => i).filter(i => keyOf(unitOf[i]) === k);
+          const cap = Math.min(budget[ki], READS_MAX_ROWS - next);
+          if (cap <= head) { hidden += inGroup.length; return; }
+          const packed = packReads(members.map(u => units[u]), cap - head);
+          const rowOfUnit = new Map(members.map((u, j) => [u, packed.rows[j] < 0 ? -1 : next + head + packed.rows[j]]));
           for (const i of inGroup) { rows[i] = rowOfUnit.get(unitOf[i])!; if (rows[i] < 0) hidden++; }
-          groupRows.push({ row: next, rows: 1 + packed.nRows, hp: k, reads: inGroup.length, sets: new Set(inGroup.map(i => setOf(visible[i])).filter(x => x != null)).size });
-          next += 1 + packed.nRows;
-        }
+          groupRows.push({ row: next, rows: head + packed.nRows, hp, reads: inGroup.length, sets: grouped ? new Set(inGroup.map(i => setOf(visible[i])).filter(x => x != null)).size : 0, anti, header });
+          next += head + packed.nRows;
+        });
         nRows = next;
       } else {
         const packed = packReads(units, READS_MAX_ROWS);
@@ -3133,7 +3237,7 @@ export default function SashimiViewer({
       const lowMapq = r.q < LOW_MAPQ;
       const spans = readSpansBoundary(r, modelBoundaries);
       const discordant = pairMode ? discordantOf(r, idx) : null;
-      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : READ_FILL;
+      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : READ_FILL;
       const body = lowMapq ? { fill: INK.bg, stroke: fill, strokeWidth: 0.8 } : { fill };
       // the line to the mate, drawn once per pair from the left mate
       const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
@@ -3279,14 +3383,17 @@ export default function SashimiViewer({
       );
     });
 
-    const groupEls = groupRows.map(g => {
-      const top = readsTop + g.row * (rowH + 1), color = g.hp ? HAP_COLORS[(g.hp - 1) % HAP_COLORS.length] : INK.faint;
-      const label = `${g.hp ? `${byPhase ? 'H' : 'HP '}${g.hp}` : byPhase ? 'unphased' : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} ${byPhase ? 'block' : 'phase set'}${g.sets === 1 ? '' : 's'}` : ''}`;
+    const groupEls = groupRows.filter(g => g.header).map(g => {
+      const top = readsTop + g.row * (rowH + 1), color = !grouped ? ANTI_COLOR : g.hp ? HAP_COLORS[(g.hp - 1) % HAP_COLORS.length] : INK.faint;
+      const strandTxt = g.anti ? 'opposite strand' : '';
+      const label = !grouped
+        ? `opposite strand · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}`
+        : `${strandTxt ? `${strandTxt} · ` : ''}${g.hp ? `${byPhase ? 'H' : 'HP '}${g.hp}` : byPhase ? 'unphased' : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} ${byPhase ? 'block' : 'phase set'}${g.sets === 1 ? '' : 's'}` : ''}`;
       return (
-        <g key={`grp${g.hp}`}>
-          <title>{byPhase
+        <g key={`grp${g.anti ? 'a' : ''}${g.hp}`}>
+          {!grouped ? <title>{`reads of the strand opposite to ${tx?.geneName ?? 'the gene'} under the library's orientation (${sampleStrands?.[sid] ?? ''}): an antisense transcript, or the few % of reads of the wrong strand every stranded library has`}</title> : <title>{byPhase
             ? (g.hp ? `reads on haplotype ${g.hp} of the page's read-based phasing: the alleles they carry at the heterozygous sites of their phase block match haplotype ${g.hp} better (H1 of one block is not tied to H1 of the next one: the blocks are listed in the collapsed mode)` : 'reads the phasing leaves unassigned: they cover no phased site, or match both haplotypes alike')
-            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}</title>
+            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}{g.anti ? ', on the strand opposite to the gene' : ''}</title>}
           <rect x={PLOT_LEFT} y={top} width={plotWidth} height={rowH} fill={color} opacity={0.1} />
           <rect x={PLOT_LEFT} y={top} width={3} height={g.rows * (rowH + 1) - 1} fill={color} />
           <text x={PLOT_LEFT + 7} y={top + rowH - 1} fill={INK.text} fontSize={Math.min(9, rowH + 3)} fontWeight={700}>{label}</text>
@@ -3296,7 +3403,8 @@ export default function SashimiViewer({
     const info = (current.supporting && readsSupport
       ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
       : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
-      (grouped ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
+      (grouped && !strandSplit ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
+      (strandSplit ? (() => { const a = groupRows.filter(g => g.anti).reduce((n, g) => n + g.reads, 0); return ` · ${a.toLocaleString('en-US')} on the opposite strand (violet, packed last${grouped ? `, grouped by ${byPhase ? 'read-based phasing' : 'haplotag'} within each strand` : ''})`; })() : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString('en-US')} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
@@ -3334,7 +3442,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -3433,6 +3541,8 @@ export default function SashimiViewer({
     longRange?: boolean;
     /** a fusion junction of an RNA track, from split reads and placed clips */
     fusion?: boolean;
+    /** an arc of the opposite strand, hanging under the mirrored coverage */
+    below?: boolean;
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
@@ -3453,6 +3563,10 @@ export default function SashimiViewer({
     methyl: number;
     /** the panel has the row of the CpG-island differences with the other samples */
     methylDiff: boolean;
+    /** height of the opposite strand's band under the baseline (0 when the strands are not split) */
+    mirror: number;
+    /** the opposite strand's coverage, mirrored under the baseline */
+    antiPaths: CoveragePaths | null;
   }
 
   const transcriptY = RULER_H;
@@ -3740,9 +3854,41 @@ export default function SashimiViewer({
             text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind, fusion: true });
         }
       }
+      // The opposite strand of a stranded sample, mirrored under the baseline on the same depth scale, its arcs hanging
+      // under it (laid out against a baseline at y = 0 too, downward positive)
+      const antiDepth = (d: number) => (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
+      if (track.anti) {
+        const anti = track.anti;
+        const list = anti.junctions.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`));
+        const aLevels = layerJunctions(list);
+        const approx = track.sampled ? '≈' : '';
+        for (const j of list) {
+          const key = `anti:${junctionKey(j)}`, dragKey = `${track.sampleId}:${key}`;
+          const x1 = scale.x(j.start), x2 = scale.x(j.end);
+          const y1 = antiDepth(depthAt(anti.coverage, j.start - 1)), y2 = antiDepth(depthAt(anti.coverage, j.end));
+          const level = aLevels.get(junctionKey(j)) || 1;
+          // dragged down (offset > 0) hangs deeper
+          const offset = junctionOffsets[dragKey] || 0;
+          const apexH = Math.max(6, 18 + (level - 1) * JUNC_LEVEL_STEP + offset);
+          const geom = arcGeom(x1, y1, x2, y2, apexH, true);
+          const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
+          const visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
+          const labelX = (visLo + visHi) / 2;
+          const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
+          const cont = (atStart: boolean) => `continues to ${currentChrom}:${(atStart ? j.start + 1 : j.end).toLocaleString('en-US')}`;
+          let edge: ArcRender['edge'] = null;
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: cont(!reverse) };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: cont(reverse) };
+          const title = `opposite strand (antisense to ${tx?.geneName ?? 'the gene'}): ${approx}${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n` +
+            `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
+            'a transcript of the other strand (antisense gene, readthrough), or reads of the library\'s wrong strand (a few % in any stranded library)';
+          arcs.push({ j, key, dragKey, level, color: ANTI_COLOR, dashed: false, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55),
+            geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, below: true });
+        }
+      }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
       // right of the midpoint, to the nearest free spot, so it stays on the arc even when enlarged; only when the
-      // whole visible arc is taken is it pushed upward.
+      // whole visible arc is taken is it pushed upward (an arc of the opposite strand: downward).
       const placed: { x: number; y: number; w: number; h: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
@@ -3761,15 +3907,21 @@ export default function SashimiViewer({
           }
           for (let iter = 0; !found && iter < 24; iter++) {
             if (!hits(a.label.x, a.label.y)) break;
-            a.label.y -= h + 3;
+            a.label.y += (a.below ? 1 : -1) * (h + 3);
           }
         }
         placed.push({ x: a.label.x, y: a.label.y, w, h });
       }
       // Highest point of the track content relative to the baseline (negative): the coverage area itself,
       // every arc apex (dragged arcs included, their apex height carries the drag), read-count pill and edge chevron.
-      let top = -COVERAGE_H;
+      let top = -COVERAGE_H, bottom = 0;
       for (const a of arcs) {
+        if (a.below) {
+          bottom = Math.max(bottom, Math.max(a.geom.y1, a.geom.y2) + a.apexH);
+          if (a.label) bottom = Math.max(bottom, a.label.y + (LABEL_H * a.labelScale) / 2);
+          if (a.edge) bottom = Math.max(bottom, a.edge.y + 4);
+          continue;
+        }
         top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH);
         if (a.label) top = Math.min(top, a.label.y - (LABEL_H * a.labelScale) / 2);
         if (a.edge) top = Math.min(top, a.edge.y - 4);
@@ -3777,11 +3929,13 @@ export default function SashimiViewer({
       const juncH = TRACK_LABEL_H + strip + Math.max(JUNC_MIN_H, -top - COVERAGE_H + JUNC_PAD);
       const baseline = y + juncH + COVERAGE_H;
       for (const a of arcs) {
-        a.geom = arcGeom(a.geom.x1, a.geom.y1 + baseline, a.geom.x2, a.geom.y2 + baseline, a.apexH);
+        a.geom = arcGeom(a.geom.x1, a.geom.y1 + baseline, a.geom.x2, a.geom.y2 + baseline, a.apexH, a.below);
         if (a.label) a.label.y += baseline;
         if (a.edge) a.edge.y += baseline;
       }
       const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
+      const antiPaths = track.anti ? buildCoveragePaths(track.anti.coverage, scale, viewStart, viewEnd, baseline, d => baseline + antiDepth(d)) : null;
+      const mirror = track.anti ? Math.ceil(Math.max(MIRROR_MIN_H, bottom, antiDepth(maxDepthIn(track.anti.coverage, viewStart, viewEnd)))) + MIRROR_PAD : 0;
       // intron retention pills: on the baseline at the middle of the visible part of each intron, above the Min % threshold
       const retention: TrackLayout['retention'] = (dnaTrack ? [] : trackAgg?.retention ?? [])
         .filter(r => r.pct * 100 >= minUsagePct && r.pct > 0 && r.end > viewStart && r.start < viewEnd)
@@ -3828,8 +3982,8 @@ export default function SashimiViewer({
       // the coverage layer switched off: a DNA track keeps its label band, then its other layers
       const hideCov = !showCoverage && dnaTrack && !track.gtex;
       const covH = hideCov ? 0 : COVERAGE_H, jH = hideCov ? TRACK_LABEL_H : juncH;
-      const height = jH + covH + variants + methyl;
-      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow });
+      const height = jH + covH + mirror + variants + methyl;
+      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow, mirror, antiPaths });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
@@ -4029,6 +4183,15 @@ export default function SashimiViewer({
       });
     }
     if (anyRna && rnaOthers.length > 0) line(UNIQUE_COLOR, false, `only in ${comparedTracks[0].sampleName}`, 'l3');
+    if (layouts.some(L => L.antiPaths)) items.push({
+      w: 300, el: (
+        <g key="lanti">
+          <line x1={0} y1={y - 3} x2={16} y2={y - 3} stroke={INK.gridStrong} strokeWidth={1} />
+          <path d={`M0,${y - 3} L4,${y + 4} L12,${y + 4} L16,${y - 3} z`} fill={withAlpha(ANTI_COLOR, 0.3)} stroke={ANTI_COLOR} strokeWidth={0.8} />
+          <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>opposite strand, mirrored (coverage, arcs, reads)</text>
+        </g>
+      ),
+    });
     items.push({
       w: 60, el: (
         <g key="l4">
@@ -4588,6 +4751,18 @@ export default function SashimiViewer({
           {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
           {covOn && paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
           {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
+          {/* the opposite strand, mirrored under the baseline */}
+          {L.antiPaths && (
+            <g data-antisense="">
+              <rect x={PLOT_LEFT} y={baseline} width={plotWidth} height={L.mirror} fill={withAlpha(ANTI_COLOR, 0.035)} />
+              {L.antiPaths.fill && <path d={L.antiPaths.fill} fill={withAlpha(ANTI_COLOR, 0.09)} stroke="none" />}
+              {L.antiPaths.mean && <path d={L.antiPaths.mean} fill={withAlpha(ANTI_COLOR, 0.26)} stroke="none" />}
+              {L.antiPaths.stroke && <path d={L.antiPaths.stroke} fill="none" stroke={ANTI_COLOR} strokeWidth={1.1} strokeLinejoin="round" />}
+              <text x={plotRight - 6} y={baseline + 10} textAnchor="end" fill={ANTI_COLOR} fontSize={9} fontWeight={600} opacity={0.85} pointerEvents="none">
+                ▼ opposite strand{track.anti && !track.anti.coverage.some(r => r.depth > 0 && r.end > viewStart && r.start < viewEnd) ? ' · no reads' : ''}
+              </text>
+            </g>
+          )}
 
           {/* Junction arcs */}
           {arcs.map(a => (
@@ -4601,7 +4776,7 @@ export default function SashimiViewer({
               }}
               onClick={e => {
                 e.stopPropagation();
-                if (dragMoved.current) return;
+                if (dragMoved.current || a.below) return;
                 const p = svgPoint(e);
                 setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
@@ -5413,14 +5588,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -5622,6 +5797,17 @@ export default function SashimiViewer({
               <Pill on={showReads} onChange={setShowReads} label="Reads" icon="reads"
                 title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).`} />
             )}
+            {anyRna && (() => {
+              const shownRna = tracks.filter(t => t.sampleId > 0 && !isDnaSample(t.sampleId));
+              const name = (sid: number) => tracks.find(t => t.sampleId === sid)?.sampleName ?? `#${sid}`;
+              const per = shownRna.map(t => `${name(t.sampleId)}: ${sampleStrands?.[t.sampleId] ?? 'orientation not known yet'}`).join('; ');
+              const none = !shownRna.some(t => sampleStrands?.[t.sampleId] === 'reverse' || sampleStrands?.[t.sampleId] === 'forward');
+              return (
+                <Pill on={showStrands} onChange={setShowStrands} label="Strands" icon="strands"
+                  title={`Split each stranded RNA sample by transcript strand: the reads of ${tx?.geneName ?? 'the gene'}'s strand above the baseline (coverage, arcs, usage, variant sites), the opposite strand mirrored under it on the same scale with its own arcs, and its reads tinted violet and grouped after the others. `
+                    + `The strand of a read comes from the library's orientation: reverse (dUTP: read 2 on the transcript's strand, read 1 opposite) or forward (read 1 or the single read on it), detected from the spliced reads of the gene's introns or set on the sample chip. An unstranded sample stays whole.\n${per}${none ? '\nNo shown sample is known to be stranded yet.' : ''}`} />
+              );
+            })()}
             <Pill on={showAllTx} onChange={setShowAllTx} label="All transcripts" icon="tx"
               title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
             <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"

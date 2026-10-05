@@ -8,7 +8,7 @@
  */
 import type { ViewerSettings, ViewerState } from '../components/SashimiViewer';
 import type { GenomeBuild } from './ensembl';
-import type { LibraryEvidence } from '../components/sashimi/types';
+import type { LibraryEvidence, StrandEvidence } from '../components/sashimi/types';
 import type { SampleKind } from './fileKinds';
 
 export const SESSION_APP = 'sashimi-viewer';
@@ -78,13 +78,13 @@ export function buildSession(args: {
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
     samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
-    consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary,
+    consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands,
   });
   const geneOf = (state: ViewerState): SessionGene => ({ name: state.gene.name, id: state.gene.id, chrom: state.gene.chrom, start: state.gene.start, end: state.gene.end, view: { ...state.view }, mark: state.mark });
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
-    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && s.lib.type !== 'unknown' ? s.lib : undefined })),
+    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
     fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name } : null,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
@@ -106,7 +106,11 @@ export function parseSession(text: string): SessionFile {
     .filter((s: any) => s && typeof s.file === 'string')
     .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: typeof s.kind === 'string' && /^[a-z0-9_-]+$/.test(s.kind) ? s.kind : 'bam',
       path: typeof s.path === 'string' ? s.path : undefined, indexPath: typeof s.indexPath === 'string' ? s.indexPath : undefined,
-      library: s.library && (s.library.type === 'rna' || s.library.type === 'dna') ? { type: s.library.type, source: ['header', 'reads', 'user'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? '') } : undefined }));
+      library: s.library && (s.library.type === 'rna' || s.library.type === 'dna' || s.library.strand) ? {
+        type: s.library.type === 'rna' || s.library.type === 'dna' ? s.library.type : 'unknown',
+        source: ['header', 'reads', 'user', 'none'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? ''),
+        strand: strandOf(s.library.strand),
+      } : undefined }));
   const parseGene = (g: any): SessionGene | null => g && typeof g.name === 'string' && typeof g.chrom === 'string' && Number.isFinite(g.start) && Number.isFinite(g.end)
     ? { name: g.name, id: typeof g.id === 'string' ? g.id : undefined, chrom: g.chrom, start: g.start, end: g.end,
         view: g.view && Number.isFinite(g.view.start) && Number.isFinite(g.view.end) ? { start: g.view.start, end: g.view.end } : { start: g.start, end: g.end },
@@ -158,4 +162,10 @@ export function viewerSettingsOf(session: SessionFile | { viewer: SessionViewer 
     ...(shown ? { shownSamples: shown.map(idOf).filter((id): id is number => id != null) } : {}),
     groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
   };
+}
+
+/** A sample's library orientation as a session file holds it, checked. */
+function strandOf(x: any): StrandEvidence | undefined {
+  if (!x || !['reverse', 'forward', 'unstranded'].includes(x.call)) return undefined;
+  return { call: x.call, source: x.source === 'reads' ? 'reads' : 'user', fraction: typeof x.fraction === 'number' ? x.fraction : undefined, reads: typeof x.reads === 'number' ? x.reads : undefined };
 }

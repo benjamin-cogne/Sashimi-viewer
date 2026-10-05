@@ -143,8 +143,37 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   1 (3–4 loci) and 0 (more), while its 255 (unique) is drawn as usual. Their mismatches stay drawn,
   and the tooltip says why they are hollow, and whether a read is a secondary or supplementary
   alignment.
-- **Library strandness** (fr-firststrand / dUTP rule) is detected per file and used for the exon
-  usage statistics.
+- **Library orientation** (strandedness) of each RNA sample is shown on its chip, next to the RNA
+  badge:
+  - **REV**: reverse-stranded (dUTP, `fr-firststrand`, RSeQC `1+-,1-+,2++,2--`). Read 1 is antisense
+    and read 2 sense. Kits: Illumina Stranded mRNA / Total RNA, TruSeq Stranded, NEB Ultra II
+    Directional, Takara SMARTer Stranded Total RNA-Seq v2 and v3 Pico.
+  - **FWD**: forward-stranded (`fr-secondstrand`). Read 1, or the single read, is sense. Kits and
+    data: Lexogen QuantSeq FWD, the first SMARTer Stranded Pico kit, ONT direct RNA, long cDNA reads
+    oriented by pychopper or Restrander.
+  - **UNS**: unstranded.
+
+  The viewer detects it from the spliced reads of the first multi-exon gene opened (50 at least),
+  the way RSeQC's `infer_experiment.py` does: it takes the share of them lying on the gene's strand
+  under the reverse rule. 90 % or more is reverse, 10 % or less forward, anything between
+  unstranded. A click on the badge sets it by hand (reverse → forward → unstranded). It is saved
+  with the session and the exported page, and is also used for the exon usage statistics.
+- **Strands** (in *Show*, RNA): splits every stranded sample by transcript strand.
+  - The reads of the gene's strand stay above the baseline. The coverage, junction arcs, usage
+    percentages and variant sites are theirs alone.
+  - The opposite strand is mirrored under the baseline, in violet, on the same depth scale, with its
+    own junction arcs hanging under it. That is an antisense transcript, or the few percent of
+    wrong-strand reads every stranded library has.
+  - In the reads track, the opposite strand's fragments are tinted violet and packed after the
+    others, under an *opposite strand* label. When the rows run short, each group keeps a share of
+    them.
+  - A variant site is called on the gene's strand's reads. Its tooltip adds the opposite strand's
+    alternate reads and depth, for example to tell an allele of the gene from one of an antisense
+    transcript.
+  - The strand of a read comes from the library's orientation: read 2 of a pair on the transcript's
+    strand and read 1 on the other one in a reverse library, the opposite in a forward one.
+  - An unstranded sample, or one whose orientation is not known yet, stays whole. Groups pool the
+    unsplit coverage. The collapsed reads track does not split by strand.
 - **Very deep libraries** (capture panels at thousands of ×, targeted RNA-seq, highly expressed
   genes): coverage, junctions and intron-retention counts are **exact at any depth**. Every read of
   the window is counted straight from its alignment into per-position tallies, without building a

@@ -11,7 +11,12 @@ language) can produce or read the same bytes. The reference implementation is
 The page payload itself stays a JSON object in a `<script id="sashimi-embedded"
 type="application/json">` tag (`EmbeddedExport` in `src/standalone/embedded.ts`). In version 2,
 `views[i].coverage[sampleId]` and `views[i].reads[sampleId]` hold `{ "bin": "<base64>", ... }`
-objects; version 1 pages held the JSON forms and are still read. Version 3 of the export writes
+objects; version 1 pages held the JSON forms and are still read. A coverage object may also hold
+`strands: { "plus": "<base64>", "minus": "<base64>", "spanning": { "plus": …, "minus": … } }`: the
+window split by transcript strand under the reverse (dUTP) rule (read 2 of a pair mapped on +, or read
+1 or a single read mapped on −, is +), each strand a coverage stream of its own (section 4), written
+for the stranded samples of a view exported with its strands shown. A reader that does not know it
+ignores it. Version 3 of the export writes
 the streams of columnar version 4 (below), version 4 of the export those of columnar version 5, and
 both read every earlier one.
 
