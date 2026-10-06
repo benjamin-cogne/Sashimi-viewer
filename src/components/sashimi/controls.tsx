@@ -64,14 +64,17 @@ export function Icon({ name, size = 16, className = '' }: { name: keyof typeof I
 }
 
 /** One choice among a few. `size="sm"` for the secondary ones (depth axis, raw / collapsed). */
-export function Segmented<T extends string>({ value, onChange, options, disabled, title, size = 'md', label }: {
+export function Segmented<T extends string>({ value, onChange, options, disabled, title, size = 'md', label, prefix }: {
   value: T; onChange: (v: T) => void; disabled?: boolean; title: string; size?: 'sm' | 'md'; label?: string;
+  /** a key in grey inside the switch, before its choices ("AF ≥", "window ≤"): one control instead of a label and a menu */
+  prefix?: string;
   options: { value: T; label: string; icon?: string; hint?: string }[];
 }) {
   const sm = size === 'sm';
   return (
     <span role="radiogroup" aria-label={label ?? title} title={title}
       className={`inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px] select-none ${disabled ? 'opacity-60' : ''}`}>
+      {prefix && <span className={`pl-1.5 pr-1 whitespace-nowrap text-slate-500 ${sm ? 'text-[11px]' : 'text-xs'}`}>{prefix}</span>}
       {options.map(o => {
         const active = o.value === value;
         return (

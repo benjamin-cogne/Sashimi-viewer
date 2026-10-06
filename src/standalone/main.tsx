@@ -21,7 +21,7 @@ import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleC
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
-import { Icon, MenuItem, Popover } from '../components/sashimi/controls';
+import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
@@ -761,13 +761,12 @@ function App() {
   const searchForm = (
     <form onSubmit={e => { e.preventDefault(); open(); }}
       className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
-      <label className="relative inline-flex items-center h-7 pl-2 pr-6 rounded-lg bg-white border border-slate-200 text-xs text-slate-700 cursor-pointer" title="Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network">
-        <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} aria-label="Genome build" className="appearance-none bg-transparent outline-none cursor-pointer font-medium">
-          <option value="GRCh38">GRCh38</option>
-          <option value="GRCh37">GRCh37</option>
-        </select>
-        <Icon name="chev" size={12} className="absolute right-1.5 text-slate-400 pointer-events-none" />
-      </label>
+      <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={b => { if (b !== build) changeBuild(b); }}
+        title="Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it"
+        options={[
+          { value: 'GRCh38' as GenomeBuild, label: '38', hint: 'GRCh38 / hg38' },
+          { value: 'GRCh37' as GenomeBuild, label: '37', hint: 'GRCh37 / hg19' },
+        ]} />
       <Icon name="search" size={15} className="text-slate-400" />
       <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" aria-label="Gene or locus"
         title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)"

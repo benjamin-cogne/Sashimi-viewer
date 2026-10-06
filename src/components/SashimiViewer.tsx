@@ -5852,9 +5852,13 @@ export default function SashimiViewer({
             <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
               title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
             {showSnps && (
-              <Select label="AF ≥" value={snpMinAf} onChange={v => setSnpMinAf(parseFloat(v))} title="Minimum allele frequency (highest over the frequency projects) for a variant to be shown">
-                {[[0.001, '0.1%'], [0.01, '1%'], [0.05, '5%']].map(([v, l]) => <option key={String(v)} value={v as number}>{l as string}</option>)}
-              </Select>
+              <Segmented size="sm" prefix="AF ≥" label="SNP allele frequency" value={String(snpMinAf)} onChange={v => setSnpMinAf(parseFloat(v))}
+                title="Minimum allele frequency of a common variant to be shown (the highest over the frequency projects: gnomAD, 1000 Genomes, TOPMed…)"
+                options={[
+                  { value: '0.001', label: '0.1 %', hint: 'Variants with an allele frequency of 0.1 % or more somewhere: the densest track' },
+                  { value: '0.01', label: '1 %', hint: 'Polymorphisms in the usual sense (1 % or more)' },
+                  { value: '0.05', label: '5 %', hint: 'Common variants only (5 % or more)' },
+                ]} />
             )}
             <Pill on={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns" icon="equal"
               title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
@@ -5946,10 +5950,9 @@ export default function SashimiViewer({
                 </Select>
               );
             })()}
-            <Select label="window ≤" value={readsWindow} onChange={v => setReadsWindow(readsWindowOf(Number(v)))} ariaLabel="Reads window"
-              title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}>
-              {READS_WINDOW_CHOICES_BP.map(bp => <option key={bp} value={bp}>{formatBp(bp)}</option>)}
-            </Select>
+            <Segmented size="sm" prefix="window ≤" label="Reads window" value={String(readsWindow)} onChange={v => setReadsWindow(readsWindowOf(Number(v)))}
+              title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}
+              options={READS_WINDOW_CHOICES_BP.map(bp => ({ value: String(bp), label: formatBp(bp).replace(' ', ''), hint: `Reads loaded in views up to ${formatBp(bp)} wide` }))} />
             <Segmented value={collapseReads ? 'collapsed' : 'raw'} onChange={v => setCollapseReads(v === 'collapsed')} size="sm" label="Raw or collapsed reads"
               title={`Raw: every read on its own row. Collapsed: the reads of the window folded into haplotypes. Haplotypes 2: the consensus of each of the two haplotypes (one row each per phase set), from the file's haplotags (HP, PS) when the reads carry them, else from the in-page read-based phasing (the heterozygous sites, ★ 25–75 % alternate allele, linked by the reads and their mates into phase blocks). Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`}
               options={[
@@ -5957,26 +5960,29 @@ export default function SashimiViewer({
                 { value: 'collapsed', label: 'Collapsed', hint: 'The reads folded into haplotypes or consensus groups' },
               ]} />
             {!collapseReads && (
-              <Select label="group" value={readsGroup} onChange={v => setReadsGroup(v === 'hp' || v === 'phase' ? v : 'none')} ariaLabel="Group"
-                title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}>
-                <option value="none">none</option>
-                <option value="phase">haplotype (phased here)</option>
-                {(anyHaplotagged || readsGroup === 'hp') && <option value="hp">haplotype (HP tags)</option>}
-              </Select>
+              <Segmented size="sm" prefix="group" label="Group" value={readsGroup} onChange={v => setReadsGroup(v)}
+                title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}
+                options={[
+                  { value: 'none' as const, label: 'none', hint: 'Reads packed by position only' },
+                  { value: 'phase' as const, label: 'phased here', hint: 'By haplotype, from the read-based phasing of the window' },
+                  ...(anyHaplotagged || readsGroup === 'hp' ? [{ value: 'hp' as const, label: 'HP tags', hint: 'By the haplotag a phasing tool wrote on the reads' }] : []),
+                ]} />
             )}
             {collapseReads && (
-              <Select label="haplotypes" value={haplotypes} onChange={v => setHaplotypes(v === 'any' ? 'any' : 2)} ariaLabel="Haplotypes"
-                title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern).">
-                <option value={2}>2 (phased)</option>
-                <option value="any">any (consensus groups)</option>
-              </Select>
+              <Segmented size="sm" prefix="haplotypes" label="Haplotypes" value={String(haplotypes)} onChange={v => setHaplotypes(v === 'any' ? 'any' : 2)}
+                title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern)."
+                options={[
+                  { value: '2', label: '2 phased', hint: 'Two haplotypes per phase block' },
+                  { value: 'any', label: 'any', hint: 'Consensus groups, as many as the reads support (haplotype × splice pattern)' },
+                ]} />
             )}
             {collapseReads && haplotypes === 2 && (anyHaplotagged || phaseSource === 'reads') && (
-              <Select label="phase" value={phaseSource} onChange={v => setPhaseSource(v === 'reads' ? 'reads' : 'auto')} ariaLabel="Phase"
-                title="Where the two haplotypes come from. File tags: the HP (haplotype) and PS (phase set) tags a phasing tool wrote on the reads (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN), phased from the whole genome's variants; used whenever the window has tagged reads. Reads: the in-page phasing of the window's own reads (blocks break where no read links two heterozygous sites).">
-                <option value="auto">file tags (HP, PS)</option>
-                <option value="reads">reads (in-page)</option>
-              </Select>
+              <Segmented size="sm" prefix="phase" label="Phase" value={phaseSource} onChange={v => setPhaseSource(v)}
+                title="Where the two haplotypes come from. File tags: the HP (haplotype) and PS (phase set) tags a phasing tool wrote on the reads (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN), phased from the whole genome's variants; used whenever the window has tagged reads. Reads: the in-page phasing of the window's own reads (blocks break where no read links two heterozygous sites)."
+                options={[
+                  { value: 'auto' as const, label: 'HP tags', hint: "The file's haplotags (HP, PS), phased from the whole genome" },
+                  { value: 'reads' as const, label: 'reads', hint: "The in-page phasing of the window's own reads" },
+                ]} />
             )}
             {(anyPairs || (!collapseReads && (anyClips || anyInserts)) || anyLongReads || anyDna) && <Sep />}
             {anyPairs && (

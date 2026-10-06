@@ -92,7 +92,9 @@ The page has three bands, top to bottom.
   Each section sits on a pastel panel of its own colour: Arcs (or Structure) indigo, Show green,
   Layers orange, Depth blue. Filters stays plain, on the right.
 
-  A pill tinted indigo is an option that is on. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
+  A pill tinted indigo is an option that is on. A choice among a few values (the genome build, the
+  SNPs' *AF ≥*, the reads window, *group*, *haplotypes*, *phase*) is a switch with all its values in
+  sight, set with one click, the key in grey at its start. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
 
 When the reads track is on, a **reads strip** tinted indigo appears under the toolbar with every option of that track:
 - the sample whose reads are shown;
@@ -129,7 +131,7 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   coverage but no arcs.
 - **Coordinate-sorted and indexed**: `sample.bam` + `sample.bam.bai` (or `sample.bai`),
   `sample.cram` + `sample.cram.crai`. Add the index in the same drop; files are paired by name.
-- **Genome build** selected in the header (GRCh38/hg38 default, GRCh37/hg19) must match the alignment.
+- **Genome build**: the *GRCh 38 | 37* switch at the start of the search box (GRCh38/hg38 default, GRCh37/hg19) must match the alignment.
 - **CRAM needs its reference.** Drop the indexed FASTA used at alignment time (`.fa` + `.fai`, or
   bgzipped `.fa.gz` + `.gzi`) with the CRAM files. Without it the viewer fetches the needed sequence
   from the UCSC API, which is slower and requires the network. A FASTA also makes the reads track
@@ -470,7 +472,7 @@ their members. Long reads carry deletions, split reads and clips; short-read pai
 discordant pairs (CRAM mate fields are read when the file records them).
 
 **Reads window.** The reads track loads the reads of views up to 100 kb wide by default (IGV's
-*visibility window*); wider, it asks to zoom in. The *window ≤* menu of the reads strip widens it
+*visibility window*); wider, it asks to zoom in. The *window ≤* switch of the reads strip widens it
 to 250 kb, 500 kb, 1 Mb or 2 Mb, to follow a large structural variant, or long reads, across a wider
 view. The track still draws at most the same number of reads, sampled over the window, so a wider
 window shows them sparser; each move of the view reads that much more of the file. The setting is
@@ -558,7 +560,7 @@ Deletions of 50 bp or more inside reads remain structural evidence whatever the 
 tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
 device for RNA).
 
-**Haplotypes (phasing).** *Collapsed* with *haplotypes 2* shows the **consensus of each of the
+**Haplotypes (phasing).** *Collapsed* with *haplotypes: 2 phased* shows the **consensus of each of the
 two haplotypes**: one row per haplotype and phase set, drawn like a read. Grey marks the stretches
 covered by at least 3 of the haplotype's reads (blank where fewer). Coloured bases, deletion lines
 (large ones included) and insertion marks are the variants at least half of its reads carry, so a
@@ -569,7 +571,7 @@ pair of rows, separated by a dashed line: the haplotypes are linked within a set
 (H1 of one set is unrelated to H1 of the next). Hover a row for its reads, the median assignment
 confidence and its variants.
 
-The haplotypes come from one of two sources, chosen with *Phase*:
+The haplotypes come from one of two sources, chosen with the *phase* switch (*HP tags* | *reads*):
 
 - **The file's haplotags** (default, used whenever the window has tagged reads). A phasing tool
   wrote them on each read it could place: `HP` (haplotype 1 or 2), `PS` (phase set) and sometimes
@@ -614,20 +616,20 @@ junction placed a few bases off is taken for the common one next to it, as in th
 below.
 
 **Group by haplotype.** The raw reads track can be grouped by haplotype without collapsing it.
-- *Group: haplotype (phased here)* runs the collapsed mode's read-based phasing on the window's reads,
+- *group: phased here* runs the collapsed mode's read-based phasing on the window's reads,
   up to 10,000 of them, then draws the usual number.
   - Two haplotypes per phase block, linked through the heterozygous sites the reads and their mates share.
   - Each fragment goes to the haplotype it matches better in the block where it covers the most sites:
     H1, H2, then the reads covering no phased site.
   - H1 of one block is not tied to H1 of the next; the collapsed mode lists the blocks. The label row
     gives the number of blocks.
-- When the reads carry haplotags, *Group: haplotype (HP tags)* packs them per haplotag instead, like
+- When the reads carry haplotags, *group: HP tags* packs them per haplotag instead, like
   IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher copy labels), then the untagged reads.
 
 Each group has a label row and a coloured band. Mates and the parts of a split read stay together. A
 read's tooltip gives its HP, PS and PC.
 
-*Haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
+*haplotypes: any* switches the collapsed track to the **consensus groups** of the earlier collapse:
 one row per local haplotype × splice pattern with its read count, groups below *Min reads* folded
 into a minor bucket. A read and its mate count as one **fragment**, one molecule: together they see
 sites and junctions further apart than either read, and *Min reads* counts fragments. Reads fitting
@@ -846,7 +848,7 @@ read or CpG, so it takes the same time at 1 kb or at 2 Mb. It is counted for vie
 
 With the **reads track** open on a view of 30 kb or less, each read's CpG calls are drawn on it:
 red for methylated, blue for unmethylated. Calls below the confidence threshold are left uncoloured,
-so the read's grey reads as "no confident call". *Group: haplotype (HP)* then shows the two
+so the read's grey reads as "no confident call". *group: HP tags* then shows the two
 haplotypes' reads apart, and an allele-specific region stands out as a red block over a blue one.
 Wider than about 15 kb (under 0.08 pixel per base), a read's consecutive calls of one kind (within
 100 bp of each other) are drawn as one bar rather than one line each. The panel is not part of exported pages, which carry no
