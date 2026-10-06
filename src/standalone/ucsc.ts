@@ -281,6 +281,17 @@ export function getAllTranscripts(build: GenomeBuild, geneName: string, geneId?:
 // ======================== Genes around a region (neighbours), 500 kb chunks cached ========================
 
 const REGION_CHUNK = 500_000;
+
+/** Exons of several transcripts as one sorted list of disjoint intervals (0-based half-open). */
+function mergeExons(list: { start: number; end: number }[]): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
+  for (const e of [...list].sort((a, b) => a.start - b.start)) {
+    const last = out[out.length - 1];
+    if (last && e.start <= last.end) last.end = Math.max(last.end, e.end);
+    else out.push({ ...e });
+  }
+  return out;
+}
 const regionCache = new Map<string, Promise<GeneModel[]>>();
 
 function regionChunk(build: GenomeBuild, chrom: string, chunk: number): Promise<GeneModel[]> {
@@ -301,6 +312,7 @@ function regionChunk(build: GenomeBuild, chrom: string, chunk: number): Promise<
           start: Math.min(...ms.map(x => x.txStart)) + 1, end: Math.max(...ms.map(x => x.txEnd)),
           transcript_id: m.name, is_canonical: !!sel, exons: m.exons.map(e => ({ start: e.start + 1, end: e.end })),
           cds_start: isCoding(m) ? m.cdsStart + 1 : null, cds_end: isCoding(m) ? m.cdsEnd : null,
+          other_exons: mergeExons(ms.filter(x => x !== m).flatMap(x => x.exons)).map(e => ({ start: e.start + 1, end: e.end })),
         });
       }
       return out;

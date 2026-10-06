@@ -990,14 +990,18 @@ function phaseTitle(p: ExonPhase): string {
 }
 
 /** A neighbouring gene (1-based, from the data source) as a 0-based transcript model; exons ranked in transcription order. */
-function toNeighbourModel(g: GeneModel, chrom: string): TxModel & { geneId: string; biotype: string; isCanonical: boolean } {
+function toNeighbourModel(g: GeneModel, chrom: string): TxModel & { geneId: string; biotype: string; isCanonical: boolean; geneStart: number; geneEnd: number; otherExons: { start: number; end: number }[] } {
   const sorted = [...g.exons].map(e => ({ start: e.start - 1, end: e.end })).sort((a, b) => a.start - b.start);
   const n = sorted.length;
   const exons = sorted.map((e, i) => ({ ...e, rank: g.strand >= 0 ? i + 1 : n - i }));
   const hasCds = g.cds_start != null && g.cds_end != null;
+  // the model spans its own exons; the gene's span (every transcript of it) can reach much further, a longer isoform's
+  // first exon upstream: drawn as an intron line of this model it read as a gene without exons there
+  const geneStart = g.start - 1, geneEnd = g.end;
   return {
     geneName: g.gene_name, transcriptId: g.transcript_id, isMane: false, modelKind: g.is_canonical ? 'canonical' : 'longest', chrom,
-    strand: g.strand < 0 ? -1 : 1, start: g.start - 1, end: g.end, exons,
+    strand: g.strand < 0 ? -1 : 1, start: n ? sorted[0].start : geneStart, end: n ? Math.max(...sorted.map(e => e.end)) : geneEnd, geneStart, geneEnd, exons,
+    otherExons: (g.other_exons ?? []).map(e => ({ start: e.start - 1, end: e.end })),
     cdsStart: hasCds ? (g.cds_start as number) - 1 : null, cdsEnd: hasCds ? (g.cds_end as number) : null,
     geneId: g.gene_id, biotype: g.biotype, isCanonical: g.is_canonical,
   };
@@ -1453,7 +1457,8 @@ export default function SashimiViewer({
   /** Centre the window on a known variant (bands get a 10 % margin, points a 1 kb window at most). */
   // ---- Neighbouring genes: canonical transcript of every other gene overlapping the window ----
   // The data sources cache 500 kb chunks, so panning only costs a request when a new chunk is entered.
-  interface NeighbourModel extends TxModel { geneId: string; biotype: string; isCanonical: boolean }
+  /** a neighbouring gene's drawn model; geneStart / geneEnd: the span of all its transcripts (≥ the model's) */
+  interface NeighbourModel extends TxModel { geneId: string; biotype: string; isCanonical: boolean; geneStart: number; geneEnd: number; otherExons: { start: number; end: number }[] }
   const [neighbours, setNeighbours] = useState<{ chrom: string; start: number; end: number; models: NeighbourModel[] } | null>(null);
   const [neighbourError, setNeighbourError] = useState<string | undefined>();
   const neighbourSeq = useRef(0);
@@ -1554,11 +1559,11 @@ export default function SashimiViewer({
     if (!neighbours || neighbours.chrom !== currentChrom || !tx) return [];
     const plotRight = PLOT_LEFT + plotWidth;
     const visible = neighbours.models
-      .filter(m => m.end > viewStart && m.start < viewEnd && m.geneName !== tx.geneName)
-      .sort((a, b) => a.start - b.start);
+      .filter(m => m.geneEnd > viewStart && m.geneStart < viewEnd && m.geneName !== tx.geneName)
+      .sort((a, b) => a.geneStart - b.geneStart);
     const rows: { items: NeighbourModel[]; spans: [number, number][] }[] = [];
     for (const m of visible) {
-      const a = scale.x(m.start), b = scale.x(m.end);
+      const a = scale.x(m.geneStart), b = scale.x(m.geneEnd);
       const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
       const lw = (m.geneName.length + 2) * 5.6 + 10;
       const inside = right - left > lw + 60;
@@ -1661,7 +1666,8 @@ export default function SashimiViewer({
         if (dist < bestD) { bestD = dist; best = { pos: b, gene: m.geneName, exon: e.rank, role: (m.strand > 0) === (side === 'end') ? 'donor' : 'acceptor', strand: m.strand, snapped: true }; }
       }
       if (best) return best;
-      const inside = models.find(m => p >= m.start && p < m.end);
+      // inside a gene: its whole span (a neighbour's other transcripts included), not only the model drawn
+      const inside = models.find(m => p >= ((m as Partial<NeighbourModel>).geneStart ?? m.start) && p < ((m as Partial<NeighbourModel>).geneEnd ?? m.end));
       return { pos: p, gene: inside?.geneName ?? '', exon: null, role: null, strand: inside?.strand ?? null, snapped: false };
     };
     const a = endOf(j.start), b = endOf(j.end);
@@ -5118,8 +5124,18 @@ export default function SashimiViewer({
       const same = tx ? m.strand === tx.strand : true;
       const color = same ? SAME_SENSE_COLOR : ANTISENSE_COLOR;
       const a = scale.x(m.start), b = scale.x(m.end);
-      const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
+      let left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
       const parts: JSX.Element[] = [];
+      // other transcripts of the gene reaching beyond this model: a faint dotted line, no exon of theirs drawn
+      for (const [s0, e0] of [[m.geneStart, m.start], [m.end, m.geneEnd]] as [number, number][]) {
+        if (e0 <= s0) continue;
+        const xa = scale.x(s0), xb = scale.x(e0);
+        const l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+        if (r > l) parts.push(
+          <line key={`ext${s0}`} x1={l} y1={mid} x2={r} y2={mid} stroke={color} strokeWidth={1} strokeDasharray="1.5 3" opacity={0.55}>
+            <title>{`other ${m.geneName} transcripts reach ${currentChrom}:${(s0 + 1).toLocaleString('en-US')}-${e0.toLocaleString('en-US')} (${formatBp(e0 - s0)}); the exons drawn are those of ${m.transcriptId}`}</title>
+          </line>);
+      }
       if (right > left) parts.push(<line key="l" x1={left} y1={mid} x2={right} y2={mid} stroke={color} strokeWidth={1.2} opacity={0.8} />);
       // Chevrons point where the gene's 3′ end lies on screen: its own strand, after the axis flip of the queried gene
       const toRight = (m.strand > 0) !== reverse;
@@ -5133,6 +5149,15 @@ export default function SashimiViewer({
         if (l > plotRight || l + w < PLOT_LEFT) return;
         parts.push(<rect key={key} x={l} y={mid - hh / 2} width={w} height={hh} fill={color} rx={1} />);
       };
+      // the exons of its other transcripts, lighter and thinner, under the model's
+      m.otherExons.forEach((ex, k) => {
+        const xa = scale.x(ex.start), xb = scale.x(ex.end);
+        const l = Math.min(xa, xb), w = Math.max(1, Math.abs(xb - xa));
+        if (l > plotRight || l + w < PLOT_LEFT) return;
+        parts.push(<rect key={`o${k}`} x={l} y={mid - 4} width={w} height={8} fill={color} opacity={0.35} rx={1}>
+          <title>{`exon of another ${m.geneName} transcript (not ${m.transcriptId}): ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')}`}</title>
+        </rect>);
+      });
       m.exons.forEach((ex, k) => {
         if (m.cdsStart == null || m.cdsEnd == null) { box(ex.start, ex.end, 12, `x${k}`); return; }
         const cs = Math.max(ex.start, m.cdsStart), ce = Math.min(ex.end, m.cdsEnd);
@@ -5142,6 +5167,11 @@ export default function SashimiViewer({
       });
       const label = `${m.geneName} ${toRight ? '→' : '←'}`;
       const lw = label.length * 5.6 + 10;
+      // the model out of view (only its gene's other transcripts in it): the name goes on their visible part
+      if (right <= left) {
+        const ga = scale.x(m.geneStart), gb = scale.x(m.geneEnd);
+        left = Math.max(PLOT_LEFT, Math.min(ga, gb)); right = Math.min(plotRight, Math.max(ga, gb));
+      }
       // Name pill: beside a short gene (so its exons stay visible), inside the extent of a long one
       const inside = right - left > lw + 60;
       const lx = inside ? Math.max(PLOT_LEFT + 3, Math.min(left, plotRight - lw - 3))
@@ -5149,7 +5179,8 @@ export default function SashimiViewer({
       const relation = tx ? (same ? `same strand as ${tx.geneName}` : `antisense to ${tx.geneName}`) : '';
       const title = `${m.geneName} · ${m.transcriptId}${m.isCanonical ? (isEnsemblId(m.transcriptId) ? ' (Ensembl canonical)' : ' (RefSeq Select)') : ''} · ${m.biotype}\n` +
         `${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
-        `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}`;
+        `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}` +
+        (m.geneStart < m.start || m.geneEnd > m.end ? `\nthe gene's other transcripts span ${currentChrom}:${(m.geneStart + 1).toLocaleString('en-US')}-${m.geneEnd.toLocaleString('en-US')} (dotted)` : '');
       return (
         <g key={m.geneId}>
           <title>{title}</title>

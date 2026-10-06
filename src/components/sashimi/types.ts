@@ -342,6 +342,8 @@ export interface GeneModel {
   gene_id: string; gene_name: string; biotype: string; strand: number; start: number; end: number;
   transcript_id: string; is_canonical: boolean; exons: { start: number; end: number }[];
   cds_start?: number | null; cds_end?: number | null;
+  /** the exons of the gene's other transcripts, merged (1-based inclusive): drawn lighter where they reach beyond the model */
+  other_exons?: { start: number; end: number }[];
 }
 
 /** Depth statistics of one exon in one sample (aligned bases only; reads with a block on the exon). */
