@@ -137,6 +137,11 @@ export interface ViewerSettings {
   insertedBases?: boolean;
   /** reads track: widest view whose reads are loaded, bp (one of READS_WINDOW_CHOICES_BP; absent = 100 kb) */
   readsWindow?: number;
+  /**
+   * reads track: the reads coloured by strand, as IGV's "Color alignments by": `strand` each read's own alignment strand,
+   * `first` the strand of read 1 of its pair (both mates alike: the fragment's orientation); absent = none
+   */
+  readsColor?: 'none' | 'strand' | 'first';
   /** secondary alignments (0x100, the other placements of multi-mapped reads) counted in coverage and junctions and drawn among the reads, as IGV does (default off) */
   secondary?: boolean;
   /**
@@ -430,6 +435,9 @@ const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto
 const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#6b7280' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const READ_FILL = '#c8cdd6';
+/** reads coloured by strand: IGV's colours (igv.js alignmentTrack posStrandColor / negStrandColor) */
+const READ_FWD_FILL = 'rgba(230,150,150,0.75)';
+const READ_REV_FILL = 'rgba(150,150,230,0.75)';
 // ======================== Variants track (DNA) ========================
 /**
  * Under the coverage of a DNA track, one mark per called site: a bar as high as its alternate-allele fraction (0–100 %,
@@ -1110,6 +1118,7 @@ export default function SashimiViewer({
   const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
+  const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
   const [showCoverage, setShowCoverage] = useState(init.coverage ?? true);
@@ -3276,7 +3285,9 @@ export default function SashimiViewer({
       const lowMapq = r.q < LOW_MAPQ;
       const spans = readSpansBoundary(r, modelBoundaries);
       const discordant = pairMode ? discordantOf(r, idx) : null;
-      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : READ_FILL;
+      // the colours that say something win (a discordant pair, the opposite strand); the strand colours go to the others
+      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : readsColor === 'none' ? READ_FILL
+        : (readsColor === 'first' && (r.f & 1) && (r.f & 128) ? (r.f & 32) === 0 : r.r === 0) ? READ_FWD_FILL : READ_REV_FILL;
       const body = lowMapq ? { fill: INK.bg, stroke: fill, strokeWidth: 0.8 } : { fill };
       // the line to the mate, drawn once per pair from the left mate
       const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
@@ -3481,7 +3492,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -4287,6 +4298,16 @@ export default function SashimiViewer({
         ),
       });
     }
+    if (showReads && !collapseReads && readsColor !== 'none') items.push({
+      w: 200, el: (
+        <g key="lstrand">
+          <path d={`M0,${y - 4} H10 L14,${y} L10,${y + 4} H0 Z`} fill={READ_FWD_FILL} />
+          <text x={18} y={y + 3.5} fill={INK.muted} fontSize={9.5}>forward</text>
+          <path d={`M74,${y - 4} H64 L60,${y} L64,${y + 4} H74 Z`} fill={READ_REV_FILL} />
+          <text x={78} y={y + 3.5} fill={INK.muted} fontSize={9.5}>reverse{readsColor === 'first' ? ' (read 1 of the pair)' : ''}</text>
+        </g>
+      ),
+    });
     if (showReads) {
       items.push({
         w: 118, el: (
@@ -5627,14 +5648,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -5966,6 +5987,15 @@ export default function SashimiViewer({
                   { value: 'none' as const, label: 'none', hint: 'Reads packed by position only' },
                   { value: 'phase' as const, label: 'phased here', hint: 'By haplotype, from the read-based phasing of the window' },
                   ...(anyHaplotagged || readsGroup === 'hp' ? [{ value: 'hp' as const, label: 'HP tags', hint: 'By the haplotag a phasing tool wrote on the reads' }] : []),
+                ]} />
+            )}
+            {!collapseReads && (
+              <Segmented size="sm" prefix="colour" label="Colour the reads by" value={readsColor} onChange={setReadsColor}
+                title="Colour the reads by strand, as IGV's Color alignments by: forward pink, reverse lavender. Strand: each read's own alignment strand (strand bias, the mates of a proper pair in the two colours). 1st-of-pair: the strand of read 1 of its pair, both mates alike, the fragment's orientation (on a stranded RNA library, the transcript's strand up to the library's rule). Discordant pairs and, with Strands, the opposite strand's reads keep their own colours."
+                options={[
+                  { value: 'none' as const, label: 'none', hint: 'Grey reads' },
+                  { value: 'strand' as const, label: 'strand', hint: "Each read's alignment strand: forward pink, reverse lavender" },
+                  { value: 'first' as const, label: '1st-of-pair', hint: 'The strand of read 1 of the pair, both mates alike (single reads: their own strand)' },
                 ]} />
             )}
             {collapseReads && (

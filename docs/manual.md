@@ -478,6 +478,16 @@ view. The track still draws at most the same number of reads, sampled over the w
 window shows them sparser; each move of the view reads that much more of the file. The setting is
 kept with the view, in sessions and in the HTML export.
 
+**Colour by strand.** The *colour* switch of the reads strip colours the reads as IGV's *Color
+alignments by* does, forward pink and reverse lavender (IGV's own colours). *strand* uses each read's
+own alignment strand: a strand bias shows at a glance, and the two mates of a proper pair take the
+two colours. *1st-of-pair* uses the strand of read 1 of the pair for both mates, which is the
+fragment's orientation. On a stranded RNA library that follows the transcript's strand: reverse-
+stranded (dUTP) fragments of a + gene come out lavender. Single reads keep their own strand. *none*
+(the default) leaves them grey. The colours that carry a meaning win: discordant pairs keep theirs,
+and so do the opposite strand's reads when *Strands* is on. A read under MAPQ 10 stays hollow, its
+outline in the strand's colour. The choice is saved with the session.
+
 **Pairs.** In the reads track the two mates of a pair share one row and are joined by a line
 (*Pairs* in the reads strip, on by default); the tooltip of a read gives its mate's position and the
 insert size. Reads of a **discordant pair** are coloured by class (the fill, and the line to the
