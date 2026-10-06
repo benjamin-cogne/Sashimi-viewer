@@ -31,6 +31,7 @@ import type { ArcSupport } from '../standalone/arcSupport';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
+import { GeneSuggest } from './sashimi/GeneSuggest';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
@@ -3239,7 +3240,7 @@ export default function SashimiViewer({
     const longReads = !!current.long_reads;
     const indelMin = longReads ? minIndelBp : 1;
     // consensus drawing (mismatches and indels only at called sites) for long reads and for every genomic DNA track
-    const consensus = (longReads || isDnaSample(sid)) && consensusMode;
+    const consensus = consensusMode;
     const snvSites = new Set(current.sites.filter(s => s.kind === 'snv').map(s => `${s.pos}\t${s.alt}`));
     const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
     const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
@@ -3464,7 +3465,7 @@ export default function SashimiViewer({
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
       (modelBoundaries ? ` · ${nSpan.toLocaleString('en-US')} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
-      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}` : '') +
+      (consensus ? " · mismatches and indels at called sites only (Consensus)" : longReads ? " · long reads: every mismatch and indel" : "") +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString('en-US')} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString('en-US')} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => {
         const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2;
@@ -5714,10 +5715,12 @@ export default function SashimiViewer({
           <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1.5">
             <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[9px] border bg-white text-slate-400 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
               <Icon name="search" size={14} />
-              <input type="text" value={geneSearch} onChange={e => { setGeneSearch(e.target.value); setSearchError(null); }}
-                placeholder="Gene, chr:pos, c.234, exon 12…" aria-label="Go to" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
+              <GeneSuggest value={geneSearch} onChange={v => { setGeneSearch(v); setSearchError(null); }} width={320}
+                local={[...(neighbours?.models.map(m => m.geneName) ?? []), currentGeneName]}
+                placeholder="Gene, chr:pos, c.234, exon 12…" ariaLabel="Go to" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
                   + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
-                  + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.`}
+                  + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.\n`
+                  + 'Gene names are suggested from the third letter (HGNC), the genes of the view first.'}
                 className="w-44 bg-transparent outline-none text-[12.5px] text-slate-800 placeholder:text-slate-400" />
               <button type="submit" disabled={geneSearchLoading} className="h-6 px-2 rounded-md text-[11.5px] font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">{geneSearchLoading ? '…' : 'Go'}</button>
             </span>
@@ -6048,7 +6051,7 @@ export default function SashimiViewer({
                   { value: 'reads' as const, label: 'reads', hint: "The in-page phasing of the window's own reads" },
                 ]} />
             )}
-            {(anyPairs || (!collapseReads && (anyClips || anyInserts)) || anyLongReads || anyDna) && <Sep />}
+            <Sep />
             {anyPairs && (
               <Pill size="sm" on={showPairs} onChange={setShowPairs} label="Pairs" icon="pair"
                 title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair are coloured by what the pair says, as IGV colours them: on genomic DNA, green when the mates face away from each other (← →, the junction of a tandem duplication), red when they face each other far apart (→ ←, more than 5 times the median insert: a deletion), blue when both are on one strand (an inversion); amber when the mate is on another chromosome or the pair is not proper. Off: every read on its own row." />
@@ -6061,10 +6064,8 @@ export default function SashimiViewer({
               <Pill size="sm" on={showInserted} onChange={setShowInserted} label="Inserted" icon="insert"
                 title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
             )}
-            {(anyLongReads || anyDna) && (
-              <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
-                title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: for long reads (ONT, PacBio) and for every genomic DNA track, short reads included. Off: every mismatch and indel of every read." />
-            )}
+            <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
+              title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: RNA-seq, genomic DNA and long reads (ONT, PacBio) alike. A rarer change (an RNA-editing site edited in a few reads, a subclonal variant) then shows only with Min VAF lowered, or with Consensus off. Off: every mismatch and indel of every read." />
             <span className="flex flex-wrap items-center gap-2 ml-auto">
               <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
                 title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name." />

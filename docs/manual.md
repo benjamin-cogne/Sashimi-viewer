@@ -47,6 +47,12 @@ Built for clinical geneticists and for bioinformaticians who need to look at a s
    read (a few blocks from the start of the file, never the index), and its badge shows the library
    type. The index is read when the first region is requested.
 4. **Type a gene** (`NF1`), an ENSG id, or coordinates (`chr17:31,229,000-31,231,000`) and press **Open**.
+   From the third letter of a gene name, up to 10 genes are suggested:
+   - first the genes already opened in the page and in this browser, and in the plot's own box the genes of the view;
+   - then HGNC's: approved symbols starting with the letters, then those found through an alias or a previous symbol
+     (shown as *alias RNF53* or *previously …*), each with its full name and cytoband.
+
+   ↑ ↓ choose, Enter or a click opens the gene. Coordinates, c. positions and exon numbers get no suggestions.
    The **n / N shown** menu of the plot lists every loaded sample: click one to show it as a
    track, click it again to remove it. **Show all** adds every sample not shown yet (with a search
    typed, *Show all matching* adds those that match), in the list's order. The tracks appear at once
@@ -531,8 +537,10 @@ BLAT to place the other side of the junction.
 
 **Consensus reads.** *Consensus* (on by default) draws mismatches and indels only where a variant
 site is called (at least 3 reads and *Min VAF*), so sequencing errors do not paint every read. It
-is offered for every genomic DNA reads track, short reads included, and for long reads whatever
-the library; off, every mismatch and indel of every read is drawn. Deletions and insertions of
+applies to every reads track: RNA-seq, genomic DNA (short reads included) and long reads. Off,
+every mismatch and indel of every read is drawn. On RNA, a change carried by fewer reads (an
+RNA-editing site edited in a few reads, A>G on the reads) shows with *Min VAF* lowered, or with
+*Consensus* off. Deletions and insertions of
 50 bp or more are always drawn (a deletion as a black line across the gap), called or not: they
 are structural evidence, not sequencing noise, and the reads of one large deletion often place
 its breakpoint a few bases apart, so no single site would gather them.
@@ -1053,6 +1061,7 @@ proxy (proxies usually allow browsers while blocking servers):
 | Transcript models (RefSeq `NM_`/`NR_`, MANE Select, RefSeq Select), gene search, neighbouring genes, protein domains, reference bases | `api.genome.ucsc.edu` | hg38 and hg19 |
 | Fallback for the row above, aliases and ENSG ids | `rest.ensembl.org`, `grch37.rest.ensembl.org` | models are then Ensembl `ENST` |
 | Common SNPs | `api.genome.ucsc.edu` (`dbSnp155Common`), Ensembl variation as fallback | |
+| Gene-name suggestions | `clinicaltables.nlm.nih.gov` (NLM Clinical Table Search Service, HGNC genes) | the letters typed only; none when unreachable |
 | GTEx tissue profiles | `gtexportal.org` (API v2) | hg38 only |
 
 **Browsers.** Current Microsoft Edge, Google Chrome or Firefox. Internet Explorer and very old
@@ -1134,8 +1143,9 @@ BAM/CRAM/FASTA files are opened with the browser's File API and decoded with
 [`@gmod/bam`](https://github.com/GMOD/bam-js), [`@gmod/cram`](https://github.com/GMOD/cram-js) and
 [`@gmod/indexedfasta`](https://github.com/GMOD/indexedfasta-js). No byte of them leaves the machine.
 The only outgoing requests are the annotation queries listed above; they carry a gene name or an
-interval, never sample data, sample names or file names. Nothing is written to disk or to browser
-storage.
+interval (the gene-name suggestions: the letters typed in a search box), never sample data, sample
+names or file names. Nothing is written to disk; the browser keeps the last gene names opened, for the
+suggestions, and the panel's folded state.
 
 ## Troubleshooting
 

@@ -22,6 +22,8 @@ import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
 import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
+import { GeneSuggest } from '../components/sashimi/GeneSuggest';
+import { rememberGene } from './geneSuggest';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
@@ -751,6 +753,9 @@ function App() {
     if (!missing.length) applySession(pendingSession.file);
   }, [pendingSession, samples, applySession]);
 
+  // genes opened are suggested first in the next searches
+  useEffect(() => { if (opened?.geneName) rememberGene(opened.geneName); }, [opened?.geneName]);
+
   // Default file name follows the gene until the user types one
   useEffect(() => { if (!sessionNameEdited) setSessionName(defaultSessionName(opened?.geneName)); }, [opened?.geneName, sessionNameEdited]);
 
@@ -768,8 +773,8 @@ function App() {
           { value: 'GRCh37' as GenomeBuild, label: '37', hint: 'GRCh37 / hg19' },
         ]} />
       <Icon name="search" size={15} className="text-slate-400" />
-      <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" aria-label="Gene or locus"
-        title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)"
+      <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
+        title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
         className="flex-1 min-w-0 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400" />
       <button type="submit" disabled={busy || !gene.trim()} className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
     </form>
