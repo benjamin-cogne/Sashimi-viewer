@@ -97,7 +97,7 @@ The page has three bands, top to bottom.
   sight, set with one click, the key in grey at its start. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
 
 When the reads track is on, a **reads strip** tinted indigo appears under the toolbar with every option of that track:
-- the sample whose reads are shown;
+- *reads of*: the sample whose reads are shown, one chip per sample in its track colour, or *all* (past five samples, a list to search);
 - the *window ≤* of the reads;
 - *Raw | Collapsed*;
 - *group* in raw mode, or *haplotypes* and *phase* when collapsed;
@@ -707,7 +707,7 @@ at once. They are always drawn in this order, top to bottom:
 - **V, variants** (amber): the variants track described below;
 - **M, methylation** (red): CpG methylation of long reads (below). *CpG islands only* appears next
   to the control while it is on;
-- **R, reads** (slate): the alignments. The sample chip, or the sample menu of the reads strip,
+- **R, reads** (slate): the alignments. The sample chip, or the *reads of* chips of the reads strip,
   picks which sample's reads are shown, or all of them.
 
 A page without a DNA sample shows a plain *Reads* option instead.

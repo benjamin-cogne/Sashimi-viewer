@@ -68,7 +68,8 @@ export function Segmented<T extends string>({ value, onChange, options, disabled
   value: T; onChange: (v: T) => void; disabled?: boolean; title: string; size?: 'sm' | 'md'; label?: string;
   /** a key in grey inside the switch, before its choices ("AF ≥", "window ≤"): one control instead of a label and a menu */
   prefix?: string;
-  options: { value: T; label: string; icon?: string; hint?: string }[];
+  /** `dot`: a colour dot (a sample's track colour) before the label, or overlapping dots for a choice covering several */
+  options: { value: T; label: string; icon?: string; hint?: string; dot?: string | string[] }[];
 }) {
   const sm = size === 'sm';
   return (
@@ -80,10 +81,23 @@ export function Segmented<T extends string>({ value, onChange, options, disabled
         return (
           <button key={o.value} type="button" role="radio" aria-checked={active} disabled={disabled} onClick={() => onChange(o.value)} title={o.hint}
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-[7px] font-medium transition-all disabled:cursor-not-allowed ${sm ? 'h-[22px] px-2 text-[11.5px]' : 'h-[26px] px-2.5 text-[12.5px]'} ${active ? 'bg-white text-indigo-600 shadow-[0_1px_2px_rgba(15,23,42,.12),0_0_0_1px_rgba(15,23,42,.04)]' : 'text-slate-500 hover:text-slate-800'}`}>
-            {o.icon && <Icon name={o.icon} size={sm ? 13 : 15} />}{o.label}
+            {o.icon && <Icon name={o.icon} size={sm ? 13 : 15} />}
+            {o.dot && <Dots colors={Array.isArray(o.dot) ? o.dot : [o.dot]} faded={!active} />}
+            <span className="truncate max-w-[150px]">{o.label}</span>
           </button>
         );
       })}
+    </span>
+  );
+}
+
+/** One colour dot, or several overlapping (a choice covering several samples); dimmed when not chosen. */
+export function Dots({ colors, faded }: { colors: string[]; faded?: boolean }) {
+  return (
+    <span className={`inline-flex items-center shrink-0 ${faded ? 'opacity-60' : ''}`} aria-hidden="true">
+      {colors.slice(0, 4).map((c, i) => (
+        <span key={i} className="w-2 h-2 rounded-full ring-[1.5px] ring-white" style={{ background: c, marginLeft: i ? -3 : 0 }} />
+      ))}
     </span>
   );
 }
