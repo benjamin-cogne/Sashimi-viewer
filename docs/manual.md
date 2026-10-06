@@ -69,7 +69,7 @@ The page has three bands, top to bottom.
   - the sample chips. The ★ marks the primary sample, and the badge is the library type (click it to switch RNA / DNA). Hover a chip for ✎ rename and × remove; click it to make it the primary sample.
   - the dashed **+ Add** menu (*Run folder…*, *Files…*);
   - the search box, with the genome build inside it;
-  - **Session ▾** (file name, *Save session*, *Load session*);
+  - **Save session** (asks the file name, then downloads it) and **Load session**;
   - **Export ▾** (*Export HTML*, *SVG* of every view);
   - the ⌃ button that folds the panel.
 
@@ -88,6 +88,9 @@ The page has three bands, top to bottom.
   - **Layers** (DNA): *Coverage*, *Variants*, *Methylation*, *Reads*.
   - **Depth**: *shared | own | % max*.
   - **Filters**: *Unique reads* and *Secondary alignments*. A badge counts the filters on.
+
+  Each section sits on a pastel panel of its own colour: Arcs (or Structure) indigo, Show green,
+  Layers orange, Depth blue. Filters stays plain, on the right.
 
   A pill tinted indigo is an option that is on. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
 
@@ -992,7 +995,7 @@ and view for a gene, more for very deep or very wide windows.
 
 ## Sessions
 
-*Save session* (in the *Session* menu of the app bar) downloads a JSON file (the name is editable, default
+*Save session* in the app bar downloads a JSON file (the name is editable, default
 `sashimi-session-GENE-DATE.json`) recording the genome build, the run folder and every alignment
 by its path inside that folder (with index name and size), the sample names and order (first =
 primary), the FASTA, the gene and the window shown, and every option of the viewer: depth axis,

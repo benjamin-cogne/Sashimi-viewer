@@ -5,13 +5,13 @@
  * - `Pill`: an on/off option, tinted indigo when on.
  * - `Stepper`: a number with − / + buttons, typed in place.
  * - `Select`: a native select dressed as a pill, with its key in grey ("window ≤ 100 kb").
- * - `Section`: an uppercase label and the controls it groups; `Sep` the thin rule between sections.
+ * - `Section`: an uppercase label and the controls it groups, on a pastel panel of its tone; `Sep` a thin rule.
  * - `Popover` / `MenuItem` / `SwitchRow`: a panel under a button, closed by a click outside or Escape.
  *
  * They live at module level, not inside the viewer's render: a component declared in a render is a new type on every
  * render, so React would remount it and a number being typed would lose its focus.
  */
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 const ICON_PATHS: Record<string, string> = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5',
@@ -141,42 +141,35 @@ export function Select({ label, value, onChange, children, title, ariaLabel, dot
   );
 }
 
-/** A group of the toolbar under its uppercase label, with a rule on its left unless it starts a line of the `Bar`. */
-export function Section({ label, title, children }: { label?: string; title?: string; children: React.ReactNode }) {
+/**
+ * The colour of a toolbar section: a pastel panel and a label in its hue, so the categories read apart at a glance
+ * (literal class names: Tailwind keeps only those it sees).
+ */
+const TONES = {
+  indigo: { panel: 'bg-indigo-50 border-indigo-200', label: 'text-indigo-600' },
+  emerald: { panel: 'bg-emerald-50 border-emerald-200', label: 'text-emerald-700' },
+  orange: { panel: 'bg-orange-50 border-orange-200', label: 'text-orange-700' },
+  sky: { panel: 'bg-sky-50 border-sky-200', label: 'text-sky-700' },
+} as const;
+export type Tone = keyof typeof TONES;
+
+/**
+ * A group of the toolbar: its uppercase label and its controls on a pastel panel of its tone. A section without a
+ * label (Filters) stands apart on the right of its line.
+ */
+export function Section({ label, title, tone, children }: { label?: string; title?: string; tone?: Tone; children: React.ReactNode }) {
+  const t = tone ? TONES[tone] : null;
   return (
-    <div className="flex flex-wrap items-center gap-1.5 border-l border-slate-200 pl-3 data-[lead=1]:border-transparent" role="group" aria-label={label}>
-      {label && <span className="text-[10px] font-bold tracking-[.08em] uppercase text-slate-400 mr-0.5 select-none" title={title}>{label}</span>}
+    <div className={`flex flex-wrap items-center gap-1.5 ${t ? `rounded-xl border px-2 py-1 ${t.panel}` : 'ml-auto'}`} role="group" aria-label={label}>
+      {label && <span className={`text-[10px] font-bold tracking-[.08em] uppercase mr-0.5 pl-0.5 select-none ${t ? t.label : 'text-slate-400'}`} title={title}>{label}</span>}
       {children}
     </div>
   );
 }
 
-/**
- * The toolbar: sections side by side, wrapping on narrow windows. The first section of every line is marked
- * (`data-lead`) so its rule is not drawn: rules only ever sit between two sections of one line.
- */
+/** The toolbar: its sections side by side, wrapping on narrow windows. */
 export function Bar({ children, className = '' }: { children: React.ReactNode; className?: string }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const mark = () => {
-    const el = ref.current;
-    if (!el) return;
-    let bottom = -Infinity;
-    for (const c of Array.from(el.children) as HTMLElement[]) {
-      const lead = c.offsetTop >= bottom - 1;
-      bottom = lead ? c.offsetTop + c.offsetHeight : Math.max(bottom, c.offsetTop + c.offsetHeight);
-      c.dataset.lead = lead ? '1' : '0';
-    }
-  };
-  useLayoutEffect(mark);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(mark);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  // pulled left by the rule and padding of a section, so the first section of each line starts at the edge
-  return <div ref={ref} className={`flex flex-wrap items-center gap-x-3 gap-y-2 -ml-[13px] ${className}`}>{children}</div>;
+  return <div className={`flex flex-wrap items-center gap-x-2.5 gap-y-2 ${className}`}>{children}</div>;
 }
 
 /** The thin rule between two sections. */

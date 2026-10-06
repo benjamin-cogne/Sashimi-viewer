@@ -5788,7 +5788,7 @@ export default function SashimiViewer({
         {/* The toolbar: ARCS (or STRUCTURE on DNA), SHOW, LAYERS (DNA), DEPTH, and the read filters */}
         <div className="px-5 pb-3"><Bar>
           {anyRna && (
-            <Section label="Arcs" title="Junction arcs: what their pills say, and which are drawn">
+            <Section label="Arcs" tone="indigo" title="Junction arcs: what their pills say, and which are drawn">
               <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'} label="Arc labels"
                 title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
                 options={[
@@ -5821,7 +5821,7 @@ export default function SashimiViewer({
             const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
               (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
             return (
-              <Section label="Structure" title="Structural hints over the DNA coverage">
+              <Section label="Structure" tone="indigo" title="Structural hints over the DNA coverage">
                 <Stepper label="min" unit="reads" value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min supporting reads"
                   title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}
                   after={!minReadsSet
@@ -5831,7 +5831,7 @@ export default function SashimiViewer({
               </Section>
             );
           })()}
-          <Section label="Show">
+          <Section label="Show" tone="emerald">
             {!anyDna && (
               <Pill on={showReads} onChange={setShowReads} label="Reads" icon="reads"
                 title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).`} />
@@ -5879,7 +5879,7 @@ export default function SashimiViewer({
             )}
           </Section>
           {anyDna && (
-              <Section label="Layers" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
+              <Section label="Layers" tone="orange" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
                 {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
                 <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px]">
                   {([
@@ -5908,7 +5908,7 @@ export default function SashimiViewer({
                 )}
               </Section>
           )}
-          <Section label="Depth" title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
+          <Section label="Depth" tone="sky" title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
             <Segmented value={depthAxis} onChange={setDepthAxis} size="sm" label="Depth axis"
               title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth."
               options={[

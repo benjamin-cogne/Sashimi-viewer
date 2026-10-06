@@ -876,24 +876,26 @@ function App() {
           {searchForm}
           <div className="flex items-center gap-2 ml-auto shrink-0">
             {!panelHidden && <>
-              <Popover width={340} title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again."
-                button={<><Icon name="save" size={15} />Session<Icon name="chev" size={13} className="text-slate-400" /></>}>
+              {/* a session file (JSON) records the files by name, the samples, the FASTA, the views and every option: saved and loaded with one button each */}
+              <Popover width={340} label="Save session"
+                title="Download the session as a JSON file: the alignment files by name (and path in the run folder), the sample names and order, the FASTA, every view with its gene, window and options, the groups and the known variants. Load it later and add the same files again."
+                buttonClass={`inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border text-[12.5px] font-medium whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:bg-slate-50 ${!samples.length && !opened ? 'opacity-40 pointer-events-none' : ''}`}
+                button={<><Icon name="download" size={15} />Save session</>}>
                 {close => (
-                  <div className="p-1 space-y-2">
+                  <form className="p-1 space-y-2" onSubmit={e => { e.preventDefault(); close(); saveSession(); }}>
                     <label className="block text-[11.5px] text-slate-500">File name
-                      <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false}
+                      <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false} autoFocus
                         className="mt-1 w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white font-mono text-slate-800 outline-none focus:border-indigo-300" title="File name of the session to save (.json)" />
                     </label>
-                    <div className="flex gap-2">
-                      <button onClick={() => { close(); saveSession(); }} disabled={!samples.length && !opened} className="flex-1 inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40" title="Download the session as a JSON file"><Icon name="download" size={14} />Save session</button>
-                      <label className="flex-1 inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 cursor-pointer" title="Load a session JSON file, then add the alignment files it names">
-                        <Icon name="upload" size={14} />Load session
-                        <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { close(); loadSession(f); } e.target.value = ''; }} />
-                      </label>
-                    </div>
-                  </div>
+                    <button type="submit" className="w-full inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700"><Icon name="download" size={14} />Download</button>
+                  </form>
                 )}
               </Popover>
+              <label className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border border-slate-200 bg-white text-slate-700 text-[12.5px] font-medium whitespace-nowrap hover:bg-slate-50 cursor-pointer"
+                title="Load a session JSON file, then add the alignment files it names (or let the page reopen them from the remembered run folder)">
+                <Icon name="upload" size={15} />Load session
+                <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
+              </label>
               <Popover width={320} title="Export the views: a self-contained HTML page with the data embedded, or every view on one SVG page"
                 buttonClass="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] text-[12.5px] font-semibold bg-indigo-600 text-white shadow-[0_1px_2px_rgba(79,70,229,.35)] hover:bg-indigo-700"
                 button={<><Icon name="download" size={15} />Export<Icon name="chev" size={13} className="text-indigo-200" /></>}>
