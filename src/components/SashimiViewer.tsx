@@ -30,7 +30,7 @@ import { pairMates } from '../standalone/mates';
 import type { ArcSupport } from '../standalone/arcSupport';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
-import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, Dots } from './sashimi/controls';
+import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
@@ -273,8 +273,6 @@ const ANTI_COLOR = '#8b5cf6';
 const ANTI_READ_FILL = '#ddd6fe';
 /** the label band over the opposite strand's rows in the collapsed reads track */
 const ANTI_BAND_H = 16;
-/** the reads strip shows one chip per sample up to this many; beyond, a list to search */
-const READS_CHIPS_MAX = 5;
 /** smallest band under the baseline for the opposite strand, and its clearance */
 const MIRROR_MIN_H = 14;
 const MIRROR_PAD = 6;
@@ -1120,7 +1118,6 @@ export default function SashimiViewer({
   const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
-  const [readsPickSearch, setReadsPickSearch] = useState('');
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
@@ -5964,56 +5961,22 @@ export default function SashimiViewer({
           <div className="mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2" role="group" aria-label="Reads track options">
             <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-indigo-700"><Icon name="reads" size={15} />Reads</span>
             {tracks.length > 1 && (() => {
-              // whose reads: one chip per sample in its track colour, and "all"; past READS_CHIPS_MAX samples, a list to search
+              // whose reads: one button, the list of the shown samples in their track colours, and all of them
               const colorOf = (sid: number) => TRACK_COLORS[Math.max(0, tracks.findIndex(tr => tr.sampleId === sid)) % TRACK_COLORS.length];
-              const value = readsAll ? 'all' : String(effectiveReadsSampleId ?? '');
-              const pick = (v: string) => { if (v === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(v)); } };
-              const allHint = 'Every sample: one reads track under each coverage track (each sample is decoded separately, so it takes longer)';
-              const title = 'Whose reads the track shows: one sample, in its track colour, or all of them';
-              if (tracks.length <= READS_CHIPS_MAX) return (
-                <Segmented size="sm" prefix="reads of" label="Reads of" value={value} onChange={pick} title={title}
+              return (
+                <PickButton prefix="reads of" label="Reads of" value={readsAll ? 'all' : String(effectiveReadsSampleId ?? '')}
+                  onChange={v => { if (v === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(v)); } }}
+                  title="Whose reads the track shows: one sample, in its track colour, or all of them"
                   options={[
-                    ...tracks.map(tr => ({ value: String(tr.sampleId), label: tr.sampleName, dot: colorOf(tr.sampleId), hint: `${tr.sampleName}: its reads under its coverage track` })),
-                    { value: 'all', label: 'all', dot: tracks.map(tr => colorOf(tr.sampleId)), hint: allHint },
+                    ...tracks.map(tr => ({ value: String(tr.sampleId), label: tr.sampleName, dot: colorOf(tr.sampleId) })),
+                    { value: 'all', label: `all ${tracks.length} samples`, dot: tracks.map(tr => colorOf(tr.sampleId)), divider: true, hint: 'One reads track under each coverage track (each sample is decoded separately, so it takes longer)' },
                   ]} />
               );
-              const q = readsPickSearch.trim().toLowerCase();
-              const current = readsAll ? null : tracks.find(tr => tr.sampleId === effectiveReadsSampleId);
-              return (
-                <Popover width={260} flush title={title} label="Reads of"
-                  buttonClass="inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-2 rounded-[9px] border border-slate-200 bg-white text-[12.5px] whitespace-nowrap hover:border-slate-300"
-                  button={<>
-                    <span className="text-slate-500 text-xs">reads of</span>
-                    <Dots colors={current ? [colorOf(current.sampleId)] : tracks.map(tr => colorOf(tr.sampleId))} />
-                    <span className="font-medium text-slate-800 truncate max-w-[160px]">{current ? current.sampleName : `all ${tracks.length} samples`}</span>
-                    <Icon name="chev" size={13} className="text-slate-400" />
-                  </>}>
-                  {close => (
-                    <>
-                      <input value={readsPickSearch} onChange={e => setReadsPickSearch(e.target.value)} placeholder="Search samples…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
-                      <div className="max-h-64 overflow-y-auto py-1">
-                        {tracks.filter(tr => !q || tr.sampleName.toLowerCase().includes(q)).map(tr => {
-                          const on = !readsAll && tr.sampleId === effectiveReadsSampleId;
-                          return (
-                            <button key={tr.sampleId} type="button" onClick={() => { pick(String(tr.sampleId)); close(); }}
-                              className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left ${on ? 'bg-indigo-50 text-indigo-900 font-semibold' : 'text-slate-800 hover:bg-slate-50'}`}>
-                              <Dots colors={[colorOf(tr.sampleId)]} /><span className="flex-1 truncate">{tr.sampleName}</span>{on && <Icon name="check" size={13} className="text-indigo-600" />}
-                            </button>
-                          );
-                        })}
-                        <button type="button" onClick={() => { pick('all'); close(); }} title={allHint}
-                          className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left border-t border-slate-100 ${readsAll ? 'bg-indigo-50 text-indigo-900 font-semibold' : 'text-slate-800 hover:bg-slate-50'}`}>
-                          <Dots colors={tracks.map(tr => colorOf(tr.sampleId))} /><span className="flex-1">All samples</span>{readsAll && <Icon name="check" size={13} className="text-indigo-600" />}
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </Popover>
-              );
             })()}
-            <Segmented size="sm" prefix="window ≤" label="Reads window" value={String(readsWindow)} onChange={v => setReadsWindow(readsWindowOf(Number(v)))}
+            <PickButton prefix="window ≤" label="Reads window" value={String(readsWindow)} onChange={v => setReadsWindow(readsWindowOf(Number(v)))} width={300}
               title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}
-              options={READS_WINDOW_CHOICES_BP.map(bp => ({ value: String(bp), label: formatBp(bp).replace(' ', ''), hint: `Reads loaded in views up to ${formatBp(bp)} wide` }))} />
+              options={READS_WINDOW_CHOICES_BP.map((bp, i) => ({ value: String(bp), label: formatBp(bp),
+                hint: i === 0 ? 'the default, as IGV: reads drawn densely' : bp >= 1_000_000 ? 'a large structural variant, long reads: sparser, each move reads more of the file' : 'wider views, reads sampled sparser' }))} />
             <Segmented value={collapseReads ? 'collapsed' : 'raw'} onChange={v => setCollapseReads(v === 'collapsed')} size="sm" label="Raw or collapsed reads"
               title={`Raw: every read on its own row. Collapsed: the reads of the window folded into haplotypes. Haplotypes 2: the consensus of each of the two haplotypes (one row each per phase set), from the file's haplotags (HP, PS) when the reads carry them, else from the in-page read-based phasing (the heterozygous sites, ★ 25–75 % alternate allele, linked by the reads and their mates into phase blocks). Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`}
               options={[

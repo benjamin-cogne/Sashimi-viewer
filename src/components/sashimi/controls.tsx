@@ -233,6 +233,55 @@ export function Popover({ button, children, width = 320, title, open: openProp, 
   );
 }
 
+/**
+ * One choice among a list, as one button: its key in grey, the current value (with its colour dots), a chevron; the
+ * list opens under it, each entry with its dots, a hint under it and a check on the current one, a search box on top
+ * past `searchFrom` entries.
+ */
+export function PickButton<T extends string>({ prefix, value, onChange, options, title, label, width = 260, searchFrom = 7 }: {
+  prefix: string; value: T; onChange: (v: T) => void; title: string; label?: string; width?: number; searchFrom?: number;
+  options: { value: T; label: string; hint?: string; dot?: string | string[]; divider?: boolean }[];
+}) {
+  const [q, setQ] = useState('');
+  const cur = options.find(o => o.value === value);
+  const shown = q.trim() ? options.filter(o => o.label.toLowerCase().includes(q.trim().toLowerCase())) : options;
+  return (
+    <Popover width={width} flush title={title} label={label ?? prefix}
+      buttonClass="inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-2 rounded-[9px] border border-slate-200 bg-white text-[12.5px] whitespace-nowrap hover:border-slate-300"
+      button={<>
+        <span className="text-slate-500 text-xs">{prefix}</span>
+        {cur?.dot && <Dots colors={Array.isArray(cur.dot) ? cur.dot : [cur.dot]} />}
+        <span className="font-medium text-slate-800 truncate max-w-[160px]">{cur?.label ?? ''}</span>
+        <Icon name="chev" size={13} className="text-slate-400" />
+      </>}>
+      {close => (
+        <>
+          {options.length >= searchFrom && (
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
+          )}
+          <div className="max-h-72 overflow-y-auto py-1" role="listbox" aria-label={label ?? prefix}>
+            {shown.map(o => {
+              const on = o.value === value;
+              return (
+                <button key={o.value} type="button" role="option" aria-selected={on} title={o.hint} onClick={() => { onChange(o.value); setQ(''); close(); }}
+                  className={`w-full flex items-start gap-2 px-3 py-1.5 text-xs text-left ${o.divider ? 'border-t border-slate-100' : ''} ${on ? 'bg-indigo-50 text-indigo-900' : 'text-slate-800 hover:bg-slate-50'}`}>
+                  {o.dot && <span className="mt-1"><Dots colors={Array.isArray(o.dot) ? o.dot : [o.dot]} /></span>}
+                  <span className="flex-1 min-w-0">
+                    <span className={`block truncate ${on ? 'font-semibold' : ''}`}>{o.label}</span>
+                    {o.hint && <span className="block text-[11px] text-slate-500 leading-snug">{o.hint}</span>}
+                  </span>
+                  {on && <Icon name="check" size={13} className="text-indigo-600 mt-0.5" />}
+                </button>
+              );
+            })}
+            {!shown.length && <div className="px-3 py-2 text-xs text-slate-500">Nothing matches</div>}
+          </div>
+        </>
+      )}
+    </Popover>
+  );
+}
+
 /** A line of a menu: icon, label, optional hint under it. */
 export function MenuItem({ icon, label, hint, onClick, disabled, title }: { icon?: string; label: string; hint?: string; onClick: () => void; disabled?: boolean; title?: string }) {
   return (

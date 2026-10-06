@@ -93,11 +93,11 @@ The page has three bands, top to bottom.
   Layers orange, Depth blue. Filters stays plain, on the right.
 
   A pill tinted indigo is an option that is on. A choice among a few values (the genome build, the
-  SNPs' *AF ≥*, the reads window, *group*, *haplotypes*, *phase*) is a switch with all its values in
+  SNPs' *AF ≥*, *group*, *haplotypes*, *phase*, the reads *colour*) is a switch with all its values in
   sight, set with one click, the key in grey at its start. An option that only makes sense with another (the intron width with *Equal introns*, the AF threshold with *SNPs*) appears next to it while that option is on.
 
 When the reads track is on, a **reads strip** tinted indigo appears under the toolbar with every option of that track:
-- *reads of*: the sample whose reads are shown, one chip per sample in its track colour, or *all* (past five samples, a list to search);
+- *reads of*: the sample whose reads are shown, picked from a list in the samples' track colours, or *all*;
 - the *window ≤* of the reads;
 - *Raw | Collapsed*;
 - *group* in raw mode, or *haplotypes* and *phase* when collapsed;
@@ -472,7 +472,7 @@ their members. Long reads carry deletions, split reads and clips; short-read pai
 discordant pairs (CRAM mate fields are read when the file records them).
 
 **Reads window.** The reads track loads the reads of views up to 100 kb wide by default (IGV's
-*visibility window*); wider, it asks to zoom in. The *window ≤* switch of the reads strip widens it
+*visibility window*); wider, it asks to zoom in. The *window ≤* button of the reads strip widens it
 to 250 kb, 500 kb, 1 Mb or 2 Mb, to follow a large structural variant, or long reads, across a wider
 view. The track still draws at most the same number of reads, sampled over the window, so a wider
 window shows them sparser; each move of the view reads that much more of the file. The setting is
@@ -707,7 +707,7 @@ at once. They are always drawn in this order, top to bottom:
 - **V, variants** (amber): the variants track described below;
 - **M, methylation** (red): CpG methylation of long reads (below). *CpG islands only* appears next
   to the control while it is on;
-- **R, reads** (slate): the alignments. The sample chip, or the *reads of* chips of the reads strip,
+- **R, reads** (slate): the alignments. The sample chip, or the *reads of* button of the reads strip,
   picks which sample's reads are shown, or all of them.
 
 A page without a DNA sample shows a plain *Reads* option instead.
