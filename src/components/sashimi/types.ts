@@ -326,6 +326,8 @@ export interface ReadsResponse {
   phase?: PhaseResult;
   /** the two haplotypes of the window as consensus rows (collapsed mode with two haplotypes) */
   haplotypes?: HaplotypeView;
+  /** collapsed mode split by strand (ReadsOptions.strands): the opposite strand's reads, collapsed on their own */
+  anti?: Pick<ReadsResponse, 'total' | 'shown' | 'sites' | 'groups' | 'phase' | 'haplotypes'>;
   /** reads of the window carrying a haplotag (HP), and the phase sets (PS) among them: the file is phased */
   haplotags?: { tagged: number; sets: number };
   /** the reads are long (median aligned length above 1 kb): noise filters apply */

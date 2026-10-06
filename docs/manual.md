@@ -172,8 +172,12 @@ Plots export as **SVG** (vector, publication-ready) for reports.
     transcript.
   - The strand of a read comes from the library's orientation: read 2 of a pair on the transcript's
     strand and read 1 on the other one in a reverse library, the opposite in a forward one.
+  - In collapsed mode, each strand is phased (*haplotypes 2*) or grouped (*any*) on its own reads.
+    The gene's strand comes first, then an *opposite strand* band with its own phase blocks or
+    consensus groups. The alleles of an antisense transcript are not mixed into the gene's
+    haplotypes.
   - An unstranded sample, or one whose orientation is not known yet, stays whole. Groups pool the
-    unsplit coverage. The collapsed reads track does not split by strand.
+    unsplit coverage.
 - **Very deep libraries** (capture panels at thousands of ×, targeted RNA-seq, highly expressed
   genes): coverage, junctions and intron-retention counts are **exact at any depth**. Every read of
   the window is counted straight from its alignment into per-position tallies, without building a

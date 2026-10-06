@@ -266,6 +266,8 @@ const PSEUDO_EXON_COLOR = '#7c3aed';
 /** the opposite strand of a stranded sample: its mirrored coverage, its arcs and its reads (lighter) */
 const ANTI_COLOR = '#8b5cf6';
 const ANTI_READ_FILL = '#ddd6fe';
+/** the label band over the opposite strand's rows in the collapsed reads track */
+const ANTI_BAND_H = 16;
 /** smallest band under the baseline for the opposite strand, and its clearance */
 const MIRROR_MIN_H = 14;
 const MIRROR_PAD = 6;
@@ -1135,7 +1137,7 @@ export default function SashimiViewer({
   /** the tracks as loaded; `tracks` (below) is what is drawn: with the strands shown, a stranded sample's gene strand */
   const [rawTracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; /** collapsed with the strands split, the gene's (ReadsOptions.strands) */ strands?: 'plus' | 'minus'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
   /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
   const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string } | null>(null);
   const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}` : undefined;
@@ -1942,9 +1944,11 @@ export default function SashimiViewer({
     const wantMethyl = (sid: number) => showMethyl && mode === 'reads' && span <= METHYL_READS_MAX_BP && isDnaSample(sid) && !!ds.getMethylation;
     // raw reads grouped by the page's phasing: the source phases the window's reads and says each one's haplotype
     const wantPhase = mode === 'reads' && readsGroup === 'phase' && !readsSupport;
+    // collapsed reads of a stranded sample with the strands shown: each strand collapsed on its own
+    const strandsFor = (sid: number) => (mode === 'collapsed' ? senseOf(sid) ?? undefined : undefined);
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.support === supportKey && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
+      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === supportKey && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
         && !(wantMethyl(sid) && !cur.methyl) && !(wantPhase && !cur.phased));
     });
     if (!stale.length) return;
@@ -1958,8 +1962,8 @@ export default function SashimiViewer({
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
         const support = mode === 'reads' ? readsSupport?.arc : undefined;
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, signal: ctl.signal })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: support ? supportKey : undefined } })); })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, strands: strandsFor(sid), signal: ctl.signal })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: support ? supportKey : undefined } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => {
             if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
@@ -1968,7 +1972,7 @@ export default function SashimiViewer({
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow, readsGroup, showSecondary]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow, readsGroup, showSecondary, senseOf]); // eslint-disable-line react-hooks/exhaustive-deps
   // a filter on the supporting reads of an arc belongs to its chromosome
   useEffect(() => { setReadsSupport(null); }, [currentChrom]);
 
@@ -2618,7 +2622,7 @@ export default function SashimiViewer({
     const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly, secondary: showSecondary }) &&
       entry.support === (mode === 'reads' ? supportKey : undefined) &&
       entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
-      (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource));
+      (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource && entry.strands === (senseOf(sid) ?? undefined)));
 
     const ref = current.reference;
     // Strands shown on a stranded sample: a read's strand under the library's orientation, the opposite strand's reads
@@ -2734,302 +2738,337 @@ export default function SashimiViewer({
       ),
     });
 
-    // ======================= Collapsed mode, two haplotypes: consensus rows =======================
-    // From the file's haplotags (HP/PS) or the in-page phasing: each phase set gets one row per haplotype, the consensus
-    // of its reads (covered stretches, the variants at least half of them carry); sets side by side share a lane.
-    if (collapseReads && current.haplotypes) {
-      const hv = current.haplotypes;
-      const ph = current.phase;
-      const rowStep = GROUP_ROW_H + 4;
-      const unit = hv.source === 'tags' ? 'reads' : 'fragments';
-      const sets = hv.sets.filter(st => st.end > viewStart && st.start < viewEnd);
-      const laneEnd: number[] = [], laneOf: number[] = [];
-      for (const st of sets) { let k = laneEnd.findIndex(e => e <= st.start); if (k < 0) { k = laneEnd.length; laneEnd.push(0); } laneEnd[k] = st.end; laneOf.push(k); }
-      const hapsPerLane = laneEnd.map(() => 2);
-      sets.forEach((st, i) => { hapsPerLane[laneOf[i]] = Math.max(hapsPerLane[laneOf[i]], st.haps.length); });
-      const laneTop: number[] = [];
-      let hapRows = 0;
-      for (const n of hapsPerLane) { laneTop.push(hapRows); hapRows += n; }
-      const posTxt = (p: number) => `${currentChrom}:${(p + 1).toLocaleString('en-US')}`;
-      const siteTxt = (x: VariantSite) => x.kind === 'snv' ? `${posTxt(x.pos)} ${x.ref}>${x.alt}` : x.kind === 'ins' ? `${posTxt(x.pos)} insertion of ${x.length} bp` : `${posTxt(x.pos)} deletion of ${x.length} bp`;
-      const rows: JSX.Element[] = [];
-      sets.forEach((st, i) => {
-        const a = scale.x(st.start), z = scale.x(st.end), setLeft = Math.min(a, z);
-        st.haps.forEach((h, hi) => {
-          const row = laneTop[laneOf[i]] + hi;
-          const top = bodyTop + 4 + row * rowStep, mid = top + GROUP_ROW_H / 2;
-          const color = HAP_COLORS[(h.hap - 1) % HAP_COLORS.length];
-          const parts: JSX.Element[] = [];
-          for (const [cs, ce] of h.covered) {
-            const x1 = scale.x(cs), x2 = scale.x(ce);
-            parts.push(<rect key={`c${cs}`} x={Math.min(x1, x2)} y={top + 3} width={Math.max(1, Math.abs(x2 - x1))} height={GROUP_ROW_H - 6} fill={READ_FILL} rx={1} />);
-          }
-          // splice junctions of the haplotype (RNA): a line across each intron, an arc over the introns of another
-          // junction (an exon skip); in the haplotype's colour where the two haplotypes use it differently
-          const js = (h.junctions ?? []).filter(j => j.end > viewStart && j.start < viewEnd);
-          for (const j of js) {
-            const x1 = scale.x(j.start), x2 = scale.x(j.end), l = Math.min(x1, x2), r = Math.max(x1, x2);
-            const al = st.allelic?.find(a => a.start === j.start && a.end === j.end);
-            const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
-            const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
-            const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
-            const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString('en-US')}): ${j.n.toLocaleString('en-US')} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString('en-US')} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
-              (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
-            const peak = top + 1;
-            parts.push(
-              <g key={`j${j.start}-${j.end}`}><title>{tip}</title>
-                {nested
-                  ? <path d={`M${l},${mid} Q${(l + r) / 2},${peak - 6} ${r},${mid}`} fill="none" stroke={stroke} strokeWidth={sw} opacity={op} />
-                  : <line x1={l} y1={mid} x2={r} y2={mid} stroke={stroke} strokeWidth={sw} opacity={op} />}
-                {r - l > 26 && <text x={(l + r) / 2} y={nested ? peak + 1 : mid - 2.5} textAnchor="middle" fill={al ? color : INK.muted} fontSize={8} fontWeight={al ? 700 : 400}>{j.n}</text>}
-              </g>);
-          }
-          for (const x of h.sites) {
-            const tip = `${siteTxt(x)} · carried by ${x.alt_count} of ${x.depth} reads of H${h.hap}`;
-            if (x.kind === 'del') {
-              const x1 = scale.x(x.pos), x2 = scale.x(x.pos + x.length), l = Math.min(x1, x2), w = Math.max(1, Math.abs(x2 - x1));
-              parts.push(<g key={`d${x.pos}-${x.length}`}><title>{tip}</title><rect x={l} y={top + 2} width={w} height={GROUP_ROW_H - 4} fill={INK.bg} /><line x1={l} y1={mid} x2={l + w} y2={mid} stroke="#111827" strokeWidth={2} /></g>);
-            } else if (x.kind === 'ins') {
-              const xi = scale.x(x.pos);
-              parts.push(<g key={`i${x.pos}-${x.length}`}><title>{tip}</title><rect x={xi - 1} y={top + 1} width={2} height={GROUP_ROW_H - 2} fill={INSERTION_COLOR} /></g>);
-            } else {
-              const { left, w } = basePx(x.pos);
-              const ww = Math.max(w, 2);
+    /**
+     * The collapsed rows of one answer from `bodyTop` down: the whole window, or with the strands split the gene's strand
+     * and then the opposite one's, each phased or grouped on its own reads (ReadsOptions.strands)
+     */
+    type CollapsedAnswer = Pick<ReadsResponse, 'total' | 'shown' | 'sites' | 'groups' | 'phase' | 'haplotypes'>;
+    const collapsedPart = (current: CollapsedAnswer, bodyTop: number): { rows: JSX.Element[]; bodyHeight: number; info: string } | null => {
+      // ======================= Collapsed mode, two haplotypes: consensus rows =======================
+      // From the file's haplotags (HP/PS) or the in-page phasing: each phase set gets one row per haplotype, the consensus
+      // of its reads (covered stretches, the variants at least half of them carry); sets side by side share a lane.
+      if (collapseReads && current.haplotypes) {
+        const hv = current.haplotypes;
+        const ph = current.phase;
+        const rowStep = GROUP_ROW_H + 4;
+        const unit = hv.source === 'tags' ? 'reads' : 'fragments';
+        const sets = hv.sets.filter(st => st.end > viewStart && st.start < viewEnd);
+        const laneEnd: number[] = [], laneOf: number[] = [];
+        for (const st of sets) { let k = laneEnd.findIndex(e => e <= st.start); if (k < 0) { k = laneEnd.length; laneEnd.push(0); } laneEnd[k] = st.end; laneOf.push(k); }
+        const hapsPerLane = laneEnd.map(() => 2);
+        sets.forEach((st, i) => { hapsPerLane[laneOf[i]] = Math.max(hapsPerLane[laneOf[i]], st.haps.length); });
+        const laneTop: number[] = [];
+        let hapRows = 0;
+        for (const n of hapsPerLane) { laneTop.push(hapRows); hapRows += n; }
+        const posTxt = (p: number) => `${currentChrom}:${(p + 1).toLocaleString('en-US')}`;
+        const siteTxt = (x: VariantSite) => x.kind === 'snv' ? `${posTxt(x.pos)} ${x.ref}>${x.alt}` : x.kind === 'ins' ? `${posTxt(x.pos)} insertion of ${x.length} bp` : `${posTxt(x.pos)} deletion of ${x.length} bp`;
+        const rows: JSX.Element[] = [];
+        sets.forEach((st, i) => {
+          const a = scale.x(st.start), z = scale.x(st.end), setLeft = Math.min(a, z);
+          st.haps.forEach((h, hi) => {
+            const row = laneTop[laneOf[i]] + hi;
+            const top = bodyTop + 4 + row * rowStep, mid = top + GROUP_ROW_H / 2;
+            const color = HAP_COLORS[(h.hap - 1) % HAP_COLORS.length];
+            const parts: JSX.Element[] = [];
+            for (const [cs, ce] of h.covered) {
+              const x1 = scale.x(cs), x2 = scale.x(ce);
+              parts.push(<rect key={`c${cs}`} x={Math.min(x1, x2)} y={top + 3} width={Math.max(1, Math.abs(x2 - x1))} height={GROUP_ROW_H - 6} fill={READ_FILL} rx={1} />);
+            }
+            // splice junctions of the haplotype (RNA): a line across each intron, an arc over the introns of another
+            // junction (an exon skip); in the haplotype's colour where the two haplotypes use it differently
+            const js = (h.junctions ?? []).filter(j => j.end > viewStart && j.start < viewEnd);
+            for (const j of js) {
+              const x1 = scale.x(j.start), x2 = scale.x(j.end), l = Math.min(x1, x2), r = Math.max(x1, x2);
+              const al = st.allelic?.find(a => a.start === j.start && a.end === j.end);
+              const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
+              const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
+              const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
+              const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString('en-US')}): ${j.n.toLocaleString('en-US')} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString('en-US')} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
+                (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
+              const peak = top + 1;
               parts.push(
-                <g key={`m${x.pos}${x.alt}`}><title>{tip}</title>
-                  <rect x={left + w / 2 - ww / 2} y={top + 3} width={ww} height={GROUP_ROW_H - 6} fill={BASE_COLORS[x.alt] || BASE_COLORS.N} />
-                  {w >= 7 && <text x={left + w / 2} y={top + GROUP_ROW_H - 5.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{x.alt}</text>}
+                <g key={`j${j.start}-${j.end}`}><title>{tip}</title>
+                  {nested
+                    ? <path d={`M${l},${mid} Q${(l + r) / 2},${peak - 6} ${r},${mid}`} fill="none" stroke={stroke} strokeWidth={sw} opacity={op} />
+                    : <line x1={l} y1={mid} x2={r} y2={mid} stroke={stroke} strokeWidth={sw} opacity={op} />}
+                  {r - l > 26 && <text x={(l + r) / 2} y={nested ? peak + 1 : mid - 2.5} textAnchor="middle" fill={al ? color : INK.muted} fontSize={8} fontWeight={al ? 700 : 400}>{j.n}</text>}
                 </g>);
             }
-          }
-          const label = `H${h.hap} · ${st.id} · ${h.reads.toLocaleString('en-US')} ${unit}`;
-          const lx = Math.min(plotRight - label.length * 5.4 - 20, Math.max(PLOT_LEFT + 3, setLeft + 3)), lw = label.length * 5.4 + 16;
-          parts.push(
-            <g key="lab">
-              <rect x={lx} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.92} />
-              <rect x={lx + 3} y={mid - 4} width={7} height={8} rx={1.5} fill={color} />
-              <text x={lx + 13} y={mid + 3.5} fill={INK.text} fontSize={9} fontWeight={700}>{label}</text>
-            </g>);
-          const variants = h.sites.map(siteTxt);
-          const title = `H${h.hap} of ${st.id} (${posTxt(st.start)}-${st.end.toLocaleString('en-US')}): consensus of ${h.reads.toLocaleString('en-US')} ${hv.source === 'tags' ? `reads tagged HP ${h.hap}` : 'fragments phased to this haplotype'}` +
-            (h.pc != null ? ` · median PC ${h.pc}` : '') +
-            `\nvariants carried by at least half of them: ${variants.length ? variants.slice(0, 15).join(', ') + (variants.length > 15 ? ` … (${variants.length})` : '') : 'none (reference)'}` +
-            `\ngrey where at least ${HAP_MIN_DEPTH} of its reads cover, blank where fewer` +
-            (sets.length > 1 ? '\nhaplotypes are linked within a phase set, not across: H1 here is unrelated to H1 of another set' : '');
-          rows.push(<g key={`${st.id}h${h.hap}`}><title>{title}</title>{parts}</g>);
+            for (const x of h.sites) {
+              const tip = `${siteTxt(x)} · carried by ${x.alt_count} of ${x.depth} reads of H${h.hap}`;
+              if (x.kind === 'del') {
+                const x1 = scale.x(x.pos), x2 = scale.x(x.pos + x.length), l = Math.min(x1, x2), w = Math.max(1, Math.abs(x2 - x1));
+                parts.push(<g key={`d${x.pos}-${x.length}`}><title>{tip}</title><rect x={l} y={top + 2} width={w} height={GROUP_ROW_H - 4} fill={INK.bg} /><line x1={l} y1={mid} x2={l + w} y2={mid} stroke="#111827" strokeWidth={2} /></g>);
+              } else if (x.kind === 'ins') {
+                const xi = scale.x(x.pos);
+                parts.push(<g key={`i${x.pos}-${x.length}`}><title>{tip}</title><rect x={xi - 1} y={top + 1} width={2} height={GROUP_ROW_H - 2} fill={INSERTION_COLOR} /></g>);
+              } else {
+                const { left, w } = basePx(x.pos);
+                const ww = Math.max(w, 2);
+                parts.push(
+                  <g key={`m${x.pos}${x.alt}`}><title>{tip}</title>
+                    <rect x={left + w / 2 - ww / 2} y={top + 3} width={ww} height={GROUP_ROW_H - 6} fill={BASE_COLORS[x.alt] || BASE_COLORS.N} />
+                    {w >= 7 && <text x={left + w / 2} y={top + GROUP_ROW_H - 5.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{x.alt}</text>}
+                  </g>);
+              }
+            }
+            const label = `H${h.hap} · ${st.id} · ${h.reads.toLocaleString('en-US')} ${unit}`;
+            const lx = Math.min(plotRight - label.length * 5.4 - 20, Math.max(PLOT_LEFT + 3, setLeft + 3)), lw = label.length * 5.4 + 16;
+            parts.push(
+              <g key="lab">
+                <rect x={lx} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.92} />
+                <rect x={lx + 3} y={mid - 4} width={7} height={8} rx={1.5} fill={color} />
+                <text x={lx + 13} y={mid + 3.5} fill={INK.text} fontSize={9} fontWeight={700}>{label}</text>
+              </g>);
+            const variants = h.sites.map(siteTxt);
+            const title = `H${h.hap} of ${st.id} (${posTxt(st.start)}-${st.end.toLocaleString('en-US')}): consensus of ${h.reads.toLocaleString('en-US')} ${hv.source === 'tags' ? `reads tagged HP ${h.hap}` : 'fragments phased to this haplotype'}` +
+              (h.pc != null ? ` · median PC ${h.pc}` : '') +
+              `\nvariants carried by at least half of them: ${variants.length ? variants.slice(0, 15).join(', ') + (variants.length > 15 ? ` … (${variants.length})` : '') : 'none (reference)'}` +
+              `\ngrey where at least ${HAP_MIN_DEPTH} of its reads cover, blank where fewer` +
+              (sets.length > 1 ? '\nhaplotypes are linked within a phase set, not across: H1 here is unrelated to H1 of another set' : '');
+            rows.push(<g key={`${st.id}h${h.hap}`}><title>{title}</title>{parts}</g>);
+          });
+          if (i > 0) rows.push(<line key={`sep${st.id}`} x1={setLeft} y1={bodyTop + 2} x2={setLeft} y2={bodyTop + 4 + hapRows * rowStep} stroke={INK.faint} strokeWidth={1} strokeDasharray="3 3"><title>{`${st.id} starts: the haplotypes are not linked across this line`}</title></line>);
         });
-        if (i > 0) rows.push(<line key={`sep${st.id}`} x1={setLeft} y1={bodyTop + 2} x2={setLeft} y2={bodyTop + 4 + hapRows * rowStep} stroke={INK.faint} strokeWidth={1} strokeDasharray="3 3"><title>{`${st.id} starts: the haplotypes are not linked across this line`}</title></line>);
-      });
-      let ri = hapRows;
-      // heterozygous sites the haplotypes do not split, and (in-page phasing) the unphased ones
-      const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
-      const flagged = [
-        ...hv.notSplit.map(n => ({ pos: n.pos, text: `${posTxt(n.pos)} ${n.alt}: not split by the haplotypes of ${n.set} (alternate allele on ${n.fractions.map(f => `${Math.round(f * 100)} %`).join(' / ')} of the H1 / H2 ${unit}): mis-phased, mosaic, a third haplotype or a collapsed duplication` })),
-        ...(ph ? ph.unphased.map(u => ({ pos: ph.sites[u.site].pos, text: `${posTxt(ph.sites[u.site].pos)} ${ph.sites[u.site].alt} (${(ph.sites[u.site].vaf * 100).toFixed(0)} % of ${ph.sites[u.site].depth} reads): unphased, ${why[u.reason]}` })) : []),
-      ].filter(f => f.pos >= viewStart && f.pos < viewEnd);
-      if (flagged.length) {
-        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
-        ri++;
-        const parts = flagged.map((f, k) => { const { left, w } = basePx(f.pos); const ww = Math.max(w, 7); return <g key={`f${f.pos}-${k}`}><title>{f.text}</title><rect x={left + w / 2 - ww / 2} y={top + 2} width={ww} height={GROUP_ROW_H - 4} fill={INK.bg} stroke={INK.muted} strokeWidth={1} strokeDasharray="2 1.5" rx={2} /></g>; });
-        const label = `${hv.notSplit.length ? 'not split' : 'unphased'} · ${flagged.length}`;
-        parts.push(<g key="lab"><rect x={PLOT_LEFT + 3} y={mid - 7} width={label.length * 5.6 + 8} height={14} rx={3} fill={INK.bg} opacity={0.9} /><text x={PLOT_LEFT + 7} y={mid + 3.5} fill={INK.muted} fontSize={9} fontWeight={700}>{label}</text></g>);
-        rows.push(<g key="flagged">{parts}</g>);
-      }
-      if (!sets.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{!current.total ? 'no reads in this window' : hv.source === 'tags' ? 'no haplotagged read in this window' : `no phase block in this window (heterozygous sites ${HET_MIN * 100}–${HET_MAX * 100} %, linked by at least 2 fragments)`}</text>);
-      const bodyHeight = Math.max(1, ri) * rowStep + 6;
-      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const nAllelic = sets.reduce((n, st) => n + (st.allelic?.filter(a => a.end > viewStart && a.start < viewEnd).length ?? 0), 0);
-      const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString('en-US')} reads on a haplotype, ${hv.unassigned.toLocaleString('en-US')} not` +
-        (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString('en-US')} ${unit} against their haplotype` : '') +
-        (nAllelic ? ` · ${nAllelic} junction${nAllelic === 1 ? '' : 's'} used differently by the haplotypes` : '') +
-        (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
-      return wrap(height, info, rows, bodyHeight);
-    }
-
-    // ======================= Collapsed mode, two haplotypes: phase blocks =======================
-    if (collapseReads && current.phase) {
-      const ph = current.phase;
-      const allSites = ph.sites;
-      const rowStep = GROUP_ROW_H + 4;
-      const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString('en-US')}`;
-      const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
-      /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
-      const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
-        const st = allSites[si];
-        const { left, w } = basePx(st.pos);
-        const ww = Math.max(w, 9), cx = left + w / 2;
-        const isAlt = al === 'alt';
-        const letter = st.kind === 'snv' ? (isAlt ? st.alt : st.ref) : (isAlt ? st.alt : '=');
-        const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-        return (
-          <g key={`al${si}`} opacity={muted ? 0.55 : 1}>
-            {title && <title>{title}</title>}
-            <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} strokeDasharray={dashed ? '2 1.5' : undefined} />
-            <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
-          </g>
-        );
-      };
-      const labelEl = (label: string, mid: number, strong: boolean) => {
-        const lw = label.length * 5.6 + 8;
-        return (
-          <g key="label">
-            <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
-            <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={strong ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
-          </g>
-        );
-      };
-      const badgeEl = (text: string, xRight: number, mid: number, strong: boolean) => {
-        const bw = text.length * 5.6 + 10;
-        const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
-        return (
-          <g key="badge">
-            <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
-            <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
-          </g>
-        );
-      };
-      const blocks = ph.blocks.filter(b => b.end > viewStart && b.start < viewEnd);
-      const homIn = ph.hom.filter(si => allSites[si].pos >= viewStart && allSites[si].pos < viewEnd);
-      const unphasedIn = ph.unphased.filter(u => allSites[u.site].pos >= viewStart && allSites[u.site].pos < viewEnd);
-      const rows: JSX.Element[] = [];
-      let ri = 0;
-      const reasonTxt: Record<'no link' | 'conflict', string> = { 'no link': 'no fragment links it to the previous block', conflict: 'the links to the previous block contradict each other (a third haplotype, mosaic alleles or errors)' };
-      for (const b of blocks) {
-        const nFrag = b.support[0] + b.support[1];
-        const a = scale.x(b.start), z = scale.x(b.end);
-        const left = Math.min(a, z), right = Math.max(a, z);
-        const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
-        const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')} · ${b.sites.length} heterozygous sites` +
-          `\nfragments (read + mate): ${b.support[0].toLocaleString('en-US')} on H1, ${b.support[1].toLocaleString('en-US')} on H2` +
-          (b.ambiguous ? `, ${b.ambiguous.toLocaleString('en-US')} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString('en-US')} disagreeing with their haplotype at one site or more` : '') +
-          (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
-          (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
-        ([b.h1, b.h2] as const).forEach((hap, hi) => {
+        let ri = hapRows;
+        // heterozygous sites the haplotypes do not split, and (in-page phasing) the unphased ones
+        const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
+        const flagged = [
+          ...hv.notSplit.map(n => ({ pos: n.pos, text: `${posTxt(n.pos)} ${n.alt}: not split by the haplotypes of ${n.set} (alternate allele on ${n.fractions.map(f => `${Math.round(f * 100)} %`).join(' / ')} of the H1 / H2 ${unit}): mis-phased, mosaic, a third haplotype or a collapsed duplication` })),
+          ...(ph ? ph.unphased.map(u => ({ pos: ph.sites[u.site].pos, text: `${posTxt(ph.sites[u.site].pos)} ${ph.sites[u.site].alt} (${(ph.sites[u.site].vaf * 100).toFixed(0)} % of ${ph.sites[u.site].depth} reads): unphased, ${why[u.reason]}` })) : []),
+        ].filter(f => f.pos >= viewStart && f.pos < viewEnd);
+        if (flagged.length) {
           const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
           ri++;
-          const parts: JSX.Element[] = [];
-          parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
-          b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
-          const share = nFrag ? b.support[hi] / nFrag : 0;
-          parts.push(badgeEl(`${b.support[hi].toLocaleString('en-US')} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
-          parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
-          const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
-          rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
-        });
+          const parts = flagged.map((f, k) => { const { left, w } = basePx(f.pos); const ww = Math.max(w, 7); return <g key={`f${f.pos}-${k}`}><title>{f.text}</title><rect x={left + w / 2 - ww / 2} y={top + 2} width={ww} height={GROUP_ROW_H - 4} fill={INK.bg} stroke={INK.muted} strokeWidth={1} strokeDasharray="2 1.5" rx={2} /></g>; });
+          const label = `${hv.notSplit.length ? 'not split' : 'unphased'} · ${flagged.length}`;
+          parts.push(<g key="lab"><rect x={PLOT_LEFT + 3} y={mid - 7} width={label.length * 5.6 + 8} height={14} rx={3} fill={INK.bg} opacity={0.9} /><text x={PLOT_LEFT + 7} y={mid + 3.5} fill={INK.muted} fontSize={9} fontWeight={700}>{label}</text></g>);
+          rows.push(<g key="flagged">{parts}</g>);
+        }
+        if (!sets.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{!current.total ? 'no reads in this window' : hv.source === 'tags' ? 'no haplotagged read in this window' : `no phase block in this window (heterozygous sites ${HET_MIN * 100}–${HET_MAX * 100} %, linked by at least 2 fragments)`}</text>);
+        const bodyHeight = Math.max(1, ri) * rowStep + 6;
+        const nAllelic = sets.reduce((n, st) => n + (st.allelic?.filter(a => a.end > viewStart && a.start < viewEnd).length ?? 0), 0);
+        const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString('en-US')} reads on a haplotype, ${hv.unassigned.toLocaleString('en-US')} not` +
+          (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString('en-US')} ${unit} against their haplotype` : '') +
+          (nAllelic ? ` · ${nAllelic} junction${nAllelic === 1 ? '' : 's'} used differently by the haplotypes` : '') +
+          (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
+        return { rows, bodyHeight, info };
       }
-      if (homIn.length) {
-        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
-        ri++;
-        const parts: JSX.Element[] = homIn.map(si => glyph(si, 'alt', top, true, false, `${posTxt(si)} ${alleleTxt(si, 'alt')}: homozygous (${(allSites[si].vaf * 100).toFixed(0)} % of ${allSites[si].depth} reads), on both haplotypes`));
-        parts.push(labelEl(`both haplotypes · ${homIn.length} homozygous`, mid, false));
-        rows.push(<g key="hom">{parts}</g>);
-      }
-      if (unphasedIn.length) {
-        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
-        ri++;
-        const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
-        const parts: JSX.Element[] = unphasedIn.map(u => glyph(u.site, 'alt', top, true, true, `${posTxt(u.site)} ${alleleTxt(u.site, 'alt')} (${(allSites[u.site].vaf * 100).toFixed(0)} % of ${allSites[u.site].depth} reads): unphased, ${why[u.reason]}`));
-        parts.push(labelEl(`unphased · ${unphasedIn.length}`, mid, false));
-        rows.push(<g key="unphased">{parts}</g>);
-      }
-      if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
-      const bodyHeight = Math.max(1, ri) * rowStep + 6;
-      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const info = `${current.total.toLocaleString('en-US')} reads · ${ph.fragments.toLocaleString('en-US')} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
-        (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
-      return wrap(height, info, rows, bodyHeight);
-    }
 
-    // ======================= Collapsed mode: consensus rows =======================
-    if (collapseReads) {
-      // Consensus rows in display order (left to right on the plot) so that the groups of one phase
-      // block sit next to each other; ambiguous buckets follow, the minor bucket last.
-      const leftPx = (g: ReadGroup) => Math.min(...g.blocks.map(([bs, be]) => Math.min(scale.x(bs), scale.x(be))));
-      const rank = { consensus: 0, ambiguous: 1, minor: 2 } as const;
-      const groups: ReadGroup[] = [...(current.groups || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || (a.kind === 'consensus' ? leftPx(a) - leftPx(b) : b.n - a.n));
-      const allSites: VariantSite[] = current.sites || [];
-      const hNum = (id: string) => parseInt(id.slice(1)) || 0;
-      const ambLabel = (g: ReadGroup) => {
-        const ids = [...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b));
-        return ids.length > 3 ? `? · ${ids.length} groups` : `${ids.join('|')} ?`;
-      };
-      const rowStep = GROUP_ROW_H + 4;
-      const bodyHeight = Math.max(1, groups.length) * rowStep + 6;
-      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const rows = groups.map((g, gi) => {
-        const top = bodyTop + 4 + gi * rowStep, mid = top + GROUP_ROW_H / 2;
-        const isCons = g.kind === 'consensus';
-        const fill = isCons ? READ_FILL : '#e2e5ea';
-        const parts: JSX.Element[] = [];
-        for (const [bs, be] of g.blocks) {
-          const a = scale.x(bs), b = scale.x(be);
-          parts.push(<rect key={`u${bs}`} x={Math.min(a, b)} y={top + 3} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H - 6} fill={fill} opacity={0.4} rx={1} />);
-        }
-        for (const [bs, be] of g.dense) {
-          const a = scale.x(bs), b = scale.x(be);
-          parts.push(<rect key={`d${bs}`} x={Math.min(a, b)} y={top} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H} fill={fill} rx={1.5}
-            strokeDasharray={isCons ? undefined : '3 2'} stroke={isCons ? undefined : INK.faint} strokeWidth={isCons ? 0 : 0.8} />);
-        }
-        for (const [js, je] of g.chain) {
-          parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#6b7280" strokeWidth={1.4} />);
-        }
-        if (!g.chain.length) {
-          for (let k = 0; k + 1 < g.blocks.length; k++) {
-            parts.push(<line key={`c${k}`} x1={scale.x(g.blocks[k][1])} y1={mid} x2={scale.x(g.blocks[k + 1][0])} y2={mid} stroke={INK.faint} strokeWidth={1} strokeDasharray="2 3" />);
-          }
-        }
-        // Alleles at the variable sites
-        const alleleTxt: string[] = [];
-        allSites.forEach((st, si) => {
-          const al = g.alleles[si];
-          if (!al || al === '.') return;
+      // ======================= Collapsed mode, two haplotypes: phase blocks =======================
+      if (collapseReads && current.phase) {
+        const ph = current.phase;
+        const allSites = ph.sites;
+        const rowStep = GROUP_ROW_H + 4;
+        const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString('en-US')}`;
+        const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
+        /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
+        const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
+          const st = allSites[si];
           const { left, w } = basePx(st.pos);
           const ww = Math.max(w, 9), cx = left + w / 2;
-          const isAlt = al !== 'ref';
-          const letter = st.kind === 'snv' ? (al === 'alt' ? st.alt : al === 'ref' ? st.ref : al) : (isAlt ? st.alt : '=');
+          const isAlt = al === 'alt';
+          const letter = st.kind === 'snv' ? (isAlt ? st.alt : st.ref) : (isAlt ? st.alt : '=');
           const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-          parts.push(
-            <g key={`al${si}`}>
-              <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} />
+          return (
+            <g key={`al${si}`} opacity={muted ? 0.55 : 1}>
+              {title && <title>{title}</title>}
+              <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} strokeDasharray={dashed ? '2 1.5' : undefined} />
               <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
+            </g>
+          );
+        };
+        const labelEl = (label: string, mid: number, strong: boolean) => {
+          const lw = label.length * 5.6 + 8;
+          return (
+            <g key="label">
+              <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
+              <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={strong ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
+            </g>
+          );
+        };
+        const badgeEl = (text: string, xRight: number, mid: number, strong: boolean) => {
+          const bw = text.length * 5.6 + 10;
+          const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
+          return (
+            <g key="badge">
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
+            </g>
+          );
+        };
+        const blocks = ph.blocks.filter(b => b.end > viewStart && b.start < viewEnd);
+        const homIn = ph.hom.filter(si => allSites[si].pos >= viewStart && allSites[si].pos < viewEnd);
+        const unphasedIn = ph.unphased.filter(u => allSites[u.site].pos >= viewStart && allSites[u.site].pos < viewEnd);
+        const rows: JSX.Element[] = [];
+        let ri = 0;
+        const reasonTxt: Record<'no link' | 'conflict', string> = { 'no link': 'no fragment links it to the previous block', conflict: 'the links to the previous block contradict each other (a third haplotype, mosaic alleles or errors)' };
+        for (const b of blocks) {
+          const nFrag = b.support[0] + b.support[1];
+          const a = scale.x(b.start), z = scale.x(b.end);
+          const left = Math.min(a, z), right = Math.max(a, z);
+          const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
+          const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')} · ${b.sites.length} heterozygous sites` +
+            `\nfragments (read + mate): ${b.support[0].toLocaleString('en-US')} on H1, ${b.support[1].toLocaleString('en-US')} on H2` +
+            (b.ambiguous ? `, ${b.ambiguous.toLocaleString('en-US')} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString('en-US')} disagreeing with their haplotype at one site or more` : '') +
+            (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
+            (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
+          ([b.h1, b.h2] as const).forEach((hap, hi) => {
+            const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+            ri++;
+            const parts: JSX.Element[] = [];
+            parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
+            b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
+            const share = nFrag ? b.support[hi] / nFrag : 0;
+            parts.push(badgeEl(`${b.support[hi].toLocaleString('en-US')} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
+            parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
+            const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
+            rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
+          });
+        }
+        if (homIn.length) {
+          const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+          ri++;
+          const parts: JSX.Element[] = homIn.map(si => glyph(si, 'alt', top, true, false, `${posTxt(si)} ${alleleTxt(si, 'alt')}: homozygous (${(allSites[si].vaf * 100).toFixed(0)} % of ${allSites[si].depth} reads), on both haplotypes`));
+          parts.push(labelEl(`both haplotypes · ${homIn.length} homozygous`, mid, false));
+          rows.push(<g key="hom">{parts}</g>);
+        }
+        if (unphasedIn.length) {
+          const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+          ri++;
+          const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
+          const parts: JSX.Element[] = unphasedIn.map(u => glyph(u.site, 'alt', top, true, true, `${posTxt(u.site)} ${alleleTxt(u.site, 'alt')} (${(allSites[u.site].vaf * 100).toFixed(0)} % of ${allSites[u.site].depth} reads): unphased, ${why[u.reason]}`));
+          parts.push(labelEl(`unphased · ${unphasedIn.length}`, mid, false));
+          rows.push(<g key="unphased">{parts}</g>);
+        }
+        if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
+        const bodyHeight = Math.max(1, ri) * rowStep + 6;
+        const info = `${current.total.toLocaleString('en-US')} reads · ${ph.fragments.toLocaleString('en-US')} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
+          (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
+        return { rows, bodyHeight, info };
+      }
+
+      // ======================= Collapsed mode: consensus rows =======================
+      if (collapseReads) {
+        // Consensus rows in display order (left to right on the plot) so that the groups of one phase
+        // block sit next to each other; ambiguous buckets follow, the minor bucket last.
+        const leftPx = (g: ReadGroup) => Math.min(...g.blocks.map(([bs, be]) => Math.min(scale.x(bs), scale.x(be))));
+        const rank = { consensus: 0, ambiguous: 1, minor: 2 } as const;
+        const groups: ReadGroup[] = [...(current.groups || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || (a.kind === 'consensus' ? leftPx(a) - leftPx(b) : b.n - a.n));
+        const allSites: VariantSite[] = current.sites || [];
+        const hNum = (id: string) => parseInt(id.slice(1)) || 0;
+        const ambLabel = (g: ReadGroup) => {
+          const ids = [...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b));
+          return ids.length > 3 ? `? · ${ids.length} groups` : `${ids.join('|')} ?`;
+        };
+        const rowStep = GROUP_ROW_H + 4;
+        const bodyHeight = Math.max(1, groups.length) * rowStep + 6;
+        const rows = groups.map((g, gi) => {
+          const top = bodyTop + 4 + gi * rowStep, mid = top + GROUP_ROW_H / 2;
+          const isCons = g.kind === 'consensus';
+          const fill = isCons ? READ_FILL : '#e2e5ea';
+          const parts: JSX.Element[] = [];
+          for (const [bs, be] of g.blocks) {
+            const a = scale.x(bs), b = scale.x(be);
+            parts.push(<rect key={`u${bs}`} x={Math.min(a, b)} y={top + 3} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H - 6} fill={fill} opacity={0.4} rx={1} />);
+          }
+          for (const [bs, be] of g.dense) {
+            const a = scale.x(bs), b = scale.x(be);
+            parts.push(<rect key={`d${bs}`} x={Math.min(a, b)} y={top} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H} fill={fill} rx={1.5}
+              strokeDasharray={isCons ? undefined : '3 2'} stroke={isCons ? undefined : INK.faint} strokeWidth={isCons ? 0 : 0.8} />);
+          }
+          for (const [js, je] of g.chain) {
+            parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#6b7280" strokeWidth={1.4} />);
+          }
+          if (!g.chain.length) {
+            for (let k = 0; k + 1 < g.blocks.length; k++) {
+              parts.push(<line key={`c${k}`} x1={scale.x(g.blocks[k][1])} y1={mid} x2={scale.x(g.blocks[k + 1][0])} y2={mid} stroke={INK.faint} strokeWidth={1} strokeDasharray="2 3" />);
+            }
+          }
+          // Alleles at the variable sites
+          const alleleTxt: string[] = [];
+          allSites.forEach((st, si) => {
+            const al = g.alleles[si];
+            if (!al || al === '.') return;
+            const { left, w } = basePx(st.pos);
+            const ww = Math.max(w, 9), cx = left + w / 2;
+            const isAlt = al !== 'ref';
+            const letter = st.kind === 'snv' ? (al === 'alt' ? st.alt : al === 'ref' ? st.ref : al) : (isAlt ? st.alt : '=');
+            const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
+            parts.push(
+              <g key={`al${si}`}>
+                <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} />
+                <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
+              </g>,
+            );
+            alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
+          });
+          // Support badge just after the last block (or pinned inside the right edge)
+          const xs = g.blocks.flatMap(([bs, be]) => [scale.x(bs), scale.x(be)]);
+          const rightEnd = Math.min(plotRight - 4, Math.max(...xs) + 6);
+          const badge = `${g.n.toLocaleString('en-US')} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
+          const bw = badge.length * 5.6 + 10;
+          const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
+          parts.push(
+            <g key="badge">
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{badge}</text>
             </g>,
           );
-          alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
+          // Row label at the left edge
+          const label = g.kind === 'minor' ? `minor · ${g.patterns} pattern${g.patterns === 1 ? '' : 's'}` : g.kind === 'ambiguous' ? ambLabel(g) : g.id;
+          const lw = label.length * 5.6 + 8;
+          parts.push(
+            <g key="label">
+              <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
+              <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={isCons ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
+            </g>,
+          );
+          const chainTxt = g.chain.map(([js, je]) => junctionContext({ start: js, end: je, count: g.n }).info.label).join('; ');
+          const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString('en-US')} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString('en-US')} absorbed as compatible` : ''}`
+            : g.kind === 'ambiguous' ? `${g.n.toLocaleString('en-US')} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
+            : `${g.n.toLocaleString('en-US')} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
+            (chainTxt ? `\nsplicing: ${chainTxt}` : '\nsplicing: none (unspliced)') +
+            (alleleTxt.length ? `\nalleles: ${alleleTxt.join(', ')}` : '');
+          return <g key={g.id}><title>{title}</title>{parts}</g>;
         });
-        // Support badge just after the last block (or pinned inside the right edge)
-        const xs = g.blocks.flatMap(([bs, be]) => [scale.x(bs), scale.x(be)]);
-        const rightEnd = Math.min(plotRight - 4, Math.max(...xs) + 6);
-        const badge = `${g.n.toLocaleString('en-US')} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
-        const bw = badge.length * 5.6 + 10;
-        const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
-        parts.push(
-          <g key="badge">
-            <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#6b7280' : INK.faint} strokeWidth={0.8} />
-            <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{badge}</text>
-          </g>,
-        );
-        // Row label at the left edge
-        const label = g.kind === 'minor' ? `minor · ${g.patterns} pattern${g.patterns === 1 ? '' : 's'}` : g.kind === 'ambiguous' ? ambLabel(g) : g.id;
-        const lw = label.length * 5.6 + 8;
-        parts.push(
-          <g key="label">
-            <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
-            <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={isCons ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
-          </g>,
-        );
-        const chainTxt = g.chain.map(([js, je]) => junctionContext({ start: js, end: je, count: g.n }).info.label).join('; ');
-        const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString('en-US')} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString('en-US')} absorbed as compatible` : ''}`
-          : g.kind === 'ambiguous' ? `${g.n.toLocaleString('en-US')} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
-          : `${g.n.toLocaleString('en-US')} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
-          (chainTxt ? `\nsplicing: ${chainTxt}` : '\nsplicing: none (unspliced)') +
-          (alleleTxt.length ? `\nalleles: ${alleleTxt.join(', ')}` : '');
-        return <g key={g.id}><title>{title}</title>{parts}</g>;
-      });
-      if (!groups.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>no reads in this window</text>);
-      const nCons = groups.filter(g => g.kind === 'consensus').length;
-      const info = `${current.total.toLocaleString('en-US')} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
-        (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
-      return wrap(height, info, rows, bodyHeight);
+        if (!groups.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>no reads in this window</text>);
+        const nCons = groups.filter(g => g.kind === 'consensus').length;
+        const info = `${current.total.toLocaleString('en-US')} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
+          (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
+        return { rows, bodyHeight, info };
+      }
+      return null;
+    };
+    if (collapseReads) {
+      const main = collapsedPart(current, bodyTop);
+      if (main) {
+        // each strand's rows in a group of their own: both are keyed alike (block 1h1, H1…)
+        const rows = [<g key="sense">{main.rows}</g>];
+        let bodyHeight = main.bodyHeight, info = main.info;
+        if (current.anti) {
+          // the opposite strand under a band of its own, tinted like its reads
+          const bandTop = bodyTop + main.bodyHeight;
+          const anti = collapsedPart(current.anti, bandTop + ANTI_BAND_H);
+          if (anti) {
+            const label = `opposite strand · ${current.anti.total.toLocaleString('en-US')} read${current.anti.total === 1 ? '' : 's'}`;
+            rows.push(
+              <g key="antiband">
+                <title>{`reads of the strand opposite to ${tx?.geneName ?? 'the gene'} under the library's orientation (${sampleStrands?.[sid] ?? ''}), ${collapseReads && haplotypes !== 'any' ? 'phased' : 'grouped'} on their own: an antisense transcript, or the few % of reads of the wrong strand every stranded library has\n${anti.info.replace(commonInfo, '')}`}</title>
+                <rect x={PLOT_LEFT} y={bandTop + 2} width={plotWidth} height={ANTI_BAND_H + anti.bodyHeight - 2} fill={withAlpha(ANTI_COLOR, 0.05)} />
+                <rect x={PLOT_LEFT} y={bandTop + 2} width={3} height={ANTI_BAND_H + anti.bodyHeight - 2} fill={ANTI_COLOR} />
+                <line x1={PLOT_LEFT} y1={bandTop + 2} x2={plotRight} y2={bandTop + 2} stroke={ANTI_COLOR} strokeWidth={0.8} opacity={0.6} />
+                <text x={PLOT_LEFT + 8} y={bandTop + ANTI_BAND_H - 3} fill={ANTI_COLOR} fontSize={9} fontWeight={700}>▼ {label}</text>
+              </g>,
+              <g key="anti">{anti.rows}</g>,
+            );
+            bodyHeight += ANTI_BAND_H + anti.bodyHeight;
+            info = `gene's strand: ${main.info.replace(commonInfo, '')} · ${label}${commonInfo}`;
+          }
+        }
+        const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
+        return wrap(height, info, rows, bodyHeight);
+      }
     }
 
     // ======================= Raw mode: packed alignments =======================

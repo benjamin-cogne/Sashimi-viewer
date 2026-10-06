@@ -11,6 +11,7 @@ import { arcReadFromAligned, supportsArc } from './arcSupport';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import { nameHash } from './mates';
+import { plusStrand } from './coverage';
 
 /**
  * Long reads (ONT, PacBio): median aligned length above 1 kb. The length counts aligned bases only, not the skipped
@@ -89,6 +90,20 @@ export function answerReads(base: ReadsAnswerBase, reads: AlignedRead[], start: 
   const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
   const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
   const full = { ...base, long_reads: longReads, haplotags: haplotagCounts(reads) };
+  if (mode === 'collapsed' && opts?.strands) {
+    // each strand collapsed on its own reads (mates agree under the library's orientation, so fragments stay whole);
+    // the window's counts shared out between them as their reads are
+    const sense = opts.strands === 'plus', mine = reads.filter(r => plusStrand(r.f) === sense), other = reads.filter(r => plusStrand(r.f) !== sense);
+    const part = (rs: AlignedRead[]): ReadsAnswerBase => ({ ...base, shown: rs.length, total: reads.length ? Math.round((base.total * rs.length) / reads.length) : 0 });
+    const one = { ...opts, strands: undefined };
+    const a = answerReads(part(mine), mine, start, end, mode, minSupport, minVaf, one, show);
+    const b = answerReads(part(other), other, start, end, mode, minSupport, minVaf, one, show);
+    // the gene's sites with the opposite strand's alternate reads and depth at each
+    const otherAlt = new Map(callSites(other, start, end, ref, refStart, 1, 0, 20, minIndel).map(x => [`${x.pos}\t${x.kind}\t${x.alt}`, x]));
+    const depthAt = (pos: number) => { let n = 0; for (const r of other) if (r.s <= pos && r.e > pos && r.b.some(([bs, be]) => bs <= pos && be > pos)) n++; return n; };
+    const sites = a.sites.map(st => { const o = otherAlt.get(`${st.pos}\t${st.kind}\t${st.alt}`); return { ...st, anti: { alt: o?.alt_count ?? 0, depth: o?.depth ?? depthAt(st.pos) } }; });
+    return { ...a, ...full, total: a.total, shown: a.shown, reads: [], sites, anti: { total: b.total, shown: b.shown, sites: b.sites, groups: b.groups, phase: b.phase, haplotypes: b.haplotypes } };
+  }
   if (mode === 'collapsed') {
     if (opts?.haplotypes !== 'any') {
       // the window's sites, called once: the phasing, the haplotypes' checks and the answer share them

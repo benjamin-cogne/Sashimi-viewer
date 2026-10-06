@@ -41,6 +41,12 @@ export interface ReadsOptions {
   /** secondary alignments (0x100) among the reads too */
   secondary?: boolean;
   /**
+   * collapsed mode: the reads split by transcript strand, `strands` naming the gene's under the reverse (dUTP) rule (read
+   * 2 of a pair mapped on +, or read 1 or a single read mapped on −, is +). The answer is the gene's strand, phased or
+   * grouped on its own reads; `anti` the opposite strand's, phased or grouped on its own.
+   */
+  strands?: 'plus' | 'minus';
+  /**
    * reads mode: only the reads supporting this arc (arcSupport.ts), with their mates in the window; `maxReads` then caps
    * the supporting reads (every k-th kept) and `total` counts them all
    */
