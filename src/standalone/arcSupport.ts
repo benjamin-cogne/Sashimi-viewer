@@ -12,9 +12,12 @@
  * - **discordant** pairs: mates on the chromosome of the arc, of the arc's class (→ ← apart, ← → facing away, one
  *   strand), the left one in the arc's first 500 bp bins and the right one in its last.
  *
+ * With `strand` (a junction drawn on one strand of a stranded sample), only the reads of that strand.
+ *
  * Coordinates 0-based half-open, as the arcs'.
  */
 import type { AlignedRead } from '../components/sashimi/types';
+import { plusStrand } from './coverage';
 
 export type ArcSupportKind = 'junction' | 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
 export interface ArcSupport {
@@ -23,6 +26,11 @@ export interface ArcSupport {
   pairKind?: 'deletion' | 'duplication' | 'inversion';
   /** bases either end may be off (0: exact) */
   tol: number;
+  /**
+   * a junction of one strand of a stranded library (coverage.ts plusStrand: 'plus' are the reads on + under the reverse
+   * rule): only the reads of that strand, with their mates (a pair's two reads are on one strand under the rule)
+   */
+  strand?: 'plus' | 'minus';
 }
 /** Soft or hard clip after which an alignment end counts as a break (as the rescue of clipped reads: alignments.ts). */
 const MIN_CLIP = 8;
@@ -94,6 +102,7 @@ function breakpoints(r: ArcRead, chrom: string): number[] {
 }
 
 export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
+  if (a.strand && plusStrand(r.flags) !== (a.strand === 'plus')) return false;
   switch (a.kind) {
     case 'junction':
       return r.gaps.some(([s, e, op]) => op === 'N' && near(s, a.start, a.tol) && near(e, a.end, a.tol));

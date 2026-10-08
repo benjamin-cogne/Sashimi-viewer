@@ -138,6 +138,30 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 - **Coordinate-sorted and indexed**: `sample.bam` + `sample.bam.bai` (or `sample.bai`),
   `sample.cram` + `sample.cram.crai`. Add the index in the same drop; files are paired by name.
 - **Genome build**: the *GRCh 38 | 37* switch at the start of the search box (GRCh38/hg38 default, GRCh37/hg19) must match the alignment.
+  - **Read from the files.** Each file's header gives the length of its chromosomes (`@SQ LN`), and
+    every primary chromosome has a different length in each build: chr1 is 248,956,422 bp in GRCh38
+    and 249,250,621 bp in GRCh37 (an `@SQ AS` tag naming the build is read first). The first file
+    that tells its build sets the switch, while no view is open and the build was not chosen by hand
+    (a session, a link). The chip's tooltip gives what its header says.
+  - **Warned when they disagree.** A file on another build than the page's, or on a reference the
+    viewer has no annotation for (T2T-CHM13, NCBI36), raises an amber bar under the app bar: genes,
+    coordinates and known variants would not match its reads. When the files agree on a build, the
+    bar offers to use it.
+  - **With views open, the switch asks first.** Two choices:
+    - *Keep the views, add the other build's coordinates* (the default): genes, reads and positions
+      do not move. A second coordinate line over the ruler gives the other build's position of each
+      labelled tick, the pointer gives both builds for any base (crosshair label and tooltip), and the
+      view's header shows its window in the other build; a click copies it. A stretch with no
+      counterpart is grey on that line, its ticks read "–", and the copied window is marked ≈. The ×
+      next to the build's name on the line, or the switch again, removes it. The dot on the switch
+      marks the build whose coordinates are shown.
+    - *Move everything to the other build*, for files aligned on it: gene models, known SNPs, GTEx and
+      the searches use it, and each open view is lifted to its window there (gene, window and searched
+      locus) and reopened with its options. A view that cannot be lifted reopens on its gene. The
+      dialog says when the files' headers name the other build, and recommends this choice then.
+  - The coordinates are lifted with Ensembl's assembly map (`rest.ensembl.org`, `/map/human/…`),
+    which follows the GRCh37 contigs kept in GRCh38 to the base (Ensembl, *assembly_map* endpoint).
+    Only the chromosome and the window's coordinates are sent, in 1 Mb pieces.
 - **CRAM needs its reference.** Drop the indexed FASTA used at alignment time (`.fa` + `.fai`, or
   bgzipped `.fa.gz` + `.gzi`) with the CRAM files. Without it the viewer fetches the needed sequence
   from the UCSC API, which is slower and requires the network. A FASTA also makes the reads track
@@ -175,6 +199,21 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   - The opposite strand is mirrored under the baseline, in violet, on the same depth scale, with its
     own junction arcs hanging under it. That is an antisense transcript, or the few percent of
     wrong-strand reads every stranded library has.
+  - **Click an opposite-strand arc** (or its read count) for its panel:
+    - Every sample's spliced reads of that intron on the opposite strand and on the gene's strand,
+      the opposite share and the library's orientation. An unstranded sample gives its reads of both
+      strands together.
+    - The gene of the other strand whose exons the junction joins (e.g. *ANTI1 · Exon 1 → Exon 2 ·
+      canonical*), else the gene it lies in, else "no gene annotated on this strand".
+    - When the opposite strand holds under 5 % of the reads of an intron that has 20 reads or more
+      on the gene's strand, the row reads *likely the gene's reads on the wrong strand*. Stranded
+      protocols leave about 0.5–3 % there: 0.47–0.63 % of the reads for the best ones in Levin et al.
+      (2010), 0.6–3 % of the sense signal for dUTP libraries in Mourão et al. (2019).
+    - *Supporting reads* lists that strand's reads only (with their mates) on the samples whose
+      strands are shown. The supporting reads of an arc of the gene's strand are likewise that
+      strand's.
+    - *Hide arc* hides the opposite-strand arc alone; the gene's arc of the same intron stays.
+    - No HGVS, reading frame or usage: they belong to the gene's strand.
   - In the reads track, the opposite strand's fragments are tinted violet and packed after the
     others, under an *opposite strand* label. When the rows run short, each group keeps a share of
     them.
@@ -1063,6 +1102,7 @@ proxy (proxies usually allow browsers while blocking servers):
 | Common SNPs | `api.genome.ucsc.edu` (`dbSnp155Common`), Ensembl variation as fallback | |
 | Gene-name suggestions | `clinicaltables.nlm.nih.gov` (NLM Clinical Table Search Service, HGNC genes) | the letters typed only; none when unreachable |
 | GTEx tissue profiles | `gtexportal.org` (API v2) | hg38 only |
+| The other build's coordinates (GRCh38 ⇄ GRCh37) | `rest.ensembl.org` (assembly map), `grch37.rest.ensembl.org` as fallback | only when asked for; the window's coordinates only |
 
 **Browsers.** Current Microsoft Edge, Google Chrome or Firefox. Internet Explorer and very old
 browsers show a plain notice instead of a blank page.
@@ -1214,6 +1254,8 @@ src/standalone/
   methylation.ts                 CpG methylation from the MM / ML tags: counts per CpG × haplotype, filter threshold, CpG islands
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
+  liftover.ts                    the other build's coordinates (Ensembl assembly map, GRCh38 ⇄ GRCh37)
+  assembly.ts                    the build of a file from its header's chromosome lengths
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)
   gtex.ts                        GTEx Portal API v2 client
 src/components/
@@ -1263,6 +1305,14 @@ If the viewer contributes to a publication, please cite it
   filter threshold (10th percentile), 5hmC handling. https://nanoporetech.github.io/modkit/
 - PacBio. *pb-CpG-tools*: CpG methylation probabilities from HiFi reads, per haplotype.
   https://github.com/PacificBiosciences/pb-CpG-tools
+- Levin JZ et al. *Comprehensive comparative analysis of strand-specific RNA sequencing methods.*
+  Nat Methods 2010;7:709–715. doi:10.1038/nmeth.1491 (antisense reads of stranded protocols).
+- Mourão K, Schurch NJ, Lucoszek R et al. *Detection and mitigation of spurious antisense expression
+  with RoSA.* F1000Research 2019;8:819 (wrong-strand reads of dUTP libraries).
+- Yates A et al. *The Ensembl REST API: Ensembl data for any language.* Bioinformatics
+  2015;31:143–145 (the assembly map used to lift coordinates between GRCh38 and GRCh37).
+- Schneider VA et al. *Evaluation of GRCh38 and de novo haploid genome assemblies demonstrates the
+  enduring quality of the reference assembly.* Genome Res 2017;27:849–864.
 - GMOD JavaScript libraries: [bam-js](https://github.com/GMOD/bam-js),
   [cram-js](https://github.com/GMOD/cram-js), [indexedfasta-js](https://github.com/GMOD/indexedfasta-js).
 

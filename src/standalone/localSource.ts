@@ -22,11 +22,12 @@ import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
+import { assemblyOfHeader, type AssemblyCall } from './assembly';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
-export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean }
+export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean; /** the build it was aligned on, from its header (assembly.ts); null: not told */ asm?: AssemblyCall | null }
 export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
 
 type Opened =
@@ -843,6 +844,17 @@ export class LocalDataSource implements SashimiDataSource {
     const k = this.providerOf(sampleId);
     if (k) return k.p.getLibraryType ? k.p.getLibraryType(k.s) : { type: 'unknown', source: 'none', note: 'the file does not say' };
     return classifyHeader(await this.headerText(sampleId));
+  }
+  /** The build the file was aligned on, from its header's chromosome lengths (assembly.ts); null when it cannot tell. */
+  async getAssembly(sampleId: number): Promise<AssemblyCall | null> {
+    if (!this.samples.has(sampleId)) return null;
+    const k = this.providerOf(sampleId);
+    if (k) return k.p.getAssembly ? k.p.getAssembly(k.s) : null;
+    const text = await this.headerText(sampleId);
+    if (/^@SQ/m.test(text)) return assemblyOfHeader(text);
+    // a BAM whose text has no @SQ line: the binary reference list
+    const o = await this.open(sampleId);
+    return o.kind === 'bam' ? assemblyOfHeader('', (o.bam.indexToChr || []).map(r => ({ name: r.refName, length: r.length }))) : null;
   }
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> { return getTranscript(this.reference.build, geneName, geneId, hint); }
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }

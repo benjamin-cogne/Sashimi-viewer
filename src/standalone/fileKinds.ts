@@ -15,6 +15,7 @@ import type { CoverageOptions, ReadsOptions, VariantScan, VariantScanOptions } f
 import type { LocalSample, ReferenceChoice } from './localSource';
 import type { RawRead } from './alignments';
 import type { MethylWindow } from './methylation';
+import type { AssemblyCall } from './assembly';
 
 /** 'bam' and 'cram' are read by LocalDataSource itself; any other kind names a registered FileKind. */
 export type SampleKind = 'bam' | 'cram' | (string & {});
@@ -42,6 +43,8 @@ export interface SampleProvider {
   /** CpG methylation of the window (LocalDataSource.countMethylation) */
   countMethylation?(s: LocalSample, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   getLibraryType?(s: LocalSample): Promise<LibraryEvidence>;
+  /** the build the file was aligned on (assembly.ts assemblyOfHeader on its header) */
+  getAssembly?(s: LocalSample): Promise<AssemblyCall | null>;
   /** reads over one exon for exon usage and strandness, one in `rate` kept (as LocalDataSource scans them) */
   exonReads?(s: LocalSample, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number): Promise<{ total: number; rate: number; kept: RawRead[] }>;
   rescueClips?(s: LocalSample, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]>;

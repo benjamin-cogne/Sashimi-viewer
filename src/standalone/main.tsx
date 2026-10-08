@@ -15,6 +15,7 @@ import { LocalDataSource, type LocalSample } from './localSource';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
 import type { GenomeBuild } from './ensembl';
+import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { attachVariantWorker } from './variantClient';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
@@ -156,6 +157,12 @@ function Logo({ size = 28 }: { size?: number }) {
 
 function App() {
   const [build, setBuild] = useState<GenomeBuild>(EMBEDDED?.build ?? LINK?.build ?? 'GRCh38');
+  /** the other build whose coordinates the views show too (a second line over the ruler), or none */
+  const [liftTo, setLiftTo] = useState<GenomeBuild | null>(null);
+  /** the build switch clicked while views are open: what to do is asked first */
+  const [buildAsk, setBuildAsk] = useState<GenomeBuild | null>(null);
+  /** the build was chosen by hand (or by a session or a link): the files' headers no longer set it */
+  const buildChosen = useRef(!!(EMBEDDED || LINK));
   const [samples, setSamples] = useState<LocalSample[]>(() => (EMBEDDED ? embeddedSamples(EMBEDDED) : []));
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
@@ -262,6 +269,8 @@ function App() {
       const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...ev, strand: x.lib?.strand } : x.lib } : x)));
       if (ds.getLibraryType) ds.getLibraryType(s.id).then(settle).catch(() => settle(null));
       else settle(null);
+      // the build it was aligned on, from the chromosome lengths in its header
+      ds.getAssembly?.(s.id).then(asm => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, asm } : x)))).catch(() => {});
     }
     if (unmatched.length) msgs.push(`No index found for ${unmatched.join(', ')} (add the .bai / .crai file together with it)`);
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
@@ -392,7 +401,66 @@ function App() {
   }, [knownLocus, knownLabel, knownVars, setKnown]);
   const removeKnown = useCallback((id: string) => setKnown(knownVars.filter(v => v.id !== id)), [knownVars, setKnown]);
 
-  const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); };
+  const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); if (liftTo === b) setLiftTo(null); };
+  /** The files whose header says another build than the page's, and the build they share when they agree. */
+  const asmOther = samples.filter(s => s.asm && (s.asm.build ? s.asm.build !== build : !!s.asm.other));
+  const filesBuild = (() => { const b = new Set(samples.map(s => s.asm?.build).filter(Boolean)); return b.size === 1 ? [...b][0] as GenomeBuild : null; })();
+  // The first file that tells its build sets the page's, while nothing is open and the build was not chosen by hand
+  useEffect(() => {
+    if (buildChosen.current || views.length || !filesBuild || filesBuild === build) return;
+    buildChosen.current = true;
+    changeBuild(filesBuild);
+    const s = samples.find(x => x.asm?.build === filesBuild);
+    setNotes(n => [...n, `Genome build set to ${filesBuild} from the files' headers${s ? ` (${s.name}: ${s.asm!.note})` : ''}.`]);
+  }, [filesBuild]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** The build switch: straight away while no view is open, else the choice is asked (keep the views and add the other coordinates, or switch everything). */
+  const requestBuild = (b: GenomeBuild) => {
+    if (b === build) return;
+    if (!views.length) { buildChosen.current = true; changeBuild(b); return; }
+    setBuildAsk(b);
+  };
+  /** The views keep their build; `b`'s coordinates are drawn over the ruler. */
+  const liftover = useMemo(() => (liftTo && liftTo !== build ? {
+    from: build, to: liftTo,
+    segments: (chrom: string, start: number, end: number, signal: AbortSignal) => liftSegments(build, liftTo, chrom, start, end, signal),
+    onRemove: () => setLiftTo(null),
+  } : null), [build, liftTo]);
+  /**
+   * Everything moves to build `b`: each open view is lifted to its coordinates there (its gene, window and searched
+   * locus, Ensembl's assembly map) and reopened with its options; a view that cannot be lifted reopens on its gene by
+   * name. For files aligned on `b` (a page whose build was wrong).
+   */
+  const switchAnnotation = useCallback(async (b: GenomeBuild) => {
+    const from = build;
+    setBuildAsk(null); setBusy(true); setError(null);
+    const tabs = snapshot(views);
+    const failed: string[] = [];
+    const moved = await Promise.all(tabs.map(async (t): Promise<ViewTab> => {
+      const st = stateOfTab(t);
+      const { name, chrom } = st.gene;
+      const lo = Math.min(st.gene.start, st.view.start, st.mark?.start ?? Infinity), hi = Math.max(st.gene.end, st.view.end, st.mark?.end ?? -Infinity);
+      const keep = { ...st, gene: { ...st.gene, id: undefined } };
+      try {
+        const segs = await liftSegments(from, b, chrom, lo, hi);
+        const g = liftRange(segs, st.gene.start, st.gene.end), v = liftRange(segs, st.view.start, st.view.end), m = st.mark ? liftRange(segs, st.mark.start, st.mark.end) : null;
+        if (!g || !v) throw new Error('no counterpart');
+        const o: Opened = { geneName: name, chrom: g.chrom, start: g.start, end: g.end, view: { start: v.start, end: v.end }, mark: m ? { start: m.start, end: m.end } : null, reads: t.opened.reads };
+        return { id: t.id, label: labelOf(o), opened: o, state: null, settings: keep };
+      } catch {
+        failed.push(name);
+        const o: Opened = { geneName: name, chrom, start: st.gene.start, end: st.gene.end, mark: null };
+        return { id: t.id, label: labelOf(o), opened: o, state: null, settings: keep };
+      }
+    }));
+    viewerStateRef.current = null;
+    pendingSettingsRef.current = moved.find(t => t.id === activeIdRef.current)?.settings;
+    setViews(moved);
+    buildChosen.current = true;
+    setLiftTo(null);
+    changeBuild(b);
+    setBusy(false);
+    setNotes([`Views moved to ${b}: their windows lifted from ${from} by Ensembl's assembly map.${failed.length ? ` ${failed.join(', ')} could not be lifted (offline, or no counterpart): reopened on the gene.` : ''}`]);
+  }, [build, views, snapshot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Open the window a deep link asked for: the gene at the locus (coding first), else the `gene` parameter, with the variant pinned. */
   const openLink = useCallback(async () => {
@@ -726,7 +794,8 @@ function App() {
     try {
       const session = parseSession(await file.text());
       setSessionName(file.name); setSessionNameEdited(true);
-      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); }
+      buildChosen.current = true;
+      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); setLiftTo(null); }
       setPendingSession({ file: session, name: file.name });
       void reopenSession(session, true);
     } catch (e: any) {
@@ -766,12 +835,12 @@ function App() {
   const searchForm = (
     <form onSubmit={e => { e.preventDefault(); open(); }}
       className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
-      <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={b => { if (b !== build) changeBuild(b); }}
-        title="Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it"
-        options={[
-          { value: 'GRCh38' as GenomeBuild, label: '38', hint: 'GRCh38 / hg38' },
-          { value: 'GRCh37' as GenomeBuild, label: '37', hint: 'GRCh37 / hg19' },
-        ]} />
+      <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
+        title={`Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other build asks first: its coordinates over the views', or everything moved to it.`}
+        options={(['GRCh38', 'GRCh37'] as GenomeBuild[]).map(b => ({
+          value: b, label: b.slice(4), hint: `${b} / ${b === 'GRCh38' ? 'hg38' : 'hg19'}${liftTo === b && b !== build ? ` · its coordinates shown over the ruler (click for the options)` : ''}${filesBuild === b ? ' · the build of the files' : ''}`,
+          dot: liftTo === b && b !== build ? '#0f766e' : undefined,
+        }))} />
       <Icon name="search" size={15} className="text-slate-400" />
       <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
         title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
@@ -815,7 +884,7 @@ function App() {
             <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
               {samples.map((s, i) => (
                 <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-indigo-50 border-indigo-200 text-slate-900' : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 cursor-pointer'}`}
-                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
                   onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
                   onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
                   {i === 0 && <span className="text-indigo-600" title="primary sample"><Icon name="star" size={13} /></span>}
@@ -1001,6 +1070,17 @@ function App() {
           {error && <div className="text-red-600">{error}</div>}
         </div>
       )}
+      {asmOther.length > 0 && (
+        <div className="mx-5 my-1 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900" role="alert">
+          <span>
+            <b>Genome build:</b> {asmOther.map(s => `${s.name} (${s.asm!.note})`).join(', ')} {asmOther.length > 1 ? 'are' : 'is'} not on {build}, the build the page uses:
+            {asmOther.some(s => s.asm!.other && !s.asm!.build) ? ' the viewer has no annotation for that reference, so genes, coordinates and known variants will not match the reads.' : ' genes, coordinates and known variants will not match the reads.'}
+          </span>
+          {filesBuild && filesBuild !== build && (
+            <button onClick={() => requestBuild(filesBuild)} className="h-6 px-2.5 rounded-md bg-amber-600 text-white font-semibold hover:bg-amber-700">Use {filesBuild}</button>
+          )}
+        </div>
+      )}
       {!opened ? (
         <div className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
           <div className="text-xl font-semibold text-indigo-700">Drop a run folder, BAM / CRAM files, or a session file anywhere on this page</div>
@@ -1019,7 +1099,7 @@ function App() {
       ) : (
         <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
           <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} svHints={SV_HINTS}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} svHints={SV_HINTS} liftover={liftover}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}
@@ -1043,6 +1123,41 @@ function App() {
           </div>
         </div>
       )}
+      {buildAsk && (() => {
+        const b = buildAsk, lifted = liftTo === b, filesOnB = filesBuild === b;
+        const filesSay = filesBuild ? `the files' headers say ${filesBuild}` : 'the files do not say their build';
+        return (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setBuildAsk(null)}>
+            <div role="dialog" aria-label={`Switch to ${b}?`} className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-xl text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
+                <div>
+                  <div className="font-bold text-sm">{b} with {views.length} view{views.length === 1 ? '' : 's'} open on {build}</div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">The views are drawn on {build} ({filesSay}). Choose what {b} should change.</div>
+                </div>
+                <button onClick={() => setBuildAsk(null)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
+              </div>
+              <div className="px-4 py-3 space-y-2.5">
+                <button onClick={() => { setLiftTo(lifted ? null : b); setBuildAsk(null); }} autoFocus
+                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border border-gray-300 hover:bg-gray-50' : 'border-2 border-teal-500 bg-teal-50/60 hover:bg-teal-50'}`}>
+                  <div className="font-semibold text-[12.5px] text-teal-900">{lifted ? `Remove the ${b} coordinates` : `Keep the views on ${build}, add the ${b} coordinates`}{!lifted && !filesOnB && <span className="ml-2 text-[10.5px] font-medium text-teal-700">recommended</span>}</div>
+                  <div className="text-[11px] text-gray-600 mt-0.5">{lifted
+                    ? `The line of ${b} positions over the ruler goes away; nothing else changes.`
+                    : `Genes, reads and positions do not move. A second line over the ruler gives the ${b} position of each tick, the pointer gives both builds for any base, and the view's header shows its ${b} window (click to copy it). Lifted by Ensembl's assembly map (rest.ensembl.org): only the chromosome and the window's coordinates are sent.`}</div>
+                </button>
+                <button onClick={() => void switchAnnotation(b)}
+                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border-2 border-indigo-500 bg-indigo-50/60 hover:bg-indigo-50' : 'border border-gray-300 hover:bg-gray-50'}`}>
+                  <div className="font-semibold text-[12.5px]">Move everything to {b}{filesOnB && <span className="ml-2 text-[10.5px] font-medium text-indigo-700">recommended: the files are on {b}</span>}</div>
+                  <div className="text-[11px] text-gray-600 mt-0.5">For files aligned on {b}. Gene models, known SNPs, GTEx and the searches use {b}; each open view is lifted to its {b} window and reopened with its options.</div>
+                  {filesBuild && filesBuild !== b && <div className="text-[11px] text-red-700 mt-1">Your files are on {filesBuild}: on {b} the genes would no longer match the reads.</div>}
+                </button>
+              </div>
+              <div className="flex justify-end px-4 py-3 border-t border-gray-200">
+                <button onClick={() => setBuildAsk(null)} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {exportDialog && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setExportDialog(null)}>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-xl text-gray-900 text-xs" onMouseDown={e => e.stopPropagation()}>

@@ -28,6 +28,7 @@ import { callSites } from '../standalone/collapse';
 import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
 import { pairMates } from '../standalone/mates';
 import type { ArcSupport } from '../standalone/arcSupport';
+import { liftPos, liftRange, type LiftSegment } from '../standalone/liftover';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
@@ -87,6 +88,12 @@ interface SashimiViewerProps {
   initialSettings?: Partial<ViewerSettings>;
   /** Called whenever an option or the navigation changes, with everything a session file needs. */
   onStateChange?: (state: ViewerState) => void;
+  /**
+   * The window's coordinates in another build too, on a line over the ruler (the host lifts them: liftover.ts):
+   * `from` is the build of the view (of the files and the annotation), `to` the other one. The view itself does not
+   * move. `onRemove` takes the line away.
+   */
+  liftover?: { from: string; to: string; segments: (chrom: string, start: number, end: number, signal: AbortSignal) => Promise<LiftSegment[]>; onRemove?: () => void } | null;
 }
 
 /** Every user option of the viewer, as stored in a session file. Samples are referred to by id (the host maps names ↔ ids). */
@@ -271,6 +278,13 @@ const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - 
 const PSEUDO_EXON_COLOR = '#7c3aed';
 /** the opposite strand of a stranded sample: its mirrored coverage, its arcs and its reads (lighter) */
 const ANTI_COLOR = '#8b5cf6';
+/**
+ * An opposite-strand junction under this share of the reads of the same intron (both strands) on a sample whose
+ * gene-strand junction has 20 reads or more reads as the gene's own reads on the wrong strand: stranded libraries
+ * (dUTP) leave about 0.5–3 % there: 0.47–0.63 % of the reads antisense for the best protocols (Levin et al. 2010, Nat
+ * Methods 7:709), 0.6–3 % of the sense signal in practice (Mourão et al. 2019, RoSA, F1000Research 8:819).
+ */
+const ANTI_LEAK_SHARE = 0.05;
 const ANTI_READ_FILL = '#ddd6fe';
 /** the label band over the opposite strand's rows in the collapsed reads track */
 const ANTI_BAND_H = 16;
@@ -325,7 +339,11 @@ function saveGtexFavourites(ids: string[]) { try { localStorage.setItem(GTEX_FAV
 
 const PLOT_LEFT = 64;       // room for the depth axis
 const PLOT_RIGHT_PAD = 36;  // room for the per-track remove button
-const RULER_H = 42;
+const RULER_BASE_H = 42;
+/** the other build's line of the ruler (liftover): its height, where it starts, its colour */
+const LIFT_ROW_H = 18;
+const LIFT_TOP = 18;
+const LIFT_COLOR = '#0f766e';
 const COVERAGE_H = 130;
 const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
 const JUNC_LEVEL_STEP = 17; // extra apex height per arc nesting level
@@ -1041,9 +1059,11 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false, liftover = null,
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
+  // the ruler grows by a line when the other build's coordinates are shown
+  const RULER_H = RULER_BASE_H + (liftover ? LIFT_ROW_H : 0);
   const ds = dataSource;
   const [snapshotState, setSnapshotState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
   const svgRef = useRef<SVGSVGElement>(null);
@@ -1153,8 +1173,9 @@ export default function SashimiViewer({
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
   type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; /** collapsed with the strands split, the gene's (ReadsOptions.strands) */ strands?: 'plus' | 'minus'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
   /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
-  const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string } | null>(null);
-  const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}` : undefined;
+  /** `side`: a junction of the gene's strand (sense) or of the opposite one (anti), on the stranded samples (supportFor) */
+  const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string; side?: 'sense' | 'anti' } | null>(null);
+  const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}:${readsSupport.side ?? ''}` : undefined;
   // Per sample, so that "all samples" keeps one reads track under each coverage track
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
@@ -1196,6 +1217,8 @@ export default function SashimiViewer({
   const [popover, setPopover] = useState<
     | { kind: 'junction'; key: string; j: JunctionArc; x: number; y: number }
     | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number }
+    /** a junction of the opposite strand of a stranded sample, drawn under the baseline */
+    | { kind: 'anti'; key: string; j: JunctionArc; x: number; y: number }
     | { kind: 'exon'; exon: { start: number; end: number; rank: number }; x: number; y: number }
     | null>(null);
   const dragMoved = useRef(false);
@@ -1239,6 +1262,16 @@ export default function SashimiViewer({
     if (!tx || !wantsStrands(sid)) return null;
     return (sampleStrands?.[sid] === 'reverse') === (tx.strand >= 0) ? 'plus' : 'minus';
   }, [tx, wantsStrands, sampleStrands]);
+  /**
+   * The supporting reads asked of a sample: on a sample whose strands are shown, a junction's reads of the strand it is
+   * drawn on (the gene's for an arc above the baseline, the other for one below), as its count; every read elsewhere.
+   */
+  const supportFor = useCallback((sid: number): { arc: ArcSupport; key: string } | undefined => {
+    if (!readsSupport || !supportKey) return undefined;
+    const sense = readsSupport.side ? senseOf(sid) : null;
+    const strand = !sense ? undefined : readsSupport.side === 'sense' ? sense : sense === 'plus' ? 'minus' : 'plus';
+    return { arc: strand ? { ...readsSupport.arc, strand } : readsSupport.arc, key: `${supportKey}:${strand ?? ''}` };
+  }, [readsSupport, supportKey, senseOf]);
   const tracks = useMemo(() => rawTracks.map(t => {
     const pick = senseOf(t.sampleId);
     if (!pick || !t.strands) return t;
@@ -1700,6 +1733,34 @@ export default function SashimiViewer({
   const readsAbort = useRef<Map<number, AbortController>>(new Map());
   const isAbort = (err: unknown) => (err as { name?: string })?.name === 'AbortError';
 
+  // ---- The other build's coordinates (liftover): the pieces of a window three times the view's, fetched again when
+  // the view leaves it ----
+  const [lift, setLift] = useState<{ to: string; chrom: string; start: number; end: number; segs: LiftSegment[] } | null>(null);
+  const [liftStatus, setLiftStatus] = useState<{ loading: boolean; error?: string }>({ loading: false });
+  const [liftCopied, setLiftCopied] = useState(false);
+  useEffect(() => {
+    if (!liftover) { setLift(null); setLiftStatus({ loading: false }); return; }
+    if (lift && lift.to === liftover.to && lift.chrom === currentChrom && lift.start <= viewStart + 1 && lift.end >= viewEnd) return;
+    const ctl = new AbortController();
+    const span = viewEnd - viewStart, start = Math.max(1, viewStart + 1 - span), end = viewEnd + span;
+    const timer = setTimeout(() => {
+      setLiftStatus({ loading: true });
+      liftover.segments(currentChrom, start, end, ctl.signal)
+        .then(segs => { setLift({ to: liftover.to, chrom: currentChrom, start, end, segs }); setLiftStatus({ loading: false }); })
+        .catch(e => { if (!isAbort(e)) setLiftStatus({ loading: false, error: e?.message ?? String(e) }); });
+    }, 300);
+    return () => { clearTimeout(timer); ctl.abort(); };
+  }, [liftover, currentChrom, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** the pieces for the view, when they are the current build's and chromosome's */
+  const liftHere = liftover && lift && lift.to === liftover.to && lift.chrom === currentChrom ? lift.segs : null;
+  /** a 0-based position in the other build, as text (its chromosome when it lands on another one), or null */
+  const liftedText = useCallback((pos0: number, withChrom = false) => {
+    if (!liftHere) return null;
+    const p = liftPos(liftHere, pos0 + 1);
+    if (!p) return null;
+    return `${withChrom || p.chrom.replace(/^chr/i, '') !== currentChrom.replace(/^chr/i, '') ? `${p.chrom}:` : ''}${p.pos.toLocaleString('en-US')}`;
+  }, [liftHere, currentChrom]);
+
   const fetchWindowFor = (v: { chrom: string; start: number; end: number; uniqueOnly: boolean; secondary?: boolean }): FetchWindow => {
     const span = v.end - v.start;
     const margin = Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
@@ -1882,8 +1943,9 @@ export default function SashimiViewer({
   const addGroup = useCallback(() => setGroups(prev => [...prev, { id: groupIdSeq.current++, name: `Group ${prev.length + 1}`, sampleIds: [] }]), []);
   const renameGroup = useCallback((id: number, name: string) => setGroups(prev => prev.map(g => g.id === id ? { ...g, name } : g)), []);
   const setGroupColor = useCallback((id: number, color: string | undefined) => setGroups(prev => prev.map(g => g.id === id ? { ...g, color } : g)), []);
-  const hideKey = useCallback((j: JunctionArc) => `${currentChrom}:${junctionKey(j)}`, [currentChrom]);
-  const hideArc = useCallback((j: JunctionArc) => { const k = hideKey(j); setHiddenArcs(prev => (prev.includes(k) ? prev : [...prev, k])); setHoverArc(null); }, [hideKey]);
+  /** an arc's key in the hidden arcs and the label sizes; `anti`: the same intron on the opposite strand, a key of its own */
+  const hideKey = useCallback((j: JunctionArc, anti = false) => `${currentChrom}:${anti ? 'anti:' : ''}${junctionKey(j)}`, [currentChrom]);
+  const hideArc = useCallback((j: JunctionArc, anti = false) => { const k = hideKey(j, anti); setHiddenArcs(prev => (prev.includes(k) ? prev : [...prev, k])); setHoverArc(null); }, [hideKey]);
   const hiddenHere = useMemo(() => hiddenArcs.filter(k => k.startsWith(`${currentChrom}:`)).length, [hiddenArcs, currentChrom]);
   const deleteGroup = useCallback((id: number) => setGroups(prev => prev.filter(g => g.id !== id)), []);
   const removeFromGroup = useCallback((id: number, sid: number) => setGroups(prev => prev.map(g => g.id === id ? { ...g, sampleIds: g.sampleIds.filter(x => x !== sid) } : g)), []);
@@ -1964,7 +2026,7 @@ export default function SashimiViewer({
     const strandsFor = (sid: number) => (mode === 'collapsed' ? senseOf(sid) ?? undefined : undefined);
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === supportKey && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
+      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
         && !(wantMethyl(sid) && !cur.methyl) && !(wantPhase && !cur.phased));
     });
     if (!stale.length) return;
@@ -1977,9 +2039,9 @@ export default function SashimiViewer({
         readsAbort.current.set(sid, ctl);
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
-        const support = mode === 'reads' ? readsSupport?.arc : undefined;
+        const sup = mode === 'reads' ? supportFor(sid) : undefined, support = sup?.arc;
         ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, strands: strandsFor(sid), signal: ctl.signal })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: support ? supportKey : undefined } })); })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: sup?.key } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => {
             if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
@@ -1988,7 +2050,7 @@ export default function SashimiViewer({
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, readsWindow, readsGroup, showSecondary, senseOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, supportFor, readsWindow, readsGroup, showSecondary, senseOf]); // eslint-disable-line react-hooks/exhaustive-deps
   // a filter on the supporting reads of an arc belongs to its chromosome
   useEffect(() => { setReadsSupport(null); }, [currentChrom]);
 
@@ -2636,7 +2698,7 @@ export default function SashimiViewer({
     // The entry answers the window and the options in force; an older one (a request still running, or one that failed)
     // keeps its reads on screen while the new answer comes, but its variant sites are not the window's: none go to the coverage.
     const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly, secondary: showSecondary }) &&
-      entry.support === (mode === 'reads' ? supportKey : undefined) &&
+      entry.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) &&
       entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
       (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource && entry.strands === (senseOf(sid) ?? undefined)));
 
@@ -3916,7 +3978,7 @@ export default function SashimiViewer({
       const antiDepth = (d: number) => (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
       if (track.anti) {
         const anti = track.anti;
-        const list = anti.junctions.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`));
+        const list = anti.junctions.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:anti:${junctionKey(j)}`));
         const aLevels = layerJunctions(list);
         const approx = track.sampled ? '≈' : '';
         for (const j of list) {
@@ -3938,7 +4000,7 @@ export default function SashimiViewer({
           else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: cont(reverse) };
           const title = `opposite strand (antisense to ${tx?.geneName ?? 'the gene'}): ${approx}${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n` +
             `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
-            'a transcript of the other strand (antisense gene, readthrough), or reads of the library\'s wrong strand (a few % in any stranded library)';
+            'a transcript of the other strand (antisense gene, readthrough), or reads of the library\'s wrong strand (a few % in any stranded library)\nclick for every sample and the gene of the other strand';
           arcs.push({ j, key, dragKey, level, color: ANTI_COLOR, dashed: false, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55),
             geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, below: true });
         }
@@ -4418,15 +4480,20 @@ export default function SashimiViewer({
     const baseY = RULER_H - 1;
     const items: JSX.Element[] = [];
     const labelY = baseY - 10;
-    const tick = (x: number, label: string | null, key: string, anchor: 'middle' | 'start' | 'end' = 'middle') => (
-      <g key={key}>
-        <line x1={x} y1={baseY - 6} x2={x} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
-        {label && <text x={x} y={labelY} textAnchor={anchor} fill={INK.muted} fontSize={9.5}>{label}</text>}
-      </g>
-    );
+    /** the labelled ticks, 1-based: the other build's line labels the same ones */
+    const labelled: { x: number; pos: number }[] = [];
+    const tick = (x: number, label: string | null, key: string, anchor: 'middle' | 'start' | 'end' = 'middle', pos?: number) => {
+      if (label && pos != null) labelled.push({ x, pos });
+      return (
+        <g key={key}>
+          <line x1={x} y1={baseY - 6} x2={x} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
+          {label && <text x={x} y={labelY} textAnchor={anchor} fill={INK.muted} fontSize={9.5}>{label}</text>}
+        </g>
+      );
+    };
     if (axis.kind === 'linear') {
       for (const t of niceTicks(viewStart + 1, viewEnd, Math.max(3, Math.floor(plotWidth / 130)))) {
-        items.push(tick(scale.x(t - 0.5), t.toLocaleString('en-US'), `t${t}`));
+        items.push(tick(scale.x(t - 0.5), t.toLocaleString('en-US'), `t${t}`, 'middle', t));
       }
     } else if (tx) {
       // Exon boundaries carry the coordinates; introns get a broken-axis mark.
@@ -4439,7 +4506,7 @@ export default function SashimiViewer({
         if (x < PLOT_LEFT || x > plotRight) continue;
         const show = Math.abs(x - lastLabelX) >= 68;
         if (show) lastLabelX = x;
-        items.push(tick(x, show ? b.label.toLocaleString('en-US') : null, `b${b.pos}`));
+        items.push(tick(x, show ? b.label.toLocaleString('en-US') : null, `b${b.pos}`, 'middle', b.label));
       }
       for (const intron of intronsOf(tx)) {
         const mx = scale.x((intron.start + intron.end) / 2);
@@ -4455,9 +4522,76 @@ export default function SashimiViewer({
       <g fontFamily={FONT}>
         <line x1={PLOT_LEFT} y1={baseY} x2={plotRight} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
         {items}
+        {liftover && renderLiftRow(labelled)}
         <text x={PLOT_LEFT} y={11} fill={INK.faint} fontSize={9} fontWeight={600} letterSpacing={0.4}>
-          {currentChrom.toUpperCase()}{reverse ? '  ·  5′ → 3′ (reverse strand, axis flipped)' : ''}{axis.kind === 'equal-intron' ? '  ·  INTRONS DRAWN AT EQUAL WIDTH' : ''}
+          {currentChrom.toUpperCase()}{liftover ? `  ·  ${liftover.from.toUpperCase()}` : ''}{reverse ? '  ·  5′ → 3′ (reverse strand, axis flipped)' : ''}{axis.kind === 'equal-intron' ? '  ·  INTRONS DRAWN AT EQUAL WIDTH' : ''}
         </text>
+      </g>
+    );
+  };
+
+  /**
+   * The other build's line, between the chromosome label and the ruler: the lift of each labelled tick under it (one
+   * column, two builds), a grey stretch where the view has no counterpart there, the build on the left (× takes the
+   * line away).
+   */
+  const renderLiftRow = (labelled: { x: number; pos: number }[]) => {
+    if (!liftover) return null;
+    const top = LIFT_TOP, textY = top + 10, markY = top + 12;
+    const segs = liftHere;
+    const range = segs ? liftRange(segs, viewStart + 1, viewEnd) : null;
+    const els: JSX.Element[] = [];
+    if (segs) {
+      for (const { x, pos } of labelled) {
+        const p = liftPos(segs, pos);
+        const other = p && p.chrom.replace(/^chr/i, '') !== currentChrom.replace(/^chr/i, '');
+        els.push(
+          <g key={`lt${pos}`}>
+            <title>{`${currentChrom}:${pos.toLocaleString('en-US')} (${liftover.from}) = ${p ? `${p.chrom}:${p.pos.toLocaleString('en-US')}` : 'no counterpart'} (${liftover.to})`}</title>
+            <line x1={x} y1={markY} x2={x} y2={markY + 4} stroke={LIFT_COLOR} strokeWidth={1} opacity={0.7} />
+            <text x={x} y={textY} textAnchor="middle" fill={p ? LIFT_COLOR : INK.faint} fontSize={9.5} fontWeight={other ? 700 : 500}>
+              {p ? `${other ? `${p.chrom}:` : ''}${p.pos.toLocaleString('en-US')}` : '–'}
+            </text>
+          </g>,
+        );
+      }
+      // stretches of the view with no counterpart
+      let at = viewStart + 1;
+      const gaps: [number, number][] = [];
+      for (const sg of segs) {
+        if (sg.from.end < at) continue;
+        if (sg.from.start > at) gaps.push([at, Math.min(viewEnd, sg.from.start - 1)]);
+        at = Math.max(at, sg.from.end + 1);
+        if (at > viewEnd) break;
+      }
+      if (at <= viewEnd) gaps.push([at, viewEnd]);
+      for (const [a, b] of gaps) {
+        if (b < a) continue;
+        const xa = Math.max(PLOT_LEFT, Math.min(scale.x(a - 1), scale.x(b))), xb = Math.min(plotRight, Math.max(scale.x(a - 1), scale.x(b)));
+        if (xb - xa < 0.5) continue;
+        els.push(
+          <rect key={`lg${a}`} x={xa} y={markY + 1} width={xb - xa} height={3} fill={INK.gridStrong} opacity={0.8}>
+            <title>{`${currentChrom}:${a.toLocaleString('en-US')}-${b.toLocaleString('en-US')} has no ${liftover.to} counterpart in Ensembl's assembly map`}</title>
+          </rect>,
+        );
+      }
+    } else {
+      els.push(
+        <text key="ls" x={PLOT_LEFT} y={textY} fill={liftStatus.error ? '#b45309' : INK.faint} fontSize={9.5}>
+          {liftStatus.error ? `${liftover.to} coordinates unavailable: ${liftStatus.error} (Ensembl assembly map, rest.ensembl.org)` : `lifting the window to ${liftover.to} (Ensembl assembly map)…`}
+        </text>,
+      );
+    }
+    const summary = range ? `${liftover.to}: ${range.chrom}:${range.start.toLocaleString('en-US')}-${range.end.toLocaleString('en-US')}${range.partial ? ' (part of the window has no counterpart)' : ''}${range.split ? ' (and pieces elsewhere)' : ''}` : liftover.to;
+    return (
+      <g data-lift="">
+        <line x1={PLOT_LEFT} y1={markY + 4} x2={plotRight} y2={markY + 4} stroke={LIFT_COLOR} strokeWidth={0.8} opacity={0.35} />
+        {els}
+        <g style={liftover.onRemove ? { cursor: 'pointer' } : undefined} onClick={liftover.onRemove ? e => { e.stopPropagation(); liftover.onRemove!(); } : undefined}
+          onMouseDown={e => e.stopPropagation()}>
+          <title>{`${summary}\nThe same ticks in ${liftover.to}, lifted by Ensembl's assembly map; hover the plot for any position.${liftover.onRemove ? '\nClick to remove this line.' : ''}`}</title>
+          <text x={PLOT_LEFT - 6} y={textY} textAnchor="end" fill={LIFT_COLOR} fontSize={9} fontWeight={700}>{liftover.to.replace(/^GRCh/, 'GRCh ')}{liftover.onRemove ? ' ×' : ''}</text>
+        </g>
       </g>
     );
   };
@@ -4843,9 +4977,9 @@ export default function SashimiViewer({
               }}
               onClick={e => {
                 e.stopPropagation();
-                if (dragMoved.current || a.below) return;
+                if (dragMoved.current) return;
                 const p = svgPoint(e);
-                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
+                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
               <title>{a.title}</title>
               <path d={a.geom.d} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
@@ -4901,7 +5035,7 @@ export default function SashimiViewer({
                 {/* hide button, shown while the arc is under the pointer */}
                 {hoverArc === a.dragKey && (
                   <g pointerEvents="all" style={{ cursor: 'pointer' }} onMouseEnter={() => setHoverArc(a.dragKey)}
-                    onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); hideArc(a.j); }}>
+                    onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); hideArc(a.j, !!a.below); }}>
                     <title>Hide this arc (it still counts in the percentages; "hidden arcs · show" in the toolbar brings it back)</title>
                     <circle cx={hideX} cy={ly} r={6.5} fill={INK.bg} stroke={a.color} strokeWidth={1} />
                     <text x={hideX} y={ly + 3.5} textAnchor="middle" fill={a.color} fontSize={10} fontWeight={700}>×</text>
@@ -5536,6 +5670,55 @@ export default function SashimiViewer({
         note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; the pairs are grouped in 500 bp bins (neighbouring bins of one class joined) and the arc drawn where their reads place the breakpoints: the outermost reads of the pairs of a duplication, the innermost of a deletion, the median of an inversion (within an insert size of the true breakpoint). Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };
     }
+    if (popover.kind === 'anti') {
+      const j = popover.j, key = junctionKey(j);
+      const gene = tx?.geneName ?? 'the gene';
+      // the genes of the other strand in the window whose exons the junction joins (the best match), else the one it lies in
+      const score = (i: JunctionInfo) => i.cls === 'canonical' ? 3 : i.cls === 'exon_skipping' ? 2 : i.cls === 'novel' ? 0 : 1;
+      let best: { m: NeighbourModel; info: JunctionInfo; sc: number } | null = null, inside: NeighbourModel | null = null;
+      for (const m of neighbours?.models ?? []) {
+        if (tx && m.strand === tx.strand) continue;
+        if (m.geneEnd <= j.start || m.geneStart >= j.end) continue;
+        if (!inside && m.geneStart <= j.start && m.geneEnd >= j.end) inside = m;
+        const info = classifyJunction(j, m), sc = score(info);
+        if (sc > 0 && (!best || sc > best.sc)) best = { m, info, sc };
+      }
+      // both ends on exon boundaries of other transcripts of that gene
+      const otherTx = (m: NeighbourModel) => m.otherExons.some(e => e.end === j.start) && m.otherExons.some(e => e.start === j.end);
+      const altOf = !best ? (neighbours?.models ?? []).find(m => (!tx || m.strand !== tx.strand) && otherTx(m)) : undefined;
+      const where = best ? `${best.m.geneName} · ${best.info.label}`
+        : altOf ? `${altOf.geneName} · annotated in another of its transcripts`
+        : inside ? `inside ${inside.geneName}, not one of its annotated junctions`
+        : 'no gene annotated on this strand here';
+      const geneLine = best ? [`${best.m.geneName} (${best.m.strand > 0 ? '+' : '−'} strand, antisense to ${gene}) · ${best.m.transcriptId}${best.m.biotype ? ` · ${best.m.biotype.replace(/_/g, ' ')}` : ''}`, best.info.label]
+        : altOf ? [`${altOf.geneName} (${altOf.strand > 0 ? '+' : '−'} strand, antisense to ${gene}) · both ends on exon boundaries of its other transcripts`]
+        : inside ? [`inside ${inside.geneName} (${inside.strand > 0 ? '+' : '−'} strand, ${inside.biotype.replace(/_/g, ' ')}), off its annotated exon boundaries`]
+        : [`no gene annotated on the ${tx ? (tx.strand > 0 ? '−' : '+') : 'other'} strand over this intron${neighbours ? '' : ' (the window\'s genes are not loaded yet)'}`];
+      const lib = (sid: number) => { const k = sampleStrands?.[sid]; return k === 'reverse' ? 'stranded (dUTP)' : k === 'forward' ? 'stranded (forward)' : k === 'unstranded' ? 'unstranded' : 'strand unknown'; };
+      let leaky = 0;
+      const rows = displayTracks.filter(tr => !tr.gtex).map(tr => {
+        if (!tr.anti) {
+          const n = tr.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+          return [tr.sampleName, '—', n ? `${n.toLocaleString('en-US')} (both strands)` : '0', '—', `${lib(tr.sampleId)}: strands not told apart`];
+        }
+        const opp = tr.anti.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+        const sense = tr.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+        const share = opp + sense > 0 ? opp / (opp + sense) : null;
+        // the gene's own spliced reads read on the wrong strand: a few % of its reads at that intron (LEAK_SHARE)
+        const leak = sense >= 20 && share != null && share < ANTI_LEAK_SHARE;
+        if (leak) leaky++;
+        return [tr.sampleName, opp.toLocaleString('en-US'), sense.toLocaleString('en-US'), pct(share, share != null && share < 0.1 ? 1 : 0), `${lib(tr.sampleId)}${leak ? ` · likely ${gene}'s reads on the wrong strand` : ''}`];
+      });
+      return {
+        title: `Opposite-strand junction ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
+        subtitle: `intron ${formatBp(j.end - j.start)} · antisense to ${gene} · ${where}`,
+        cartoon: null, hgvs: geneLine,
+        tables: [{ head: ['sample', 'opposite strand', `${gene}'s strand`, 'opposite share', 'library'], rows }],
+        strip: null,
+        note: `Spliced reads of this intron on each strand, under each sample's library orientation (Strands). ${leaky ? `Where the opposite strand holds under ${Math.round(ANTI_LEAK_SHARE * 100)} % of the reads of the same intron on ${gene}'s strand, the arc is most likely ${gene}'s own reads read on the wrong strand: stranded protocols leave about 0.5–3 % there. ` : ''}` +
+          `A transcript of the other strand (antisense gene, read-through) has introns of its own, usually with GT…AG read on its strand. No HGVS, reading frame or usage: they belong to ${gene}'s strand. "Supporting reads" lists the opposite strand's reads only.`,
+      };
+    }
     if (popover.kind === 'junction') {
       const j = popover.j;
       const { model, info, foreign } = junctionContext(j);
@@ -5599,7 +5782,7 @@ export default function SashimiViewer({
         ' ψ = mean inclusion junction reads / (mean inclusion + skipping reads).',
       status,
     };
-  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf]);
+  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands]);
 
   useEffect(() => {
     if (!popover) return;
@@ -5647,19 +5830,21 @@ export default function SashimiViewer({
    * reads (not collapsed), shown if they were not. Tolerances: long-read junctions counted within JUNCTION_SNAP_BP
    * (junctionSnap.ts); structural events merge breakpoints within 5 % of their length, 20–100 bp, after 5 bp rounding.
    */
-  const showSupporting = useCallback((p: { kind: 'junction'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind }) => {
+  const showSupporting = useCallback((p: { kind: 'junction' | 'anti'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind }) => {
     const { j } = p;
     const pos = `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`;
-    let arc: ArcSupport, label: string;
-    if (p.kind === 'junction') {
+    let arc: ArcSupport, label: string, side: 'sense' | 'anti' | undefined;
+    if (p.kind !== 'structural') {
       arc = { kind: 'junction', start: j.start, end: j.end, tol: j.snapped ? JUNCTION_SNAP_BP : 0 };
-      label = `the junction ${pos}`;
+      // on the samples whose strands are shown, the reads of the strand the arc is drawn on (supportFor)
+      side = p.kind === 'anti' ? 'anti' : 'sense';
+      label = `the junction ${pos}${p.kind === 'anti' ? ' on the opposite strand' : ''}`;
     } else {
       const pairKind = p.sv === 'discordant' ? (j as DiscordantArc).kind : undefined;
       arc = { kind: p.sv, start: j.start, end: j.end, pairKind, tol: Math.min(100, Math.max(20, Math.round(0.05 * (j.end - j.start)))) + 5 };
       label = p.sv === 'discordant' ? `the ${pairKind ? `${pairKind}-type ` : ''}discordant pairs ${pos}` : `the ${p.sv === 'split' ? 'split-read' : p.sv} arc ${pos}`;
     }
-    setReadsSupport({ arc, label });
+    setReadsSupport({ arc, label, side });
     setCollapseReads(false);
     setShowReads(true);
   }, [currentChrom]);
@@ -5706,7 +5891,18 @@ export default function SashimiViewer({
             <h2 className="text-xl font-bold tracking-tight leading-tight text-slate-900">{currentGeneName}</h2>
             {tx && <span className="text-xs text-slate-500 truncate" title="The transcript model the plot is drawn on">{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons</span>}
           </div>
-          <span className="font-mono text-[12.5px] text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 whitespace-nowrap" title="The window in view">{regionStr}</span>
+          <span className="font-mono text-[12.5px] text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 whitespace-nowrap" title={`The window in view${liftover ? ` (${liftover.from})` : ''}`}>{regionStr}</span>
+          {liftover && (() => {
+            const r = liftHere ? liftRange(liftHere, viewStart + 1, viewEnd) : null;
+            const text = r ? `${r.chrom}:${r.start.toLocaleString('en-US')}-${r.end.toLocaleString('en-US')}` : liftStatus.error ? 'unavailable' : 'lifting…';
+            return (
+              <button type="button" disabled={!r} onClick={() => { if (r) navigator.clipboard?.writeText(`${r.chrom}:${r.start}-${r.end}`).then(() => { setLiftCopied(true); setTimeout(() => setLiftCopied(false), 1200); }).catch(() => {}); }}
+                className="inline-flex items-center gap-1.5 font-mono text-[12.5px] rounded-lg px-2 py-1 whitespace-nowrap border border-teal-200 bg-teal-50 text-teal-800 hover:bg-teal-100 disabled:hover:bg-teal-50"
+                title={r ? `The window in ${liftover.to}, lifted by Ensembl's assembly map${r.partial ? '; part of it has no counterpart there' : ''}${r.split ? '; some of it lands on another sequence' : ''}. Click to copy.` : liftStatus.error ? `${liftover.to} coordinates unavailable: ${liftStatus.error}` : `Lifting the window to ${liftover.to}`}>
+                <span className="font-sans text-[10.5px] font-bold tracking-wide">{liftover.to}</span>{liftCopied ? 'copied' : text}{r?.partial ? ' ≈' : ''}
+              </button>
+            );
+          })()}
           <span className="inline-flex border border-slate-200 rounded-[9px] overflow-hidden bg-white" role="group" aria-label="Zoom">
             <button onClick={() => zoomBy(1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50" title="Zoom out (Ctrl + scroll down)" aria-label="Zoom out"><Icon name="minus" /></button>
             <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Zoom in (Ctrl + scroll up)" aria-label="Zoom in"><Icon name="plus" /></button>
@@ -6131,8 +6327,8 @@ export default function SashimiViewer({
                   : <rect x={left} y={RULER_H} width={Math.max(1, right - left)} height={legendY - RULER_H} fill={withAlpha(INK.select, 0.08)} stroke={INK.select} strokeWidth={0.8} strokeDasharray="5 3" opacity={0.9} />}
                 <g style={{ cursor: 'context-menu' }}>
                   <title>{`Locus you searched for · right-click to remove the highlight`}</title>
-                  <rect x={lx} y={RULER_H - 40} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
-                  <text x={lx + w / 2} y={RULER_H - 29.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
+                  <rect x={lx} y={2} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
+                  <text x={lx + w / 2} y={12.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
                 </g>
               </g>
             );
@@ -6182,7 +6378,8 @@ export default function SashimiViewer({
             <g data-export="skip" pointerEvents="none">
               <line x1={hoverInfo.x} y1={RULER_H} x2={hoverInfo.x} y2={tracksBottom - TRACK_GAP} stroke={INK.select} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
               {(() => {
-                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString('en-US')}`;
+                const lifted = liftover ? liftedText(hoverInfo.pos, true) : null;
+                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString('en-US')}${liftover ? ` · ${liftover.to.replace(/^GRCh/, '')}: ${lifted ?? '–'}` : ''}`;
                 const w = txt.length * 6.2 + 12;
                 const x = Math.min(plotRight - w / 2, Math.max(PLOT_LEFT + w / 2, hoverInfo.x));
                 return (
@@ -6209,6 +6406,7 @@ export default function SashimiViewer({
             style={{ left: Math.min(hover!.px + 14, svgWidth - 200), top: Math.max(RULER_H + 4, hover!.py - 10) }}>
             <div className="font-mono text-[11px] text-gray-900 leading-5">
               {currentChrom}:{(hoverInfo.pos + 1).toLocaleString('en-US')}
+              {liftover && <span className="ml-2" style={{ color: LIFT_COLOR }}>{liftover.to} {liftedText(hoverInfo.pos, true) ?? (liftHere ? 'no counterpart' : '…')}</span>}
               {hoverInfo.alt ? <span className="ml-2 font-semibold text-amber-700">{hoverInfo.alt.label}</span> : hoverInfo.cdna && <span className="ml-2 font-semibold text-indigo-700">{hoverInfo.cdna.label}</span>}
             </div>
             {hoverInfo.known.map(k => (
@@ -6346,8 +6544,13 @@ export default function SashimiViewer({
           </div>
         )}
         {popover && popoverContent && (
-          <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs"
-            style={{ left: Math.min(popover.x + 12, Math.max(8, svgWidth - 552)), top: Math.max(RULER_H, popover.y + 12) }}
+          <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs overflow-y-auto"
+            // opened in the lower half of the plot (an arc under the baseline, a low track): above the click, so the plot's
+            // scroll box does not cut it
+            style={{ left: Math.min(popover.x + 12, Math.max(8, svgWidth - 552)),
+              ...(popover.y > totalHeight / 2
+                ? { bottom: totalHeight - popover.y + 20, maxHeight: Math.max(160, popover.y - 8) }
+                : { top: Math.max(RULER_H, popover.y + 12), maxHeight: Math.max(160, totalHeight - popover.y - 12) }) }}
             onMouseDown={e => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-2 px-3 pt-2">
               <div>
@@ -6360,7 +6563,7 @@ export default function SashimiViewer({
                     className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
                 )}
                 {popover.kind !== 'exon' && (() => {
-                  const k = hideKey(popover.j), sc = labelScales[k] ?? 1;
+                  const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;
                   return (
                     <span className="flex items-center gap-1" title="Size of this junction's label, on every track (saved with the session)">
                       <button onClick={() => setLabelScale(k, sc / LABEL_SCALE_STEP)} disabled={sc <= LABEL_SCALE_MIN + 0.01} className={`${t.btn} px-1.5 py-0.5 text-[11px] disabled:opacity-40`} title="Smaller label">A−</button>
@@ -6372,10 +6575,10 @@ export default function SashimiViewer({
                 })()}
                 {popover.kind !== 'exon' && (
                   <button onClick={() => { showSupporting(popover); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px] font-medium`}
-                    title={`Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
+                    title={`Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : popover.kind === 'anti' ? ' (on a sample whose strands are shown, its reads of the opposite strand only)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
                 )}
                 {popover.kind !== 'exon' && (
-                  <button onClick={() => { hideArc(popover.j); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
+                  <button onClick={() => { hideArc(popover.j, popover.kind === 'anti'); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
                     title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
                 )}
                 <button onClick={() => setPopover(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close (Esc)">×</button>
