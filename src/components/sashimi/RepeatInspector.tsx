@@ -3,7 +3,7 @@
  * categories of the locus and, on the same axis, a waterfall of reads drawn unit by unit (pathogenic motif, benign or
  * reference motif, known interruption, other unit), with the alleles called from the modes.
  *
- * Sizes come from the reads spanning the repeat (both flanks) when there are SPAN_MIN of them or more. Below that the
+ * Sizes come from the reads spanning the repeat (both anchors) when there are SPAN_MIN of them or more. Below that the
  * reads stopping inside the repeat are added at the length they reach, a lower bound, and the panel says so.
  * Dragging across the plot selects a size range: its reads, their spread and interruptions.
  */
@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import { Segmented } from './controls';
 import {
-  FLANK, SPAN_MIN, callAlleles, categoryOf, interruptionPattern, measureReads, quantile, revComp,
+  FLANK, PURITY_MIN, SPAN_MIN, callAlleles, categoryOf, interruptionPattern, measureReads, quantile, revComp,
   type Allele, type CategoryTone, type ReadRepeat, type RepeatLocus, type RepeatReads,
 } from '../../standalone/repeatScan';
 
@@ -125,6 +125,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     if (cur.error) return <div className="px-5 py-6 text-sm text-red-700">Could not read this sample: {cur.error}</div>;
     if (!view) return null;
     const { r, enough, alleles, xMax, step, rows, units, beyond, p95 } = view;
+    const shorter = r.reads.spanning.filter(x => x.units < locus.refUnits).length;
     if (!units.length) return <div className="px-5 py-6 text-sm text-slate-600">No read of this sample reaches the repeat with a flank on either side ({fmt(r.reads.total)} reads over the locus).</div>;
     const nb = Math.ceil(xMax / step);
     const span = new Array(nb).fill(0), trunc = new Array(nb).fill(0);
@@ -140,7 +141,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
       <>
         {!enough && (
           <div className="mx-5 mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[12px] text-amber-900" role="alert">
-            <b>Few reads span the repeat:</b> {fmt(r.reads.spanning.length)} read{r.reads.spanning.length === 1 ? '' : 's'} with both flanks (at least {SPAN_MIN} are needed to size it from them alone).
+            <b>Few reads span the repeat:</b> {fmt(r.reads.spanning.length)} read{r.reads.spanning.length === 1 ? '' : 's'} with both anchors (at least {SPAN_MIN} are needed to size it from them alone).
             The {fmt(r.reads.truncated.length)} reads that stop inside the repeat are added at the length they reach, hatched: <b>lower bounds</b>, the alleles may be longer than shown.
           </div>
         )}
@@ -150,7 +151,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           </div>
         )}
         <div className="flex flex-wrap gap-2 px-5 pt-3">
-          <Chip k="spanning reads (both flanks)" v={fmt(r.reads.spanning.length)} />
+          <Chip k="spanning reads (both anchors)" v={fmt(r.reads.spanning.length)} />
           <Chip k={enough ? 'stop inside the repeat · not counted' : 'stop inside the repeat · lower bounds'} v={fmt(r.reads.truncated.length)} />
           {alleles.map((a, i) => {
             const c = categoryOf(locus.categories, a.mode), st = stats(alleleReads(a));
@@ -160,6 +161,10 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
                 sub={`P5–P95 ${a.p5}–${a.p95}${a.broad ? ' · broad' : ''}${locus.interruptions.length && st.pats[0] ? ` · ${patText(st.pats[0][0])} (${pct(st.pats[0][1], st.n)})` : ''}`} />
             );
           })}
+          {(r.reads.impure.length > 0 || r.reads.chimeric > 0 || shorter > 0) && (
+            <Chip k="set apart" v={fmt(r.reads.impure.length + r.reads.chimeric)}
+              sub={[`${fmt(r.reads.impure.length)} impure tract (< ${Math.round(PURITY_MIN * 100)} % ${locus.motif}${locus.interruptions.length ? `/${locus.interruptions[0]}` : ''})`, `${fmt(r.reads.chimeric)} anchor twice or out of order`, shorter ? `${fmt(shorter)} spanning reads shorter than the reference (counted)` : ''].filter(Boolean).join(' · ')} />
+          )}
           {alleles.some(a => a.broad) && <Chip k="reading" v={<span className="text-red-700">broad spread</span>} sub="somatic mosaicism, or PCR / sequencing stutter" />}
         </div>
         <div className="px-3 pt-1 relative">
@@ -168,7 +173,15 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             onMouseMove={e => {
               const { px, py } = svgPoint(e);
               if (drag.current != null) { setBrush([drag.current, ux(px)]); return; }
-              if (py > base || px < L || px > W - R) { setHover(null); return; }
+              if (px < L || px > W - R) { setHover(null); return; }
+              if (py >= wTop && py < wTop + wH) {
+                const row = rows[Math.floor((py - wTop) / rowH)];
+                if (!row) { setHover(null); return; }
+                const ed = (v?: number) => (v == null ? 'not found' : `${v} edit${v === 1 ? '' : 's'}`);
+                setHover({ x: px, y: py, text: `${row.name}${row.reverse ? ' (reverse)' : ''} · ${row.truncated ? '≥ ' : ''}${row.units} ${locus.motif} · 5′ anchor ${ed(row.edL)}, 3′ anchor ${ed(row.edR)} · ${Math.round(row.purity * 100)} % motif units` });
+                return;
+              }
+              if (py > base) { setHover(null); return; }
               const i = Math.floor(ux(px) / step);
               if (i < 0 || i >= nb) { setHover(null); return; }
               setHover({ x: px, y: py, text: `${i * step}–${(i + 1) * step - 1} ${locus.motif}: ${fmt(span[i])} spanning${!enough && trunc[i] ? ` + ${fmt(trunc[i])} at least` : ''}` });
@@ -236,7 +249,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             <text x={L - 8} y={wTop + 20} textAnchor="end" fontSize={10} fill="#64748b">by size</text>
             <text x={L} y={wTop - 6} fontSize={10.5} fontWeight={600} fill="#334155">
               {enough
-                ? `${fmt(rows.length)} of the ${fmt(r.reads.spanning.length)} spanning reads (both flanks), evenly by size · reads stopping inside not drawn`
+                ? `${fmt(rows.length)} of the ${fmt(r.reads.spanning.length)} spanning reads (both anchors), evenly by size · reads stopping inside not drawn`
                 : `${fmt(rows.length)} of ${fmt(view.used.length)} reads: ${fmt(r.reads.spanning.length)} spanning, the others stopping inside (chevron: at least that long)`}
             </text>
             {rows.map((r, k) => {
@@ -281,11 +294,12 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           {!enough && <span className="inline-flex items-center gap-1.5"><svg width="14" height="10"><rect width="14" height="10" fill="url(#ri-hatch)" stroke="#6f8fd6" strokeWidth="0.5" /></svg>stops inside the repeat: at least that long</span>}
         </div>
         <div className="px-5 pt-2 pb-4 text-[11px] leading-relaxed text-slate-500">
-          Each read is rebuilt over the locus from its soft clips, aligned bases and insertions; its repeat is what lies between the {FLANK}-bp flanks of the reference,
-          found wherever they are in the read and each checked by aligning it whole (10 edits at most: a GC-rich piece of a flank also occurs inside a GC-rich repeat),
-          its size the tract length divided by {locus.k}, so that sequencing indels inside it average out. A read with one flank gives a lower bound: the stretch next to it
-          while at least 60 % of its last 10 units are the motif. Primary alignments only;
-          {r.sampled ? ` ${fmt(INSPECT_MAX_READS)} of the ${fmt(r.total)} reads over the locus (every k-th kept);` : ` ${fmt(r.reads.total)} reads over the locus;`} {fmt(r.reads.skipped)} do not reach the repeat with a flank.
+          Each read is rebuilt over the locus from its soft clips, aligned bases and insertions. Two locus-specific anchors place the tract's ends in it (above:{' '}
+          {locus.anchorSource}), each the 40-bp stretch nearest the tract that differs from the repeat by 35 % at least, matched whole at 6 edits (15 %) at most: a
+          stretch next to a GC-rich repeat often looks like it, and a looser match finds it inside the repeat. A spanning read has both anchors, once each and in order,
+          and a tract of {Math.round(PURITY_MIN * 100)} % motif or interruption units at least; its size is the tract length divided by {locus.k}, so that sequencing indels inside
+          it average out. A read with one anchor gives a lower bound: the stretch next to it while at least 60 % of its last 10 units are the motif. Primary alignments only;
+          {r.sampled ? ` ${fmt(INSPECT_MAX_READS)} of the ${fmt(r.total)} reads over the locus (every k-th kept);` : ` ${fmt(r.reads.total)} reads over the locus;`} {fmt(r.reads.skipped)} do not reach the repeat with an anchor.
           Alleles: modes of a kernel density on the log of the size, at most two; "broad" when P10–P90 exceeds a quarter of the median.
           {locus.categorySource && <> Categories: {locus.categorySource}.</>} PCR amplification and nanopore sequencing both add stutter to GC-rich repeats: a broad allele is not by itself mosaicism.
           Evidence from the reads, not a diagnostic call.
@@ -303,6 +317,11 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             <div className="text-[12px] text-slate-500 mt-0.5">
               Reference: {locus.refStructure} = {locus.refUnits} units{geneMotif ? ` (${geneMotif} on ${motifs!.gene}'s strand)` : ''}
               {motifs && <> · {motifs.disease} ({motifs.inh}) · {motifs.where}</>}
+            </div>
+            <div className="text-[11.5px] text-slate-500 mt-0.5" title={`5′ anchor ${locus.anchorL.seq}\n3′ anchor ${locus.anchorR.seq}\nreference orientation; source: ${locus.anchorSource}`}>
+              Anchors ({locus.anchorSource}): 5′ <span className="font-mono text-slate-700">{locus.anchorL.seq.slice(0, 12)}…</span> {locus.anchorL.gap ? `${locus.anchorL.gap} bp before the tract` : 'next to the tract'}, {Math.round(locus.anchorL.far * 100)} % from the repeat
+              {' · '}3′ <span className="font-mono text-slate-700">{locus.anchorR.seq.slice(0, 12)}…</span> {locus.anchorR.gap ? `${locus.anchorR.gap} bp after it` : 'next to it'}, {Math.round(locus.anchorR.far * 100)} % from the repeat
+              {Math.min(locus.anchorL.far, locus.anchorR.far) < 0.35 && <span className="text-amber-700"> · an anchor looks like the repeat: sizes are less certain</span>}
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">

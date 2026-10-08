@@ -24,13 +24,22 @@
  */
 import type { AlignedRead } from '../components/sashimi/types';
 import type { StrLocus } from './strCatalog';
+import { STR_FLANKS } from './strFlanks';
 
-/** bases of unique sequence taken on each side of the tract to find it in a read */
-export const FLANK = 40;
-/** seeds taken in a flank: exact matches of this length, every SEED_STEP bases */
+/** anchor length: a locus-specific stretch on each side of the tract, found in a read to place the tract's ends */
+export const ANCHOR = 40;
+/** how far from the tract an anchor may sit (reference bases), when the stretches next to it look like the repeat */
+const ANCHOR_SEARCH = 150;
+/** reference bases around the tract a locus needs (the anchors' room) */
+export const FLANK = ANCHOR_SEARCH + ANCHOR;
+/** an anchor must differ from the repeat by this share of its bases at least (FMR1's 40 bp next to the CGG tract differ by 28 %) */
+const ANCHOR_MIN_FAR = 0.35;
+/** edits allowed between an anchor and the read: 15 %, above nanopore error rates and well below ANCHOR_MIN_FAR */
+const ANCHOR_MAX_EDITS = 6;
+/** a tract whose units are this share of the motif or a known interruption at least counts; under it, impure (chimera, noise) */
+export const PURITY_MIN = 0.8;
+/** seeds taken in an anchor: exact matches of this length, every SEED_STEP bases */
 const SEED = 10, SEED_STEP = 2;
-/** edits allowed between a flank and the read (40 bp: 25 %, above nanopore error rates; a flank-like stretch inside the repeat needs 15 or more) */
-const MAX_FLANK_EDITS = 10;
 /** spanning reads needed to size a sample from them alone (below it, the reads stopping inside count as lower bounds) */
 export const SPAN_MIN = 20;
 
@@ -48,7 +57,9 @@ export interface RepeatLocus {
   refUnits: number;
   /** the reference tract in units: "(CGG)10 AGG (CGG)9" */
   refStructure: string;
-  flankL: string; flankR: string;
+  /** the stretches found in the reads to place the tract's ends, and where they come from */
+  anchorL: Anchor; anchorR: Anchor;
+  anchorSource: string;
   /** "FMR1 CGG" or "CAG repeat" */
   label: string;
   catalog?: StrLocus;
@@ -56,6 +67,9 @@ export interface RepeatLocus {
   /** where the categories come from */
   categorySource?: string;
 }
+
+/** An anchor: its sequence (reference orientation), the bases between it and the tract, its share of edits from the repeat. */
+export interface Anchor { seq: string; gap: number; far: number }
 
 const COMP: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 export const revComp = (s: string) => { let o = ''; for (let i = s.length - 1; i >= 0; i--) o += COMP[s[i]] ?? 'N'; return o; };
@@ -128,7 +142,7 @@ export function makeLocus(ref: string, refStart: number, chrom: string, hint: { 
   const t = findTract(ref, refStart, hint.start, hint.end, motifs);
   if (!t) return null;
   const a = t.start - refStart, b = t.end - refStart;
-  if (a < FLANK || b + FLANK > ref.length) return null;
+  if (a < ANCHOR + 10 || b + ANCHOR + 10 > ref.length) return null;
   const k = t.unit.length;
   const pathogenic = entry?.path.length ? entry.path : motifs;
   const benign = entry ? [...new Set([...entry.benign, ...entry.ref])].filter(m => !pathogenic.includes(m)) : [];
@@ -136,12 +150,65 @@ export function makeLocus(ref: string, refStart: number, chrom: string, hint: { 
   // interruptions: the catalogue's, else the units one base off the motif found in the reference tract
   const interruptions = entry?.intr.length ? entry.intr.filter(m => m.length === k) : [...new Set(Array.from({ length: Math.floor(tract.length / k) }, (_, i) => tract.substr(i * k, k)).filter(s => s !== t.unit && hamming(s, t.unit) === 1))];
   const { categories, source } = categoriesOf(entry);
+  // the stretches next to the tract: published flanks where a tool gives them (STRique), else the reference's
+  const pub = entry ? STR_FLANKS[entry.id] : undefined;
+  const exact = [...new Set([...pathogenic, ...benign, t.unit])];
+  const before = pub ? trimUnits(pub.prefix, exact, true) : '';
+  const after = pub ? trimUnits(pub.suffix, exact, false) : '';
+  const reps = [...new Set([...pathogenic, ...benign])].map(m => m.repeat(Math.ceil((3 * ANCHOR) / m.length)));
+  const refBefore = ref.slice(Math.max(0, a - ANCHOR_SEARCH - ANCHOR), a), refAfter = ref.slice(b, b + ANCHOR_SEARCH + ANCHOR);
+  // an anchor from a published flank is placed in the reference next to this tract (whose ends may differ from the
+  // tool's by a phase): its gap is measured there; not found there, the reference's own stretches are used
+  const placed = (anc: Anchor | null, stretch: string, isBefore: boolean): Anchor | null => {
+    if (!anc) return null;
+    const hits = anchorHits(stretch, anc.seq, isBefore);
+    if (hits.length !== 1) return null;
+    return { ...anc, gap: isBefore ? stretch.length - hits[0].pos : hits[0].pos };
+  };
+  let anchorL = pub ? placed(chooseAnchor(before, reps, true), refBefore, true) : null;
+  let anchorR = pub ? placed(chooseAnchor(after, reps, false), refAfter, false) : null;
+  const fromPub = !!(anchorL && anchorR);
+  if (!fromPub) { anchorL = chooseAnchor(refBefore, reps, true); anchorR = chooseAnchor(refAfter, reps, false); }
+  if (!anchorL || !anchorR) return null;
   return {
     chrom, start: t.start, end: t.end, k, motif: t.unit, pathogenic, benign, interruptions,
     refUnits: Math.round(tract.length / k), refStructure: tractStructure(tract, t.unit),
-    flankL: ref.slice(a - FLANK, a), flankR: ref.slice(b, b + FLANK),
+    anchorL, anchorR, anchorSource: fromPub ? `${pub!.tool} flanks (${pub!.name}), Giesselmann et al. 2019` : 'reference flanks',
     label: entry ? `${entry.gene} ${entry.path[0] ?? t.unit}` : `${t.unit} repeat`, catalog: entry, categories, categorySource: source,
   };
+}
+
+/**
+ * A flank without the repeat units at its tract end (a tool's flank may keep some outside its tract): cut after the last
+ * exact motif unit reached through units one base off at most, no two misses in a row, as findTract ends the tract.
+ */
+function trimUnits(flank: string, motifs: string[], atEnd: boolean): string {
+  const k = motifs[0]?.length ?? 3;
+  const unitAt = (i: number) => (atEnd ? flank.slice(flank.length - (i + 1) * k, flank.length - i * k) : flank.slice(i * k, (i + 1) * k));
+  let cut = 0, miss = 0;
+  for (let i = 0; (i + 1) * k <= flank.length && miss < 2; i++) {
+    const u = unitAt(i);
+    if (motifs.includes(u)) { cut = i + 1; miss = 0; } else if (!motifs.some(m => hamming(m, u) <= 1)) miss++;
+  }
+  return atEnd ? flank.slice(0, flank.length - cut * k) : flank.slice(cut * k);
+}
+
+/**
+ * The anchor of one side: the ANCHOR-bp window nearest the tract that differs from the repeat (`reps`: motifs written
+ * out) by ANCHOR_MIN_FAR of its bases, else the one that differs most. `before`: the stretch ends at the tract;
+ * otherwise it starts there.
+ */
+function chooseAnchor(stretch: string, reps: string[], before: boolean): Anchor | null {
+  if (stretch.length < ANCHOR) return null;
+  let best: Anchor | null = null;
+  for (let gap = 0; gap + ANCHOR <= stretch.length; gap++) {
+    const seq = before ? stretch.slice(stretch.length - gap - ANCHOR, stretch.length - gap) : stretch.slice(gap, gap + ANCHOR);
+    if (seq.includes('N')) continue;
+    const far = Math.min(...reps.map(r => fitPattern(seq, r).ed)) / ANCHOR;
+    if (far >= ANCHOR_MIN_FAR) return { seq, gap, far };
+    if (!best || far > best.far + 0.01) best = { seq, gap, far };
+  }
+  return best;
 }
 
 /**
@@ -215,34 +282,27 @@ function fitPattern(pat: string, text: string): { ed: number; end: number } {
 }
 
 /**
- * Where a flank sits in a read: the read position it ends at (`left`) or starts at (right), or null. Exact seeds of the
- * flank propose places; each place is checked by aligning the whole flank there, and taken only within
- * MAX_FLANK_EDITS: a GC-rich seed also matches inside a GC-rich repeat (TCGGGGGCGG among erroneous CGG units at
- * FMR1), where the flank itself is nowhere. The first place that passes, from `from` on, wins; the boundary is where the
- * flank's alignment ends (left) or starts (right).
+ * Every place an anchor sits in a read: where it ends (`before` the tract) or starts (after it), with its edits. Exact
+ * seeds of the anchor propose places; each is checked by aligning the whole anchor there, ANCHOR_MAX_EDITS at most: a
+ * GC-rich seed also matches inside a GC-rich repeat, where the anchor itself is not.
  */
-function flankAt(seq: string, flank: string, left: boolean, from = 0): number | null {
+function anchorHits(seq: string, anchor: string, before: boolean): { pos: number; ed: number }[] {
   const at: number[] = [];
-  for (let o = 0; o + SEED <= flank.length; o += SEED_STEP) {
-    const key = flank.substr(o, SEED);
-    for (let j = seq.indexOf(key, from); j >= 0; j = seq.indexOf(key, j + 1)) at.push(j - o);
+  for (let o = 0; o + SEED <= anchor.length; o += SEED_STEP) {
+    const key = anchor.substr(o, SEED);
+    for (let j = seq.indexOf(key); j >= 0; j = seq.indexOf(key, j + 1)) at.push(j - o);
   }
-  if (!at.length) return null;
   at.sort((a, b) => a - b);
-  const slack = 8;
+  const slack = 8, out: { pos: number; ed: number }[] = [];
   for (let i = 0; i < at.length;) {
     let j = i; while (j + 1 < at.length && at[j + 1] - at[i] <= slack) j++;
-    const start = Math.max(0, at[(i + j) >> 1] - slack), text = seq.slice(start, start + flank.length + 2 * slack);
-    if (left) {
-      const f = fitPattern(flank, text);
-      if (f.ed <= MAX_FLANK_EDITS) return start + f.end;
-    } else {
-      const f = fitPattern(reverse(flank), reverse(text));
-      if (f.ed <= MAX_FLANK_EDITS) return start + text.length - f.end;
-    }
+    const start = Math.max(0, at[(i + j) >> 1] - slack), text = seq.slice(start, start + anchor.length + 2 * slack);
+    const f = before ? fitPattern(anchor, text) : fitPattern(reverse(anchor), reverse(text));
+    const pos = before ? start + f.end : start + text.length - f.end;
+    if (f.ed <= ANCHOR_MAX_EDITS && !out.some(h => Math.abs(h.pos - pos) < anchor.length / 2)) out.push({ pos, ed: f.ed });
     i = j + 1;
   }
-  return null;
+  return out;
 }
 
 /**
@@ -298,44 +358,71 @@ export interface ReadRepeat {
   /** the units' classes, from the 5′ flank of the reference (P B I o) */
   tokens: string;
   truncated: boolean;
-  /** truncated: the flank it was measured from */
+  /** truncated: the anchor it was measured from */
   from?: 'left' | 'right' | 'none';
   reverse: boolean;
+  /** the anchors' edits (absent: not found) and the share of motif or interruption units of the tract */
+  edL?: number; edR?: number; purity: number;
 }
-export interface RepeatReads { spanning: ReadRepeat[]; truncated: ReadRepeat[]; skipped: number; total: number }
+export interface RepeatReads {
+  /** both anchors, once each and in order, and a tract of PURITY_MIN or more */
+  spanning: ReadRepeat[];
+  /** one anchor: a lower bound */
+  truncated: ReadRepeat[];
+  /** both anchors but an impure tract (a chimera, or a read too noisy to size) */
+  impure: ReadRepeat[];
+  /** an anchor found twice, or the 3′ one before the 5′ one: concatemers and fold-back reads */
+  chimeric: number;
+  /** no anchor and not all repeat: the read does not reach the locus */
+  skipped: number;
+  total: number;
+}
 
-/** The repeat of each read (primary alignments only: a supplementary part is the same read again). */
+const purityOf = (tok: string) => (tok.length ? [...tok].filter(c => c !== 'o').length / tok.length : 1);
+
+/**
+ * The repeat of each read (primary alignments only: a supplementary part is the same read again), from the anchors: the
+ * tract lies between the 5′ anchor's end plus its gap and the 3′ anchor's start minus its gap.
+ */
 export function measureReads(reads: AlignedRead[], ref: string, refStart: number, locus: RepeatLocus): RepeatReads {
-  const out: RepeatReads = { spanning: [], truncated: [], skipped: 0, total: 0 };
-  const k = locus.k, back = backwards(locus);
+  const out: RepeatReads = { spanning: [], truncated: [], impure: [], chimeric: 0, skipped: 0, total: 0 };
+  const k = locus.k, back = backwards(locus), gL = locus.anchorL.gap, gR = locus.anchorR.gap;
   for (const r of reads) {
     if (r.f & 0x900) continue;
     out.total++;
     const seq = readSequence(r, ref, refStart);
+    const base = { name: r.n, reverse: r.r === 1 };
     let done = false;
     // the read as stored, then reverse-complemented (a read folded back on itself reads the locus the other way)
     for (const s of [seq, revComp(seq)]) {
-      const L = flankAt(s, locus.flankL, true), R = flankAt(s, locus.flankR, false, L ?? 0);
-      if (L != null && R != null && R >= L) {
-        const tract = s.slice(L, R);
-        out.spanning.push({ name: r.n, units: Math.round(tract.length / k), tokens: tokenize(tract, locus), truncated: false, reverse: r.r === 1 });
-        done = true; break;
+      const Ls = anchorHits(s, locus.anchorL.seq, true), Rs = anchorHits(s, locus.anchorR.seq, false);
+      if (!Ls.length && !Rs.length) continue;
+      done = true;
+      if (Ls.length > 1 || Rs.length > 1 || (Ls.length && Rs.length && Rs[0].pos < Ls[0].pos)) { out.chimeric++; break; }
+      const L = Ls[0], R = Rs[0];
+      if (L && R) {
+        const a = L.pos + gL, b = Math.max(a, R.pos - gR), tract = s.slice(a, b), tokens = tokenize(tract, locus), purity = purityOf(tokens);
+        const rr: ReadRepeat = { ...base, units: Math.round(tract.length / k), tokens, truncated: false, edL: L.ed, edR: R.ed, purity };
+        (purity >= PURITY_MIN ? out.spanning : out.impure).push(rr);
+        break;
       }
-      // one flank and no other: the repeat is at least the motif-rich stretch next to it, whatever follows (the read's
-      // end, or sequence that is not the other flank)
-      if (L != null && R == null) {
-        const run = motifRun(s.slice(L), locus);
-        if (run.units >= 3) { out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(s.slice(L, L + run.bases), locus), truncated: true, from: 'left', reverse: r.r === 1 }); done = true; break; }
+      // one anchor and not the other: the repeat is at least the motif-rich stretch next to it, whatever follows (the
+      // read's end, or sequence that is not the other anchor)
+      if (L) {
+        const a = L.pos + gL, run = motifRun(s.slice(a), locus), tokens = tokenize(s.slice(a, a + run.bases), locus);
+        if (run.units >= 3) out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'left', edL: L.ed, purity: purityOf(tokens) });
+        else out.skipped++;
+      } else {
+        const b = R.pos - gR, run = motifRun(reverse(s.slice(0, Math.max(0, b))), back), tokens = tokenize(s.slice(b - run.bases, b), locus);
+        if (run.units >= 3) out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'right', edR: R.ed, purity: purityOf(tokens) });
+        else out.skipped++;
       }
-      if (R != null && L == null) {
-        const run = motifRun(reverse(s.slice(0, R)), back);
-        if (run.units >= 3) { out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(s.slice(R - run.bases, R), locus), truncated: true, from: 'right', reverse: r.r === 1 }); done = true; break; }
-      }
+      break;
     }
     if (!done) {
       // a read that is all repeat (inside a long expansion)
       const run = motifRun(seq, locus);
-      if (run.units >= 10 && run.bases >= 0.8 * seq.length) out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(seq.slice(0, run.bases), locus), truncated: true, from: 'none', reverse: r.r === 1 });
+      if (run.units >= 10 && run.bases >= 0.8 * seq.length) { const tokens = tokenize(seq.slice(0, run.bases), locus); out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'none', purity: purityOf(tokens) }); }
       else out.skipped++;
     }
   }

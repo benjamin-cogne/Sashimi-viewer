@@ -980,16 +980,31 @@ repeat in every read and draws the result.
 **How a read is measured.**
 - Each read is rebuilt over the locus from what it carries: its soft clips, its aligned bases with
   their mismatches, and its insertions.
-- The repeat is what lies between the two unique 40-bp flanks of the reference, wherever they are in
-  the read. Its size is the tract length divided by the motif length, so that sequencing indels inside
-  the tract average out.
-- A flank is proposed by exact 10-bp seeds and checked by aligning it whole: 10 edits at most out of
-  40. A GC-rich seed of a flank also matches inside a GC-rich repeat (at FMR1 the 3′ flank's
-  `TCGGGGGCGG` occurs among CGG units with sequencing errors); without the check such a read would
-  pass for a short spanning one.
-- A read with both flanks **spans** the repeat. A read with one flank and not the other gives a
-  **lower bound**: the motif-rich stretch next to that flank, followed while at least 60 % of its
-  last 10 units are the motif.
+- **Anchors.** Two locus-specific 40-bp stretches, one on each side, place the tract's ends in a read.
+  They come from published flanking sequences where a tool gives them (STRique's targets: FMR1 and
+  C9orf72, Giesselmann et al. 2019), else from the reference at the catalogue's coordinates, as
+  STRipy and ExpansionHunter do. STRipy's catalogue gives coordinates, motifs and ranges but no
+  flanking sequences.
+  - Each anchor is the stretch nearest the tract that differs from the repeat by at least 35 % of its
+    bases. Next to a GC-rich repeat the reference often looks like the repeat: FMR1's 40 bp next to
+    the CGG tract differ from (CGG)n by 28 %, and a loose match finds them inside the repeat. At FMR1
+    the 5′ anchor therefore sits 57 bp before the tract; the 3′ one is adjacent.
+  - A published anchor is placed in the reference next to the tract, so that the gap between them is
+    measured on the same tract the panel sizes.
+  - In a read, an anchor is matched whole at 6 edits (15 %) at most; exact 10-bp seeds only propose
+    places.
+  - The panel's header names the anchors, their distance to the tract and their source.
+- **Spanning reads** have both anchors, once each, 5′ before 3′, and a tract of at least 80 % motif
+  or known-interruption units. The size is the tract length divided by the motif length, so that
+  sequencing indels inside the tract average out.
+- **Reads set apart** are counted in a chip, not sized:
+  - an impure tract (a chimera, or a read too noisy to size);
+  - an anchor found twice or out of order (a concatemer or a fold-back read).
+
+  Spanning reads shorter than the reference size are counted there too, for information.
+- **Lower bounds.** A read with one anchor and not the other gives a lower bound: the motif-rich
+  stretch next to that anchor, followed while at least 60 % of its last 10 units are the motif.
+- **Hover a waterfall row** for the read's name, size, anchor edits and purity.
 - Primary alignments only, up to 20,000 reads over the locus (every k-th kept past that).
 
 **What is drawn.**
@@ -1322,7 +1337,8 @@ src/standalone/
   liftover.ts                    the other build's coordinates (Ensembl assembly map, GRCh38 ⇄ GRCh37)
   assembly.ts                    the build of a file from its header's chromosome lengths
   strCatalog.ts                  pathogenic tandem-repeat loci (generated from STRchive, MIT License)
-  repeatScan.ts                  repeat sizing from the reads: rebuilt reads, flanks, units, alleles
+  strFlanks.ts                   published flanking sequences of repeat loci (STRique, MIT License)
+  repeatScan.ts                  repeat sizing from the reads: rebuilt reads, anchors, units, alleles
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)
   gtex.ts                        GTEx Portal API v2 client
 src/components/
@@ -1390,6 +1406,11 @@ If the viewer contributes to a publication, please cite it
   disease genetic testing.* Am J Hum Genet 1998;62:1243–1247 (HTT size classes).
 - Nolin SL et al. *Fragile X full mutation expansions are inhibited by one or more AGG interruptions
   in premutation carriers.* Genet Med 2015;17:358–364.
+- Giesselmann P et al. *Analysis of short tandem repeat expansions and their methylation state with
+  nanopore sequencing.* Nat Biotechnol 2019;37:1478–1481 (STRique; its published FMR1 and C9orf72
+  flanks are the inspector's anchors there; MIT License).
+- Halman A, Dolzhenko E, Oshlack A. *STRipy: a graphical application for enhanced genotyping of
+  pathogenic short tandem repeats in sequencing data.* Hum Mutat 2022;43:859–868.
 - Dolzhenko E et al. *Characterization and visualization of tandem repeats at genome scale.* Nat
   Biotechnol 2024 (TRGT and its read waterfall plots, which the inspector's waterfall follows).
 - GMOD JavaScript libraries: [bam-js](https://github.com/GMOD/bam-js),
