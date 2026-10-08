@@ -962,6 +962,66 @@ such data); this is a one-off ceiling, not a growth. The reads track draws misma
 per base colour, not one per mismatch. A noisy long-read library with *Consensus* off, or a
 reference of another genome build, used to put over 100,000 shapes on the page; it now stays
 under 3,000.
+## Tandem repeats: the repeat inspector
+
+Long reads of an expansion (nanopore amplicons of FMR1, targeted or whole-genome long reads) rarely
+align through the repeat: the aligner soft-clips it, or the read stops inside it. The coverage and the
+reads track then show clips and structural hints, not a size. The **repeat inspector** sizes the
+repeat in every read and draws the result.
+
+**Opening it.**
+- **Known loci.** The pathogenic tandem-repeat loci of STRchive (77 loci with motifs of 12 bp or
+  less: FMR1, HTT, DMPK, FXN, C9orf72, RFC1, the ATXNs…) get an orange pill on the ruler when they
+  are in view: *FMR1 CGG repeat · inspect ▸*. Their tooltip names the disease, the inheritance and
+  where the repeat lies in the gene.
+- **Any other repeat.** **Shift+drag** across it in the plot, then *Inspect repeat*. The motif
+  (1–6 bp) is the one whose units cover most of the selected reference.
+
+**How a read is measured.**
+- Each read is rebuilt over the locus from what it carries: its soft clips, its aligned bases with
+  their mismatches, and its insertions.
+- The repeat is what lies between the two unique 40-bp flanks of the reference, wherever they are in
+  the read. Its size is the tract length divided by the motif length, so that sequencing indels inside
+  the tract average out.
+- A read with both flanks **spans** the repeat. A read with one flank that ends inside the repeat
+  gives a **lower bound**: the motif-rich stretch it reaches.
+- Primary alignments only, up to 20,000 reads over the locus (every k-th kept past that).
+
+**What is drawn.**
+- **Size categories** of the locus across both panels. FMR1 uses the ACMG technical standard: normal
+  ≤ 44, intermediate 45–54, premutation 55–200, full mutation > 200 (Spector et al. 2021). HTT uses
+  the ACMG/ASHG guidelines: normal ≤ 26, intermediate 27–35, reduced penetrance 36–39, full
+  penetrance ≥ 40 (1998). The other loci use STRchive's benign, intermediate and pathogenic ranges.
+- **A histogram of sizes** with the reference size and the alleles marked.
+- **A waterfall of reads** on the same axis, sorted by size, drawn unit by unit:
+  - the pathogenic motif, blue;
+  - a benign or reference motif when it differs from the pathogenic one (RFC1's AAAAG against
+    AAGGG), teal;
+  - a known interruption (AGG at FMR1, CAA at HTT), orange;
+  - any other unit, violet.
+
+  Loss of the 5′ AGG interruptions of an FMR1 allele, which makes a premutation more likely to
+  expand when transmitted by the mother (Nolin et al. 2015), reads as a missing orange stripe.
+- **Alleles.** At most two, from the modes of a kernel density on the log of the size, so that a
+  peak's width grows with its size as stutter does. Each allele gives its mode, P5–P95, its read
+  count, its category and its commonest interruption pattern. It is *broad* when P10–P90 exceeds a
+  quarter of its median. A broad allele can be somatic mosaicism, or stutter added by PCR
+  amplification and by nanopore sequencing of GC-rich repeats: the panel does not decide which.
+- **A size range.** Drag across the plot to measure it: its reads, median, P5–P95, interruption
+  patterns and the share of each category.
+
+**When few reads span the repeat.**
+- With 20 spanning reads or more, sizes come from them alone; the reads that stop inside are only
+  counted.
+- Below 20, an amber banner says so. The reads stopping inside are added at the length they reach,
+  hatched in the histogram and ending in a chevron in the waterfall: lower bounds, so the alleles may
+  be longer than shown.
+- When many reads stop beyond the longest spanning ones, a note says that long alleles are
+  under-represented among the spanning reads. Long expansions are spanned less often.
+
+The inspector works on exported pages too, from the reads they embed (the reads track must have
+been on when the page was exported). It reports evidence from the reads, not a diagnostic call.
+
 ## Moving inside a view
 
 The search box next to the gene name moves the window without leaving the view. It takes, in
@@ -1256,6 +1316,8 @@ src/standalone/
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
   liftover.ts                    the other build's coordinates (Ensembl assembly map, GRCh38 ⇄ GRCh37)
   assembly.ts                    the build of a file from its header's chromosome lengths
+  strCatalog.ts                  pathogenic tandem-repeat loci (generated from STRchive, MIT License)
+  repeatScan.ts                  repeat sizing from the reads: rebuilt reads, flanks, units, alleles
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)
   gtex.ts                        GTEx Portal API v2 client
 src/components/
@@ -1313,6 +1375,18 @@ If the viewer contributes to a publication, please cite it
   2015;31:143–145 (the assembly map used to lift coordinates between GRCh38 and GRCh37).
 - Schneider VA et al. *Evaluation of GRCh38 and de novo haploid genome assemblies demonstrates the
   enduring quality of the reference assembly.* Genome Res 2017;27:849–864.
+- Hiatt L, Weisburd B, Dolzhenko E et al. *STRchive: a dynamic resource detailing population-level
+  and locus-specific insights at tandem repeat disease loci.* Genome Med 2025;17:29.
+  doi:10.1186/s13073-025-01454-4 (the repeat loci, motifs and ranges; data under the MIT License).
+- Spector E, Behlmann A, Kronquist K et al. *Laboratory testing for fragile X, 2021 revision: a
+  technical standard of the American College of Medical Genetics and Genomics (ACMG).* Genet Med
+  2021;23:799–812. doi:10.1038/s41436-021-01115-y (FMR1 size classes).
+- ACMG/ASHG Huntington Disease Genetic Testing Working Group. *Laboratory guidelines for Huntington
+  disease genetic testing.* Am J Hum Genet 1998;62:1243–1247 (HTT size classes).
+- Nolin SL et al. *Fragile X full mutation expansions are inhibited by one or more AGG interruptions
+  in premutation carriers.* Genet Med 2015;17:358–364.
+- Dolzhenko E et al. *Characterization and visualization of tandem repeats at genome scale.* Nat
+  Biotechnol 2024 (TRGT and its read waterfall plots, which the inspector's waterfall follows).
 - GMOD JavaScript libraries: [bam-js](https://github.com/GMOD/bam-js),
   [cram-js](https://github.com/GMOD/cram-js), [indexedfasta-js](https://github.com/GMOD/indexedfasta-js).
 

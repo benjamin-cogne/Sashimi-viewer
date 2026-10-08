@@ -33,6 +33,9 @@ import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVa
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
 import { GeneSuggest } from './sashimi/GeneSuggest';
+import { RepeatInspector } from './sashimi/RepeatInspector';
+import { FLANK as REPEAT_FLANK, detectMotif, makeLocus, type RepeatLocus } from '../standalone/repeatScan';
+import { STR_LOCI, type StrLocus } from '../standalone/strCatalog';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
@@ -94,6 +97,8 @@ interface SashimiViewerProps {
    * move. `onRemove` takes the line away.
    */
   liftover?: { from: string; to: string; segments: (chrom: string, start: number, end: number, signal: AbortSignal) => Promise<LiftSegment[]>; onRemove?: () => void } | null;
+  /** the genome build of the view ('GRCh38', 'GRCh37'): places the known repeat loci (strCatalog.ts) */
+  build?: string;
 }
 
 /** Every user option of the viewer, as stored in a session file. Samples are referred to by id (the host maps names ↔ ids). */
@@ -344,6 +349,10 @@ const RULER_BASE_H = 42;
 const LIFT_ROW_H = 18;
 const LIFT_TOP = 18;
 const LIFT_COLOR = '#0f766e';
+/** tandem repeats: the catalogue's pills, the Shift+drag selection */
+const REPEAT_COLOR = '#ea580c';
+const chromKeyOf = (c: string) => c.replace(/^chr/i, '').toUpperCase().replace(/^MT$/, 'M');
+const revCompSeq = (s: string) => s.split('').reverse().map(c => ({ A: 'T', C: 'G', G: 'C', T: 'A' } as Record<string, string>)[c] ?? 'N').join('');
 const COVERAGE_H = 130;
 const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
 const JUNC_LEVEL_STEP = 17; // extra apex height per arc nesting level
@@ -1059,7 +1068,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false, liftover = null,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false, liftover = null, build = 'GRCh38',
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   // the ruler grows by a line when the other build's coordinates are shown
@@ -1211,7 +1220,12 @@ export default function SashimiViewer({
   const gtexIdSeq = useRef(-1);
   const [pickerSearch, setPickerSearch] = useState('');
   const [dragging, setDragging] = useState(false);
-  const [regionSelect, setRegionSelect] = useState<{ startX: number; currentX: number } | null>(null);
+  /** a drag across the plot: Ctrl zooms to it, Shift selects it for the repeat inspector */
+  const [regionSelect, setRegionSelect] = useState<{ startX: number; currentX: number; repeat?: boolean } | null>(null);
+  /** a stretch selected with Shift+drag (0-based half-open), offered to the repeat inspector */
+  const [repeatSel, setRepeatSel] = useState<{ start: number; end: number; busy?: boolean; error?: string } | null>(null);
+  /** the repeat inspector's locus, while it is open */
+  const [inspect, setInspect] = useState<RepeatLocus | null>(null);
   const [hover, setHover] = useState<{ px: number; py: number } | null>(null);
   /** Detail popover opened by clicking a junction arc or an exon (HTML, never exported). */
   const [popover, setPopover] = useState<
@@ -1753,6 +1767,48 @@ export default function SashimiViewer({
   }, [liftover, currentChrom, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
   /** the pieces for the view, when they are the current build's and chromosome's */
   const liftHere = liftover && lift && lift.to === liftover.to && lift.chrom === currentChrom ? lift.segs : null;
+  /** The known repeat loci (STRchive) of the view, in the view's build: their stretch, 0-based half-open. */
+  const strHere = useMemo(() => {
+    const out: { entry: StrLocus; start: number; end: number }[] = [];
+    for (const entry of STR_LOCI) {
+      if (chromKeyOf(entry.chrom) !== chromKeyOf(currentChrom)) continue;
+      const [start, end] = build === 'GRCh37' ? entry.hg19 : entry.hg38;
+      if (end > viewStart && start < viewEnd) out.push({ entry, start, end });
+    }
+    return out;
+  }, [currentChrom, viewStart, viewEnd, build]);
+  /**
+   * Opens the repeat inspector on a known locus (its motifs) or on a stretch picked by hand (the motif of its reference).
+   * The reference around it comes from the source (a FASTA, the network), else from the reads' answer (an exported page).
+   */
+  const openRepeat = useCallback(async (where: { start: number; end: number }, entry?: StrLocus) => {
+    const pad = 2000, a = Math.max(0, where.start - pad), b = where.end + pad;
+    if (!entry) setRepeatSel(p => p && { ...p, busy: true, error: undefined });
+    try {
+      let ref: { start: number; seq: string } | null = null;
+      const s = await ds.getReference(currentChrom, a, b).catch(() => null);
+      if (s && !/^N*$/.test(s)) ref = { start: a, seq: s };
+      if (!ref) {
+        const sid = tracksRef.current.find(t => t.sampleId > 0 && !t.gtex)?.sampleId;
+        if (sid) ref = (await ds.getReads(sid, currentChrom, where.start - REPEAT_FLANK - 50, where.end + REPEAT_FLANK + 50, false, 50, 'reads', 0, 1, {}).catch(() => null))?.reference ?? null;
+      }
+      if (!ref) throw new Error('no reference sequence for this stretch (add the FASTA, or check the network)');
+      let motif: string | undefined;
+      if (!entry) {
+        const sel = ref.seq.slice(Math.max(0, where.start - ref.start), Math.max(0, where.end - ref.start));
+        const m = detectMotif(sel);
+        if (!m) throw new Error('no tandem repeat in the selection: select the repeat itself');
+        motif = m.motif;
+      }
+      const locus = makeLocus(ref.seq, ref.start, currentChrom, where, entry, motif);
+      if (!locus) throw new Error(entry ? `the ${entry.gene} repeat was not found in the reference here (another build?)` : 'the repeat is too close to the end of the known reference to take its flanks');
+      setInspect(locus);
+      setRepeatSel(null);
+    } catch (e: any) {
+      if (entry) setRepeatSel({ start: where.start, end: where.end, error: e?.message ?? String(e) });
+      else setRepeatSel(p => p && { ...p, busy: false, error: e?.message ?? String(e) });
+    }
+  }, [ds, currentChrom]);
   /** a 0-based position in the other build, as text (its chromosome when it lands on another one), or null */
   const liftedText = useCallback((pos0: number, withChrom = false) => {
     if (!liftHere) return null;
@@ -2317,8 +2373,9 @@ export default function SashimiViewer({
     if (e.button !== 0) return;
     const { x } = svgPoint(e);
     setPopover(null); setSeqPanel(null);
-    if (e.ctrlKey || e.metaKey) {
-      setRegionSelect({ startX: x, currentX: x });
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      setRegionSelect({ startX: x, currentX: x, repeat: e.shiftKey && !(e.ctrlKey || e.metaKey) });
+      setRepeatSel(null);
     } else {
       setDragging(true);
       dragStart.current = { x: e.clientX, vStart: scale.vStart, vEnd: scale.vEnd };
@@ -2361,8 +2418,13 @@ export default function SashimiViewer({
       const x1 = Math.min(regionSelect.startX, regionSelect.currentX);
       const x2 = Math.max(regionSelect.startX, regionSelect.currentX);
       if (x2 - x1 > 5) {
-        const va = scale.pxToV(x1), vb = scale.pxToV(x2);
-        setViewFromV(Math.min(va, vb), Math.max(va, vb));
+        if (regionSelect.repeat) {
+          const a = Math.floor(scale.invert(x1)), b = Math.ceil(scale.invert(x2));
+          setRepeatSel({ start: Math.min(a, b), end: Math.max(a, b) });
+        } else {
+          const va = scale.pxToV(x1), vb = scale.pxToV(x2);
+          setViewFromV(Math.min(va, vb), Math.max(va, vb));
+        }
       }
       setRegionSelect(null);
       return;
@@ -6396,9 +6458,46 @@ export default function SashimiViewer({
           {regionSelect && (() => {
             const x1 = Math.min(regionSelect.startX, regionSelect.currentX);
             const x2 = Math.max(regionSelect.startX, regionSelect.currentX);
-            return <rect data-export="skip" x={x1} y={0} width={x2 - x1} height={totalHeight} fill={withAlpha(INK.select, 0.12)} stroke={INK.select} strokeWidth={1} strokeDasharray="4 2" />;
+            return <rect data-export="skip" x={x1} y={0} width={x2 - x1} height={totalHeight} fill={withAlpha(regionSelect.repeat ? REPEAT_COLOR : INK.select, 0.12)} stroke={regionSelect.repeat ? REPEAT_COLOR : INK.select} strokeWidth={1} strokeDasharray="4 2" />;
           })()}
+          {/* A stretch picked for the repeat inspector (Shift+drag) */}
+          {repeatSel && (() => {
+            const xa = scale.x(repeatSel.start), xb = scale.x(repeatSel.end), l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+            return r > l ? <rect data-export="skip" x={l} y={RULER_H} width={r - l} height={legendY - RULER_H} fill={withAlpha(REPEAT_COLOR, 0.08)} stroke={REPEAT_COLOR} strokeWidth={1} strokeDasharray="4 2" pointerEvents="none" /> : null;
+          })()}
+          {/* Known repeat loci in view: a pill on the ruler opens the inspector */}
+          {strHere.map(({ entry, start, end }) => {
+            const xa = scale.x(start), xb = scale.x(end), cx = (Math.max(PLOT_LEFT, Math.min(xa, xb)) + Math.min(plotRight, Math.max(xa, xb))) / 2;
+            if (cx < PLOT_LEFT || cx > plotRight) return null;
+            const motif = entry.path[0] ?? entry.ref[0] ?? '';
+            const text = `${entry.gene} ${entry.strand === '-' ? revCompSeq(motif) : motif} repeat · inspect ▸`, w = text.length * 5.7 + 14;
+            const lx = Math.min(plotRight - w, Math.max(PLOT_LEFT, cx - w / 2));
+            return (
+              <g key={entry.id} data-export="skip" style={{ cursor: 'pointer' }} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); void openRepeat({ start, end }, entry); }}>
+                <title>{`${entry.disease} (${entry.inh}) · ${entry.where}\n${currentChrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')} · STRchive ${entry.id}\nClick to size the repeat in the reads (repeat inspector)`}</title>
+                <line x1={Math.min(xa, xb)} y1={RULER_H - 2} x2={Math.max(xa, xb)} y2={RULER_H - 2} stroke={REPEAT_COLOR} strokeWidth={3} />
+                <rect x={lx} y={2} width={w} height={15} rx={7.5} fill="#fff7ed" stroke={REPEAT_COLOR} />
+                <text x={lx + w / 2} y={13} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#9a3412">{text}</text>
+              </g>
+            );
+          })}
         </svg>
+        {repeatSel && (() => {
+          const xa = scale.x(repeatSel.start), xb = scale.x(repeatSel.end), l = Math.max(PLOT_LEFT, Math.min(xa, xb));
+          return (
+            <div className="absolute z-20 flex items-center gap-2 rounded-lg border border-orange-300 bg-white px-2 py-1 text-[11.5px] shadow-lg" style={{ left: Math.min(l, svgWidth - 360), top: RULER_H + 6 }} onMouseDown={e => e.stopPropagation()}>
+              <span className="font-mono text-slate-600">{currentChrom}:{(repeatSel.start + 1).toLocaleString('en-US')}-{repeatSel.end.toLocaleString('en-US')}</span>
+              <button disabled={repeatSel.busy} onClick={() => void openRepeat({ start: repeatSel.start, end: repeatSel.end })} className="rounded-md bg-orange-600 px-2 py-0.5 font-semibold text-white hover:bg-orange-700 disabled:opacity-50"
+                title="Find the tandem repeat in the selection (its motif from the reference) and size it in every sample's reads">{repeatSel.busy ? 'Looking…' : '⟲ Inspect repeat'}</button>
+              {repeatSel.error && <span className="text-red-700 max-w-[260px]">{repeatSel.error}</span>}
+              <button onClick={() => setRepeatSel(null)} className="text-slate-400 hover:text-slate-700" title="Clear the selection">×</button>
+            </div>
+          );
+        })()}
+        {inspect && (
+          <RepeatInspector locus={inspect} ds={ds} onClose={() => setInspect(null)}
+            samples={tracks.filter(t => t.sampleId > 0 && !t.gtex).map((t, i) => ({ id: t.sampleId, name: t.sampleName, color: TRACK_COLORS[i % TRACK_COLORS.length] }))} />
+        )}
 
         {/* HTML tooltip (crisper text than SVG, never exported) */}
         {hoverInfo && !popover && (
@@ -6684,7 +6783,7 @@ export default function SashimiViewer({
         </div>
       )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
-        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
+        Drag to pan · Ctrl+drag to zoom into a region · Shift+drag to inspect a repeat · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>
     </div>
   );
