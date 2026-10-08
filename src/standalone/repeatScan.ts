@@ -29,6 +29,8 @@ import type { StrLocus } from './strCatalog';
 export const FLANK = 40;
 /** seeds taken in a flank: exact matches of this length, every SEED_STEP bases */
 const SEED = 10, SEED_STEP = 2;
+/** edits allowed between a flank and the read (40 bp: 25 %, above nanopore error rates; a flank-like stretch inside the repeat needs 15 or more) */
+const MAX_FLANK_EDITS = 10;
 /** spanning reads needed to size a sample from them alone (below it, the reads stopping inside count as lower bounds) */
 export const SPAN_MIN = 20;
 
@@ -58,6 +60,7 @@ export interface RepeatLocus {
 const COMP: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 export const revComp = (s: string) => { let o = ''; for (let i = s.length - 1; i >= 0; i--) o += COMP[s[i]] ?? 'N'; return o; };
 const rotations = (m: string) => Array.from({ length: m.length }, (_, i) => m.slice(i) + m.slice(0, i));
+const reverse = (s: string) => s.split('').reverse().join('');
 const hamming = (a: string, b: string) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
 
 /**
@@ -193,50 +196,100 @@ export function readSequence(r: AlignedRead, ref: string, refStart: number): str
   return parts.join('');
 }
 
-/** Where a flank sits in a read: the read position it ends at (`left`) or starts at (right), from its exact seeds (median). */
-function flankAt(seq: string, flank: string, left: boolean, from = 0): number | null {
-  const hits: number[] = [];
-  for (let o = 0; o + SEED <= flank.length; o += SEED_STEP) {
-    const j = seq.indexOf(flank.substr(o, SEED), from);
-    if (j >= 0) hits.push(left ? j - o + flank.length : j - o);
+/**
+ * Semi-global edit distance of `pat` (used whole) in `text` (free ends): the fewest edits, and where the best alignment
+ * ends in `text` (exclusive).
+ */
+function fitPattern(pat: string, text: string): { ed: number; end: number } {
+  const n = text.length;
+  let prev = new Array<number>(n + 1).fill(0), cur = new Array<number>(n + 1);
+  for (let i = 1; i <= pat.length; i++) {
+    cur[0] = i;
+    const c = pat[i - 1];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (text[j - 1] === c ? 0 : 1));
+    [prev, cur] = [cur, prev];
   }
-  if (!hits.length) return null;
-  hits.sort((a, b) => a - b);
-  return hits[hits.length >> 1];
+  let ed = Infinity, end = 0;
+  for (let j = 0; j <= n; j++) if (prev[j] < ed) { ed = prev[j]; end = j; }
+  return { ed, end };
+}
+
+/**
+ * Where a flank sits in a read: the read position it ends at (`left`) or starts at (right), or null. Exact seeds of the
+ * flank propose places; each place is checked by aligning the whole flank there, and taken only within
+ * MAX_FLANK_EDITS: a GC-rich seed also matches inside a GC-rich repeat (TCGGGGGCGG among erroneous CGG units at
+ * FMR1), where the flank itself is nowhere. The first place that passes, from `from` on, wins; the boundary is where the
+ * flank's alignment ends (left) or starts (right).
+ */
+function flankAt(seq: string, flank: string, left: boolean, from = 0): number | null {
+  const at: number[] = [];
+  for (let o = 0; o + SEED <= flank.length; o += SEED_STEP) {
+    const key = flank.substr(o, SEED);
+    for (let j = seq.indexOf(key, from); j >= 0; j = seq.indexOf(key, j + 1)) at.push(j - o);
+  }
+  if (!at.length) return null;
+  at.sort((a, b) => a - b);
+  const slack = 8;
+  for (let i = 0; i < at.length;) {
+    let j = i; while (j + 1 < at.length && at[j + 1] - at[i] <= slack) j++;
+    const start = Math.max(0, at[(i + j) >> 1] - slack), text = seq.slice(start, start + flank.length + 2 * slack);
+    if (left) {
+      const f = fitPattern(flank, text);
+      if (f.ed <= MAX_FLANK_EDITS) return start + f.end;
+    } else {
+      const f = fitPattern(reverse(flank), reverse(text));
+      if (f.ed <= MAX_FLANK_EDITS) return start + text.length - f.end;
+    }
+    i = j + 1;
+  }
+  return null;
 }
 
 /**
  * The units of a tract in the motif's phase: P pathogenic motif, B benign or reference motif, I known interruption,
  * o another unit; a base or two breaking the phase (an indel) are skipped to the next motif unit.
  */
-export function tokenize(tract: string, locus: RepeatLocus): string {
+export function tokenize(tract: string, locus: RepeatLocus): string { return units(tract, locus).tok; }
+
+/** The units of a tract (tokenize) with where each one ends in it. */
+function units(tract: string, locus: RepeatLocus): { tok: string; ends: number[] } {
   const k = locus.k;
   // in the motif's phase only: a unit of another phase is a shifted read, brought back by the resync below
   const P = new Set(locus.pathogenic), B = new Set(locus.benign), I = new Set(locus.interruptions);
-  let out = '';
+  let tok = '';
+  const ends: number[] = [];
   for (let i = 0; i + k <= tract.length;) {
     const s = tract.substr(i, k);
-    if (P.has(s)) { out += 'P'; i += k; continue; }
-    if (B.has(s)) { out += 'B'; i += k; continue; }
-    if (I.has(s)) { out += 'I'; i += k; continue; }
+    const c = P.has(s) ? 'P' : B.has(s) ? 'B' : I.has(s) ? 'I' : '';
+    if (c) { tok += c; i += k; ends.push(i); continue; }
     let j = 1;
     while (j < k && !P.has(tract.substr(i + j, k)) && !B.has(tract.substr(i + j, k))) j++;
     if (j < k) { i += j; continue; }
-    out += 'o'; i += k;
+    tok += 'o'; i += k; ends.push(i);
   }
-  return out;
+  return { tok, ends };
 }
 
-/** Length of the motif-rich stretch at the start of `s`: up to the last motif unit before two other units in a row. */
-function motifRun(s: string, locus: RepeatLocus): number {
-  const tok = tokenize(s, locus);
-  let end = 0, miss = 0, pos = 0;
-  for (const t of tok) {
-    pos += locus.k;
-    if (t === 'P' || t === 'B' || t === 'I') { end = pos; miss = 0; } else if (++miss >= 2) break;
+/** units of the window over which a run's motif share is judged, and the share it must keep */
+const RUN_WINDOW = 10, RUN_SHARE = 0.6;
+/**
+ * The motif-rich stretch at the start of `s`: its units and bases, up to the last motif unit before the share of motif
+ * units over the last RUN_WINDOW drops under RUN_SHARE (sequencing errors in a long GC-rich repeat break a stricter run).
+ */
+function motifRun(s: string, locus: RepeatLocus): { units: number; bases: number } {
+  const { tok, ends } = units(s, locus);
+  let last = -1, inWindow = 0;
+  for (let i = 0; i < tok.length; i++) {
+    const good = tok[i] !== 'o';
+    if (good) inWindow++;
+    if (i >= RUN_WINDOW && tok[i - RUN_WINDOW] !== 'o') inWindow--;
+    if (i + 1 >= Math.min(RUN_WINDOW, 3) && inWindow < RUN_SHARE * Math.min(RUN_WINDOW, i + 1)) break;
+    if (good) last = i;
   }
-  return end;
+  return { units: last + 1, bases: last >= 0 ? ends[last] : 0 };
 }
+/** The same locus read backwards (its motifs reversed): the run before a right flank, measured from the flank. */
+const backwards = (locus: RepeatLocus): RepeatLocus => ({ ...locus, pathogenic: locus.pathogenic.map(reverse), benign: locus.benign.map(reverse), interruptions: locus.interruptions.map(reverse) });
 
 export interface ReadRepeat {
   name: string;
@@ -254,7 +307,7 @@ export interface RepeatReads { spanning: ReadRepeat[]; truncated: ReadRepeat[]; 
 /** The repeat of each read (primary alignments only: a supplementary part is the same read again). */
 export function measureReads(reads: AlignedRead[], ref: string, refStart: number, locus: RepeatLocus): RepeatReads {
   const out: RepeatReads = { spanning: [], truncated: [], skipped: 0, total: 0 };
-  const k = locus.k;
+  const k = locus.k, back = backwards(locus);
   for (const r of reads) {
     if (r.f & 0x900) continue;
     out.total++;
@@ -268,43 +321,25 @@ export function measureReads(reads: AlignedRead[], ref: string, refStart: number
         out.spanning.push({ name: r.n, units: Math.round(tract.length / k), tokens: tokenize(tract, locus), truncated: false, reverse: r.r === 1 });
         done = true; break;
       }
+      // one flank and no other: the repeat is at least the motif-rich stretch next to it, whatever follows (the read's
+      // end, or sequence that is not the other flank)
       if (L != null && R == null) {
-        const tail = s.slice(L), n = motifRun(tail, locus);
-        if (n >= 3 * k && L + n >= s.length - 2 * k) { out.truncated.push({ name: r.n, units: Math.round(n / k), tokens: tokenize(tail.slice(0, n), locus), truncated: true, from: 'left', reverse: r.r === 1 }); done = true; break; }
+        const run = motifRun(s.slice(L), locus);
+        if (run.units >= 3) { out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(s.slice(L, L + run.bases), locus), truncated: true, from: 'left', reverse: r.r === 1 }); done = true; break; }
       }
       if (R != null && L == null) {
-        // the motif-rich stretch before the right flank, read back from it
-        const len = backRun(s.slice(0, R), locus);
-        if (len >= 3 * k && R - len <= 2 * k) { out.truncated.push({ name: r.n, units: Math.round(len / k), tokens: tokenize(s.slice(R - len, R), locus), truncated: true, from: 'right', reverse: r.r === 1 }); done = true; break; }
+        const run = motifRun(reverse(s.slice(0, R)), back);
+        if (run.units >= 3) { out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(s.slice(R - run.bases, R), locus), truncated: true, from: 'right', reverse: r.r === 1 }); done = true; break; }
       }
     }
     if (!done) {
       // a read that is all repeat (inside a long expansion)
-      const n = motifRun(seq, locus);
-      if (n >= 10 * k && n >= 0.8 * seq.length) out.truncated.push({ name: r.n, units: Math.round(n / k), tokens: tokenize(seq.slice(0, n), locus), truncated: true, from: 'none', reverse: r.r === 1 });
+      const run = motifRun(seq, locus);
+      if (run.units >= 10 && run.bases >= 0.8 * seq.length) out.truncated.push({ name: r.n, units: Math.round(run.bases / k), tokens: tokenize(seq.slice(0, run.bases), locus), truncated: true, from: 'none', reverse: r.r === 1 });
       else out.skipped++;
     }
   }
   return out;
-}
-
-/** Length of the motif-rich stretch ending at the end of `s` (the repeat before a right flank). */
-function backRun(s: string, locus: RepeatLocus): number {
-  const k = locus.k;
-  const P = new Set([...locus.pathogenic, ...locus.benign, ...locus.interruptions]);
-  const end = s.length;
-  let pos = s.length, miss = 0, start = s.length;
-  while (pos - k >= 0) {
-    const u = s.substr(pos - k, k);
-    if (P.has(u)) { start = pos - k; miss = 0; pos -= k; continue; }
-    // resync by a base or two
-    let j = 1;
-    while (j < k && !P.has(s.substr(pos - k - j, k))) j++;
-    if (j < k && pos - k - j >= 0) { pos -= j; continue; }
-    if (++miss >= 2) break;
-    pos -= k;
-  }
-  return end - start;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

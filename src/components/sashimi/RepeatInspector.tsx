@@ -131,7 +131,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     for (const u of r.reads.spanning) span[Math.min(nb - 1, Math.floor(u.units / step))]++;
     if (!enough) for (const u of r.reads.truncated) trunc[Math.min(nb - 1, Math.floor(u.units / step))]++;
     const yMax = Math.max(1, ...span.map((v, i) => v + trunc[i]));
-    const base = top + hH, wTop = base + 34;
+    const base = top + hH, wTop = base + 52;
     const rowH = Math.max(1.4, Math.min(4, 320 / Math.max(1, rows.length))), wH = rows.length * rowH;
     const H = wTop + wH + 10;
     const sel = brush ? view.used.filter(u => u.units >= Math.min(...brush) && u.units <= Math.max(...brush)) : null;
@@ -186,7 +186,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               return locus.categories.map(c => {
                 if (c.min > xMax) return null;
                 const a = x(Math.max(0, c.min - 0.5)), b = x(Math.min(xMax, c.max + 0.5));
-                const label = `${c.name} ${c.max === Infinity ? `> ${c.min - 1}` : c.min === 0 ? `≤ ${c.max}` : `${c.min}–${c.max}`}`, tw = label.length * 6.3;
+                const label = `${c.name} ${c.max === Infinity ? `> ${c.min - 1}` : c.min === 0 ? `≤ ${c.max}` : `${c.min}–${c.max}`}`, tw = label.length * 7;
                 const inside = tw + 8 <= b - a;
                 let lx = inside ? a + 4 : Math.max((a + b) / 2 - tw / 2, aboveRight + 8);
                 if (!inside) aboveRight = lx + tw;
@@ -234,6 +234,11 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             {/* waterfall */}
             <text x={L - 8} y={wTop + 8} textAnchor="end" fontSize={10} fill="#64748b">reads</text>
             <text x={L - 8} y={wTop + 20} textAnchor="end" fontSize={10} fill="#64748b">by size</text>
+            <text x={L} y={wTop - 6} fontSize={10.5} fontWeight={600} fill="#334155">
+              {enough
+                ? `${fmt(rows.length)} of the ${fmt(r.reads.spanning.length)} spanning reads (both flanks), evenly by size · reads stopping inside not drawn`
+                : `${fmt(rows.length)} of ${fmt(view.used.length)} reads: ${fmt(r.reads.spanning.length)} spanning, the others stopping inside (chevron: at least that long)`}
+            </text>
             {rows.map((r, k) => {
               const y = wTop + k * rowH, runs: JSX.Element[] = [];
               const t = r.tokens;
@@ -276,8 +281,10 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           {!enough && <span className="inline-flex items-center gap-1.5"><svg width="14" height="10"><rect width="14" height="10" fill="url(#ri-hatch)" stroke="#6f8fd6" strokeWidth="0.5" /></svg>stops inside the repeat: at least that long</span>}
         </div>
         <div className="px-5 pt-2 pb-4 text-[11px] leading-relaxed text-slate-500">
-          Each read is rebuilt over the locus from its soft clips, aligned bases and insertions; its repeat is what lies between the {FLANK}-bp flanks of the reference
-          (found wherever they are in the read), its size the tract length divided by {locus.k}, so that sequencing indels inside it average out. Primary alignments only;
+          Each read is rebuilt over the locus from its soft clips, aligned bases and insertions; its repeat is what lies between the {FLANK}-bp flanks of the reference,
+          found wherever they are in the read and each checked by aligning it whole (10 edits at most: a GC-rich piece of a flank also occurs inside a GC-rich repeat),
+          its size the tract length divided by {locus.k}, so that sequencing indels inside it average out. A read with one flank gives a lower bound: the stretch next to it
+          while at least 60 % of its last 10 units are the motif. Primary alignments only;
           {r.sampled ? ` ${fmt(INSPECT_MAX_READS)} of the ${fmt(r.total)} reads over the locus (every k-th kept);` : ` ${fmt(r.reads.total)} reads over the locus;`} {fmt(r.reads.skipped)} do not reach the repeat with a flank.
           Alleles: modes of a kernel density on the log of the size, at most two; "broad" when P10–P90 exceeds a quarter of the median.
           {locus.categorySource && <> Categories: {locus.categorySource}.</>} PCR amplification and nanopore sequencing both add stutter to GC-rich repeats: a broad allele is not by itself mosaicism.

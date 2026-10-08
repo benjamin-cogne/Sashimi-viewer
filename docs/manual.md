@@ -983,8 +983,13 @@ repeat in every read and draws the result.
 - The repeat is what lies between the two unique 40-bp flanks of the reference, wherever they are in
   the read. Its size is the tract length divided by the motif length, so that sequencing indels inside
   the tract average out.
-- A read with both flanks **spans** the repeat. A read with one flank that ends inside the repeat
-  gives a **lower bound**: the motif-rich stretch it reaches.
+- A flank is proposed by exact 10-bp seeds and checked by aligning it whole: 10 edits at most out of
+  40. A GC-rich seed of a flank also matches inside a GC-rich repeat (at FMR1 the 3′ flank's
+  `TCGGGGGCGG` occurs among CGG units with sequencing errors); without the check such a read would
+  pass for a short spanning one.
+- A read with both flanks **spans** the repeat. A read with one flank and not the other gives a
+  **lower bound**: the motif-rich stretch next to that flank, followed while at least 60 % of its
+  last 10 units are the motif.
 - Primary alignments only, up to 20,000 reads over the locus (every k-th kept past that).
 
 **What is drawn.**
