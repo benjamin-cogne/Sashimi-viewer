@@ -10,7 +10,7 @@ import ReactDOM from 'react-dom/client';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
-import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
+import { FOLDER_MAX_FILES, fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, type LocalSample } from './localSource';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
@@ -297,7 +297,11 @@ function App() {
     }
     setIntake(`Listing the folder ${h.name}…`);
     setNotes([`Reading ${h.name}…`]);
-    try { addFolder(h.name, h, await filesInFolder(h)); }
+    try {
+      const files = await filesInFolder(h);
+      addFolder(h.name, h, files);
+      if (files.length >= FOLDER_MAX_FILES) setNotes(n => [...n, `Only the first ${FOLDER_MAX_FILES.toLocaleString('en-US')} alignment files of ${h!.name} were listed: choose the folder holding the BAMs themselves (or a run folder) to see them all.`]);
+    }
     catch (e: any) { setError(`Could not list the folder ${h.name}: ${e.message}`); }
     finally { setIntake(null); }
   }, [addFolder, openFolderInput]);
@@ -321,6 +325,7 @@ function App() {
       const { folder, folderHandle, files, fileHandles, others } = await filesFromDrop(dt);
       for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
       if (folder) addFolder(folder, folderHandle, files); else if (files.length) addFiles(files);
+      if (files.length >= FOLDER_MAX_FILES) setNotes(n => [...n, `Only the first ${FOLDER_MAX_FILES.toLocaleString('en-US')} alignment files of the drop were listed: drop the folder holding the BAMs themselves (or a run folder) to see them all.`]);
       const session = others.find(f => /\.json$/i.test(f.name));
       if (session) void loadSessionRef.current?.(session);
       else if (!files.length && !folder && others.length) setNotes([`Nothing usable in the drop (${others.map(f => f.name).join(', ')}): expected BAM/CRAM files with their index, a FASTA, a folder, or a session .json.`]);
@@ -740,8 +745,11 @@ function App() {
     setViews(tabs);
     setActiveId(act?.id ?? null);
     if (act) setGene(act.opened.geneName);
-    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.`]);
-  }, [samples, ds]);
+    // the session's FASTA, when it had one and another (or none) is loaded: the bases then come from the web APIs
+    const faNote = session.fasta && !EMBEDDED && fasta?.fa.name !== session.fasta.file
+      ? ` The session used the reference ${session.fasta.file}, not loaded here: add it (with ${session.fasta.index}) for the same bases, else they come from the UCSC / Ensembl APIs.` : '';
+    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.${faNote}`]);
+  }, [samples, ds, fasta]);
 
   /**
    * Gets a session's files back by itself (Chromium): from the remembered run folder by relative path, else from
@@ -753,6 +761,9 @@ function App() {
     if (!missing.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
+    /** files found under the session's name but of another size (another file of that name), or whose bookmark no longer opens */
+    const changed: string[] = [], gone: string[] = [];
+    const sameSize = (f: File, size: number) => !size || f.size === size;
     if (session.folder) setIntake(`Looking for the session's files in ${session.folder}…`);
     try {
     if (session.folder) {
@@ -763,27 +774,37 @@ function App() {
           for (const m of missing) {
             if (!m.path || !m.indexPath) continue;
             const [f, i] = await Promise.all([fileInFolder(dir, m.path), fileInFolder(dir, m.indexPath)]);
-            if (f && i) out.push({ file: f, path: m.path }, { file: i, path: m.indexPath });
+            if (f && i && sameSize(f, m.size)) out.push({ file: f, path: m.path }, { file: i, path: m.indexPath });
+            else if (f && i) changed.push(m.file);
           }
         } else needPermission = true;
       }
     }
-    // individual bookmarks for what the folder did not give
+    // individual bookmarks for what the folder did not give: each on its own, so a file moved or deleted since (its
+    // bookmark then fails) or replaced by another of the same name (another size) leaves the others to be reopened
     const got = new Set(out.map(x => x.file.name));
     for (const m of missing) {
       if (got.has(m.file)) continue;
-      const [fh, ih] = await Promise.all([recallFile(m.file), recallFile(m.index)]);
-      if (!fh || !ih) continue;
-      if (await permitted(fh, ask) && await permitted(ih, ask)) {
-        out.push({ file: await fh.getFile() }, { file: await ih.getFile() });
-        fileHandlesRef.current.set(m.file, fh); fileHandlesRef.current.set(m.index, ih);
-      } else needPermission = true;
+      try {
+        const [fh, ih] = await Promise.all([recallFile(m.file), recallFile(m.index)]);
+        if (!fh || !ih) continue;
+        if (await permitted(fh, ask) && await permitted(ih, ask)) {
+          const [f, i] = await Promise.all([fh.getFile(), ih.getFile()]);
+          if (!sameSize(f, m.size)) { changed.push(m.file); continue; }
+          out.push({ file: f }, { file: i });
+          fileHandlesRef.current.set(m.file, fh); fileHandlesRef.current.set(m.index, ih);
+        } else needPermission = true;
+      } catch { gone.push(m.file); }
     }
     if (out.length) addFiles(out);
     const stillMissing = missing.filter(m => !out.some(x => x.file.name === m.file));
     setReopenState(stillMissing.length ? {
       folder: session.folder ?? '', ready: needPermission,
-      note: needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : undefined,
+      note: [
+        needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : '',
+        changed.length ? `${changed.join(', ')}: a file of that name was found but its size differs from the session's (another file), so it was not used` : '',
+        gone.length ? `${gone.join(', ')}: moved or deleted since this browser last opened ${gone.length === 1 ? 'it' : 'them'}` : '',
+      ].filter(Boolean).join(' · ') || undefined,
     } : null);
     } finally { setIntake(null); }
   }, [samples, addFiles]);

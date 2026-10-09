@@ -86,7 +86,14 @@ export async function pickFiles(): Promise<{ file: File; handle: FSHandle }[]> {
 const KEEP = /\.(bam|bai|cram|crai|fa|fasta|fna|fai|gzi|gz)$/i;
 /** a file the viewer reads: alignments, indexes, reference, and the files of registered kinds (asked each time: plugins register at load) */
 const keep = (name: string) => KEEP.test(name) || kindExtensions().some(x => name.toLowerCase().endsWith(x));
-const MAX_DEPTH = 4, MAX_FILES = 5000;
+/**
+ * How deep a folder is walked and how many of its files are listed. Depth counts the folders under the one given: a
+ * MinKNOW experiment holds its BAMs five levels down (sample / run / bam_pass / barcode01 / …bam), which a depth of 4
+ * missed when the experiment folder was dropped. A walk that stops at FOLDER_MAX_FILES says so (main.tsx).
+ */
+const MAX_DEPTH = 8;
+export const FOLDER_MAX_FILES = 20000;
+const MAX_FILES = FOLDER_MAX_FILES;
 
 /** Alignment-related files of a folder handle with their relative paths (metadata only; bounded depth and count). */
 export async function filesInFolder(dir: FSDirHandle): Promise<PathedFile[]> {
@@ -163,7 +170,7 @@ export async function filesFromDrop(dt: DataTransfer): Promise<{ folder: string 
       folder = folder ?? e.name;
       if (h && h.kind === 'directory' && !folderHandle) folderHandle = h as FSDirHandle;
       // paths are relative to the dropped folder itself
-      for (const c of await readDir(e as FileSystemDirectoryEntry)) await walk(c, '', 1);
+      for (const c of await readDir(e as FileSystemDirectoryEntry)) await walk(c, '', 0);
     } else {
       const f = plain[i];
       if (!f) continue;
