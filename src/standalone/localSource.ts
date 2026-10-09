@@ -772,8 +772,9 @@ export class LocalDataSource implements SashimiDataSource {
         if (!n) return;
         // the tags describe the read as sequenced: a hard-clipped record matches them only when MN says so
         if (m.mn != null ? m.mn !== n : Array.from(ops).some(v => (v & 15) === 5)) return;
-        const hp = tagNumber(r.getTag('HP')) ?? 0;
-        countRead(layer, view.start(r), ops, scratch.a, n, (view.flags(r) & 16) !== 0, m.mm, m.ml, cpgs, hp, mods);
+        // the haplotag, within its phase set: HP means nothing across sets
+        const t = view.hap(r);
+        countRead(layer, view.start(r), ops, scratch.a, n, (view.flags(r) & 16) !== 0, m.mm, m.ml, cpgs, t.hp ?? 0, mods, t.ps ?? null);
       };
       const span = Math.max(1, end - start);
       const progress = () => opts?.onProgress?.(Math.min(1, Math.max(0, Math.min(end, st.pe) - Math.max(start, st.ps)) / span));

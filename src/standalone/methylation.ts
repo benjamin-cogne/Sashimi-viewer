@@ -18,6 +18,11 @@
  *
  * Counts are kept per CpG, per haplotag (untagged, HP 1, HP 2) and per confidence bin, so the threshold can be applied
  * when a window is read back, from whatever has been counted.
+ *
+ * Haplotags only mean something within their phase set (PS): HP 1 of one set and HP 1 of the next one need not be the
+ * same chromosome copy, and where the reads of two sets overlap (around a set's ends, tens of kb with long reads) a CpG
+ * holds both. The tagged calls are therefore also kept per phase set, and a window read back gives each CpG's HP 1 and
+ * HP 2 from the one set holding most of its tagged calls (`ps`), the other sets' calls joining the untagged ones.
  */
 
 /** Confidence bins over [0.5, 1]: 32nds. */
@@ -101,17 +106,32 @@ export function callOf(pm: number, ph: number): { mod: boolean; conf: number } |
   return m > 0.5 ? { mod: true, conf: m } : { mod: false, conf: 1 - m };
 }
 
+/** A phase set's key in the counts: its PS value, or NO_PS for reads tagged without one. */
+const NO_PS = -1;
 /** CpG counts of one set of reads, with the histogram of their call confidences (for the filter threshold). */
 export class MethylCounts {
   sites = new Map<number, CpgCounts>();
+  /** the tagged calls (HP 1, 2) again, per CpG and phase set: [hap 1, 2][state][bin] */
+  bySet = new Map<number, Map<number, Uint16Array>>();
   hist = new Float64Array(CONF_BINS);
   calls = 0;
-  get bytes(): number { return this.sites.size * (HAPS * 2 * CONF_BINS * 2 + 48); }
-  add(pos: number, hap: number, mod: boolean, conf: number): void {
+  private setArrays = 0;
+  get bytes(): number { return this.sites.size * (HAPS * 2 * CONF_BINS * 2 + 48) + this.bySet.size * 64 + this.setArrays * (4 * CONF_BINS * 2 + 32); }
+  /** `ps`: the read's phase set (tagged reads; null or undefined when it has none) */
+  add(pos: number, hap: number, mod: boolean, conf: number, ps?: number | null): void {
     let c = this.sites.get(pos);
     if (!c) this.sites.set(pos, c = new Uint16Array(HAPS * 2 * CONF_BINS));
     const b = confBin(conf), i = idx(hap, mod ? 1 : 0, b);
     if (c[i] < 65535) c[i]++;
+    if (hap === 1 || hap === 2) {
+      let m = this.bySet.get(pos);
+      if (!m) this.bySet.set(pos, m = new Map());
+      const k = ps ?? NO_PS;
+      let a = m.get(k);
+      if (!a) { m.set(k, a = new Uint16Array(4 * CONF_BINS)); this.setArrays++; }
+      const j = idx(hap - 1, mod ? 1 : 0, b);
+      if (a[j] < 65535) a[j]++;
+    }
     this.hist[b]++; this.calls++;
   }
 }
@@ -121,9 +141,9 @@ export class MethylCounts {
  * positions of the reference over it, `hap` its haplotag (0 untagged).
  */
 export function countRead(out: MethylCounts, start: number, ops: ArrayLike<number>, codes: Uint8Array, n: number, reverse: boolean,
-  mm: string, ml: ArrayLike<number> | null, cpgs: Int32Array, hap: number, sc: ModScratch): number {
+  mm: string, ml: ArrayLike<number> | null, cpgs: Int32Array, hap: number, sc: ModScratch, ps?: number | null): number {
   const h = hap > 0 && hap <= 2 ? hap : 0;
-  return visitReadCalls(start, ops, codes, n, reverse, mm, ml, cpgs, sc, (cpg, mod, conf) => out.add(cpg, h, mod, conf));
+  return visitReadCalls(start, ops, codes, n, reverse, mm, ml, cpgs, sc, (cpg, mod, conf) => out.add(cpg, h, mod, conf, ps));
 }
 
 /**
@@ -131,10 +151,10 @@ export function countRead(out: MethylCounts, start: number, ops: ArrayLike<numbe
  * the C of the CpG `cpg`. Counted into `out` (when given) exactly as countRead counts a call, and returned as the
  * read's P(5mC) against unmodified, 5hmC set aside (what a read's `me` holds, × 255); null when there is no call.
  */
-export function addCall(out: MethylCounts | null, cpg: number, hap: number, pm: number, ph: number): number | null {
+export function addCall(out: MethylCounts | null, cpg: number, hap: number, pm: number, ph: number, ps?: number | null): number | null {
   const call = callOf(pm, ph);
   if (!call) return null;
-  out?.add(cpg, hap > 0 && hap <= 2 ? hap : 0, call.mod, call.conf);
+  out?.add(cpg, hap > 0 && hap <= 2 ? hap : 0, call.mod, call.conf, ps);
   return call.mod ? call.conf : 1 - call.conf;
 }
 
@@ -182,9 +202,14 @@ export interface MethylWindow {
   start: number; end: number;
   /** CpG positions (C of the CpG, 0-based) with at least one call */
   pos: Int32Array;
-  /** per haplotag 0 untagged, 1, 2: modified calls and all passing calls at each CpG */
+  /**
+   * per haplotag 0, 1, 2: modified calls and all passing calls at each CpG. HP 1 and HP 2 are those of the CpG's phase
+   * set (`ps`); 0 holds the untagged calls and those of reads tagged in another set
+   */
   mod: [Uint16Array, Uint16Array, Uint16Array];
   total: [Uint16Array, Uint16Array, Uint16Array];
+  /** each CpG's phase set: the PS holding most of its tagged calls; NaN when none, -1 for reads tagged without PS */
+  ps: Float64Array;
   /** confidence threshold applied (the lower edge of its bin), and the calls it left out of the window */
   threshold: number; filtered: number; calls: number;
   /** CpG islands of the reference over the window (Gardiner-Garden & Frommer 1987) */
@@ -217,6 +242,7 @@ export function methylWindow(layers: MethylCounts[], start: number, end: number,
   const pos = Int32Array.from([...merged.keys()].sort((a, b) => a - b));
   const mod = [new Uint16Array(pos.length), new Uint16Array(pos.length), new Uint16Array(pos.length)] as MethylWindow['mod'];
   const total = [new Uint16Array(pos.length), new Uint16Array(pos.length), new Uint16Array(pos.length)] as MethylWindow['total'];
+  const ps = new Float64Array(pos.length).fill(NaN);
   let filtered = 0, calls = 0;
   pos.forEach((p, i) => {
     const c = merged.get(p)!;
@@ -227,10 +253,30 @@ export function methylWindow(layers: MethylCounts[], start: number, end: number,
       if (b < tb) { filtered += x; continue; }
       total[h][i] += x; if (st === 1) mod[h][i] += x;
     }
+    // HP 1 and HP 2 within the CpG's phase set only: the set with most passing tagged calls (ties: the lower PS); the
+    // other sets' tagged calls go with the untagged ones
+    const sets = new Map<number, Uint16Array>();
+    for (const l of layers) for (const [k, a] of l.bySet.get(p) ?? []) {
+      const m = sets.get(k);
+      if (!m) sets.set(k, a.slice()); else for (let j = 0; j < a.length; j++) m[j] = Math.min(65535, m[j] + a[j]);
+    }
+    if (!sets.size) return;
+    const passing = (a: Uint16Array, h: number, st?: number) => { let n = 0; for (let s2 = 0; s2 < 2; s2++) { if (st != null && s2 !== st) continue; for (let b = tb; b < CONF_BINS; b++) n += a[idx(h, s2, b)]; } return n; };
+    let best: number | null = null, bestN = -1;
+    for (const [k, a] of sets) { const n = passing(a, 0) + passing(a, 1); if (n > bestN || (n === bestN && best != null && k < best)) { best = k; bestN = n; } }
+    if (best == null || sets.size === 1) { ps[i] = best ?? NaN; return; }
+    ps[i] = best;
+    for (const [k, a] of sets) {
+      if (k === best) continue;
+      for (let h = 0; h < 2; h++) {
+        const t = passing(a, h), m = passing(a, h, 1);
+        total[h + 1][i] -= t; mod[h + 1][i] -= m; total[0][i] += t; mod[0][i] += m;
+      }
+    }
   });
   let cpgs = 0;
   if (refSeq) for (let i = Math.max(0, start - refStart); i + 1 < refSeq.length && refStart + i < end; i++) if ((refSeq.charCodeAt(i) & 0xdf) === C && (refSeq.charCodeAt(i + 1) & 0xdf) === G) cpgs++;
-  return { start, end, pos, mod, total, threshold: 0.5 + tb / (2 * CONF_BINS), filtered, calls, islands: refSeq ? cpgIslands(refSeq, refStart, start, end) : [], cpgs };
+  return { start, end, pos, mod, total, ps, threshold: 0.5 + tb / (2 * CONF_BINS), filtered, calls, islands: refSeq ? cpgIslands(refSeq, refStart, start, end) : [], cpgs };
 }
 
 /**

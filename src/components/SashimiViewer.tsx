@@ -543,8 +543,23 @@ const METHYL_MIN_CALLS = 3;
 const METHYL_ASM_DELTA = 0.5, METHYL_ASM_CPGS = 5, METHYL_ASM_MIN_CALLS = 10;
 const METHYL_ASM_COLOR = '#7c3aed';
 interface MethylEntry { chrom: string; start: number; end: number; w?: MethylWindow; prefix?: MethylPrefix; loading: boolean; progress: number; error?: string }
-/** Prefix sums of a window's calls per lane (haplotag 0 untagged, 1, 2, and 3 all reads), for any range's sums in two binary searches. */
-interface MethylPrefix { pos: Int32Array; mod: Float64Array[]; total: Float64Array[]; tagged: boolean }
+/**
+ * Prefix sums of a window's calls per lane (haplotag 0 untagged, 1, 2, and 3 all reads), for any range's sums in two
+ * binary searches. `run` numbers the stretches of consecutive CpGs of one phase set (a CpG without tagged calls joins
+ * the stretch before it): HP 1 and HP 2 are only ever pooled within one, and `ps` gives each stretch's PS.
+ */
+interface MethylPrefix { pos: Int32Array; mod: Float64Array[]; total: Float64Array[]; tagged: boolean; run: Int32Array; ps: Float64Array }
+/** The phase-set stretches of CpGs: a new one wherever the CpG's set differs from the last set seen. */
+function methylRuns(ps: ArrayLike<number>): Int32Array {
+  const run = new Int32Array(ps.length);
+  let r = 0, last = NaN;
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    if (!Number.isNaN(p)) { if (!Number.isNaN(last) && p !== last) r++; last = p; }
+    run[i] = r;
+  }
+  return run;
+}
 function methylPrefix(w: MethylWindow): MethylPrefix {
   const n = w.pos.length, mod: Float64Array[] = [], total: Float64Array[] = [];
   for (let lane = 0; lane < 4; lane++) {
@@ -556,7 +571,8 @@ function methylPrefix(w: MethylWindow): MethylPrefix {
     }
     mod.push(m); total.push(t);
   }
-  return { pos: w.pos, mod, total, tagged: total[1][n] + total[2][n] > 0 };
+  const ps = w.ps ?? new Float64Array(n).fill(NaN);
+  return { pos: w.pos, mod, total, tagged: total[1][n] + total[2][n] > 0, run: methylRuns(ps), ps };
 }
 /** Index of the first CpG at or after `p`. */
 const methylLower = (pos: Int32Array, p: number) => { let lo = 0, hi = pos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (pos[mid] < p) lo = mid + 1; else hi = mid; } return lo; };
@@ -580,7 +596,7 @@ const METHYL_SMOOTH_CPGS = 6, METHYL_SMOOTH_MAX_BP = 1000;
  * into one of all reads. Phased stretches narrower than METHYL_PHASED_MIN_PX are joined too.
  */
 const METHYL_PHASED_SHARE = 0.2, METHYL_TAGGED_SHARE = 0.6, METHYL_PHASED_MIN_PX = 4;
-interface MethylCol { x: number; a: number; b: number; phased: boolean; f: number[]; t: number[] }
+interface MethylCol { x: number; a: number; b: number; phased: boolean; f: number[]; t: number[]; /** the phase-set stretch its HP 1 / HP 2 come from, and its PS (NaN: none) */ run: number; ps: number }
 /** Modified and all calls of a lane over the CpGs of indices [i, j). */
 const methylSumIdx = (P: MethylPrefix, lane: number, i: number, j: number): [number, number] => [P.mod[lane][j] - P.mod[lane][i], P.total[lane][j] - P.total[lane][i]];
 /**
@@ -607,7 +623,8 @@ function methylSource(e: MethylEntry, islandsOnly: boolean): MethylSource | null
       keep.forEach((i, j) => { m[j + 1] = m[j] + P.mod[lane][i + 1] - P.mod[lane][i]; t[j + 1] = t[j] + P.total[lane][i + 1] - P.total[lane][i]; });
       mod.push(m); total.push(t);
     }
-    Q = { pos: Int32Array.from(keep, i => P.pos[i]), mod, total, tagged: total[1][n] + total[2][n] > 0 };
+    const ps = Float64Array.from(keep, i => P.ps[i]);
+    Q = { pos: Int32Array.from(keep, i => P.pos[i]), mod, total, tagged: total[1][n] + total[2][n] > 0, run: methylRuns(ps), ps };
     methylIslandCache.set(P, Q);
   }
   const starts = isl.map(r => r[0]);
@@ -647,8 +664,26 @@ function methylCol(S: MethylSource, scale: { invert(px: number): number }, x: nu
   const f: number[] = [], t: number[] = [];
   for (let lane = 0; lane < 4; lane++) { const [m, tt] = methylSumIdx(P, lane, a, b); f.push(tt ? m / tt : NaN); t.push(tt); }
   if (!t[3]) return null;
+  // HP 1 and HP 2 from one phase set only: the stretch holding most of the column's tagged calls; the other stretches'
+  // tagged calls join lane 0 (their haplotypes are not this set's)
+  let run = P.run[a], ps = NaN;
+  if (P.run[b - 1] !== P.run[a]) {
+    const per = new Map<number, number>();
+    for (let i = a; i < b; i++) per.set(P.run[i], (per.get(P.run[i]) ?? 0) + P.total[1][i + 1] - P.total[1][i] + P.total[2][i + 1] - P.total[2][i]);
+    let best = -1;
+    for (const [r, n] of per) if (n > best) { best = n; run = r; }
+    let m1 = 0, t1 = 0, m2 = 0, t2 = 0, mo = 0, to = 0;
+    for (let i = a; i < b; i++) {
+      const dm1 = P.mod[1][i + 1] - P.mod[1][i], dt1 = P.total[1][i + 1] - P.total[1][i], dm2 = P.mod[2][i + 1] - P.mod[2][i], dt2 = P.total[2][i + 1] - P.total[2][i];
+      if (P.run[i] === run) { m1 += dm1; t1 += dt1; m2 += dm2; t2 += dt2; } else { mo += dm1 + dm2; to += dt1 + dt2; }
+    }
+    const [m0, t0] = methylSumIdx(P, 0, a, b);
+    f[1] = t1 ? m1 / t1 : NaN; t[1] = t1; f[2] = t2 ? m2 / t2 : NaN; t[2] = t2;
+    t[0] = t0 + to; f[0] = t[0] ? (m0 + mo) / t[0] : NaN;
+  }
+  for (let i = a; i < b; i++) if (P.run[i] === run && !Number.isNaN(P.ps[i])) { ps = P.ps[i]; break; }
   const phased = P.tagged && t[1] >= METHYL_MIN_CALLS && t[2] >= METHYL_MIN_CALLS && t[1] >= METHYL_PHASED_SHARE * t[3] && t[2] >= METHYL_PHASED_SHARE * t[3] && t[1] + t[2] >= METHYL_TAGGED_SHARE * t[3];
-  return { x, a, b, phased, f, t };
+  return { x, a, b, phased, f, t, run, ps };
 }
 function methylCols(S: MethylSource, scale: Scale): MethylCol[] {
   const out: MethylCol[] = [];
@@ -690,7 +725,10 @@ interface MethylDraw {
   phasedRuns: [number, number][];
   /** share of the drawn columns that are phased */
   phasedShare: number;
-  delta?: { up: string; down: string };
+  /** the phased pixel runs by phase set: where HP 1 / HP 2 are one set's, and its PS (NaN: tagged without PS) */
+  setRuns: { x0: number; x1: number; ps: number }[];
+  /** HP 1 − HP 2 bars per phase set (up: HP 1 more methylated) */
+  delta?: { ps: number; up: string; down: string }[];
   asm: { x0: number; x1: number; delta: number; cpgs: number; start: number; end: number }[];
   islands: { x0: number; x1: number; start: number; end: number }[];
   /** CpGs, calls and 5mC fraction of the view per lane (3 = all reads) */
@@ -710,15 +748,24 @@ function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: nu
     const last = phasedRuns[phasedRuns.length - 1];
     if (last && last[1] === c.x) last[1] = c.x + 1; else phasedRuns.push([c.x, c.x + 1]);
   }
+  const setRuns: MethylDraw['setRuns'] = [];
+  for (const c of cols) {
+    if (!c.phased) continue;
+    const last = setRuns[setRuns.length - 1];
+    if (last && last.x1 === c.x && (last.ps === c.ps || (Number.isNaN(last.ps) && Number.isNaN(c.ps)))) last.x1 = c.x + 1;
+    else setRuns.push({ x0: c.x, x1: c.x + 1, ps: c.ps });
+  }
   let delta: MethylDraw['delta'];
   if (P.tagged) {
-    const h = METHYL_DELTA_H, half = h / 2 - 1, up: string[] = [], down: string[] = [];
+    const h = METHYL_DELTA_H, half = h / 2 - 1, by = new Map<string, { ps: number; up: string[]; down: string[] }>();
     for (const c of cols) {
       if (!c.phased) continue;
-      const d = c.f[1] - c.f[2], bh = Math.max(0.6, Math.abs(d) * half);
-      (d > 0 ? up : down).push(`M${c.x},${(d > 0 ? h / 2 - bh : h / 2).toFixed(1)}h1v${bh.toFixed(1)}h-1z`);
+      const d = c.f[1] - c.f[2], bh = Math.max(0.6, Math.abs(d) * half), k = String(c.ps);
+      let g = by.get(k);
+      if (!g) by.set(k, g = { ps: c.ps, up: [], down: [] });
+      (d > 0 ? g.up : g.down).push(`M${c.x},${(d > 0 ? h / 2 - bh : h / 2).toFixed(1)}h1v${bh.toFixed(1)}h-1z`);
     }
-    delta = { up: up.join(''), down: down.join('') };
+    delta = [...by.values()].map(g => ({ ps: g.ps, up: g.up.join(''), down: g.down.join('') }));
   }
   const span = (a: number, b: number) => { const xa = scale.x(a), xb = scale.x(b); return { x0: Math.min(xa, xb), x1: Math.max(xa, xb) }; };
   const asm = P.tagged ? methylAsm(P, viewStart, viewEnd).map(r => ({ ...span(r.start, r.end), ...r })) : [];
@@ -726,7 +773,7 @@ function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: nu
   const frac: number[] = [], calls: number[] = [];
   const i0 = methylLower(P.pos, viewStart), i1 = methylLower(P.pos, viewEnd);
   for (let lane = 0; lane < 4; lane++) { const [m, t] = methylSumIdx(P, lane, i0, i1); frac.push(t ? m / t : NaN); calls.push(t); }
-  return { ribbon, phasedRuns, phasedShare: cols.length ? cols.filter(c => c.phased).length / cols.length : 0, delta, asm, islands, summary: { cpgs: i1 - i0, frac, calls } };
+  return { ribbon, phasedRuns, phasedShare: cols.length ? cols.filter(c => c.phased).length / cols.length : 0, setRuns, delta, asm, islands, summary: { cpgs: i1 - i0, frac, calls } };
 }
 /**
  * Stretches where the two haplotypes are methylated differently: runs of METHYL_ASM_CPGS consecutive CpGs covered on
@@ -737,19 +784,25 @@ function methylAsm(P: MethylPrefix, from: number, to: number): { start: number; 
   const i0 = methylLower(P.pos, from), i1 = methylLower(P.pos, to);
   const both: number[] = [];
   for (let i = i0; i < i1; i++) if (P.total[1][i + 1] - P.total[1][i] > 0 && P.total[2][i + 1] - P.total[2][i] > 0) both.push(i);
-  const out: { start: number; end: number; delta: number; cpgs: number; sign: number; sumD: number }[] = [];
+  const out: { start: number; end: number; delta: number; cpgs: number; sign: number; sumD: number; run: number }[] = [];
   for (let k = 0; k + METHYL_ASM_CPGS <= both.length; k++) {
     const a = both[k], b = both[k + METHYL_ASM_CPGS - 1] + 1;
+    // within one phase set: HP 1 − HP 2 has no meaning across two
+    if (P.run[a] !== P.run[b - 1]) continue;
     const m1 = P.mod[1][b] - P.mod[1][a], t1 = P.total[1][b] - P.total[1][a], m2 = P.mod[2][b] - P.mod[2][a], t2 = P.total[2][b] - P.total[2][a];
     if (t1 < METHYL_ASM_MIN_CALLS || t2 < METHYL_ASM_MIN_CALLS) continue;
     const d = m1 / t1 - m2 / t2;
     if (Math.abs(d) < METHYL_ASM_DELTA) continue;
     const s = Math.sign(d), last = out[out.length - 1], st = P.pos[a], en = P.pos[b - 1] + 2;
-    if (last && last.sign === s && st <= last.end) { last.end = Math.max(last.end, en); last.cpgs = 0; last.sumD += d; }
-    else out.push({ start: st, end: en, delta: d, cpgs: 0, sign: s, sumD: d });
+    if (last && last.sign === s && st <= last.end && last.run === P.run[a]) { last.end = Math.max(last.end, en); last.cpgs = 0; last.sumD += d; }
+    else out.push({ start: st, end: en, delta: d, cpgs: 0, sign: s, sumD: d, run: P.run[a] });
   }
   return out.map(x => {
-    const [m1, t1] = methylSum(P, 1, x.start, x.end), [m2, t2] = methylSum(P, 2, x.start, x.end);
+    // the stretch's own CpGs only (an overlap of two sets' reads at its ends)
+    let m1 = 0, t1 = 0, m2 = 0, t2 = 0;
+    for (let i = methylLower(P.pos, x.start), j = methylLower(P.pos, x.end); i < j; i++) if (P.run[i] === x.run) {
+      m1 += P.mod[1][i + 1] - P.mod[1][i]; t1 += P.total[1][i + 1] - P.total[1][i]; m2 += P.mod[2][i + 1] - P.mod[2][i]; t2 += P.total[2][i + 1] - P.total[2][i];
+    }
     return { start: x.start, end: x.end, delta: m1 / Math.max(1, t1) - m2 / Math.max(1, t2), cpgs: methylLower(P.pos, x.end) - methylLower(P.pos, x.start) };
   });
 }
@@ -830,6 +883,20 @@ function methylReadTicks(r: AlignedRead, thr: number, h: number) {
 
 /** haplotypes 1, 2 (and DRAGEN's higher copy labels): the chip of a consensus row, the band of a group of reads */
 const HAP_COLORS = ['#0369a1', '#be185d', '#4d7c0f', '#92400e'];
+/**
+ * Phase sets of a phased file: a haplotag (HP) only means something within its set (PS), so each set takes a hue of
+ * its own, the same in the reads, the variants' haplotype lanes and the methylation panel: HP 1 the mid tone, HP 2 the
+ * light one, `ink` for text. Sets are numbered in PS order (≈ genomic order), so neighbouring sets differ; reads tagged
+ * without PS are grey. Mid and light tones stay pale enough for the mismatch colours drawn over the reads.
+ */
+interface PsTone { hp: [string, string]; ink: string }
+const PS_TONES: PsTone[] = [
+  { hp: ['#6b93cf', '#b9cff0'], ink: '#1e40af' },
+  { hp: ['#c79a55', '#ecd3a8'], ink: '#92400e' },
+  { hp: ['#9a85c9', '#d6cdee'], ink: '#5b21b6' },
+  { hp: ['#6fae95', '#c3e3d6'], ink: '#065f46' },
+];
+const PS_NONE_TONE: PsTone = { hp: ['#9ca3af', '#d1d5db'], ink: '#374151' };
 /** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
 const READ_DISCORDANT_FILL = '#fcd34d';
 /**
@@ -2142,6 +2209,20 @@ export default function SashimiViewer({
     return m;
   }, [showMethyl, methylData, scale, viewStart, viewEnd, currentChrom, methylIslands]);
 
+  /** The phase sets met on the chromosome (reads, variant scans, methylation), in PS order: each one's hue (PS_TONES). */
+  const psRank = useMemo(() => {
+    const seen = new Set<number>();
+    for (const e of Object.values(readsData)) if (e?.fetched.chrom === currentChrom) for (const r of e.data.reads) if (r.hp && r.ps != null) seen.add(r.ps);
+    for (const e of Object.values(dnaSites)) if (e.fetched.chrom === currentChrom) for (const st of e.sites) if (st.hap?.ps != null) seen.add(st.hap.ps);
+    for (const e of Object.values(methylData)) if (e.chrom === currentChrom && e.w?.ps) for (const p of e.w.ps) if (!Number.isNaN(p) && p >= 0) seen.add(p);
+    return new Map([...seen].sort((a, b) => a - b).map((p, i) => [p, i]));
+  }, [readsData, dnaSites, methylData, currentChrom]);
+  const psTone = useCallback((ps: number | null | undefined): PsTone => {
+    if (ps == null || Number.isNaN(ps) || ps < 0) return PS_NONE_TONE;
+    const i = psRank.get(ps);
+    return i == null ? PS_NONE_TONE : PS_TONES[i % PS_TONES.length];
+  }, [psRank]);
+
   /** Forgets the variants of a sample: its running scan is stopped and its sites dropped (plain coverage again until the chip is clicked). */
   const forgetVariants = useCallback((sid: number) => {
     dnaSitesAbort.current.get(sid)?.abort();
@@ -2874,7 +2955,9 @@ export default function SashimiViewer({
           st.haps.forEach((h, hi) => {
             const row = laneTop[laneOf[i]] + hi;
             const top = bodyTop + 4 + row * rowStep, mid = top + GROUP_ROW_H / 2;
-            const color = HAP_COLORS[(h.hap - 1) % HAP_COLORS.length];
+            // the set's hue (the file's PS, or the block's rank for the page's own phasing), HP 1 the darker
+            const tone = hv.source === 'tags' ? psTone(st.ps) : PS_TONES[i % PS_TONES.length];
+            const color = h.hap === 1 ? tone.ink : h.hap === 2 ? tone.hp[0] : HAP_COLORS[(h.hap - 1) % HAP_COLORS.length];
             const parts: JSX.Element[] = [];
             for (const [cs, ce] of h.covered) {
               const x1 = scale.x(cs), x2 = scale.x(ce);
@@ -3212,6 +3295,15 @@ export default function SashimiViewer({
     const byPhase = readsGroup === 'phase';
     const hapOf = (r: AlignedRead) => (byPhase ? r.ph : r.hp), setOf = (r: AlignedRead) => (byPhase ? r.pb : r.ps);
     const grouped = readsGroup !== 'none' && visible.some(r => hapOf(r));
+    // grouped by haplotype, a read takes its phase set's hue (HP 1 the mid tone, HP 2 the light one): a haplotag only means
+    // something within its set, so two sets in one group never look alike. The page's own phasing: its block's hue.
+    const blockRank = byPhase ? new Map([...new Set(visible.map(r => r.pb).filter((p): p is number => p != null))].sort((a, b) => a - b).map((p, i) => [p, i])) : null;
+    const phaseFill = (r: AlignedRead): string | null => {
+      if (!grouped) return null;
+      const h = hapOf(r);
+      if (h !== 1 && h !== 2) return null;
+      return (byPhase ? PS_TONES[(blockRank!.get(r.pb!) ?? 0) % PS_TONES.length] : psTone(r.ps)).hp[h - 1];
+    };
     const strandSplit = !!antiOf && visible.some(antiOf);
     const groupRows: { row: number; rows: number; hp: number; reads: number; sets: number; anti: boolean; header: boolean }[] = [];
     if (pairMode || splitMode || grouped || strandSplit) {
@@ -3383,7 +3475,7 @@ export default function SashimiViewer({
       const spans = readSpansBoundary(r, modelBoundaries);
       const discordant = pairMode ? discordantOf(r, idx) : null;
       // the colours that say something win (a discordant pair, the opposite strand); the strand colours go to the others
-      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : readsColor === 'none' ? READ_FILL
+      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : readsColor === 'none' ? phaseFill(r) ?? READ_FILL
         : (readsColor === 'first' && (r.f & 1) && (r.f & 128) ? (r.f & 32) === 0 : r.r === 0) ? READ_FWD_FILL : READ_REV_FILL;
       const body = lowMapq ? { fill: INK.bg, stroke: fill, strokeWidth: 0.8 } : { fill };
       // the line to the mate, drawn once per pair from the left mate
@@ -3531,7 +3623,7 @@ export default function SashimiViewer({
     });
 
     const groupEls = groupRows.filter(g => g.header).map(g => {
-      const top = readsTop + g.row * (rowH + 1), color = !grouped ? ANTI_COLOR : g.hp ? HAP_COLORS[(g.hp - 1) % HAP_COLORS.length] : INK.faint;
+      const top = readsTop + g.row * (rowH + 1), color = !grouped ? ANTI_COLOR : g.hp ? INK.muted : INK.faint;
       const strandTxt = g.anti ? 'opposite strand' : '';
       const label = !grouped
         ? `opposite strand · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}`
@@ -3540,7 +3632,7 @@ export default function SashimiViewer({
         <g key={`grp${g.anti ? 'a' : ''}${g.hp}`}>
           {!grouped ? <title>{`reads of the strand opposite to ${tx?.geneName ?? 'the gene'} under the library's orientation (${sampleStrands?.[sid] ?? ''}): an antisense transcript, or the few % of reads of the wrong strand every stranded library has`}</title> : <title>{byPhase
             ? (g.hp ? `reads on haplotype ${g.hp} of the page's read-based phasing: the alleles they carry at the heterozygous sites of their phase block match haplotype ${g.hp} better (H1 of one block is not tied to H1 of the next one: the blocks are listed in the collapsed mode)` : 'reads the phasing leaves unassigned: they cover no phased site, or match both haplotypes alike')
-            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool (haplotype ${g.hp} within each phase set, PS)` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}{g.anti ? ', on the strand opposite to the gene' : ''}</title>}
+            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool: haplotype ${g.hp} within each phase set (PS). Each set has its own hue (HP 1 the darker tone, HP 2 the lighter): HP ${g.hp} of two sets need not be the same chromosome copy` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}{g.anti ? ', on the strand opposite to the gene' : ''}</title>}
           <rect x={PLOT_LEFT} y={top} width={plotWidth} height={rowH} fill={color} opacity={0.1} />
           <rect x={PLOT_LEFT} y={top} width={3} height={g.rows * (rowH + 1) - 1} fill={color} />
           <text x={PLOT_LEFT + 7} y={top + rowH - 1} fill={INK.text} fontSize={Math.min(9, rowH + 3)} fontWeight={700}>{label}</text>
@@ -3589,7 +3681,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving, psTone]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -4287,11 +4379,12 @@ export default function SashimiViewer({
         ),
       });
       if (layouts.some(L => L.variants > VAR_TRACK_H)) {
-        const txt = 'haplotags: H1 · H2 · to check · ⫽ phase sets not linked';
+        const txt = 'haplotags: H1 · H2, one hue per phase set · ⫽ sets not linked';
         items.push({
           w: 34 + txt.length * 5.4, el: (
             <g key="lvar3">
-              <rect x={0} y={y - 5} width={22} height={3} rx={1.5} fill={HAP_COLORS[0]} opacity={0.6} /><rect x={0} y={y + 2} width={22} height={3} rx={1.5} fill={HAP_COLORS[1]} opacity={0.6} />
+              <rect x={0} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[0]} /><rect x={0} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[1]} />
+              <rect x={11} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[0]} /><rect x={11} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[1]} />
               <circle cx={7} cy={y - 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.G} strokeWidth={1.5} /><circle cx={16} cy={y + 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.A} strokeWidth={1.5} />
               <text x={28} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{txt}</text>
             </g>
@@ -4323,7 +4416,7 @@ export default function SashimiViewer({
       items.push({
         w: 268, el: (
           <g key="lme2">
-            <rect x={0} y={y - 6} width={4} height={6} fill={HAP_COLORS[0]} /><rect x={5} y={y - 3} width={4} height={3} fill={HAP_COLORS[0]} /><rect x={10} y={y} width={4} height={5} fill={HAP_COLORS[1]} />
+            <rect x={0} y={y - 6} width={4} height={6} fill={PS_TONES[0].ink} /><rect x={5} y={y - 3} width={4} height={3} fill={PS_TONES[0].ink} /><rect x={10} y={y} width={4} height={5} fill={PS_TONES[0].hp[0]} />
             <line x1={0} y1={y} x2={16} y2={y} stroke={INK.gridStrong} strokeWidth={0.6} />
             <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>Δ HP1 − HP2</text>
             <rect x={88} y={y - 6} width={26} height={12} rx={2} fill={METHYL_ASM_COLOR} fillOpacity={0.07} stroke={METHYL_ASM_COLOR} strokeDasharray="3 2" />
@@ -4411,6 +4504,17 @@ export default function SashimiViewer({
               <rect key={c} x={104 + i * 11} y={y - 4} width={10} height={8} fill={PAIR_CLASS_FILL[c]}><title>{PAIR_CLASS_LABEL[c]}</title></rect>
             ))}
             <text x={150} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant: ← → dup · → ← del · inv · other</text>
+          </g>
+        ),
+      });
+    }
+    if (showReads && !collapseReads && readsColor === 'none' && readsGroup !== 'none' && (anyHaplotagged || readsGroup === 'phase')) {
+      const txt = readsGroup === 'phase' ? 'reads: one hue per phase block · H1 darker, H2 lighter' : 'reads: one hue per phase set (PS) · HP 1 darker, HP 2 lighter';
+      items.push({
+        w: 44 + txt.length * 5.4, el: (
+          <g key="lps">
+            {PS_TONES.slice(0, 3).map((t, i) => <g key={i}><rect x={i * 12} y={y - 5} width={10} height={4} rx={1} fill={t.hp[0]} /><rect x={i * 12} y={y + 1} width={10} height={4} rx={1} fill={t.hp[1]} /></g>)}
+            <text x={40} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{txt}</text>
           </g>
         ),
       });
@@ -4736,12 +4840,12 @@ export default function SashimiViewer({
         const psTxt = b.ps == null ? 'tagged without PS' : `phase set PS ${b.ps.toLocaleString('en-US')}`;
         phaseBack.push(
           <g key={`pb${i}`}>
-            <rect x={x0} y={phTop + 1} width={x1 - x0} height={VAR_PHASE_H - 3} rx={3} fill={i % 2 ? '#dbeafe' : '#fef3c7'} opacity={0.55} />
-            {[0, 1].map(h => <rect key={h} x={x0 + 2} y={laneY[h] - 2.5} width={Math.max(1, x1 - x0 - 4)} height={5} rx={2.5} fill={HAP_COLORS[h]} opacity={0.55} />)}
+            <rect x={x0} y={phTop + 1} width={x1 - x0} height={VAR_PHASE_H - 3} rx={3} fill={psTone(b.ps).hp[1]} opacity={0.3} />
+            {[0, 1].map(h => <rect key={h} x={x0 + 2} y={laneY[h] - 2.5} width={Math.max(1, x1 - x0 - 4)} height={5} rx={2.5} fill={psTone(b.ps).hp[h]} />)}
           </g>,
         );
         const lx = Math.max(PLOT_LEFT + 4, x0 + 4), label = b.ps == null ? 'no PS' : `PS ${b.ps.toLocaleString('en-US')}`;
-        if (Math.min(plotRight, x1) - lx >= label.length * 5 + 6) phaseBack.push(<text key={`pt${i}`} x={lx} y={phTop + 10} fill={INK.muted} fontSize={8.5}>{label}<title>{`${psTxt}: ${b.n} site${b.n === 1 ? '' : 's'} of the scanned window, ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')}`}</title></text>);
+        if (Math.min(plotRight, x1) - lx >= label.length * 5 + 6) phaseBack.push(<text key={`pt${i}`} x={lx} y={phTop + 10} fill={psTone(b.ps).ink} fontSize={8.5} fontWeight={600}>{label}<title>{`${psTxt}: ${b.n} site${b.n === 1 ? '' : 's'} of the scanned window, ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')}`}</title></text>);
         // between two sets: their haplotypes are not linked
         const nb = blocks[i + 1];
         if (nb) {
@@ -4801,8 +4905,8 @@ export default function SashimiViewer({
           Q
         </text>
         {phased && [0, 1].map(h => (
-          <text key={`hl${h}`} x={PLOT_LEFT - 7} y={phTop + VAR_PHASE_LANE[h] + 3} textAnchor="end" fill={HAP_COLORS[h]} fontSize={9} fontWeight={800}>
-            <title>{`Haplotype ${h + 1}: the reads tagged HP ${h + 1} by the phasing tool, within each phase set (PS). A site sits on this lane when at least ${PHASE_HI * 100} % of the HP ${h + 1} reads carry it and at most ${PHASE_LO * 100} % of the HP ${2 - h} reads do (both lanes: homozygous). Dashed red circle: to check (in part of one haplotype's reads, or on both without being homozygous); ?: on neither haplotype; grey dot: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype. ⫽: two phase sets, not linked to each other.`}</title>
+          <text key={`hl${h}`} x={PLOT_LEFT - 7} y={phTop + VAR_PHASE_LANE[h] + 3} textAnchor="end" fill={h ? INK.muted : INK.text} fontSize={9} fontWeight={800}>
+            <title>{`Haplotype ${h + 1}: the reads tagged HP ${h + 1} by the phasing tool, within each phase set (PS). Each phase set has its own hue (HP 1 the darker tone, HP 2 the lighter), the same as its reads and its methylation. A site sits on this lane when at least ${PHASE_HI * 100} % of the HP ${h + 1} reads carry it and at most ${PHASE_LO * 100} % of the HP ${2 - h} reads do (both lanes: homozygous). Dashed red circle: to check (in part of one haplotype's reads, or on both without being homozygous); ?: on neither haplotype; grey dot: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype. ⫽: two phase sets, not linked to each other.`}</title>
             H{h + 1}
           </text>
         ))}
@@ -4853,11 +4957,15 @@ export default function SashimiViewer({
     else if (e.w && !e.w.calls) status = { text: 'no base-modification calls here (the reads carry no MM / ML tags for 5mC)', color: INK.faint };
     else {
       const s = draw!.summary, w = e.w!;
-      const lanes = e.prefix?.tagged ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view` : `5mC ${pct(s.frac[3])}`;
+      // HP 1 / HP 2 over the view only within one phase set: over several, the haplotypes are not the same copies
+      const nSets = new Set(draw!.setRuns.map(r => String(r.ps))).size;
+      const lanes = e.prefix?.tagged
+        ? `${nSets <= 1 ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''}${nSets === 1 && draw!.setRuns[0].ps >= 0 ? ` · PS ${draw!.setRuns[0].ps.toLocaleString('en-US')}` : ''}` : `${nSets} phase sets · 5mC ${pct(s.frac[3])}`} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view`
+        : `5mC ${pct(s.frac[3])}`;
       status = {
         text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString('en-US')} CpG · ${Math.round(s.calls[3]).toLocaleString('en-US')} calls${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
         color: INK.muted,
-        title: `5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${w.threshold.toFixed(2)} (the 10th percentile of this window's calls, as modkit does) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.`,
+        title: `5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${w.threshold.toFixed(2)} (the 10th percentile of this window's calls, as modkit does) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
       };
     }
     // the island tags: placed from the largest difference down, each where it does not cover one already placed
@@ -4890,8 +4998,8 @@ export default function SashimiViewer({
         <text transform={`translate(${12}, ${(lanesTop + lanesBottom) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>CpG</text>
         {draw && (draw.phasedRuns.length ? (
           <>
-            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H / 2 + 3} textAnchor="end" fill={HAP_COLORS[0]} fontSize={8.5} fontWeight={700}>HP1</text>
-            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H * 1.5 + 4} textAnchor="end" fill={HAP_COLORS[1]} fontSize={8.5} fontWeight={700}>HP2</text>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H / 2 + 3} textAnchor="end" fill={INK.text} fontSize={8.5} fontWeight={700}>HP1</text>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H * 1.5 + 4} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>HP2</text>
           </>
         ) : <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 3} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>5mC</text>)}
         {dH > 0 && <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_DIFF_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8}>
@@ -4925,6 +5033,17 @@ export default function SashimiViewer({
             <g transform={`translate(0, ${ry})`}>
               <line x1={PLOT_LEFT} y1={METHYL_HEAD_H + METHYL_RIBBON_H / 2} x2={plotRight} y2={METHYL_HEAD_H + METHYL_RIBBON_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="1 3" />
               {draw.ribbon.map((p, i) => <path key={i} d={p.d} fill={p.color} opacity={p.faint ? 0.35 : 1} />)}
+              {/* the phase set of each split stretch, and the breaks between two sets */}
+              {draw.setRuns.map((r, i) => (
+                <g key={`sr${r.x0}`}>
+                  <rect x={r.x0} y={METHYL_HEAD_H - 3} width={Math.max(1, r.x1 - r.x0)} height={2} fill={psTone(r.ps).hp[0]}>
+                    <title>{r.ps >= 0 ? `phase set PS ${r.ps.toLocaleString('en-US')}: HP 1 and HP 2 here are this set's` : 'reads tagged without a phase set'}</title>
+                  </rect>
+                  {i > 0 && draw.setRuns[i - 1].x1 >= r.x0 - 1 && String(draw.setRuns[i - 1].ps) !== String(r.ps) && (
+                    <text x={r.x0} y={METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 4} textAnchor="middle" fill="#dc2626" fontSize={11} fontWeight={800} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">⫽</text>
+                  )}
+                </g>
+              ))}
               {/* where the ribbon splits into the two haplotypes and joins again */}
               {draw.phasedRuns.map(([a, b]) => (
                 <path key={`pr${a}`} d={`M${a},${METHYL_HEAD_H - 0.5}v${METHYL_RIBBON_H + 1}M${b},${METHYL_HEAD_H - 0.5}v${METHYL_RIBBON_H + 1}`} stroke={INK.gridStrong} strokeWidth={0.8} opacity={a <= PLOT_LEFT || b >= plotRight ? 0 : 1} />
@@ -4935,8 +5054,12 @@ export default function SashimiViewer({
             <g transform={`translate(0, ${ry + METHYL_HEAD_H + METHYL_RIBBON_H})`}>
               {draw.phasedRuns.map(([a, b]) => <rect key={`dr${a}`} x={a} y={1} width={b - a} height={METHYL_DELTA_H - 2} fill={INK.grid} opacity={0.35} />)}
               <line x1={PLOT_LEFT} y1={METHYL_DELTA_H / 2} x2={plotRight} y2={METHYL_DELTA_H / 2} stroke={INK.gridStrong} strokeWidth={0.6} strokeDasharray={draw.phasedRuns.length ? undefined : '1 3'} />
-              {draw.delta.up && <path d={draw.delta.up} fill={HAP_COLORS[0]} opacity={0.85} />}
-              {draw.delta.down && <path d={draw.delta.down} fill={HAP_COLORS[1]} opacity={0.85} />}
+              {draw.delta.map(g => (
+                <g key={`dd${g.ps}`}>
+                  {g.up && <path d={g.up} fill={psTone(g.ps).ink} opacity={0.75} />}
+                  {g.down && <path d={g.down} fill={psTone(g.ps).hp[0]} opacity={0.9} />}
+                </g>
+              ))}
             </g>
           )}
           {draw?.asm.filter(r => r.x1 - r.x0 > 70).map(r => {
@@ -5727,8 +5850,8 @@ export default function SashimiViewer({
       const P = S.P, x = Math.floor(hover!.px), c = methylCol(S, scale, x);
       if (!c) return null;
       const phased = !!methylDraws.get(sid)?.phasedRuns.some(([a, b]) => x >= a && x < b);
-      const lanes = (phased ? [1, 2, ...(c.t[0] ? [0] : [])] : [3]).map(l => ({ label: l === 3 ? (P.tagged ? 'all (not phased)' : '5mC') : l === 0 ? 'untagged' : `HP${l}`, f: c.f[l], t: c.t[l] }));
-      return { n: c.b - c.a, from: P.pos[c.a], to: P.pos[c.b - 1] + 2, lanes };
+      const lanes = (phased ? [1, 2, ...(c.t[0] ? [0] : [])] : [3]).map(l => ({ label: l === 3 ? (P.tagged ? 'all (not phased)' : '5mC') : l === 0 ? 'other' : `HP${l}`, f: c.f[l], t: c.t[l] }));
+      return { n: c.b - c.a, from: P.pos[c.a], to: P.pos[c.b - 1] + 2, lanes, ps: phased ? c.ps : NaN };
     }
   }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, methylIslands, dnaSites, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
 
@@ -6590,7 +6713,7 @@ export default function SashimiViewer({
                 {(() => {
                   const ph = sitePhase(hoverInfo.variant.site);
                   if (!ph) return null;
-                  const color = ph.call === 'h1' ? HAP_COLORS[0] : ph.call === 'h2' ? HAP_COLORS[1] : ph.call === 'check' ? '#dc2626' : '#374151';
+                  const color = ph.call === 'h1' || ph.call === 'h2' ? psTone(ph.ps).ink : ph.call === 'check' ? '#dc2626' : '#374151';
                   return (
                     <div className="text-gray-600">
                       <span className="font-semibold" style={{ color }}>{ph.call === 'h1' ? 'H1' : ph.call === 'h2' ? 'H2' : ph.call === 'both' ? 'H1 + H2' : ph.call === 'check' ? 'phase: check' : ph.call === 'neither' ? 'phase: neither' : 'phase: not judged'}</span>
@@ -6611,9 +6734,10 @@ export default function SashimiViewer({
                 <span className="text-gray-700">{r.name}</span>
                 <span className="ml-auto font-mono font-semibold text-gray-900">{r.depth.toLocaleString('en-US')}</span>
                 {r.methyl && (
-                  <span className="font-mono text-[10px] text-gray-600" title={`5mC pooled over ${r.methyl.n} CpG${r.methyl.n === 1 ? '' : 's'} (${formatBp(r.methyl.to - r.methyl.from)}) under the pointer`}>
+                  <span className="font-mono text-[10px] text-gray-600" title={`5mC pooled over ${r.methyl.n} CpG${r.methyl.n === 1 ? '' : 's'} (${formatBp(r.methyl.to - r.methyl.from)}) under the pointer${r.methyl.ps >= 0 ? `; HP 1 and HP 2 of phase set PS ${r.methyl.ps.toLocaleString('en-US')}, other: untagged reads and reads of another set` : ''}`}>
+                    {r.methyl.ps >= 0 && <span className="ml-1.5 text-gray-400">PS {r.methyl.ps.toLocaleString('en-US')}</span>}
                     {r.methyl.lanes.map(l => (
-                      <span key={l.label} className="ml-1.5"><span style={{ color: l.label === 'HP1' ? HAP_COLORS[0] : l.label === 'HP2' ? HAP_COLORS[1] : undefined }}>{l.label}</span> {Number.isFinite(l.f) ? `${Math.round(l.f * 100)}%` : '–'}<span className="text-gray-400">/{Math.round(l.t)}</span></span>
+                      <span key={l.label} className="ml-1.5"><span style={{ color: l.label === 'HP1' || l.label === 'HP2' ? psTone(r.methyl!.ps).ink : undefined }}>{l.label}</span> {Number.isFinite(l.f) ? `${Math.round(l.f * 100)}%` : '–'}<span className="text-gray-400">/{Math.round(l.t)}</span></span>
                     ))}
                   </span>
                 )}
@@ -6667,8 +6791,8 @@ export default function SashimiViewer({
                     <table className="mt-1 text-[10px] text-gray-600">
                       <tbody>
                         <tr><td className="pr-3" /><td className="pr-3 font-semibold">with allele</td><td className="pr-3 font-semibold">over site</td><td className="font-semibold">share</td></tr>
-                        {row('HP 1', HAP_COLORS[0], h.alt[0], h.depth[0])}
-                        {row('HP 2', HAP_COLORS[1], h.alt[1], h.depth[1])}
+                        {row('HP 1', psTone(h.ps).ink, h.alt[0], h.depth[0])}
+                        {row('HP 2', psTone(h.ps).ink, h.alt[1], h.depth[1])}
                         {h.otherDepth > 0 && row('other set / HP', undefined, h.otherAlt, h.otherDepth)}
                         <tr><td className="pr-3">untagged</td><td className="pr-3 text-right">{untagged}</td><td className="pr-3 text-right" colSpan={2}><span className="text-gray-400">(with the allele)</span></td></tr>
                       </tbody>

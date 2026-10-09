@@ -682,6 +682,14 @@ below.
     gives the number of blocks.
 - When the reads carry haplotags, *group: HP tags* packs them per haplotag instead, like
   IGV's *Group alignments by tag HP*: HP 1, HP 2 (and higher copy labels), then the untagged reads.
+  A haplotag only means something within its **phase set** (`PS`): the tool numbers the two copies
+  afresh in every set, so HP 1 of one set and HP 1 of the next need not be the same chromosome
+  copy. Grouped by haplotype (and *colour: none*), each read therefore takes its **phase set's
+  hue**, HP 1 the darker tone and HP 2 the lighter one: two sets in one group never look alike.
+  Where the reads of two sets overlap (around the end of a set, up to about 30 kb with ONT reads
+  on HG002), the group shows both hues side by side. *group: phased here* does the same with the
+  page's own phase blocks. The hues are those of the variants' haplotype lanes and of the
+  methylation panel, so a read, its set's variants and its set's methylation share one colour.
 
 Each group has a label row and a coloured band. Mates and the parts of a split read stay together. A
 read's tooltip gives its HP, PS and PC.
@@ -851,7 +859,8 @@ counted read by read, for views up to 3 Mb.
   haplotype of its phase set: its allele sits in untagged reads or in another phase set's.
 - A **grey dot** is a site not phased: fewer than 3 reads on one haplotype, or a site the quality
   cells flag red (a likely artefact is not given a haplotype).
-- Each phase set is a shaded band labelled with its `PS`. Between two sets, a red **⫽** says that
+- Each phase set is a band in a hue of its own, labelled with its `PS`; its H1 lane takes the darker
+  tone and its H2 lane the lighter one, as its reads do. Between two sets, a red **⫽** says that
   no read linked them: H1 of one set is not known to be H1 of the next. Two variants are in *cis*
   or in *trans* only when they lie in the same set.
 
@@ -905,6 +914,16 @@ DNA track is open. Each long-read DNA track then gets a panel under its coverage
   fair share of its calls: each at least 20 % of them, the tagged reads together at least 60 %, and
   each haplotype 3 calls or more. Split stretches narrower than 4 pixels are joined.
   A file without haplotags gives one band all along;
+- **within one phase set at a time.** HP 1 and HP 2 are the phasing tool's numbers within a phase
+  set, so the calls are also counted per set. Each CpG takes the set holding most of its tagged
+  calls, and only that set's HP 1 and HP 2 reads fill its two lanes. The reads of another set
+  overlapping it count as untagged there (*other* in the hover card). A pixel never pools two
+  sets, nor does an allele-specific frame. A thin strip in the set's hue runs over each split
+  stretch, and a red **⫽** marks where one set gives way to another. With several sets in view,
+  the header gives the number of sets instead of view-wide HP 1 / HP 2 fractions, which would mix
+  copies. On HG002 (CFTR, 200 kb), 179 of 1,502 CpGs hold the reads of two sets. Their lanes now
+  hold only their own set's reads; at each CpG, the counts of a set equal those of a file holding
+  only that set's reads;
 - a **regional density at every zoom**. Each pixel shows the pooled fraction of methylated calls
   over the CpGs under it: the calls add up, and per-CpG fractions are not averaged, so better-covered
   sites weigh more. When fewer than 6 CpGs lie under the pixel, it pools the 6 nearest, as long as
@@ -914,7 +933,8 @@ DNA track is open. Each long-read DNA track then gets a panel under its coverage
   3 calls is drawn pale. The hover card gives the fractions of the pixel under the pointer, split or
   joined as drawn, with the CpGs and the span pooled;
 - under the ribbon, the **difference HP 1 − HP 2** where it is split, as bars up (HP 1 more
-  methylated, in its colour) or down (HP 2). **Allele-specific methylation** is framed in purple
+  methylated) or down (HP 2), in the hue of the stretch's phase set: its sign has no meaning
+  from one set to the next. **Allele-specific methylation** is framed in purple
   across the panel. A frame marks a run of at least 5 consecutive CpGs covered on both haplotypes
   whose fractions differ by 50 points or more, with at least 10 calls on each side, and its label
   gives the difference. Imprinted differentially methylated regions, the inactive X of a female

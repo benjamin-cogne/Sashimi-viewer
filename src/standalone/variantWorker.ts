@@ -46,7 +46,7 @@ self.onmessage = (e: MessageEvent<In>) => {
     const ctl = new AbortController();
     running.set(m.req, ctl);
     ds.countMethylation(m.sampleId, m.chrom, m.start, m.end, { signal: ctl.signal, onProgress: fraction => post({ type: 'progress', req: m.req, fraction }) })
-      .then(result => (self as unknown as Worker).postMessage({ type: 'done', req: m.req, result }, [result.pos.buffer, ...result.mod.map(a => a.buffer), ...result.total.map(a => a.buffer)]))
+      .then(result => (self as unknown as Worker).postMessage({ type: 'done', req: m.req, result }, [result.pos.buffer, result.ps.buffer, ...result.mod.map(a => a.buffer), ...result.total.map(a => a.buffer)]))
       .catch((err: any) => post({ type: 'error', req: m.req, name: err?.name ?? 'Error', message: err?.message ?? String(err) }))
       .finally(() => settle(m.req));
   }
