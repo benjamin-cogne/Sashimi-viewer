@@ -226,6 +226,8 @@ export interface MethylWindow {
   islands: [number, number][];
   /** CpG sites of the reference in the window, called or not */
   cpgs: number;
+  /** what the source wants said about its calls (shown with the panel's status), e.g. that they are approximate */
+  note?: string;
 }
 
 /** The threshold bin: the 10th percentile of the call confidences of `hist`. */
