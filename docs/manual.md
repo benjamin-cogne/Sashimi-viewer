@@ -1044,7 +1044,10 @@ repeat in every read and draws the result.
 
 **When few reads span the repeat.**
 - With 20 spanning reads or more, sizes come from them alone; the reads that stop inside are only
-  counted.
+  counted. The switch *reads drawn: spanning | + stopping inside* draws them as well, at the length
+  they reach: hatched in the histogram, faded with a chevron in the waterfall. A size range dragged
+  then counts them too, and says how many are lower bounds. The alleles and the chips stay those of
+  the spanning reads.
 - Below 20, an amber banner says so. The reads stopping inside are added at the length they reach,
   hatched in the histogram and ending in a chevron in the waterfall: lower bounds, so the alleles may
   be longer than shown.

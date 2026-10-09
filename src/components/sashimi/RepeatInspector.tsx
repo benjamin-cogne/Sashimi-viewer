@@ -50,6 +50,8 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
   const [results, setResults] = useState<Record<number, { loading?: boolean; error?: string; r?: SampleResult }>>({});
   const [brush, setBrush] = useState<[number, number] | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; text: string } | null>(null);
+  /** draw the reads that stop inside the repeat too (lower bounds), though there are enough spanning ones to size it */
+  const [withTrunc, setWithTrunc] = useState(false);
   /** the reads whose sequences are shown under the plot */
   const [browse, setBrowse] = useState<{ title: string; list: ReadRepeat[] } | null>(null);
   /** a click on the plot (no drag): where, to open a waterfall row */
@@ -97,14 +99,18 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     const spanSorted = r.reads.spanning.map(x => x.units).sort((a, b) => a - b);
     const p95 = quantile(spanSorted, 0.95);
     const beyond = r.reads.truncated.filter(x => spanSorted.length && x.units > p95).length;
-    const xMaxRaw = Math.max(quantile(units, 0.99) * 1.12, locus.refUnits * 2.5, 30);
+    // the reads drawn: the ones sized, and on demand the ones stopping inside (alleles stay those of the reads sized)
+    const showTrunc = !enough || withTrunc;
+    const drawn: ReadRepeat[] = showTrunc ? [...r.reads.spanning, ...r.reads.truncated] : r.reads.spanning;
+    const drawnUnits = drawn.map(x => x.units).sort((a, b) => a - b);
+    const xMaxRaw = Math.max(quantile(drawnUnits, 0.99) * 1.12, locus.refUnits * 2.5, 30);
     const step = niceStep(xMaxRaw);
     const xMax = Math.ceil(xMaxRaw / step) * step;
     // waterfall rows: evenly by size
-    const order = [...used].sort((a, b) => a.units - b.units);
+    const order = [...drawn].sort((a, b) => a.units - b.units);
     const rows = order.length <= WATERFALL_ROWS ? order : Array.from({ length: WATERFALL_ROWS }, (_, i) => order[Math.round((i * (order.length - 1)) / (WATERFALL_ROWS - 1))]);
-    return { r, enough, used, units, alleles, beyond, p95, xMax, step, rows };
-  }, [cur, locus.refUnits]);
+    return { r, enough, used, units, alleles, beyond, p95, xMax, step, rows, drawn, showTrunc };
+  }, [cur, locus.refUnits, withTrunc]);
 
   const W = 1000, L = 64, R = 24, top = 46, hH = 150;
   const x = (u: number) => L + (Math.min(u, view?.xMax ?? 1) / (view?.xMax ?? 1)) * (W - L - R);
@@ -129,18 +135,18 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     if (!cur || cur.loading) return <div className="px-5 py-10 text-center text-sm text-slate-500">Reading the reads over the repeat…</div>;
     if (cur.error) return <div className="px-5 py-6 text-sm text-red-700">Could not read this sample: {cur.error}</div>;
     if (!view) return null;
-    const { r, enough, alleles, xMax, step, rows, units, beyond, p95 } = view;
+    const { r, enough, alleles, xMax, step, rows, units, beyond, p95, drawn, showTrunc } = view;
     const shorter = r.reads.spanning.filter(x => x.units < locus.refUnits).length;
     if (!units.length) return <div className="px-5 py-6 text-sm text-slate-600">No read of this sample reaches the repeat with a flank on either side ({fmt(r.reads.total)} reads over the locus).</div>;
     const nb = Math.ceil(xMax / step);
     const span = new Array(nb).fill(0), trunc = new Array(nb).fill(0);
     for (const u of r.reads.spanning) span[Math.min(nb - 1, Math.floor(u.units / step))]++;
-    if (!enough) for (const u of r.reads.truncated) trunc[Math.min(nb - 1, Math.floor(u.units / step))]++;
+    if (showTrunc) for (const u of r.reads.truncated) trunc[Math.min(nb - 1, Math.floor(u.units / step))]++;
     const yMax = Math.max(1, ...span.map((v, i) => v + trunc[i]));
     const base = top + hH, wTop = base + 52;
     const rowH = Math.max(1.4, Math.min(4, 320 / Math.max(1, rows.length))), wH = rows.length * rowH;
     const H = wTop + wH + 10;
-    const sel = brush ? view.used.filter(u => u.units >= Math.min(...brush) && u.units <= Math.max(...brush)) : null;
+    const sel = brush ? drawn.filter(u => u.units >= Math.min(...brush) && u.units <= Math.max(...brush)) : null;
     const selStats = sel ? stats(sel) : null;
     return (
       <>
@@ -172,6 +178,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           )}
           {alleles.some(a => a.broad) && <Chip k="reading" v={<span className="text-red-700">broad spread</span>} sub="somatic mosaicism, or PCR / sequencing stutter" />}
         </div>
+        <div className="flex flex-wrap items-center gap-2 px-5 pt-2 text-[11.5px] text-slate-600">
+          <Segmented size="sm" prefix="reads drawn" label="Reads drawn" value={showTrunc ? 'all' : 'spanning'} disabled={!enough}
+            title={enough ? 'Draw the reads that stop inside the repeat too: hatched in the histogram, faded with a chevron in the waterfall, at the length they reach (a lower bound). The alleles stay those of the spanning reads.' : `Fewer than ${SPAN_MIN} reads span the repeat: the reads stopping inside are part of the sizes, and always drawn`}
+            onChange={v => setWithTrunc(v === 'all')}
+            options={[{ value: 'spanning', label: 'spanning' }, { value: 'all', label: `+ stopping inside (${fmt(r.reads.truncated.length)})` }]} />
+          {enough && withTrunc && <span className="text-slate-500">alleles and chips: spanning reads only; the reads stopping inside are drawn at the length they reach</span>}
+        </div>
         <div className="px-3 pt-1 relative">
           <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, cursor: 'crosshair', userSelect: 'none' }} fontFamily="Inter, system-ui, sans-serif"
             onMouseDown={e => { const p = svgPoint(e); clickAt.current = p; if (p.px < L) return; drag.current = ux(p.px); setBrush([ux(p.px), ux(p.px)]); }}
@@ -189,7 +202,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               if (py > base) { setHover(null); return; }
               const i = Math.floor(ux(px) / step);
               if (i < 0 || i >= nb) { setHover(null); return; }
-              setHover({ x: px, y: py, text: `${i * step}–${(i + 1) * step - 1} ${locus.motif}: ${fmt(span[i])} spanning${!enough && trunc[i] ? ` + ${fmt(trunc[i])} at least` : ''}` });
+              setHover({ x: px, y: py, text: `${i * step}–${(i + 1) * step - 1} ${locus.motif}: ${fmt(span[i])} spanning${showTrunc && trunc[i] ? ` + ${fmt(trunc[i])} stopping inside (at least that long)` : ''}` });
             }}
             onMouseUp={() => {
               drag.current = null;
@@ -264,9 +277,9 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             <text x={L - 8} y={wTop + 8} textAnchor="end" fontSize={10} fill="#64748b">reads</text>
             <text x={L - 8} y={wTop + 20} textAnchor="end" fontSize={10} fill="#64748b">by size</text>
             <text x={L} y={wTop - 6} fontSize={10.5} fontWeight={600} fill="#334155">
-              {enough
+              {!showTrunc
                 ? `${fmt(rows.length)} of the ${fmt(r.reads.spanning.length)} spanning reads (both anchors), evenly by size · reads stopping inside not drawn`
-                : `${fmt(rows.length)} of ${fmt(view.used.length)} reads: ${fmt(r.reads.spanning.length)} spanning, the others stopping inside (chevron: at least that long)`}
+                : `${fmt(rows.length)} of ${fmt(drawn.length)} reads, evenly by size: ${fmt(r.reads.spanning.length)} spanning, ${fmt(r.reads.truncated.length)} stopping inside (faded, chevron: at least that long)`}
             </text>
             {rows.map((r, k) => {
               const y = wTop + k * rowH, runs: JSX.Element[] = [];
@@ -295,7 +308,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
         <div className="px-5 pb-1 text-[11.5px] text-slate-600 min-h-[22px]">
           {selStats && brush ? (
             <span>
-              <b>{Math.round(Math.min(...brush))}–{Math.round(Math.max(...brush))} units:</b> {fmt(selStats.n)} reads ({pct(selStats.n, view.used.length)}) · median {selStats.median} · P5–P95 {selStats.p5}–{selStats.p95}
+              <b>{Math.round(Math.min(...brush))}–{Math.round(Math.max(...brush))} units:</b> {fmt(selStats.n)} reads ({pct(selStats.n, drawn.length)}{showTrunc && sel!.some(u => u.truncated) ? `, ${fmt(sel!.filter(u => u.truncated).length)} of them lower bounds` : ''}) · median {selStats.median} · P5–P95 {selStats.p5}–{selStats.p95}
               {locus.interruptions.length > 0 && selStats.pats.length > 0 && <> · {selStats.pats.map(([p, n]) => `${patText(p)} ${pct(n, selStats.n)}`).join(', ')}</>}
               {locus.categories.length > 0 && <> · {locus.categories.map(c => `${c.name.toLowerCase()} ${pct(sel!.filter(u => u.units >= c.min && u.units <= c.max).length, selStats.n)}`).join(', ')}</>}
               <button onClick={() => setBrowse({ title: `${Math.round(Math.min(...brush))}–${Math.round(Math.max(...brush))} units`, list: sel! })} className="ml-2 text-indigo-700 underline">their sequences</button>
@@ -324,7 +337,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           {locus.benign.length > 0 && <Swatch c={UNIT_COLOR.B} t={`${locus.benign.join(' / ')} (benign or reference motif)`} />}
           {locus.interruptions.length > 0 && <Swatch c={UNIT_COLOR.I} t={`${locus.interruptions.join(' / ')} (interruption)`} />}
           <Swatch c={UNIT_COLOR.o} t="other unit (variant or sequencing error)" />
-          {!enough && <span className="inline-flex items-center gap-1.5"><svg width="14" height="10"><rect width="14" height="10" fill="url(#ri-hatch)" stroke="#6f8fd6" strokeWidth="0.5" /></svg>stops inside the repeat: at least that long</span>}
+          {showTrunc && <span className="inline-flex items-center gap-1.5"><svg width="14" height="10"><rect width="14" height="10" fill="url(#ri-hatch)" stroke="#6f8fd6" strokeWidth="0.5" /></svg>stops inside the repeat: at least that long</span>}
         </div>
         <div className="px-5 pt-2 pb-4 text-[11px] leading-relaxed text-slate-500">
           Each read is rebuilt over the locus from its soft clips, aligned bases and insertions. Two locus-specific anchors place the tract's ends in it (above:{' '}
