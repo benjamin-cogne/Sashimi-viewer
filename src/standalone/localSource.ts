@@ -40,7 +40,9 @@ type Opened =
  */
 export function classifyHeader(header: string): LibraryEvidence {
   const pg = header.split('\n').filter(l => l.startsWith('@PG'));
-  const text = pg.join(' ').toLowerCase();
+  // one line per program call, so a pattern stays within its line: a merged long-read BAM can carry tens of thousands of
+  // @PG lines (one per chunk), and a pattern free to run across all of them (minimap2 … splice) took minutes
+  const text = [...new Set(pg.map(l => l.replace(/\t(?:ID|PP|VN):[^\t]*/g, '')))].join('\n').toLowerCase();
   const name = (re: RegExp) => re.test(text);
   if (!pg.length) return { type: 'unknown', source: 'none', note: 'no @PG line in the header' };
   if (name(/\bstar\b|starsolo|hisat2|hisat|tophat|\bsubjunc\b|gsnap|olego|mapsplice|crac\b/) || name(/minimap2[^\n]*(-ax? ?splice|-x ?splice)/) || name(/dragen[^\n]*(--enable-rna(?:\s+|=)true|rna)/))
