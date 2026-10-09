@@ -1005,9 +1005,12 @@ repeat in every read and draws the result.
 - **Lower bounds.** A read with one anchor and not the other gives a lower bound: the motif-rich
   stretch next to that anchor, followed while at least 60 % of its last 10 units are the motif.
 - **Hover a waterfall row** for the read's name, size, anchor edits and purity.
-- **Read sequences.** Click a waterfall row, *their sequences* after dragging a size range, or one of
-  the buttons under the plot (spanning, shorter than the reference, impure tract, anchor twice / out
-  of order, stop inside the repeat). For each read:
+- **One class of reads.** The buttons above the plot (all spanning, shorter than the reference, impure
+  tract, anchor twice / out of order, stop inside the repeat) draw that class alone in the histogram
+  and the waterfall, and list its sequences under the plot. The allele lines and the chips stay those
+  of the reads sized. Clicking the button again, or *back to all*, returns to the usual view.
+- **Read sequences.** Click a waterfall row, *their sequences* after dragging a size range, or a class
+  button. For each read:
   - its 5′ and 3′ flanks (120 bp) are aligned base to base on the reference's: differing bases in
     red, extra bases in amber, missing ones as `-`, the anchor underlined;
   - its tract is shown as runs of units, e.g. `(CGG)10 AGG (CGG)9 AGG (CGG)140`, with the bases

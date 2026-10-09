@@ -52,6 +52,8 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
   const [hover, setHover] = useState<{ x: number; y: number; text: string } | null>(null);
   /** draw the reads that stop inside the repeat too (lower bounds), though there are enough spanning ones to size it */
   const [withTrunc, setWithTrunc] = useState(false);
+  /** a class of reads (spanning, shorter than the reference, impure…) drawn alone and listed, or the usual view */
+  const [focus, setFocus] = useState<string | null>(null);
   /** the reads whose sequences are shown under the plot */
   const [browse, setBrowse] = useState<{ title: string; list: ReadRepeat[] } | null>(null);
   /** a click on the plot (no drag): where, to open a waterfall row */
@@ -81,7 +83,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     })().catch(e => { if (!cancelled) setResults(p => ({ ...p, [sid]: { error: e?.message ?? String(e) } })); });
     return () => { cancelled = true; };
   }, [sid, locus]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { setBrush(null); setBrowse(null); }, [sid]);
+  useEffect(() => { setBrush(null); setBrowse(null); setFocus(null); }, [sid]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { if (brush) setBrush(null); else onClose(); } };
     window.addEventListener('keydown', onKey);
@@ -99,18 +101,28 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     const spanSorted = r.reads.spanning.map(x => x.units).sort((a, b) => a - b);
     const p95 = quantile(spanSorted, 0.95);
     const beyond = r.reads.truncated.filter(x => spanSorted.length && x.units > p95).length;
-    // the reads drawn: the ones sized, and on demand the ones stopping inside (alleles stay those of the reads sized)
-    const showTrunc = !enough || withTrunc;
-    const drawn: ReadRepeat[] = showTrunc ? [...r.reads.spanning, ...r.reads.truncated] : r.reads.spanning;
+    // the classes of reads a button draws alone and lists
+    const classes: [string, ReadRepeat[]][] = ([
+      ['all spanning', r.reads.spanning],
+      ['shorter than the reference', r.reads.spanning.filter(x => x.units < locus.refUnits)],
+      ['impure tract', r.reads.impure],
+      ['anchor twice / out of order', r.reads.chimeric],
+      ['stop inside the repeat', r.reads.truncated],
+    ] as [string, ReadRepeat[]][]).filter(([, l]) => l.length);
+    const focused = focus ? classes.find(([t]) => t === focus) : undefined;
+    // the reads drawn: a class chosen, else the ones sized and on demand the ones stopping inside (alleles stay those
+    // of the reads sized); reads set apart for their anchors have no tract to draw
+    const drawn: ReadRepeat[] = focused ? focused[1].filter(x => !x.note) : !enough || withTrunc ? [...r.reads.spanning, ...r.reads.truncated] : r.reads.spanning;
+    const showTrunc = drawn.some(x => x.truncated);
     const drawnUnits = drawn.map(x => x.units).sort((a, b) => a - b);
-    const xMaxRaw = Math.max(quantile(drawnUnits, 0.99) * 1.12, locus.refUnits * 2.5, 30);
+    const xMaxRaw = Math.max(drawnUnits.length ? quantile(drawnUnits, 0.99) * 1.12 : 0, locus.refUnits * 2.5, 30);
     const step = niceStep(xMaxRaw);
     const xMax = Math.ceil(xMaxRaw / step) * step;
     // waterfall rows: evenly by size
     const order = [...drawn].sort((a, b) => a.units - b.units);
     const rows = order.length <= WATERFALL_ROWS ? order : Array.from({ length: WATERFALL_ROWS }, (_, i) => order[Math.round((i * (order.length - 1)) / (WATERFALL_ROWS - 1))]);
-    return { r, enough, used, units, alleles, beyond, p95, xMax, step, rows, drawn, showTrunc };
-  }, [cur, locus.refUnits, withTrunc]);
+    return { r, enough, used, units, alleles, beyond, p95, xMax, step, rows, drawn, showTrunc, classes, focused };
+  }, [cur, locus.refUnits, withTrunc, focus]);
 
   const W = 1000, L = 64, R = 24, top = 46, hH = 150;
   const x = (u: number) => L + (Math.min(u, view?.xMax ?? 1) / (view?.xMax ?? 1)) * (W - L - R);
@@ -135,13 +147,12 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     if (!cur || cur.loading) return <div className="px-5 py-10 text-center text-sm text-slate-500">Reading the reads over the repeat…</div>;
     if (cur.error) return <div className="px-5 py-6 text-sm text-red-700">Could not read this sample: {cur.error}</div>;
     if (!view) return null;
-    const { r, enough, alleles, xMax, step, rows, units, beyond, p95, drawn, showTrunc } = view;
+    const { r, enough, alleles, xMax, step, rows, units, beyond, p95, drawn, showTrunc, classes, focused } = view;
     const shorter = r.reads.spanning.filter(x => x.units < locus.refUnits).length;
     if (!units.length) return <div className="px-5 py-6 text-sm text-slate-600">No read of this sample reaches the repeat with a flank on either side ({fmt(r.reads.total)} reads over the locus).</div>;
     const nb = Math.ceil(xMax / step);
     const span = new Array(nb).fill(0), trunc = new Array(nb).fill(0);
-    for (const u of r.reads.spanning) span[Math.min(nb - 1, Math.floor(u.units / step))]++;
-    if (showTrunc) for (const u of r.reads.truncated) trunc[Math.min(nb - 1, Math.floor(u.units / step))]++;
+    for (const u of drawn) (u.truncated ? trunc : span)[Math.min(nb - 1, Math.floor(u.units / step))]++;
     const yMax = Math.max(1, ...span.map((v, i) => v + trunc[i]));
     const base = top + hH, wTop = base + 52;
     const rowH = Math.max(1.4, Math.min(4, 320 / Math.max(1, rows.length))), wH = rows.length * rowH;
@@ -179,12 +190,26 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           {alleles.some(a => a.broad) && <Chip k="reading" v={<span className="text-red-700">broad spread</span>} sub="somatic mosaicism, or PCR / sequencing stutter" />}
         </div>
         <div className="flex flex-wrap items-center gap-2 px-5 pt-2 text-[11.5px] text-slate-600">
-          <Segmented size="sm" prefix="reads drawn" label="Reads drawn" value={showTrunc ? 'all' : 'spanning'} disabled={!enough}
+          <Segmented size="sm" prefix="reads drawn" label="Reads drawn" value={!enough || withTrunc ? 'all' : 'spanning'} disabled={!enough}
             title={enough ? 'Draw the reads that stop inside the repeat too: hatched in the histogram, faded with a chevron in the waterfall, at the length they reach (a lower bound). The alleles stay those of the spanning reads.' : `Fewer than ${SPAN_MIN} reads span the repeat: the reads stopping inside are part of the sizes, and always drawn`}
-            onChange={v => setWithTrunc(v === 'all')}
+            onChange={v => { setWithTrunc(v === 'all'); setFocus(null); }}
             options={[{ value: 'spanning', label: 'spanning' }, { value: 'all', label: `+ stopping inside (${fmt(r.reads.truncated.length)})` }]} />
-          {enough && withTrunc && <span className="text-slate-500">alleles and chips: spanning reads only; the reads stopping inside are drawn at the length they reach</span>}
+          <span className="text-slate-400">or one class, drawn alone and listed:</span>
+          {classes.map(([t, l]) => (
+            <button key={t} onClick={() => { if (focus === t) { setFocus(null); setBrowse(null); } else { setFocus(t); setBrowse({ title: t, list: l }); } setBrush(null); }}
+              title={focus === t ? 'Back to the usual view' : `Draw these reads alone in the histogram and the waterfall, and list their sequences under the plot`}
+              className={`rounded-full border px-2.5 py-0.5 ${focus === t ? 'border-indigo-400 bg-indigo-50 text-indigo-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
+              {t} <span className="text-slate-400">{fmt(l.length)}</span>
+            </button>
+          ))}
         </div>
+        {(focused || (enough && withTrunc)) && (
+          <div className="mx-5 mt-1.5 rounded-md bg-indigo-50 px-3 py-1 text-[11.5px] text-indigo-900">
+            {focused
+              ? <>Showing <b>{focused[0]}</b> only: {fmt(focused[1].length)} read{focused[1].length === 1 ? '' : 's'}{focused[1].some(x => x.note) ? ' (no tract measured: their anchors are listed under the plot)' : ''}. The allele lines and chips stay those of the reads sized. <button onClick={() => { setFocus(null); setBrowse(null); }} className="underline">back to all</button></>
+              : <>Alleles and chips: spanning reads only; the reads stopping inside are drawn at the length they reach.</>}
+          </div>
+        )}
         <div className="px-3 pt-1 relative">
           <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, cursor: 'crosshair', userSelect: 'none' }} fontFamily="Inter, system-ui, sans-serif"
             onMouseDown={e => { const p = svgPoint(e); clickAt.current = p; if (p.px < L) return; drag.current = ux(p.px); setBrush([ux(p.px), ux(p.px)]); }}
@@ -277,7 +302,9 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             <text x={L - 8} y={wTop + 8} textAnchor="end" fontSize={10} fill="#64748b">reads</text>
             <text x={L - 8} y={wTop + 20} textAnchor="end" fontSize={10} fill="#64748b">by size</text>
             <text x={L} y={wTop - 6} fontSize={10.5} fontWeight={600} fill="#334155">
-              {!showTrunc
+              {focused
+                ? (drawn.length ? `${fmt(rows.length)} of the ${fmt(drawn.length)} reads · ${focused[0]}, evenly by size${showTrunc ? ' (faded, chevron: at least that long)' : ''}` : `${focused[0]}: no tract measured, nothing to draw · their sequences are listed under the plot`)
+                : !showTrunc
                 ? `${fmt(rows.length)} of the ${fmt(r.reads.spanning.length)} spanning reads (both anchors), evenly by size · reads stopping inside not drawn`
                 : `${fmt(rows.length)} of ${fmt(drawn.length)} reads, evenly by size: ${fmt(r.reads.spanning.length)} spanning, ${fmt(r.reads.truncated.length)} stopping inside (faded, chevron: at least that long)`}
             </text>
@@ -315,21 +342,6 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               <button onClick={() => setBrush(null)} className="ml-2 text-indigo-700 underline">clear</button>
             </span>
           ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions · click a waterfall row for its sequence.</span>}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 px-5 pt-1.5 pb-1 text-[11.5px]">
-          <span className="text-slate-500">Read sequences (flanks against the reference, tract by units):</span>
-          {([
-            ['spanning', r.reads.spanning],
-            ['shorter than the reference', r.reads.spanning.filter(x => x.units < locus.refUnits)],
-            ['impure tract', r.reads.impure],
-            ['anchor twice / out of order', r.reads.chimeric],
-            ['stop inside the repeat', r.reads.truncated],
-          ] as [string, ReadRepeat[]][]).filter(([, l]) => l.length).map(([t, l]) => (
-            <button key={t} onClick={() => setBrowse({ title: t, list: l })}
-              className={`rounded-full border px-2.5 py-0.5 ${browse?.title === t ? 'border-indigo-400 bg-indigo-50 text-indigo-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
-              {t} <span className="text-slate-400">{fmt(l.length)}</span>
-            </button>
-          ))}
         </div>
         {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} onClose={() => setBrowse(null)} />}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1 text-[11.5px] text-slate-600">
