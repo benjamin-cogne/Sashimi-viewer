@@ -764,7 +764,8 @@ export class LocalDataSource implements SashimiDataSource {
         cpgs = seq ? cpgSites(lo, seq) : new Int32Array(0);
       };
       const count = (layer: MethylCounts, r: any) => {
-        if (!keepFlags(view.flags(r))) return;
+        // primary alignments only, as modkit pileup counts (a split read's supplementary parts are left out)
+        if (!keepFlags(view.flags(r)) || (view.flags(r) & 2048)) return;
         const m = view.mods(r);
         if (!m) return;
         const ops = view.ops(r);
