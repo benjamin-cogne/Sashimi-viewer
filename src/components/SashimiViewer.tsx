@@ -4379,7 +4379,7 @@ export default function SashimiViewer({
         const txt = 'haplotags: H1 · H2, one hue per phase set · ⫽ sets not linked';
         items.push({
           w: 34 + txt.length * 5.4, el: (
-            <g key="lvar3">
+            <g key="lphase">
               <rect x={0} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[0]} /><rect x={0} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[1]} />
               <rect x={11} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[0]} /><rect x={11} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[1]} />
               <circle cx={7} cy={y - 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.G} strokeWidth={1.5} /><circle cx={16} cy={y + 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.A} strokeWidth={1.5} />
