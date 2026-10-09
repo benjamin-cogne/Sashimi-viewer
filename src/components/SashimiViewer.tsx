@@ -482,80 +482,10 @@ const READ_REV_FILL = 'rgba(150,150,230,0.75)';
  * grows with its bases as the reads do: the bar and the four cells span the changed bases (an insertion stays a thin
  * mark between two bases) and the label grows, naming the change once there is room.
  */
-const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7, VAR_MAF_H = 14;
-const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 4 + VAR_MAF_H + 5;
+const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7;
+const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 5;
 /** A phased file (HP / PS haplotags): the two haplotype lanes under the variants track, their phase sets above them. */
 const VAR_PHASE_H = 46, VAR_PHASE_LANE = [22, 37] as const;
-/**
- * The allele-balance strip under the sites: the major allele fraction, max(VAF, 1 − VAF), smoothed along the window.
- * Each pixel pools the sites under it, or the MAF_SMOOTH_SITES nearest within MAF_SMOOTH_MAX_BP of it (sites flagged
- * red by the quality checks, and those under MAF_MIN_VAF, left out). With heterozygous sites (VAF 0.2–0.8) among them,
- * the strip takes their median MAF: 0.5 in green for a balanced diploid region, drifting through amber towards red
- * as one allele takes over (a copy gain gives 0.67, a mosaic change anything between). With hardly any (under
- * MAF_MIN_HET_SHARE of the sites) and a wider stretch agreeing (MAF_ROH_*), the region is a run of homozygosity (loss
- * of heterozygosity, uniparental disomy, identity by descent) and the strip takes the mean MAF of its sites, near 1: red. Homozygous sites alone do not
- * make a region red: in a normal diploid genome about 40 % of the variant sites are homozygous for the alternate
- * allele, which is why the median of the heterozygous sites, not a mean over all, gives the balance.
- */
-const MAF_SMOOTH_SITES = 8, MAF_SMOOTH_MAX_BP = 100_000, MAF_MIN_VAF = 0.2, MAF_MIN_HET_SHARE = 0.15, MAF_MIN_SITES = 3;
-interface MafSites { pos: Int32Array; maf: Float64Array; het: Uint8Array }
-const mafSiteCache = new WeakMap<VariantSite[], { long: boolean; m: MafSites }>();
-function mafSites(sites: VariantSite[], long: boolean): MafSites {
-  const c = mafSiteCache.get(sites);
-  if (c && c.long === long) return c.m;
-  const keep = sites.filter(s => s.vaf >= MAF_MIN_VAF && cachedChecks(s, long).worst !== 'bad').sort((a, b) => a.pos - b.pos);
-  const m = { pos: Int32Array.from(keep, s => s.pos), maf: Float64Array.from(keep, s => Math.max(s.vaf, 1 - s.vaf)), het: Uint8Array.from(keep, s => (s.vaf <= 0.8 ? 1 : 0)) };
-  mafSiteCache.set(sites, { long, m });
-  return m;
-}
-/**
- * A run of homozygosity is judged on more sites than the colour: at least MAF_ROH_MIN_SITES of the MAF_ROH_SITES nearest
- * (within MAF_ROH_MAX_BP), fewer than MAF_ROH_HET_SHARE of them heterozygous. Eight sites of a normal region, 60 %
- * heterozygous, are all homozygous but one about once in a hundred windows; twenty, well under once in 10⁴. PLINK's
- * default run of homozygosity asks for 100 SNPs over 1 Mb on genotyping arrays; a window of sequenced sites is smaller.
- */
-const MAF_ROH_SITES = 20, MAF_ROH_MIN_SITES = 15, MAF_ROH_HET_SHARE = 0.1, MAF_ROH_MAX_BP = 500_000;
-/** The nearest sites to [ga, gb): indices [a, b) holding at least `k` of them if they lie within `reach` of it. */
-function mafWindow(M: MafSites, ga: number, gb: number, k: number, reach: number): [number, number] {
-  const n = M.pos.length;
-  let a = methylLower(M.pos, ga), b = methylLower(M.pos, gb);
-  while (b - a < k) {
-    const canL = a > 0 && M.pos[a - 1] >= ga - reach, canR = b < n && M.pos[b] < gb + reach;
-    if (!canL && !canR) break;
-    if (canL && (!canR || ga - M.pos[a - 1] <= M.pos[b] - gb)) a--; else b++;
-  }
-  return [a, b];
-}
-const median = (v: number[]) => { const s = [...v].sort((p, q) => p - q), h = s.length; return h % 2 ? s[h >> 1] : (s[h / 2 - 1] + s[h / 2]) / 2; };
-/** The strip at pixel x: its value (0.5–1), the sites pooled and how many are heterozygous, or null. */
-function mafColumn(M: MafSites, scale: { invert(px: number): number }, x: number): { v: number; n: number; het: number; from: number; to: number; roh: boolean } | null {
-  if (!M.pos.length) return null;
-  const g1 = scale.invert(x), g2 = scale.invert(x + 1);
-  const ga = Math.ceil(Math.min(g1, g2)), gb = Math.max(ga + 1, Math.ceil(Math.max(g1, g2)));
-  const hetsOf = (a: number, b: number) => { const h: number[] = []; for (let i = a; i < b; i++) if (M.het[i]) h.push(M.maf[i]); return h; };
-  const [a, b] = mafWindow(M, ga, gb, MAF_SMOOTH_SITES, MAF_SMOOTH_MAX_BP);
-  if (b - a < MAF_MIN_SITES) return null;
-  const hets = hetsOf(a, b);
-  if (hets.length >= 2 && hets.length >= MAF_MIN_HET_SHARE * (b - a)) return { v: median(hets), n: b - a, het: hets.length, from: M.pos[a], to: M.pos[b - 1] + 1, roh: false };
-  // few heterozygous sites close by: a run of homozygosity only if a wider stretch agrees
-  const [a2, b2] = mafWindow(M, ga, gb, MAF_ROH_SITES, MAF_ROH_MAX_BP), hets2 = hetsOf(a2, b2);
-  if (b2 - a2 >= MAF_ROH_MIN_SITES && hets2.length < MAF_ROH_HET_SHARE * (b2 - a2)) {
-    let sum = 0;
-    for (let i = a2; i < b2; i++) sum += M.maf[i];
-    return { v: sum / (b2 - a2), n: b2 - a2, het: hets2.length, from: M.pos[a2], to: M.pos[b2 - 1] + 1, roh: true };
-  }
-  if (hets2.length >= 2) return { v: median(hets2), n: b2 - a2, het: hets2.length, from: M.pos[a2], to: M.pos[b2 - 1] + 1, roh: false };
-  return null;
-}
-/** green at 0.5 (balanced), amber around 0.65, red from 0.8 (one allele) */
-const MAF_STOPS: [number, [number, number, number]][] = [[0.5, [22, 163, 74]], [0.58, [101, 163, 13]], [0.65, [202, 138, 4]], [0.72, [234, 88, 12]], [0.8, [220, 38, 38]]];
-function mafColor(v: number): string {
-  const x = Math.min(0.8, Math.max(0.5, v));
-  let k = 0;
-  while (k + 2 < MAF_STOPS.length && x > MAF_STOPS[k + 1][0]) k++;
-  const [x0, c0] = MAF_STOPS[k], [x1, c1] = MAF_STOPS[k + 1], t = (x - x0) / (x1 - x0);
-  return `rgb(${c0.map((c, i) => Math.round(c + (c1[i] - c) * t)).join(',')})`;
-}
 const VAR_CELLS_PX = 17;
 const DEL_COLOR = '#111827';
 /** the checks of a site, computed once per site object (their binomial tests are not redone at every frame) */
@@ -4369,14 +4299,6 @@ export default function SashimiViewer({
         });
       }
       items.push({
-        w: 42 + 'allele balance (MAF): balanced · imbalance · homozygous run'.length * 5.4 + 14, el: (
-          <g key="lvar4">
-            {[0.5, 0.56, 0.62, 0.68, 0.74, 0.8].map((v, i) => <rect key={v} x={i * 6} y={y - 4} width={6} height={8} fill={mafColor(v)} />)}
-            <text x={42} y={y + 3.5} fill={INK.muted} fontSize={9.5}>allele balance (MAF): balanced · imbalance · homozygous run</text>
-          </g>
-        ),
-      });
-      items.push({
         w: 196, el: (
           <g key="lvar3">
             {(['good', 'warn', 'bad', 'na'] as QLevel[]).map((lv, i) => (
@@ -4770,21 +4692,6 @@ export default function SashimiViewer({
     const bars = new Map<string, string[]>(), refs: string[] = [], cells = new Map<QLevel, string[]>(), labels: JSX.Element[] = [];
     const push = <K,>(m: Map<K, string[]>, k: K, d: string) => { const l = m.get(k); if (l) l.push(d); else m.set(k, [d]); };
     const verdicts: Record<QLevel, number> = { good: 0, warn: 0, bad: 0, na: 0 };
-    // the allele-balance strip: one column per pixel, merged into one path per colour step, and the value as a line
-    const mafTop = cellY + VAR_CELL_H + 4, M = mafSites(L.sites, long), mafFill = new Map<string, string[]>(), mafLine: string[] = [];
-    {
-      let run: { key: number; x0: number; x1: number } | null = null, lastY: number | null = null, lastX = -2;
-      const flush = () => { if (run) { push(mafFill, mafColor(run.key / 50), `M${run.x0},${mafTop}h${run.x1 - run.x0}v${VAR_MAF_H}h${run.x0 - run.x1}z`); run = null; } };
-      for (let x = PLOT_LEFT; x < plotRight; x++) {
-        const c = mafColumn(M, scale, x);
-        if (!c) { flush(); lastY = null; continue; }
-        const key = Math.round(c.v * 50), y = (mafTop + VAR_MAF_H - 1 - ((Math.min(1, c.v) - 0.5) / 0.5) * (VAR_MAF_H - 2)).toFixed(1);
-        if (run && run.key === key && run.x1 === x) run.x1 = x + 1; else { flush(); run = { key, x0: x, x1: x + 1 }; }
-        mafLine.push(lastY != null && lastX === x - 1 ? `L${x + 0.5},${y}` : `M${x + 0.5},${y}`);
-        lastY = +y; lastX = x;
-      }
-      flush();
-    }
     for (const { s, cx, w, bp, room, below, lead, group } of marks) {
       const h = Math.max(1, s.vaf * VAR_BAR_H), x = (cx - w / 2).toFixed(1), ww = w.toFixed(1);
       const bottom = barBottom - Math.min(1, below) * VAR_BAR_H, total = group.reduce((a, o) => a + o.vaf, 0);
@@ -4809,7 +4716,7 @@ export default function SashimiViewer({
       if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - hAll - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
     }
     // ---- a phased file: the two haplotype lanes of each phase set, every site on the lane(s) carrying it (sitePhase.ts) ----
-    const phTop = mafTop + VAR_MAF_H + 5, phased = L.variants > VAR_TRACK_H;
+    const phTop = cellY + VAR_CELL_H + 5, phased = L.variants > VAR_TRACK_H;
     const phaseBack: JSX.Element[] = [], phaseFront: JSX.Element[] = [];
     let phaseInfo = '';
     if (phased) {
@@ -4882,17 +4789,13 @@ export default function SashimiViewer({
     return (
       <g key="variants">
         <line x1={PLOT_LEFT} y1={top + 1} x2={plotRight} y2={top + 1} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />
-        <text transform={`translate(${12}, ${(barTop + mafTop + VAR_MAF_H) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>VAF</text>
+        <text transform={`translate(${12}, ${(barTop + cellY + VAR_CELL_H) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>VAF</text>
         {[1, 0.5].map(f => (
           <g key={f}>
             <line x1={PLOT_LEFT - 4} y1={barBottom - f * VAR_BAR_H} x2={PLOT_LEFT} y2={barBottom - f * VAR_BAR_H} stroke={INK.gridStrong} strokeWidth={1} />
             <text x={PLOT_LEFT - 7} y={barBottom - f * VAR_BAR_H + 3} textAnchor="end" fill={INK.muted} fontSize={8.5}>{f * 100} %</text>
           </g>
         ))}
-        <text x={PLOT_LEFT - 7} y={mafTop + VAR_MAF_H / 2 + 3} textAnchor="end" fill={INK.muted} fontSize={8}>
-          <title>{`Allele balance: the major allele fraction max(VAF, 1 − VAF), smoothed (each pixel pools the sites under it or its ${MAF_SMOOTH_SITES} nearest within ${formatBp(MAF_SMOOTH_MAX_BP)}; sites under ${MAF_MIN_VAF * 100} % or flagged red left out). With heterozygous sites, their median: 0.5 green (balanced), towards amber and red as one allele takes over (copy gain 0.67, mosaic change in between). With hardly any heterozygous site: a run of homozygosity (LOH, UPD, IBD), red. The line gives the value, 0.5 at the bottom to 1 at the top.`}</title>
-          MAF
-        </text>
         <text x={PLOT_LEFT - 7} y={cellY + VAR_CELL_H - 0.5} textAnchor="end" fill={INK.faint} fontSize={7.5}>
           <title>Quality cells under each site: base quality (SNV) or homopolymer (indel) · mapping quality · strand · read position; green pass, amber check, red likely artefact, grey not judged (too few reads). One cell in the colour of the worst where sites are close.</title>
           Q
@@ -4910,9 +4813,6 @@ export default function SashimiViewer({
           {[...bars].map(([c, d]) => <path key={c} d={d.join('')} fill={c} />)}
           {[...cells].map(([lv, d]) => <path key={lv} d={d.join('')} fill={Q_COLORS[lv]} />)}
           {labels}
-          <rect x={PLOT_LEFT} y={mafTop} width={plotWidth} height={VAR_MAF_H} fill={INK.grid} opacity={0.25} />
-          {[...mafFill].map(([c, d]) => <path key={`maf${c}`} d={d.join('')} fill={c} opacity={0.85} />)}
-          {mafLine.length > 0 && <path d={mafLine.join('')} fill="none" stroke="#111827" strokeOpacity={0.55} strokeWidth={1} />}
           {phaseBack}
           {phaseFront.filter(el => !String(el.key).startsWith('pk'))}
           {/* a click on a site opens its evidence from the reads */}
@@ -5807,23 +5707,16 @@ export default function SashimiViewer({
     }
     // over a variants track: the site under the pointer, with its checks
     let variant: { name: string; color: string; site: VariantSite; checks: QCheck[] } | null = null;
-    let maf: { name: string; v: number; n: number; het: number; from: number; to: number; roh: boolean } | null = null;
     for (const L of layouts) {
       if (!L.variants) continue;
       const top = L.yOff + L.juncH + L.covH;
       if (hover.py < top || hover.py > top + L.variants) continue;
-      const mafTop = top + VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 4;
-      if (hover.py >= mafTop - 1 && hover.py <= mafTop + VAR_MAF_H + 1) {
-        const c = mafColumn(mafSites(L.sites, !!dnaSites[L.track.sampleId]?.long), scale, Math.floor(hover.px));
-        if (c) maf = { name: L.track.sampleName, ...c };
-        continue;
-      }
       let best: { s: VariantSite; d: number } | null = null;
       for (const m of variantMarks(L.sites)) { const d = Math.abs(m.cx - hover.px); if (d <= Math.max(5, m.w / 2 + 2) && (!best || d < best.d)) best = { s: m.s, d }; }
       if (best) variant = { name: L.track.sampleName, color: siteColor(best.s), site: best.s, checks: cachedChecks(best.s, !!dnaSites[L.track.sampleId]?.long).checks };
     }
     return {
-      x: hover.px, pos, alt, snps: here, known, variant, maf,
+      x: hover.px, pos, alt, snps: here, known, variant,
       cdna: tx ? cdnaPosition(pos, tx) : null,
       rows: layouts.map(L => ({ name: L.track.sampleName, color: L.color, depth: depthAt(L.track.coverage, pos), methyl: L.methyl ? methylHover(methylData[L.track.sampleId], L.track.sampleId) : null })),
     };
@@ -6707,13 +6600,6 @@ export default function SashimiViewer({
                   );
                 })()}
                 <div className="text-gray-400">click for the reads' distributions</div>
-              </div>
-            )}
-            {hoverInfo.maf && (
-              <div className="text-[10px] leading-4 mb-1 border-l-2 pl-1.5" style={{ borderColor: mafColor(hoverInfo.maf.v) }}>
-                <span className="font-semibold" style={{ color: mafColor(hoverInfo.maf.v) }}>{hoverInfo.maf.roh ? 'run of homozygosity?' : `major allele fraction ${hoverInfo.maf.v.toFixed(2)}`}</span>
-                <span className="text-gray-600"> · {hoverInfo.maf.name}</span>
-                <div className="text-gray-600">{hoverInfo.maf.n} sites ({hoverInfo.maf.het} heterozygous) over {currentChrom}:{(hoverInfo.maf.from + 1).toLocaleString('en-US')}-{hoverInfo.maf.to.toLocaleString('en-US')}{hoverInfo.maf.roh ? ` · mean MAF ${hoverInfo.maf.v.toFixed(2)}` : ' · median of the heterozygous sites'}</div>
               </div>
             )}
             {hoverInfo.snps.map(v => <div key={v.id + v.start} className="text-[10px] text-blue-700 leading-4 mb-0.5 whitespace-pre-line">{snpText(v)}</div>)}

@@ -815,23 +815,6 @@ way (amplicons), or a region where every read maps poorly, from being called an 
 checks follow what GATK's hard filters (FisherStrand, MQ and MQRankSum, ReadPosRankSum) and a
 reviewer in IGV look at. They are an aid to judge a call, not a variant caller's filter.
 
-- under them, the **allele balance** strip: the major allele fraction, max(VAF, 1 − VAF), smoothed
-  along the window. Each pixel pools the sites under it, or its 8 nearest within 100 kb, leaving out
-  sites under 20 % and those flagged red. Where heterozygous sites (VAF 0.2–0.8) are among them, the
-  strip takes their median:
-  - 0.5, in green, is a balanced diploid region;
-  - it turns amber, then red, as one allele takes over. A copy gain gives 0.67, and a mosaic change
-    anything in between.
-
-  Where hardly any site is heterozygous, and a wider stretch agrees (at least 15 of the 20 nearest
-  sites within 500 kb, under 10 % heterozygous), the region is a **run of homozygosity** in red:
-  loss of heterozygosity, uniparental disomy or identity by descent. Homozygous sites alone never
-  make a region red. In a normal genome about 40 % of the variant sites are homozygous for the
-  alternate allele, which is why the median of the heterozygous sites gives the balance, and not a
-  mean over all. A thin line gives the value, 0.5 at the bottom to 1 at the top, and the hover card
-  gives the sites pooled. Twenty sites is far fewer than PLINK's default run (100 SNPs over 1 Mb on
-  arrays), so take a red stretch as a lead to check, for example against a copy-number view.
-
 Hovering a site gives its values. A click opens the **distributions from the reads** over the
 site, decoded there (up to 5,000):
 - the alternate and reference reads by strand;
