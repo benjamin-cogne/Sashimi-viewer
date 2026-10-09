@@ -159,6 +159,8 @@ interface RecordView<R> {
   quals(r: R): ArrayLike<number> | null;
   /** the base-modification tags (MM / ML, or the legacy Mm / Ml), null when the record has none */
   mods(r: R): { mm: string; ml: ArrayLike<number> | null; mn: number | null } | null;
+  /** the haplotag of a record of a phased file (HP, PS), nothing when untagged */
+  hap(r: R): { hp?: number; ps?: number };
   /** `light` leaves out name, sequence and qualities (coverage only needs the alignment blocks); `structural` adds the pair and SA fields. */
   raw(r: R, light: boolean, structural: boolean, refNames: string[]): RawRead;
 }
@@ -202,6 +204,7 @@ const BAM_VIEW: RecordView<any> = {
   },
   quals: r => r.qual ?? null,
   mods: r => modTags(t => r.getTag(t)),
+  hap: r => haplotag(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
     const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(r.CIGAR)) || bigInsertion(r.CIGAR)));
@@ -228,6 +231,7 @@ const CRAM_VIEW: RecordView<any> = {
   },
   quals: r => r.qualityScores ?? null,
   mods: r => modTags(t => r.getTag(t)),
+  hap: r => haplotag(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const feats = r.readFeatures as any;
     const qual = r.qualityScores ?? null;
@@ -815,7 +819,10 @@ export class LocalDataSource implements SashimiDataSource {
         const ops = view.ops(r);
         const n = view.seqCodes(r, scratch);
         const start0 = view.start(r);
-        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r));
+        // a phased file: the read's haplotag (HP 1, 2, … within the phase set PS) numbered for the counts
+        const t = view.hap(r);
+        const g = t.hp ? st.groups.of(t.hp, t.ps ?? null) : 0;
+        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r), g);
         if (st.longReads == null) {
           let span = 0;
           // aligned bases, not the introns (N) nor the deletions (D): see isLongRead
@@ -836,8 +843,8 @@ export class LocalDataSource implements SashimiDataSource {
       const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
       const siteRef = refWindow(start, await this.getReferenceSeq(chrom, start, end));
       throwIfAborted(signal);
-      const { sites, reads } = sitesFromCounts([st.owned, st.spill], uniqueOnly, start, end, siteRef, vaf, minIndel);
-      return { sites, total: reads, long_reads: longReads };
+      const { sites, reads, haplotagged } = sitesFromCounts([st.owned, st.spill], uniqueOnly, start, end, siteRef, vaf, minIndel, st.groups);
+      return { sites, total: reads, long_reads: longReads, ...(haplotagged ? { haplotagged } : {}) };
     });
   }
 

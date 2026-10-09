@@ -21,8 +21,9 @@
  */
 import type { AlignedRead, AllelicJunction, HapJunction, HaplotypeConsensus, HaplotypeSet, HaplotypeView, PhaseResult, VariantSite } from '../components/sashimi/types';
 import { fisher } from '../components/sashimi/siteQuality';
-import { callSites, jKey, junctionSnap, readJunctions } from './collapse';
+import { callSites, jKey, junctionSnap, mismatchAt, readJunctions } from './collapse';
 import { HET_MAX, HET_MIN, alleleAt, fragmentsOf } from './phasing';
+import { siteHaplotypesOf } from './alleles';
 
 /** Reads of one haplotype needed for a stretch to count as covered, and for a site to be judged. */
 export const HAP_MIN_DEPTH = 3;
@@ -242,4 +243,30 @@ export function windowHaplotypes(reads: AlignedRead[], start: number, end: numbe
   if (source !== 'reads' && reads.some(r => r.hp)) return { haplotypes: haplotypesFromTags(reads, o) };
   const phase = phaseReads();
   return { phase, haplotypes: haplotypesFromPhase(reads, phase, o) };
+}
+
+/**
+ * The sites' counts by haplotag (VariantSite.hap) from decoded reads, by the rules of the variants scan (alleles.ts): per
+ * (phase set, haplotype), the tagged reads whose alignment spans the site and those carrying its allele, whatever its
+ * base quality. For sources that call their sites from reads (a container's stored reads). Returns the tagged reads.
+ */
+export function addSiteHaplotypesFromReads(reads: AlignedRead[], sites: VariantSite[]): number {
+  const tagged = reads.filter(r => r.hp && r.hp > 0);
+  if (!tagged.length) return 0;
+  for (const s of sites) {
+    const per = new Map<string, { ps: number | null; hp: number; depth: number; alt: number }>();
+    for (const r of tagged) {
+      if (r.s > s.pos || r.e <= s.pos) continue;
+      const ps = r.ps ?? null, key = `${ps ?? ''}:${r.hp}`;
+      let x = per.get(key);
+      if (!x) per.set(key, x = { ps, hp: r.hp!, depth: 0, alt: 0 });
+      x.depth++;
+      if (s.kind === 'snv' ? mismatchAt(r, s.pos)?.[0] === s.alt
+        : s.kind === 'ins' ? r.i.some(([p, l]) => p === s.pos && l === s.length)
+        : r.d.some(([a, b]) => a === s.pos && b === s.pos + s.length)) x.alt++;
+    }
+    const hap = siteHaplotypesOf([...per.values()]);
+    if (hap) s.hap = hap;
+  }
+  return tagged.length;
 }

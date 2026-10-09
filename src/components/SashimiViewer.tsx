@@ -5,6 +5,7 @@ import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from '
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
+import { PHASE_HI, PHASE_LO, PHASE_MIN_DEPTH, sitePhase } from './sashimi/sitePhase';
 import type { MethylWindow } from '../standalone/methylation';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
@@ -129,6 +130,8 @@ export interface ViewerSettings {
   coverageVariants?: boolean;
   /** long-read DNA tracks: CpG methylation from the MM / ML tags, a panel under the coverage and colours on the reads (default off) */
   methylation?: boolean;
+  /** the reference bases and the MANE translation in a strip under the gene model (unset: on when a DNA sample is shown) */
+  sequence?: boolean;
   /** DNA tracks: the coverage layer (histogram and structural arcs; default on). Off, a DNA track keeps its label band and the layers under it */
   coverage?: boolean;
   /** the methylation panel restricted to the CpG islands of the reference (default off: every CpG) */
@@ -431,7 +434,7 @@ const READS_MAX_ROWS = 120;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
 /** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
-const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
+const LAYER_COLORS = { S: '#0f766e', C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
 /** Supporting reads of an arc kept at most (every k-th past it), their mates added. */
 const READS_SUPPORT_MAX = 300;
@@ -446,6 +449,10 @@ const READS_MAX = 2500;
 const SITES_STRIP_H = 18;      // strip above the sashimi holding the variant-site stars
 const GROUP_ROW_H = 16;        // consensus row height in collapsed mode
 const AA_ROW_H = 16;           // amino-acid row above the reference bases
+/** Widest stretch whose reference bases are drawn (the sequence strip, the reads track). */
+const SEQ_MAX_BP = 8000;
+/** The sequence strip while zoomed out: one line saying how far to zoom in. */
+const SEQ_NOTE_H = 14;
 
 // ======================== Colours ========================
 // Categorical slots validated for colour-vision deficiency (adjacent-pair ΔE ≥ 8);
@@ -477,6 +484,8 @@ const READ_REV_FILL = 'rgba(150,150,230,0.75)';
  */
 const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7, VAR_MAF_H = 14;
 const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 4 + VAR_MAF_H + 5;
+/** A phased file (HP / PS haplotags): the two haplotype lanes under the variants track, their phase sets above them. */
+const VAR_PHASE_H = 46, VAR_PHASE_LANE = [22, 37] as const;
 /**
  * The allele-balance strip under the sites: the major allele fraction, max(VAF, 1 − VAF), smoothed along the window.
  * Each pixel pools the sites under it, or the MAF_SMOOTH_SITES nearest within MAF_SMOOTH_MAX_BP of it (sites flagged
@@ -1155,6 +1164,11 @@ export default function SashimiViewer({
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
+  /** the sequence strip: on, off, or unset (on when a DNA sample is shown) */
+  const [seqPref, setSeqPref] = useState<boolean | null>(init.sequence ?? null);
+  const [seqRef, setSeqRef] = useState<{ chrom: string; start: number; seq: string } | null>(null);
+  /** the last fetch for the strip found no reference (no FASTA, the web APIs unreachable) */
+  const [seqMiss, setSeqMiss] = useState(false);
   const [showCoverage, setShowCoverage] = useState(init.coverage ?? true);
   const [methylIslands, setMethylIslands] = useState(init.methylIslands ?? false);
   /**
@@ -1190,7 +1204,7 @@ export default function SashimiViewer({
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
   /** Variant sites of DNA tracks without a reads track, from the "variants" chip (the reads of the window, sampled only past the scan's budget); nothing is read until the user asks. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** long reads (the homopolymer check is stricter) */ long?: boolean; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number };
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** long reads (the homopolymer check is stricter) */ long?: boolean; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number; /** reads over the window carrying a haplotag (HP): the sites have their counts by haplotype */ haplotagged?: number };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   /** Fraction of the window the running full scan has covered, per sample. */
@@ -1777,6 +1791,21 @@ export default function SashimiViewer({
     }
     return out;
   }, [currentChrom, viewStart, viewEnd, build]);
+  // the sequence strip's bases: the view and as much again on each side, fetched once the view is narrow enough to draw them
+  const seqWanted = (seqPref ?? tracks.some(t => sampleTypes?.[t.sampleId] === 'dna')) && viewEnd - viewStart <= SEQ_MAX_BP;
+  useEffect(() => {
+    if (!seqWanted) return;
+    if (seqRef && seqRef.chrom === currentChrom && seqRef.start <= viewStart && seqRef.start + seqRef.seq.length >= viewEnd) return;
+    let live = true;
+    const span = viewEnd - viewStart, a = Math.max(0, viewStart - span), b = viewEnd + span, chrom = currentChrom;
+    const timer = setTimeout(() => {
+      ds.getReference(chrom, a, b)
+        .then(seq => { if (!live) return; if (seq && !/^N*$/.test(seq)) { setSeqRef({ chrom, start: a, seq }); setSeqMiss(false); } else setSeqMiss(true); })
+        .catch(() => { if (live) setSeqMiss(true); });
+    }, 120);
+    return () => { live = false; clearTimeout(timer); };
+  }, [seqWanted, currentChrom, viewStart, viewEnd, ds]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /**
    * Opens the repeat inspector on a known locus (its motifs) or on a stretch picked by hand (the motif of its reference).
    * The reference around it comes from the source (a FASTA, the network), else from the reads' answer (an exported page).
@@ -2241,15 +2270,16 @@ export default function SashimiViewer({
     const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
     (async () => {
       const sites: VariantSite[] = [];
-      let total = 0, done = 0, rate = 1, long = false;
+      let total = 0, done = 0, rate = 1, long = false, haplotagged = 0;
       for (const r of ranges) {
         const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.uniqueOnly, minVaf,
           { ...opts, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: (done + f * (r.end - r.start)) / span })); } });
         sites.push(...res.sites); total += res.total; done += r.end - r.start;
         rate = Math.max(rate, res.sampled?.rate ?? 1);
         long = long || res.long_reads;
+        haplotagged += res.haplotagged ?? 0;
       }
-      return { sites, total, rate, long };
+      return { sites, total, rate, long, haplotagged };
     })()
       .then(data => {
         if (!live()) return;
@@ -2260,7 +2290,8 @@ export default function SashimiViewer({
           const fetched: FetchWindow = { chrom: v.chrom, uniqueOnly: v.uniqueOnly, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
           const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
           const rate = Math.max(data.rate, keep ? old.rate ?? 1 : 1);
-          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined, long: data.long } };
+          const haplotagged = (keep ? old.haplotagged ?? 0 : 0) + data.haplotagged;
+          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined, long: data.long, ...(haplotagged ? { haplotagged } : {}) } };
         });
       })
       .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
@@ -2726,6 +2757,80 @@ export default function SashimiViewer({
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
+  /**
+   * The reference rows over the view, from `top` down: the amino acids of the MANE CDS (codon by codon, once letters
+   * are legible), the transcript strand of a minus-strand gene drawn 5′→3′, and the + strand bases: bars from 1 px per
+   * base, letters from 7 px. Only the exons in equal-intron mode (compressed introns and flanks have no linear scale).
+   * Drawn by the sequence strip under the gene model and above the reads.
+   */
+  const sequenceRows = (ref: { start: number; seq: string } | null | undefined, top: number, aaMinPx = 7) => {
+    const segments: [number, number][] = [];
+    if (ref) {
+      const refEnd = ref.start + ref.seq.length;
+      if (axis.kind === 'equal-intron' && tx) {
+        for (const ex of tx.exons) {
+          const a = Math.max(viewStart, ref.start, ex.start), b = Math.min(viewEnd, refEnd, ex.end);
+          if (b > a) segments.push([a, b]);
+        }
+      } else {
+        segments.push([Math.max(viewStart, ref.start), Math.min(viewEnd, refEnd)]);
+      }
+    }
+    const pxPerBaseOf = (from: number) => Math.abs(scale.x(from + 1) - scale.x(from));
+    const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
+    const aaShown = segments.some(([from, to]) => to - from <= SEQ_MAX_BP && pxPerBaseOf(from) >= aaMinPx);
+    const aaRowH = ref && tx && tx.cdsStart != null && aaShown ? AA_ROW_H : 0;
+    const revRowH = ref && reverse ? READS_SEQ_ROW_H : 0;
+    const seqRowH = ref ? READS_SEQ_ROW_H : 0;
+    const els: JSX.Element[] = [];
+    if (aaRowH && ref && tx) {
+      const rowY = top;
+      const seen = new Set<number>();
+      for (const [from, to] of segments) {
+        if (to - from > SEQ_MAX_BP || pxPerBaseOf(from) < aaMinPx) continue;
+        for (const c of codonsInWindow(tx, ref.seq, ref.start, from, to)) {
+          if (seen.has(c.index)) continue;
+          seen.add(c.index);
+          const fill = c.aa === '*' ? AA_STOP_COLOR : c.index === 1 && c.aa === 'M' ? AA_START_COLOR : AA_FILLS[c.index % 2];
+          const title = c.aa === '*' ? `stop codon (codon ${c.index})` : `${AA_NAMES[c.aa] ?? c.aa}${c.aa !== 'X' ? ` (${c.aa})` : ''} · codon ${c.index}${c.segments.length > 1 ? ' · spans a splice junction' : ''}`;
+          const spans = c.segments.map(([gs, ge]) => { const a = scale.x(gs), b = scale.x(ge); return { left: Math.min(a, b), w: Math.abs(b - a) }; });
+          const widest = spans.reduce((best, sp) => (sp.w > best.w ? sp : best), spans[0]);
+          els.push(
+            <g key={`aa${c.index}`}>
+              <title>{title}</title>
+              {spans.map((sp, k) => <rect key={k} x={sp.left + 0.5} y={rowY + 2} width={Math.max(1, sp.w - 1)} height={aaRowH - 4} rx={2.5} fill={fill} opacity={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? 0.9 : 0.75} />)}
+              {widest.w >= 9 && <text x={widest.left + widest.w / 2} y={rowY + aaRowH - 4.5} textAnchor="middle" fill={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? '#ffffff' : INK.text} fontSize={10} fontWeight={700}>{c.aa}</text>}
+            </g>,
+          );
+        }
+      }
+    }
+    let note = '';
+    if (ref) {
+      const revY = top + aaRowH, rowY = revY + revRowH;
+      let drawn = false;
+      for (const [from, to] of segments) {
+        if (to - from > SEQ_MAX_BP) continue;
+        const pxPerBase = pxPerBaseOf(from);
+        if (pxPerBase < 1) continue;
+        drawn = true;
+        for (let pos = from; pos < to; pos++) {
+          const base = ref.seq[pos - ref.start];
+          const { left, w } = basePx(pos);
+          els.push(<rect key={`rb${pos}`} x={left} y={rowY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={seqRowH - 4} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
+          if (pxPerBase >= 7) els.push(<text key={`rt${pos}`} x={left + w / 2} y={rowY + seqRowH - 5} textAnchor="middle" fill={BASE_COLORS[base] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{base}</text>);
+          if (revRowH) {
+            const comp = COMPLEMENT[base] || 'N';
+            els.push(<rect key={`vb${pos}`} x={left} y={revY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={revRowH - 4} fill={BASE_COLORS[comp] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
+            if (pxPerBase >= 7) els.push(<text key={`vt${pos}`} x={left + w / 2} y={revY + revRowH - 5} textAnchor="middle" fill={BASE_COLORS[comp] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{comp}</text>);
+          }
+        }
+      }
+      if (!drawn) note = axis.kind === 'equal-intron' ? 'reference · zoom in to see exon bases (introns are compressed)' : 'reference · zoom in to see bases';
+    }
+    return { aaRowH, revRowH, seqRowH, els, note, drawn: els.length > 0 };
+  };
+
   type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[]; /** reads of the window are shown (not a placeholder message) */ loaded: boolean };
   /** One reads track per shown sample (Map in track order); each is drawn under its sample's coverage track. */
   const readsTracks = useMemo((): Map<number, ReadsTrack> => {
@@ -2783,78 +2888,9 @@ export default function SashimiViewer({
     const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
     const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
 
-    // Reference segments with sequence: the whole window on a linear axis; only the exons in equal-intron
-    // mode (compressed introns and flanks have no linear scale). Letters appear from 7 px per base.
-    const segments: [number, number][] = [];
-    if (ref) {
-      const refEnd = ref.start + ref.seq.length;
-      if (axis.kind === 'equal-intron' && tx) {
-        for (const ex of tx.exons) {
-          const a = Math.max(viewStart, ref.start, ex.start), b = Math.min(viewEnd, refEnd, ex.end);
-          if (b > a) segments.push([a, b]);
-        }
-      } else {
-        segments.push([Math.max(viewStart, ref.start), Math.min(viewEnd, refEnd)]);
-      }
-    }
-    const pxPerBaseOf = (from: number) => Math.abs(scale.x(from + 1) - scale.x(from));
-    const lettersShown = segments.some(([from, to]) => to - from <= 8000 && pxPerBaseOf(from) >= 7);
-    // ---- Amino-acid row (MANE CDS translated codon by codon) above the reference bases, when letters are legible ----
-    const aaRowH = ref && tx && tx.cdsStart != null && lettersShown ? AA_ROW_H : 0;
-    // Minus-strand gene: the transcript-strand bases (complement, read 5′→3′ on the flipped axis) sit above the genomic + strand
-    const revRowH = ref && reverse ? READS_SEQ_ROW_H : 0;
-    const seqRowH = ref ? READS_SEQ_ROW_H : 0;
+    // the reference rows (amino acids, transcript strand, + strand) above the reads: the same as the sequence strip's
+    const { aaRowH, revRowH, seqRowH, els: seqEls, note: refNote } = sequenceRows(ref, yOff + READS_HEADER_H + sitesRowH);
     const bodyTop = yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH;
-    const aaEls: JSX.Element[] = [];
-    if (aaRowH && ref && tx) {
-      const rowY = yOff + READS_HEADER_H + sitesRowH;
-      const seen = new Set<number>();
-      for (const [from, to] of segments) {
-        if (to - from > 8000 || pxPerBaseOf(from) < 7) continue;
-        for (const c of codonsInWindow(tx, ref.seq, ref.start, from, to)) {
-          if (seen.has(c.index)) continue;
-          seen.add(c.index);
-          const fill = c.aa === '*' ? AA_STOP_COLOR : c.index === 1 && c.aa === 'M' ? AA_START_COLOR : AA_FILLS[c.index % 2];
-          const title = c.aa === '*' ? `stop codon (codon ${c.index})` : `${AA_NAMES[c.aa] ?? c.aa}${c.aa !== 'X' ? ` (${c.aa})` : ''} · codon ${c.index}${c.segments.length > 1 ? ' · spans a splice junction' : ''}`;
-          const spans = c.segments.map(([gs, ge]) => { const a = scale.x(gs), b = scale.x(ge); return { left: Math.min(a, b), w: Math.abs(b - a) }; });
-          const widest = spans.reduce((best, sp) => (sp.w > best.w ? sp : best), spans[0]);
-          aaEls.push(
-            <g key={`aa${c.index}`}>
-              <title>{title}</title>
-              {spans.map((sp, k) => <rect key={k} x={sp.left + 0.5} y={rowY + 2} width={Math.max(1, sp.w - 1)} height={aaRowH - 4} rx={2.5} fill={fill} opacity={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? 0.9 : 0.75} />)}
-              {widest.w >= 9 && <text x={widest.left + widest.w / 2} y={rowY + aaRowH - 4.5} textAnchor="middle" fill={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? '#ffffff' : INK.text} fontSize={10} fontWeight={700}>{c.aa}</text>}
-            </g>,
-          );
-        }
-      }
-    }
-
-    // ---- Reference row: bars when ≥ 1 px per base, letters when ≥ 7 px. ----
-    const refEls: JSX.Element[] = [];
-    let refNote = '';
-    if (ref) {
-      const revY = yOff + READS_HEADER_H + sitesRowH + aaRowH;
-      const rowY = revY + revRowH;
-      let drawn = false;
-      for (const [from, to] of segments) {
-        if (to - from > 8000) continue;
-        const pxPerBase = pxPerBaseOf(from);
-        if (pxPerBase < 1) continue;
-        drawn = true;
-        for (let pos = from; pos < to; pos++) {
-          const base = ref.seq[pos - ref.start];
-          const { left, w } = basePx(pos);
-          refEls.push(<rect key={`rb${pos}`} x={left} y={rowY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={seqRowH - 4} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
-          if (pxPerBase >= 7) refEls.push(<text key={`rt${pos}`} x={left + w / 2} y={rowY + seqRowH - 5} textAnchor="middle" fill={BASE_COLORS[base] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{base}</text>);
-          if (revRowH) {
-            const comp = COMPLEMENT[base] || 'N';
-            refEls.push(<rect key={`vb${pos}`} x={left} y={revY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={revRowH - 4} fill={BASE_COLORS[comp] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
-            if (pxPerBase >= 7) refEls.push(<text key={`vt${pos}`} x={left + w / 2} y={revY + revRowH - 5} textAnchor="middle" fill={BASE_COLORS[comp] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{comp}</text>);
-          }
-        }
-      }
-      if (!drawn) refNote = axis.kind === 'equal-intron' ? 'reference · zoom in to see exon bases (introns are compressed)' : 'reference · zoom in to see bases';
-    }
 
     const refSourceLabel: Record<string, string> = { fasta: 'REFERENCE_FASTA', ensembl: 'Ensembl (server)', browser: 'UCSC API (browser)' };
     const commonInfo = (ref ? ` · reference: ${refSourceLabel[current.reference_source ?? ''] ?? current.reference_source}` : ' · no reference genome (no REFERENCE_FASTA on the server, and the browser could not fetch bases from the UCSC / Ensembl APIs); mismatches only from MD tags') +
@@ -2873,7 +2909,7 @@ export default function SashimiViewer({
           {revRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}><title>transcript strand (−): complement of the genomic bases, 5′→3′ left to right</title>ref −</text>}
           {ref && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>{revRowH > 0 ? 'ref +' : 'ref'}</text>}
           {refNote && <text x={PLOT_LEFT + 8} y={yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH - 5} fill={INK.faint} fontSize={9}>{refNote}</text>}
-          <g clipPath={`url(#${clipId})`}>{aaEls}{refEls}{body}</g>
+          <g clipPath={`url(#${clipId})`}>{seqEls}{body}</g>
         </g>
       ),
     });
@@ -3751,7 +3787,22 @@ export default function SashimiViewer({
   }
 
   const transcriptY = RULER_H;
-  const knownY = transcriptY + transcriptPanelH + TRACK_GAP;
+  // the sequence strip under the gene model: the rows once bases can be drawn, else one line saying how far to zoom
+  const showSeq = seqPref ?? tracks.some(t => isDnaSample(t.sampleId));
+  const stripRef = (() => {
+    if (!showSeq || viewEnd - viewStart > SEQ_MAX_BP) return null;
+    if (seqRef && seqRef.chrom === currentChrom && seqRef.start <= viewStart && seqRef.start + seqRef.seq.length >= viewEnd) return seqRef;
+    // no FASTA nor network: the reference a reads window came with (an exported page)
+    for (const e of Object.values(readsData)) {
+      const r = e?.data.reference;
+      if (r && e.fetched.chrom === currentChrom && r.start <= viewStart && r.start + r.seq.length >= viewEnd) return r;
+    }
+    return null;
+  })();
+  const seqRows = showSeq ? sequenceRows(stripRef, 0, 2) : null;
+  const seqPanelH = !seqRows ? 0 : seqRows.drawn ? seqRows.aaRowH + seqRows.revRowH + seqRows.seqRowH + 2 : SEQ_NOTE_H;
+  const seqY = transcriptY + transcriptPanelH + TRACK_GAP;
+  const knownY = seqY + (seqPanelH ? seqPanelH + TRACK_GAP : 0);
   const snpY = knownY + (knownPanelH ? knownPanelH + TRACK_GAP : 0);
   const snpPanelH = showSnps ? SNP_PANEL_H : 0;
   const altY = snpY + (snpPanelH ? snpPanelH + TRACK_GAP : 0);
@@ -4159,7 +4210,8 @@ export default function SashimiViewer({
         }
       }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
-      const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites ? VAR_TRACK_H : 0;
+      const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites
+        ? VAR_TRACK_H + ((dnaSites[track.sampleId]?.haplotagged ?? 0) > 0 && trackSites.some(st => st.hap) ? VAR_PHASE_H : 0) : 0;
       // the coverage layer switched off: a DNA track keeps its label band, then its other layers
       const hideCov = !showCoverage && dnaTrack && !track.gtex;
       const covH = hideCov ? 0 : COVERAGE_H, jH = hideCov ? TRACK_LABEL_H : juncH;
@@ -4304,6 +4356,18 @@ export default function SashimiViewer({
           </g>
         ),
       });
+      if (layouts.some(L => L.variants > VAR_TRACK_H)) {
+        const txt = 'haplotags: H1 · H2 · to check · ⫽ phase sets not linked';
+        items.push({
+          w: 34 + txt.length * 5.4, el: (
+            <g key="lvar3">
+              <rect x={0} y={y - 5} width={22} height={3} rx={1.5} fill={HAP_COLORS[0]} opacity={0.6} /><rect x={0} y={y + 2} width={22} height={3} rx={1.5} fill={HAP_COLORS[1]} opacity={0.6} />
+              <circle cx={7} cy={y - 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.G} strokeWidth={1.5} /><circle cx={16} cy={y + 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.A} strokeWidth={1.5} />
+              <text x={28} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{txt}</text>
+            </g>
+          ),
+        });
+      }
       items.push({
         w: 42 + 'allele balance (MAF): balanced · imbalance · homozygous run'.length * 5.4 + 14, el: (
           <g key="lvar4">
@@ -4744,6 +4808,69 @@ export default function SashimiViewer({
       const text = (s.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= Math.max(30, widthOf(short)) ? short : null;
       if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - hAll - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
     }
+    // ---- a phased file: the two haplotype lanes of each phase set, every site on the lane(s) carrying it (sitePhase.ts) ----
+    const phTop = mafTop + VAR_MAF_H + 5, phased = L.variants > VAR_TRACK_H;
+    const phaseBack: JSX.Element[] = [], phaseFront: JSX.Element[] = [];
+    let phaseInfo = '';
+    if (phased) {
+      const laneY = [phTop + VAR_PHASE_LANE[0], phTop + VAR_PHASE_LANE[1]], midY = (laneY[0] + laneY[1]) / 2;
+      // the phase sets: their sites over the whole scanned window, so a set reaching beyond the view keeps its extent
+      const sets = new Map<string, { ps: number | null; start: number; end: number; n: number }>();
+      for (const st of L.sites) {
+        if (!st.hap || !(st.hap.depth[0] + st.hap.depth[1])) continue;
+        const k = `${st.hap.ps}`, end = st.pos + (st.kind === 'del' ? st.length : 1), b = sets.get(k);
+        if (!b) sets.set(k, { ps: st.hap.ps, start: st.pos, end, n: 1 }); else { b.start = Math.min(b.start, st.pos); b.end = Math.max(b.end, end); b.n++; }
+      }
+      const blocks = [...sets.values()].sort((a, b) => a.start - b.start);
+      const xr = (a: number, b: number) => { const xa = scale.x(a), xb = scale.x(b); return [Math.min(xa, xb) - 5, Math.max(xa, xb) + 5]; };
+      blocks.forEach((b, i) => {
+        const [x0, x1] = xr(b.start, b.end);
+        if (x1 < PLOT_LEFT || x0 > plotRight) return;
+        const psTxt = b.ps == null ? 'tagged without PS' : `phase set PS ${b.ps.toLocaleString('en-US')}`;
+        phaseBack.push(
+          <g key={`pb${i}`}>
+            <rect x={x0} y={phTop + 1} width={x1 - x0} height={VAR_PHASE_H - 3} rx={3} fill={i % 2 ? '#dbeafe' : '#fef3c7'} opacity={0.55} />
+            {[0, 1].map(h => <rect key={h} x={x0 + 2} y={laneY[h] - 2.5} width={Math.max(1, x1 - x0 - 4)} height={5} rx={2.5} fill={HAP_COLORS[h]} opacity={0.55} />)}
+          </g>,
+        );
+        const lx = Math.max(PLOT_LEFT + 4, x0 + 4), label = b.ps == null ? 'no PS' : `PS ${b.ps.toLocaleString('en-US')}`;
+        if (Math.min(plotRight, x1) - lx >= label.length * 5 + 6) phaseBack.push(<text key={`pt${i}`} x={lx} y={phTop + 10} fill={INK.muted} fontSize={8.5}>{label}<title>{`${psTxt}: ${b.n} site${b.n === 1 ? '' : 's'} of the scanned window, ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')}`}</title></text>);
+        // between two sets: their haplotypes are not linked
+        const nb = blocks[i + 1];
+        if (nb) {
+          const [, xe] = xr(b.start, b.end), [xs] = xr(nb.start, nb.end), xm = nb.start >= b.end ? (xe + xs) / 2 : xs;
+          if (xm >= PLOT_LEFT && xm <= plotRight) phaseFront.push(
+            <text key={`pk${i}`} x={xm} y={midY + 4} textAnchor="middle" fill="#dc2626" fontSize={12} fontWeight={800} stroke={INK.bg} strokeWidth={3} paintOrder="stroke" style={{ cursor: 'help' }}>
+              ⫽<title>{`Phase sets ${b.ps ?? 'without PS'} and ${nb.ps ?? 'without PS'}: no read linked them, so the phasing tool could not tell which haplotype of one goes with which of the other. H1 here and H1 there need not be the same chromosome copy.`}</title>
+            </text>,
+          );
+        }
+      });
+      // the sites: a mark on the lane(s) carrying the allele; checks and undecided sites between the lanes
+      const shapes = new Map<string, string[]>(), checkD: string[] = [], greyD: string[] = [], qMarks: JSX.Element[] = [];
+      const counts = { h1: 0, h2: 0, both: 0, check: 0, neither: 0, thin: 0, none: 0, flagged: 0 };
+      for (const { s, cx, room } of marks) {
+        const ph = sitePhase(s);
+        if (!ph) { counts.none++; continue; }
+        // a site the quality cells flag as a likely artefact is not phased: a grey dot, whatever its haplotypes
+        if (cachedChecks(s, long).worst === 'bad') { counts.flagged++; greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`); continue; }
+        counts[ph.call]++;
+        const r = Math.max(2.2, Math.min(4.5, (room - 2) / 2.6));
+        const shape = (y: number) => s.kind === 'snv' ? `M${(cx - r).toFixed(1)},${y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0z`
+          : s.kind === 'del' ? `M${(cx - r).toFixed(1)},${(y - r).toFixed(1)}h${2 * r}v${2 * r}h${-2 * r}zM${(cx - r * 0.6).toFixed(1)},${y}h${1.2 * r}`
+          : `M${cx.toFixed(1)},${(y - r * 1.15).toFixed(1)}l${r * 1.1},${r * 2}h${-r * 2.2}z`;
+        const lanes = ph.call === 'h1' ? [0] : ph.call === 'h2' ? [1] : ph.call === 'both' ? [0, 1] : [];
+        for (const h of lanes) { const c = siteColor(s), l = shapes.get(c); if (l) l.push(shape(laneY[h])); else shapes.set(c, [shape(laneY[h])]); }
+        if (ph.call === 'check') { const rr = Math.max(3, Math.min(6.5, room / 2.2)); checkD.push(`M${(cx - rr).toFixed(1)},${midY}a${rr},${rr} 0 1,0 ${2 * rr},0a${rr},${rr} 0 1,0 ${-2 * rr},0z`); if (room >= 10) qMarks.push(<text key={`pq${s.pos}${s.kind}${s.alt}`} x={cx} y={midY + 3.5} textAnchor="middle" fill="#dc2626" fontSize={9} fontWeight={800}>!</text>); }
+        else if (ph.call === 'neither') { if (room >= 8) qMarks.push(<text key={`pq${s.pos}${s.kind}${s.alt}`} x={cx} y={midY + 4} textAnchor="middle" fill={INK.muted} fontSize={10} fontWeight={800}>?</text>); else greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`); }
+        else if (ph.call === 'thin') greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`);
+      }
+      for (const [c, d] of shapes) phaseFront.push(<path key={`ps${c}`} d={d.join('')} fill={INK.bg} stroke={c} strokeWidth={1.8} />);
+      if (checkD.length) phaseFront.push(<path key="pchk" d={checkD.join('')} fill={INK.bg} stroke="#dc2626" strokeWidth={1.5} strokeDasharray="2.5 1.5" />);
+      if (greyD.length) phaseFront.push(<path key="pgrey" d={greyD.join('')} fill={INK.faint} />);
+      phaseFront.push(...qMarks);
+      phaseInfo = ` · haplotags: ${counts.h1} H1 · ${counts.h2} H2 · ${counts.both} both${counts.check ? ` · ${counts.check} to check` : ''}${counts.neither ? ` · ${counts.neither} neither` : ''}${counts.thin + counts.flagged + counts.none ? ` · ${counts.thin + counts.flagged + counts.none} not phased` : ''}`;
+    }
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const status = span > VARIANTS_MAX_VIEW_BP && !(e && e.fetched.start <= viewStart && e.fetched.end >= viewEnd)
       ? { text: `zoom in to ≤ ${formatBp(VARIANTS_MAX_VIEW_BP)} for the variants`, color: INK.faint }
@@ -4770,6 +4897,12 @@ export default function SashimiViewer({
           <title>Quality cells under each site: base quality (SNV) or homopolymer (indel) · mapping quality · strand · read position; green pass, amber check, red likely artefact, grey not judged (too few reads). One cell in the colour of the worst where sites are close.</title>
           Q
         </text>
+        {phased && [0, 1].map(h => (
+          <text key={`hl${h}`} x={PLOT_LEFT - 7} y={phTop + VAR_PHASE_LANE[h] + 3} textAnchor="end" fill={HAP_COLORS[h]} fontSize={9} fontWeight={800}>
+            <title>{`Haplotype ${h + 1}: the reads tagged HP ${h + 1} by the phasing tool, within each phase set (PS). A site sits on this lane when at least ${PHASE_HI * 100} % of the HP ${h + 1} reads carry it and at most ${PHASE_LO * 100} % of the HP ${2 - h} reads do (both lanes: homozygous). Dashed red circle: to check (in part of one haplotype's reads, or on both without being homozygous); ?: on neither haplotype; grey dot: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype. ⫽: two phase sets, not linked to each other.`}</title>
+            H{h + 1}
+          </text>
+        ))}
         <g clipPath={`url(#${clipId})`}>
           <line x1={PLOT_LEFT} y1={barBottom - VAR_BAR_H / 2} x2={plotRight} y2={barBottom - VAR_BAR_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="3 3" />
           <line x1={PLOT_LEFT} y1={barBottom} x2={plotRight} y2={barBottom} stroke={INK.gridStrong} strokeWidth={0.8} />
@@ -4780,8 +4913,10 @@ export default function SashimiViewer({
           <rect x={PLOT_LEFT} y={mafTop} width={plotWidth} height={VAR_MAF_H} fill={INK.grid} opacity={0.25} />
           {[...mafFill].map(([c, d]) => <path key={`maf${c}`} d={d.join('')} fill={c} opacity={0.85} />)}
           {mafLine.length > 0 && <path d={mafLine.join('')} fill="none" stroke="#111827" strokeOpacity={0.55} strokeWidth={1} />}
+          {phaseBack}
+          {phaseFront.filter(el => !String(el.key).startsWith('pk'))}
           {/* a click on a site opens its evidence from the reads */}
-          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={VAR_TRACK_H - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? 'pointer' : undefined }}
+          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={L.variants - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? 'pointer' : undefined }}
             onMouseDown={ev => ev.stopPropagation()}
             onClick={ev => {
               ev.stopPropagation();
@@ -4790,8 +4925,13 @@ export default function SashimiViewer({
               for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
               if (best) void openVariantPanel(sid, L.track.sampleName, best.s, long, ev.clientX, ev.clientY);
             }} />
+          {/* the breaks between phase sets keep their explanation on hover */}
+          {phaseFront.filter(el => String(el.key).startsWith('pk'))}
         </g>
-        <text x={plotRight - 6} y={y0 + VAR_HEAD_H - 3} textAnchor="end" fill={status.color} fontSize={8.5} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{status.text}</text>
+        <text x={plotRight - 6} y={y0 + VAR_HEAD_H - 3} textAnchor="end" fill={status.color} fontSize={8.5} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">
+          {status.text}{phaseInfo && status.color === INK.muted ? phaseInfo : ''}
+          {phaseInfo && <title>{`Sites in view by haplotype (the file's HP / PS tags): H1, H2, both (homozygous); to check (in part of one haplotype's reads, or on both without being homozygous); neither (the allele in untagged reads or another phase set). Not phased: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype, a site the quality cells flag red, or no tagged read over it.`}</title>}
+        </text>
         {loading && <rect x={PLOT_LEFT} y={top} width={plotWidth * Math.max(0.02, Math.min(1, dnaSitesProgress[sid] ?? 0))} height={1.5} fill={SNP_INDEL_COLOR} opacity={0.6} />}
       </g>
     );
@@ -5196,6 +5336,33 @@ export default function SashimiViewer({
             <circle cx={plotRight + 16} cy={yOff + 12} r={8} fill={INK.bg} stroke={INK.grid} />
             <text x={plotRight + 16} y={yOff + 15.5} textAnchor="middle" fill={INK.muted} fontSize={12}>×</text>
           </g>
+        )}
+      </g>
+    );
+  };
+
+  /** The sequence strip under the gene model (sequenceRows), or one line saying what it waits for. */
+  const renderSequence = (yOff: number) => {
+    const rows = sequenceRows(stripRef, yOff, 2);
+    const span = viewEnd - viewStart, bars = Math.min(SEQ_MAX_BP, Math.floor(plotWidth));
+    const note = rows.drawn ? '' : span > bars || rows.note
+      ? `reference sequence · zoom in below ${formatBp(bars)} to see the bases${tx?.cdsStart != null ? `, below ${formatBp(Math.floor(plotWidth / 2))} the amino acids` : ''}`
+      : seqMiss ? 'reference sequence unavailable: add the FASTA, or check that the UCSC / Ensembl APIs are reachable' : 'reference sequence · loading…';
+    const label = (y: number, h: number, text: string, title?: string) => h > 0 && (
+      <text x={PLOT_LEFT - 6} y={y + h / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8.5}>{title && <title>{title}</title>}{text}</text>
+    );
+    return (
+      <g key="sequence" fontFamily={FONT} data-sequence="">
+        <defs><clipPath id="sashimi-clip-seq"><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={seqPanelH} /></clipPath></defs>
+        {rows.drawn ? (
+          <>
+            {label(yOff, rows.aaRowH, 'aa', `amino acids of the ${tx?.isMane ? 'MANE' : 'shown'} transcript's CDS, codon by codon`)}
+            {label(yOff + rows.aaRowH, rows.revRowH, 'ref −', 'transcript strand (−): complement of the genomic bases, 5′→3′ left to right')}
+            {label(yOff + rows.aaRowH + rows.revRowH, rows.seqRowH, rows.revRowH ? 'ref +' : 'ref')}
+            <g clipPath="url(#sashimi-clip-seq)">{rows.els}</g>
+          </>
+        ) : (
+          <text x={PLOT_LEFT + 8} y={yOff + SEQ_NOTE_H - 3.5} fill={INK.faint} fontSize={9}>{note}</text>
         )}
       </g>
     );
@@ -5927,14 +6094,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, sequence: seqPref ?? undefined, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, seqPref, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -6196,10 +6363,11 @@ export default function SashimiViewer({
             )}
           </Section>
           {anyDna && (
-              <Section label="Layers" tone="orange" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
+              <Section label="Layers" tone="orange" title="Layers of the DNA tracks: S the reference sequence under the gene model, then under each DNA track in this order C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
                 {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
                 <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px]">
                   {([
+                    { key: 'S', name: 'Sequence', on: showSeq, set: (v: boolean) => setSeqPref(v), color: LAYER_COLORS.S, title: `The reference sequence in a strip under the gene model: the bases from ${formatBp(Math.min(SEQ_MAX_BP, Math.floor(plotWidth)))} wide views (coloured bars, letters once legible), and the amino acids of the MANE transcript's CDS above them (letters from about 3 px per base). On by default when a DNA sample is shown. Bases from the FASTA, else from the UCSC / Ensembl APIs.` },
                     { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
                     { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
                     ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
@@ -6398,6 +6566,7 @@ export default function SashimiViewer({
 
           {renderRuler()}
           {renderTranscript(transcriptY)}
+          {seqPanelH > 0 && renderSequence(seqY)}
           {knownPanelH > 0 && renderKnown(knownY)}
           {showSnps && renderSnps(snpY)}
           {showAllTx && renderAltTranscripts(altY)}
@@ -6525,6 +6694,18 @@ export default function SashimiViewer({
                     <span className="font-semibold text-gray-700 w-7">{c.key}</span><span className="text-gray-600">{c.value}</span>
                   </div>
                 ))}
+                {(() => {
+                  const ph = sitePhase(hoverInfo.variant.site);
+                  if (!ph) return null;
+                  const color = ph.call === 'h1' ? HAP_COLORS[0] : ph.call === 'h2' ? HAP_COLORS[1] : ph.call === 'check' ? '#dc2626' : '#374151';
+                  return (
+                    <div className="text-gray-600">
+                      <span className="font-semibold" style={{ color }}>{ph.call === 'h1' ? 'H1' : ph.call === 'h2' ? 'H2' : ph.call === 'both' ? 'H1 + H2' : ph.call === 'check' ? 'phase: check' : ph.call === 'neither' ? 'phase: neither' : 'phase: not judged'}</span>
+                      {ph.ps != null && <span className="text-gray-400"> · PS {ph.ps.toLocaleString('en-US')}</span>}
+                      <div>{ph.note.replace(/^[^·]*· /, '')}</div>
+                    </div>
+                  );
+                })()}
                 <div className="text-gray-400">click for the reads' distributions</div>
               </div>
             )}
@@ -6586,6 +6767,30 @@ export default function SashimiViewer({
                   </div>
                 ))}
               </div>
+              {(() => {
+                const ph = sitePhase(s), h = s.hap;
+                if (!ph || !h) return null;
+                const untagged = Math.max(0, s.alt_count - h.alt[0] - h.alt[1] - h.otherAlt);
+                const row = (label: string, color: string | undefined, a: number, d: number) => (
+                  <tr><td className="pr-3 font-semibold" style={{ color }}>{label}</td><td className="pr-3 text-right">{a}</td><td className="pr-3 text-right">{d}</td><td className="text-right">{d ? `${Math.round((100 * a) / d)} %` : '–'}</td></tr>
+                );
+                return (
+                  <div className="px-3 pt-1.5 mt-1 border-t border-gray-100">
+                    <div className="text-gray-700"><b>Haplotypes</b> <span className="text-gray-500">(the file's haplotags{h.ps != null ? `, phase set PS ${h.ps.toLocaleString('en-US')}` : ', no PS'})</span></div>
+                    <div className="leading-4" style={{ color: ph.call === 'check' ? '#b91c1c' : undefined }}>{ph.note.split(' · ')[0]}</div>
+                    <table className="mt-1 text-[10px] text-gray-600">
+                      <tbody>
+                        <tr><td className="pr-3" /><td className="pr-3 font-semibold">with allele</td><td className="pr-3 font-semibold">over site</td><td className="font-semibold">share</td></tr>
+                        {row('HP 1', HAP_COLORS[0], h.alt[0], h.depth[0])}
+                        {row('HP 2', HAP_COLORS[1], h.alt[1], h.depth[1])}
+                        {h.otherDepth > 0 && row('other set / HP', undefined, h.otherAlt, h.otherDepth)}
+                        <tr><td className="pr-3">untagged</td><td className="pr-3 text-right">{untagged}</td><td className="pr-3 text-right" colSpan={2}><span className="text-gray-400">(with the allele)</span></td></tr>
+                      </tbody>
+                    </table>
+                    <div className="mt-0.5 text-[10px] text-gray-500">HP 1 vs HP 2, Fisher exact test: p = {ph.p < 1e-4 ? ph.p.toExponential(1) : ph.p.toFixed(4)} · on a lane at ≥ {PHASE_HI * 100} % of its reads and ≤ {PHASE_LO * 100} % of the other's; reads spanning the site, the allele whatever its base quality</div>
+                  </div>
+                );
+              })()}
               <div className="px-3 pb-2 pt-1.5 mt-1 border-t border-gray-100">
                 {variantPanel.busy && <div className="text-gray-400">reading the reads over the site…</div>}
                 {variantPanel.error && <div className="text-red-600">{variantPanel.error}</div>}

@@ -91,7 +91,7 @@ The page has three bands, top to bottom.
   - **Arcs** (RNA): *Reads | Usage*, and the *min reads* or *min %* threshold with its − / + buttons (*Retention* in Usage mode).
   - **Structure** instead of Arcs when every track is DNA: the reads a structural hint needs.
   - **Show**: *Reads* (RNA), *All transcripts*, *SNPs*, *Equal introns*, *Known variants*.
-  - **Layers** (DNA): *Coverage*, *Variants*, *Methylation*, *Reads*.
+  - **Layers** (DNA): *Sequence*, *Coverage*, *Variants*, *Methylation*, *Reads*.
   - **Depth**: *shared | own | % max*.
   - **Filters**: *Unique reads* and *Secondary alignments*. A badge counts the filters on.
 
@@ -743,9 +743,19 @@ wrong reference) used to take 1–2 minutes and gigabytes to collapse, and over 
 million reads. It now takes about 6 s. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
-**Layers.** Four layers make a DNA track, switched in the *Layers* section of the toolbar,
-**C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample
+**Layers.** Five layers make a DNA view, switched in the *Layers* section of the toolbar,
+**S Sequence · C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample
 at once. They are always drawn in this order, top to bottom:
+- **S, sequence** (teal, on by default as soon as a DNA sample is shown): the reference under the
+  gene model, once for all samples, like IGV's sequence track. From views of about 1.3 kb (one pixel
+  per base) the bases are coloured bars, from about 190 bp they are letters. The amino acids of the
+  MANE transcript's CDS sit above them, codon by codon, from about 650 bp (two pixels per base),
+  with their letters once a codon is 9 px wide; the start codon is green, a stop red, and a codon
+  split by an intron is drawn on both sides. With a minus-strand gene drawn 5′→3′ (RNA pages), the
+  transcript strand is added above the + strand. Wider views show one line saying how far to zoom.
+  The bases come from the FASTA when one is loaded, else from the UCSC / Ensembl APIs, else (an
+  exported page) from the reference its reads came with. The switch is saved with the session. The
+  reads track keeps its own reference rows above the reads;
 - **C, coverage** (blue, on by default): the coverage histogram and the structural arcs over it.
   Switched off, a DNA track keeps its label band and the layers under it, for example to compare
   the methylation or the variants of several samples in little room. The coverage stays loaded,
@@ -836,6 +846,50 @@ The scan counts this evidence without holding a record per error. The first two 
 (position, base) are kept as flags in a byte, and only an allele seen a third time gets an entry.
 On a noisy long-read library most mismatches are isolated errors, so the added memory stays
 moderate.
+
+**Haplotypes of the sites (phased files).** When the reads carry haplotags, the variants track
+gains two lanes, **H1** and **H2**, and every site is drawn on the haplotype that carries it. A
+phasing tool writes them on each read it can place: `HP` (haplotype 1 or 2) and `PS` (the phase
+set, a stretch whose variants it could link). Such tools include WhatsHap and LongPhase `haplotag`
+(the ONT wf-human-variation outputs), PacBio HiPhase, and DRAGEN. Nothing has to be switched on:
+the lanes appear as soon as the scan meets a tagged read. They follow the same scan as the bars,
+counted read by read, for views up to 3 Mb.
+- For each site, the scan counts per phase set and haplotype the tagged reads whose alignment spans
+  the site, and those carrying its allele (whatever its base quality, as for the bar). The phase
+  set holding the most tagged reads over the site is the site's.
+- A site goes on **H1** when at least 70 % of the HP 1 reads carry it and at most 20 % of the HP 2
+  reads do, on **H2** the other way round, and on **both lanes** when each haplotype carries it at
+  70 % or more (homozygous). The mark keeps the site's shape and colour: a circle for an SNV in
+  the colour of its base, a square for a deletion, a triangle for an insertion.
+- A **dashed red circle** between the lanes is a site **to check**: the allele is in part of one
+  haplotype's reads only (a mosaic, post-zygotic change; an artefact; an indel the long reads only
+  partly carry in a homopolymer), or on both haplotypes without being homozygous (a mis-phased
+  site, a collapsed duplication or paralog, a third haplotype). A **?** is a site on neither
+  haplotype of its phase set: its allele sits in untagged reads or in another phase set's.
+- A **grey dot** is a site not phased: fewer than 3 reads on one haplotype, or a site the quality
+  cells flag red (a likely artefact is not given a haplotype).
+- Each phase set is a shaded band labelled with its `PS`. Between two sets, a red **⫽** says that
+  no read linked them: H1 of one set is not known to be H1 of the next. Two variants are in *cis*
+  or in *trans* only when they lie in the same set.
+
+The header of the track adds the counts (H1, H2, both, to check, neither, not phased). Hovering a
+site gives its haplotype and the share of each haplotype's reads carrying it. Its panel (click)
+adds a table: reads with the allele and reads over the site for HP 1, HP 2, the reads of other
+phase sets, and the untagged reads with the allele, with a Fisher exact test of HP 1 against HP 2.
+70 % rather than 80 % keeps the indels of long reads in homopolymers, which reads carry only in
+part, on their haplotype; the shares are always shown.
+
+The numbers `1` and `2` are the phasing tool's, not a parental origin: which copy is called HP 1
+is arbitrary within each phase set. They also need not follow the order of the alleles in the
+genotype (`0|1`) of the VCF written by the same pipeline, when the reads were tagged from another
+phasing run. On ONT's GIAB HG002 data (wf-human-variation, 60×), the haplotags of the BAM and the
+phased VCF number the haplotypes in opposite ways in some sets and alike in others. Within every set,
+the lanes agree with the VCF on all 1,413 phased heterozygous SNVs of the CFTR and HBB regions
+tested (500 kb each): every pair of variants is in *cis* or *trans* as the VCF says. On a simulated
+library with two phase sets, a mosaic SNV and an allele only in untagged reads, every site lands
+where it should, for short pairs and noisy long reads alike, and the counts equal an independent
+count with pysam. The scan of a phased file takes about a fifth longer (5.0–5.3 s instead of
+4.1–4.6 s for 500 kb of 60× ONT); an unphased file is read as before.
 
 **Allele balance.** *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch them on
 to separate a known polymorphism from a novel change. With Variants on, the track label then
@@ -1371,7 +1425,7 @@ src/standalone/
   phasing.ts                     read-based phasing of the heterozygous sites into two-haplotype blocks
   haplotypes.ts                  haplotype consensus rows from the HP/PS haplotags or the in-page phasing
   svmerge.ts                     structural arcs with nearby breakpoints merged into events
-  alleles.ts                     allele counts of the full variant scan, with each call's quality evidence
+  alleles.ts                     allele counts of the full variant scan, with each call's quality evidence and its reads by haplotag
   methylation.ts                 CpG methylation from the MM / ML tags: counts per CpG × haplotype, filter threshold, CpG islands
   ucsc.ts                        UCSC Genome Browser API client (RefSeq / MANE models, sequence, domains)
   ensembl.ts                     Ensembl REST client (fallback, ENSG resolution, GRCh37)
@@ -1390,6 +1444,7 @@ src/components/
   sashimi/SpliceCartoon.tsx      animated splicing cartoon
   sashimi/knownVariants.ts       HGVS g. / ISCN parsing for the known-variants panel
   sashimi/siteQuality.ts         quality checks of a variant site (BQ / homopolymer, MQ, strand, read position)
+  sashimi/sitePhase.ts           the haplotype of a variant site from its reads by haplotag (H1, H2, both, check)
   sashimi/datasource.ts, types.ts   interfaces shared with the parent application
 ```
 
@@ -1455,6 +1510,15 @@ If the viewer contributes to a publication, please cite it
   pathogenic short tandem repeats in sequencing data.* Hum Mutat 2022;43:859–868.
 - Dolzhenko E et al. *Characterization and visualization of tandem repeats at genome scale.* Nat
   Biotechnol 2024 (TRGT and its read waterfall plots, which the inspector's waterfall follows).
+- Martin M, Patterson M, Garg S et al. *WhatsHap: fast and accurate read-based phasing.* bioRxiv
+  2016:085050. doi:10.1101/085050 (WhatsHap, its `haplotag` command writes HP / PS).
+- Lin JH, Chen LC, Yu SC, Huang YT. *LongPhase: an ultra-fast chromosome-scale phasing algorithm
+  for small and large variants.* Bioinformatics 2022;38(7):1816–1822.
+- Holt JM et al. *HiPhase: jointly phasing small, structural, and tandem repeat variants from HiFi
+  sequencing.* Bioinformatics 2024;40(2):btae042. doi:10.1093/bioinformatics/btae042.
+- Oxford Nanopore Technologies, GIAB 2023.05 open data release (HG002 haplotagged BAM and phased
+  VCF of wf-human-variation, `s3://ont-open-data/giab_2023.05`): the real data the phased lanes were
+  checked on.
 - GMOD JavaScript libraries: [bam-js](https://github.com/GMOD/bam-js),
   [cram-js](https://github.com/GMOD/cram-js), [indexedfasta-js](https://github.com/GMOD/indexedfasta-js).
 

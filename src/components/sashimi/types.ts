@@ -219,6 +219,23 @@ export interface VariantSite {
   q?: SiteQuality;
   /** strands shown on a stranded sample: the site is counted on the gene's strand, this is the opposite strand's alternate reads and depth */
   anti?: { alt: number; depth: number };
+  /** a phased file (reads carrying HP / PS haplotags): the site's reads by haplotype (full variant scans) */
+  hap?: SiteHaplotypes;
+}
+/**
+ * The reads over a site by haplotag, for a file phased by a tool (WhatsHap or LongPhase haplotag, HiPhase, DRAGEN): HP
+ * gives the haplotype within the phase set PS. Counted like the site itself: every read over the position (the
+ * deleting reads too, for a deletion), the allele whatever its base quality.
+ */
+export interface SiteHaplotypes {
+  /** the phase set holding the most tagged reads over the site (its PS value), null for reads tagged without PS */
+  ps: number | null;
+  /** HP 1 and HP 2 of that phase set: reads with the alternate allele, and reads over the site */
+  alt: [number, number];
+  depth: [number, number];
+  /** reads tagged in another phase set, or with another HP (DRAGEN copy labels): with the allele, and over the site */
+  otherAlt: number;
+  otherDepth: number;
 }
 export interface SiteQuality {
   /** on the + strand */

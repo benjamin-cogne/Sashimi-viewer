@@ -67,6 +67,8 @@ export interface VariantScan {
   long_reads: boolean;
   /** set when a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */
   sampled?: { rate: number };
+  /** reads over the window carrying a haplotag (HP): the file is phased, the sites have their counts by haplotype (`hap`) */
+  haplotagged?: number;
 }
 /** Budget of a coverage request. */
 export interface CoverageOptions {

@@ -10,6 +10,7 @@
  * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
+import { addSiteHaplotypesFromReads } from './haplotypes';
 import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
@@ -257,7 +258,9 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
     const r = await this.getReads(sampleId, chrom, start, end, uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
     opts?.onProgress?.(1);
-    return { sites: r.sites, total: r.total, long_reads: !!r.long_reads };
+    // a phased file's reads keep their haplotags: the sites get their counts by haplotype as from the file
+    const haplotagged = addSiteHaplotypesFromReads(r.reads, r.sites);
+    return { sites: r.sites, total: r.total, long_reads: !!r.long_reads, ...(haplotagged ? { haplotagged } : {}) };
   }
   override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean) {
     if (this.names.has(sampleId)) return [];   // an embedded sample has no reads to go back to
