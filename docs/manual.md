@@ -91,7 +91,7 @@ The page has three bands, top to bottom.
   - **Arcs** (RNA): *Reads | Usage*, and the *min reads* or *min %* threshold with its − / + buttons (*Retention* in Usage mode).
   - **Structure** instead of Arcs when every track is DNA: the reads a structural hint needs.
   - **Show**: *Reads* (RNA), *All transcripts*, *SNPs*, *Equal introns*, *Known variants*.
-  - **Layers** (DNA): *Sequence*, *Coverage*, *Variants*, *Methylation*, *Reads*.
+  - **Layers** (DNA): *Coverage*, *Variants*, *Methylation*, *Reads*.
   - **Depth**: *shared | own | % max*.
   - **Filters**: *Unique reads* and *Secondary alignments*. A badge counts the filters on.
 
@@ -751,19 +751,19 @@ wrong reference) used to take 1–2 minutes and gigabytes to collapse, and over 
 million reads. It now takes about 6 s. These choices are saved with the session. Exported pages keep the haplotags of
 their embedded reads and compute the haplotypes on the spot.
 
-**Layers.** Five layers make a DNA view, switched in the *Layers* section of the toolbar,
-**S Sequence · C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample
+**Sequence strip.** The reference sits under the gene model, once for all samples, DNA or RNA, like
+IGV's sequence track; it has no switch. From views of about 1.3 kb (one pixel per base) the bases are
+coloured bars, from about 190 bp they are letters. The amino acids of the MANE transcript's CDS sit
+above them, codon by codon, from about 650 bp (two pixels per base), with their letters once a codon
+is 9 px wide; the start codon is green, a stop red, and a codon split by an intron is drawn on both
+sides. With a minus-strand gene drawn 5′→3′ (RNA pages), the transcript strand is added above the +
+strand. Wider views show one line saying how far to zoom. The bases come from the FASTA when one is
+loaded, else from the UCSC / Ensembl APIs, else (an exported page) from the reference its reads came
+with. The reads track keeps its own reference rows above the reads.
+
+**Layers.** Four layers make a DNA track, switched in the *Layers* section of the toolbar,
+**C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample
 at once. They are always drawn in this order, top to bottom:
-- **S, sequence** (teal, on by default as soon as a DNA sample is shown): the reference under the
-  gene model, once for all samples, like IGV's sequence track. From views of about 1.3 kb (one pixel
-  per base) the bases are coloured bars, from about 190 bp they are letters. The amino acids of the
-  MANE transcript's CDS sit above them, codon by codon, from about 650 bp (two pixels per base),
-  with their letters once a codon is 9 px wide; the start codon is green, a stop red, and a codon
-  split by an intron is drawn on both sides. With a minus-strand gene drawn 5′→3′ (RNA pages), the
-  transcript strand is added above the + strand. Wider views show one line saying how far to zoom.
-  The bases come from the FASTA when one is loaded, else from the UCSC / Ensembl APIs, else (an
-  exported page) from the reference its reads came with. The switch is saved with the session. The
-  reads track keeps its own reference rows above the reads;
 - **C, coverage** (blue, on by default): the coverage histogram and the structural arcs over it.
   Switched off, a DNA track keeps its label band and the layers under it, for example to compare
   the methylation or the variants of several samples in little room. The coverage stays loaded,
