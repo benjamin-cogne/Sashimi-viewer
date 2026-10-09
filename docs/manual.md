@@ -1020,6 +1020,11 @@ repeat in every read and draws the result.
   - a read set apart for its anchors shows the whole read with every anchor found in it.
 
   Reads are listed longest or shortest first, 15 at a time.
+- **Consensus per allele**, automatic: each allele chip ends with its consensus structure (`≈ (CGG)9 AGG
+  (CGG)9 AGG (CGG)100`), built when the sample is measured from the allele's core: its reads between
+  its P10 and P90 sizes, so that a broad allele's tails (stutter, chimeras at the edge of a smear) do
+  not pull it. A click opens the consensus card. The consensus has the core's median size, which can
+  differ from the allele's mode (the density peak) when the allele is broad.
 - **Consensus.** The *Consensus* button of a read list builds the consensus of the reads listed (300
   at most, evenly by size), in a repeat-aware way:
   - **Flanks**, base by base: each read's flank is aligned on the reference's, as in the read view,

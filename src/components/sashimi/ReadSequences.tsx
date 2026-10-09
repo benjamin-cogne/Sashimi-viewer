@@ -193,7 +193,7 @@ function WholeRead({ r }: { r: ReadRepeat }) {
 }
 
 /** The consensus of the reads listed: a summary line, its flanks against the reference, its tract by units, its support. */
-function ConsensusCard({ c, locus, sample, title, onClose }: { c: RepeatConsensus; locus: RepeatLocus; sample: string; title: string; onClose: () => void }) {
+export function ConsensusCard({ c, locus, sample, title, onClose }: { c: RepeatConsensus; locus: RepeatLocus; sample: string; title: string; onClose: () => void }) {
   const [copied, setCopied] = useState('');
   const left = useMemo(() => ({ ...alignFlank(c.flankL.seq, locus.refL, true), from: 0, anchor: null }), [c, locus]);
   const right = useMemo(() => ({ ...alignFlank(c.flankR.seq, locus.refR, false), from: 0, anchor: null }), [c, locus]);

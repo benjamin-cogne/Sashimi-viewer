@@ -10,7 +10,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import { Segmented } from './controls';
-import { ReadSequences } from './ReadSequences';
+import { ConsensusCard, ReadSequences } from './ReadSequences';
+import { repeatConsensus, type RepeatConsensus } from '../../standalone/repeatConsensus';
 import {
   FLANK, PURITY_MIN, SPAN_MIN, callAlleles, categoryOf, interruptionPattern, measureReads, quantile, revComp,
   type Allele, type CategoryTone, type ReadRepeat, type RepeatLocus, type RepeatReads,
@@ -142,6 +143,23 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
   };
   const patText = (p: string) => (p ? `${locus.interruptions[0] ?? 'interruption'} at ${p}` : `no ${locus.interruptions.length ? locus.interruptions[0] : 'interruption'}`);
   const alleleReads = (a: Allele) => (view ? view.used.filter(r => r.units > a.lo && r.units <= a.hi) : []);
+  /**
+   * Each allele's consensus, made as soon as the sample is measured: from the allele's core, its reads between its P10
+   * and P90 sizes, so that a broad allele's tails (stutter, chimeras at the edge of a smear) do not pull it.
+   */
+  const alleleCons = useMemo(() => {
+    if (!view) return [] as { c: RepeatConsensus | null; core: number; of: number }[];
+    return view.alleles.map(a => {
+      const mine = view.used.filter(r => r.units > a.lo && r.units <= a.hi);
+      const core = mine.filter(r => r.units >= a.p10 && r.units <= a.p90);
+      const reads = core.length >= 3 ? core : mine;
+      return { c: repeatConsensus(reads, locus), core: reads.length, of: mine.length };
+    });
+  }, [view?.alleles, view?.used, locus]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** the allele whose consensus card is open */
+  const [alleleCard, setAlleleCard] = useState<number | null>(null);
+  useEffect(() => setAlleleCard(null), [sid]);
+  const sampleShort = shortNames(samples.map(x => x.name))[Math.max(0, samples.findIndex(x => x.id === sid))] ?? '';
 
   const body = (() => {
     if (!cur || cur.loading) return <div className="px-5 py-10 text-center text-sm text-slate-500">Reading the reads over the repeat…</div>;
@@ -180,7 +198,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             return (
               <Chip key={i} k={`allele ${i + 1} · ${fmt(a.n)} reads`} accent={c ? TONE[c.tone] : undefined}
                 v={<><b>{a.mode}</b> <span className="font-normal text-slate-600">{locus.motif}</span>{c && <span className="ml-1.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full border" style={{ borderColor: TONE[c.tone], color: '#334155' }}>{c.name}</span>}</>}
-                sub={`P5–P95 ${a.p5}–${a.p95}${a.broad ? ' · broad' : ''}${locus.interruptions.length && st.pats[0] ? ` · ${patText(st.pats[0][0])} (${pct(st.pats[0][1], st.n)})` : ''}`} />
+                sub={`P5–P95 ${a.p5}–${a.p95}${a.broad ? ' · broad' : ''}${locus.interruptions.length && st.pats[0] ? ` · ${patText(st.pats[0][0])} (${pct(st.pats[0][1], st.n)})` : ''}`}
+                foot={alleleCons[i]?.c ? (
+                  <button onClick={() => setAlleleCard(alleleCard === i ? null : i)} className={`mt-1 block max-w-[340px] truncate text-left font-mono text-[11px] ${alleleCard === i ? 'text-indigo-800 underline' : 'text-indigo-700 hover:underline'}`}
+                    title={`Consensus of the allele's core: ${alleleCons[i].core} of its ${alleleCons[i].of} reads (sizes P10–P90). Click for the sequence, its support, copy and FASTA.\n${alleleCons[i].c!.structure}`}>
+                    ≈ {alleleCons[i].c!.structure}
+                  </button>
+                ) : undefined} />
             );
           })}
           {(r.reads.impure.length > 0 || r.reads.chimeric.length > 0 || shorter > 0) && (
@@ -343,7 +367,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             </span>
           ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions · click a waterfall row for its sequence.</span>}
         </div>
-        {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} sample={shortNames(samples.map(x => x.name))[Math.max(0, samples.findIndex(x => x.id === sid))] ?? ''} onClose={() => setBrowse(null)} />}
+        {alleleCard != null && alleleCons[alleleCard]?.c && (
+          <div className="mx-5 mb-3 rounded-lg border border-indigo-200 overflow-hidden">
+            <ConsensusCard c={alleleCons[alleleCard].c!} locus={locus} sample={sampleShort} onClose={() => setAlleleCard(null)}
+              title={`allele ${alleleCard + 1} core, sizes ${alleles[alleleCard].p10}–${alleles[alleleCard].p90}`} />
+          </div>
+        )}
+        {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} sample={sampleShort} onClose={() => setBrowse(null)} />}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1 text-[11.5px] text-slate-600">
           <Swatch c={UNIT_COLOR.P} t={`${locus.pathogenic.join(' / ')}${locus.benign.length ? ' (pathogenic motif)' : ''}`} />
           {locus.benign.length > 0 && <Swatch c={UNIT_COLOR.B} t={`${locus.benign.join(' / ')} (benign or reference motif)`} />}
@@ -396,12 +426,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
   );
 }
 
-function Chip({ k, v, sub, accent }: { k: string; v: React.ReactNode; sub?: string; accent?: string }) {
+function Chip({ k, v, sub, accent, foot }: { k: string; v: React.ReactNode; sub?: string; accent?: string; foot?: React.ReactNode }) {
   return (
     <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-3 py-1.5 min-w-[150px]" style={accent ? { borderLeft: `3px solid ${accent}` } : undefined}>
       <div className="text-[10.5px] text-slate-500">{k}</div>
       <div className="text-[15px] font-semibold leading-tight">{v}</div>
       {sub && <div className="text-[10.5px] text-slate-500 mt-0.5">{sub}</div>}
+      {foot}
     </div>
   );
 }
