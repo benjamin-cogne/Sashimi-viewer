@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import { Segmented } from './controls';
+import { ReadSequences } from './ReadSequences';
 import {
   FLANK, PURITY_MIN, SPAN_MIN, callAlleles, categoryOf, interruptionPattern, measureReads, quantile, revComp,
   type Allele, type CategoryTone, type ReadRepeat, type RepeatLocus, type RepeatReads,
@@ -49,6 +50,10 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
   const [results, setResults] = useState<Record<number, { loading?: boolean; error?: string; r?: SampleResult }>>({});
   const [brush, setBrush] = useState<[number, number] | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; text: string } | null>(null);
+  /** the reads whose sequences are shown under the plot */
+  const [browse, setBrowse] = useState<{ title: string; list: ReadRepeat[] } | null>(null);
+  /** a click on the plot (no drag): where, to open a waterfall row */
+  const clickAt = useRef<{ px: number; py: number } | null>(null);
   const drag = useRef<number | null>(null);
   const motifs = locus.catalog;
   const geneMotif = motifs?.strand === '-' ? revComp(locus.motif) : null;
@@ -74,7 +79,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     })().catch(e => { if (!cancelled) setResults(p => ({ ...p, [sid]: { error: e?.message ?? String(e) } })); });
     return () => { cancelled = true; };
   }, [sid, locus]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => setBrush(null), [sid]);
+  useEffect(() => { setBrush(null); setBrowse(null); }, [sid]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { if (brush) setBrush(null); else onClose(); } };
     window.addEventListener('keydown', onKey);
@@ -161,15 +166,15 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
                 sub={`P5–P95 ${a.p5}–${a.p95}${a.broad ? ' · broad' : ''}${locus.interruptions.length && st.pats[0] ? ` · ${patText(st.pats[0][0])} (${pct(st.pats[0][1], st.n)})` : ''}`} />
             );
           })}
-          {(r.reads.impure.length > 0 || r.reads.chimeric > 0 || shorter > 0) && (
-            <Chip k="set apart" v={fmt(r.reads.impure.length + r.reads.chimeric)}
-              sub={[`${fmt(r.reads.impure.length)} impure tract (< ${Math.round(PURITY_MIN * 100)} % ${locus.motif}${locus.interruptions.length ? `/${locus.interruptions[0]}` : ''})`, `${fmt(r.reads.chimeric)} anchor twice or out of order`, shorter ? `${fmt(shorter)} spanning reads shorter than the reference (counted)` : ''].filter(Boolean).join(' · ')} />
+          {(r.reads.impure.length > 0 || r.reads.chimeric.length > 0 || shorter > 0) && (
+            <Chip k="set apart" v={fmt(r.reads.impure.length + r.reads.chimeric.length)}
+              sub={[`${fmt(r.reads.impure.length)} impure tract (< ${Math.round(PURITY_MIN * 100)} % ${locus.motif}${locus.interruptions.length ? `/${locus.interruptions[0]}` : ''})`, `${fmt(r.reads.chimeric.length)} anchor twice or out of order`, shorter ? `${fmt(shorter)} spanning reads shorter than the reference (counted)` : ''].filter(Boolean).join(' · ')} />
           )}
           {alleles.some(a => a.broad) && <Chip k="reading" v={<span className="text-red-700">broad spread</span>} sub="somatic mosaicism, or PCR / sequencing stutter" />}
         </div>
         <div className="px-3 pt-1 relative">
           <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ maxWidth: W, cursor: 'crosshair', userSelect: 'none' }} fontFamily="Inter, system-ui, sans-serif"
-            onMouseDown={e => { const { px } = svgPoint(e); if (px < L) return; drag.current = ux(px); setBrush([ux(px), ux(px)]); }}
+            onMouseDown={e => { const p = svgPoint(e); clickAt.current = p; if (p.px < L) return; drag.current = ux(p.px); setBrush([ux(p.px), ux(p.px)]); }}
             onMouseMove={e => {
               const { px, py } = svgPoint(e);
               if (drag.current != null) { setBrush([drag.current, ux(px)]); return; }
@@ -178,7 +183,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
                 const row = rows[Math.floor((py - wTop) / rowH)];
                 if (!row) { setHover(null); return; }
                 const ed = (v?: number) => (v == null ? 'not found' : `${v} edit${v === 1 ? '' : 's'}`);
-                setHover({ x: px, y: py, text: `${row.name}${row.reverse ? ' (reverse)' : ''} · ${row.truncated ? '≥ ' : ''}${row.units} ${locus.motif} · 5′ anchor ${ed(row.edL)}, 3′ anchor ${ed(row.edR)} · ${Math.round(row.purity * 100)} % motif units` });
+                setHover({ x: px, y: py, text: `${row.name}${row.reverse ? ' (reverse)' : ''} · ${row.truncated ? '≥ ' : ''}${row.units} ${locus.motif} · 5′ anchor ${ed(row.edL)}, 3′ anchor ${ed(row.edR)} · ${Math.round(row.purity * 100)} % motif units · click for its sequence` });
                 return;
               }
               if (py > base) { setHover(null); return; }
@@ -186,7 +191,18 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               if (i < 0 || i >= nb) { setHover(null); return; }
               setHover({ x: px, y: py, text: `${i * step}–${(i + 1) * step - 1} ${locus.motif}: ${fmt(span[i])} spanning${!enough && trunc[i] ? ` + ${fmt(trunc[i])} at least` : ''}` });
             }}
-            onMouseUp={() => { drag.current = null; if (brush && Math.abs(brush[1] - brush[0]) < step / 2) setBrush(null); }}
+            onMouseUp={() => {
+              drag.current = null;
+              if (brush && Math.abs(brush[1] - brush[0]) < step / 2) {
+                setBrush(null);
+                // a click on a waterfall row: that read's sequence
+                const c = clickAt.current;
+                if (c && c.py >= wTop && c.py < wTop + wH) {
+                  const row = rows[Math.floor((c.py - wTop) / rowH)];
+                  if (row) setBrowse({ title: row.name, list: [row] });
+                }
+              }
+            }}
             onMouseLeave={() => { drag.current = null; setHover(null); }}>
             <defs>
               <pattern id="ri-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
@@ -282,10 +298,27 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               <b>{Math.round(Math.min(...brush))}–{Math.round(Math.max(...brush))} units:</b> {fmt(selStats.n)} reads ({pct(selStats.n, view.used.length)}) · median {selStats.median} · P5–P95 {selStats.p5}–{selStats.p95}
               {locus.interruptions.length > 0 && selStats.pats.length > 0 && <> · {selStats.pats.map(([p, n]) => `${patText(p)} ${pct(n, selStats.n)}`).join(', ')}</>}
               {locus.categories.length > 0 && <> · {locus.categories.map(c => `${c.name.toLowerCase()} ${pct(sel!.filter(u => u.units >= c.min && u.units <= c.max).length, selStats.n)}`).join(', ')}</>}
+              <button onClick={() => setBrowse({ title: `${Math.round(Math.min(...brush))}–${Math.round(Math.max(...brush))} units`, list: sel! })} className="ml-2 text-indigo-700 underline">their sequences</button>
               <button onClick={() => setBrush(null)} className="ml-2 text-indigo-700 underline">clear</button>
             </span>
-          ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions.</span>}
+          ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions · click a waterfall row for its sequence.</span>}
         </div>
+        <div className="flex flex-wrap items-center gap-2 px-5 pt-1.5 pb-1 text-[11.5px]">
+          <span className="text-slate-500">Read sequences (flanks against the reference, tract by units):</span>
+          {([
+            ['spanning', r.reads.spanning],
+            ['shorter than the reference', r.reads.spanning.filter(x => x.units < locus.refUnits)],
+            ['impure tract', r.reads.impure],
+            ['anchor twice / out of order', r.reads.chimeric],
+            ['stop inside the repeat', r.reads.truncated],
+          ] as [string, ReadRepeat[]][]).filter(([, l]) => l.length).map(([t, l]) => (
+            <button key={t} onClick={() => setBrowse({ title: t, list: l })}
+              className={`rounded-full border px-2.5 py-0.5 ${browse?.title === t ? 'border-indigo-400 bg-indigo-50 text-indigo-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
+              {t} <span className="text-slate-400">{fmt(l.length)}</span>
+            </button>
+          ))}
+        </div>
+        {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} onClose={() => setBrowse(null)} />}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1 text-[11.5px] text-slate-600">
           <Swatch c={UNIT_COLOR.P} t={`${locus.pathogenic.join(' / ')}${locus.benign.length ? ' (pathogenic motif)' : ''}`} />
           {locus.benign.length > 0 && <Swatch c={UNIT_COLOR.B} t={`${locus.benign.join(' / ')} (benign or reference motif)`} />}

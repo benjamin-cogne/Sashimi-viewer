@@ -1005,6 +1005,18 @@ repeat in every read and draws the result.
 - **Lower bounds.** A read with one anchor and not the other gives a lower bound: the motif-rich
   stretch next to that anchor, followed while at least 60 % of its last 10 units are the motif.
 - **Hover a waterfall row** for the read's name, size, anchor edits and purity.
+- **Read sequences.** Click a waterfall row, *their sequences* after dragging a size range, or one of
+  the buttons under the plot (spanning, shorter than the reference, impure tract, anchor twice / out
+  of order, stop inside the repeat). For each read:
+  - its 5′ and 3′ flanks (120 bp) are aligned base to base on the reference's: differing bases in
+    red, extra bases in amber, missing ones as `-`, the anchor underlined;
+  - its tract is shown as runs of units, e.g. `(CGG)10 AGG (CGG)9 AGG (CGG)140`, with the bases
+    skipped to regain the motif's phase (sequencing indels) in small lowercase; *every unit*
+    numbers them all;
+  - a read that stops inside the repeat shows what follows the stretch measured;
+  - a read set apart for its anchors shows the whole read with every anchor found in it.
+
+  Reads are listed longest or shortest first, 15 at a time.
 - Primary alignments only, up to 20,000 reads over the locus (every k-th kept past that).
 
 **What is drawn.**

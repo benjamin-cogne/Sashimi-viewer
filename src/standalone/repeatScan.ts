@@ -32,6 +32,8 @@ export const ANCHOR = 40;
 const ANCHOR_SEARCH = 150;
 /** reference bases around the tract a locus needs (the anchors' room) */
 export const FLANK = ANCHOR_SEARCH + ANCHOR;
+/** reference bases shown next to a read's tract, on each side */
+export const FLANK_SHOWN = 120;
 /** an anchor must differ from the repeat by this share of its bases at least (FMR1's 40 bp next to the CGG tract differ by 28 %) */
 const ANCHOR_MIN_FAR = 0.35;
 /** edits allowed between an anchor and the read: 15 %, above nanopore error rates and well below ANCHOR_MIN_FAR */
@@ -60,6 +62,8 @@ export interface RepeatLocus {
   /** the stretches found in the reads to place the tract's ends, and where they come from */
   anchorL: Anchor; anchorR: Anchor;
   anchorSource: string;
+  /** the reference next to the tract, FLANK_SHOWN bases on each side: what a read's flanks are compared with */
+  refL: string; refR: string;
   /** "FMR1 CGG" or "CAG repeat" */
   label: string;
   catalog?: StrLocus;
@@ -173,6 +177,7 @@ export function makeLocus(ref: string, refStart: number, chrom: string, hint: { 
   return {
     chrom, start: t.start, end: t.end, k, motif: t.unit, pathogenic, benign, interruptions,
     refUnits: Math.round(tract.length / k), refStructure: tractStructure(tract, t.unit),
+    refL: ref.slice(Math.max(0, a - FLANK_SHOWN), a), refR: ref.slice(b, b + FLANK_SHOWN),
     anchorL, anchorR, anchorSource: fromPub ? `${pub!.tool} flanks (${pub!.name}), Giesselmann et al. 2019` : 'reference flanks',
     label: entry ? `${entry.gene} ${entry.path[0] ?? t.unit}` : `${t.unit} repeat`, catalog: entry, categories, categorySource: source,
   };
@@ -363,6 +368,14 @@ export interface ReadRepeat {
   reverse: boolean;
   /** the anchors' edits (absent: not found) and the share of motif or interruption units of the tract */
   edL?: number; edR?: number; purity: number;
+  /** the read's sequence as it was measured (reference orientation; reverse-complemented when it read the locus backwards) */
+  seq: string;
+  /** the tract in `seq` (a lower bound: the stretch measured) */
+  tract: [number, number];
+  /** every place each anchor was found in `seq`: where the 5′ one ends, where the 3′ one starts */
+  hitsL: number[]; hitsR: number[];
+  /** a read set apart: why */
+  note?: string;
 }
 export interface RepeatReads {
   /** both anchors, once each and in order, and a tract of PURITY_MIN or more */
@@ -372,7 +385,7 @@ export interface RepeatReads {
   /** both anchors but an impure tract (a chimera, or a read too noisy to size) */
   impure: ReadRepeat[];
   /** an anchor found twice, or the 3′ one before the 5′ one: concatemers and fold-back reads */
-  chimeric: number;
+  chimeric: ReadRepeat[];
   /** no anchor and not all repeat: the read does not reach the locus */
   skipped: number;
   total: number;
@@ -385,7 +398,7 @@ const purityOf = (tok: string) => (tok.length ? [...tok].filter(c => c !== 'o').
  * tract lies between the 5′ anchor's end plus its gap and the 3′ anchor's start minus its gap.
  */
 export function measureReads(reads: AlignedRead[], ref: string, refStart: number, locus: RepeatLocus): RepeatReads {
-  const out: RepeatReads = { spanning: [], truncated: [], impure: [], chimeric: 0, skipped: 0, total: 0 };
+  const out: RepeatReads = { spanning: [], truncated: [], impure: [], chimeric: [], skipped: 0, total: 0 };
   const k = locus.k, back = backwards(locus), gL = locus.anchorL.gap, gR = locus.anchorR.gap;
   for (const r of reads) {
     if (r.f & 0x900) continue;
@@ -398,11 +411,15 @@ export function measureReads(reads: AlignedRead[], ref: string, refStart: number
       const Ls = anchorHits(s, locus.anchorL.seq, true), Rs = anchorHits(s, locus.anchorR.seq, false);
       if (!Ls.length && !Rs.length) continue;
       done = true;
-      if (Ls.length > 1 || Rs.length > 1 || (Ls.length && Rs.length && Rs[0].pos < Ls[0].pos)) { out.chimeric++; break; }
+      const at = { seq: s, hitsL: Ls.map(h => h.pos), hitsR: Rs.map(h => h.pos) };
+      if (Ls.length > 1 || Rs.length > 1 || (Ls.length && Rs.length && Rs[0].pos < Ls[0].pos)) {
+        out.chimeric.push({ ...base, ...at, units: 0, tokens: '', truncated: false, purity: 0, tract: [0, 0], note: Ls.length > 1 || Rs.length > 1 ? 'an anchor found twice' : "the 3′ anchor before the 5′ one" });
+        break;
+      }
       const L = Ls[0], R = Rs[0];
       if (L && R) {
         const a = L.pos + gL, b = Math.max(a, R.pos - gR), tract = s.slice(a, b), tokens = tokenize(tract, locus), purity = purityOf(tokens);
-        const rr: ReadRepeat = { ...base, units: Math.round(tract.length / k), tokens, truncated: false, edL: L.ed, edR: R.ed, purity };
+        const rr: ReadRepeat = { ...base, ...at, tract: [a, b], units: Math.round(tract.length / k), tokens, truncated: false, edL: L.ed, edR: R.ed, purity };
         (purity >= PURITY_MIN ? out.spanning : out.impure).push(rr);
         break;
       }
@@ -410,11 +427,11 @@ export function measureReads(reads: AlignedRead[], ref: string, refStart: number
       // read's end, or sequence that is not the other anchor)
       if (L) {
         const a = L.pos + gL, run = motifRun(s.slice(a), locus), tokens = tokenize(s.slice(a, a + run.bases), locus);
-        if (run.units >= 3) out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'left', edL: L.ed, purity: purityOf(tokens) });
+        if (run.units >= 3) out.truncated.push({ ...base, ...at, tract: [a, a + run.bases], units: Math.round(run.bases / k), tokens, truncated: true, from: 'left', edL: L.ed, purity: purityOf(tokens) });
         else out.skipped++;
       } else {
         const b = R.pos - gR, run = motifRun(reverse(s.slice(0, Math.max(0, b))), back), tokens = tokenize(s.slice(b - run.bases, b), locus);
-        if (run.units >= 3) out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'right', edR: R.ed, purity: purityOf(tokens) });
+        if (run.units >= 3) out.truncated.push({ ...base, ...at, tract: [b - run.bases, b], units: Math.round(run.bases / k), tokens, truncated: true, from: 'right', edR: R.ed, purity: purityOf(tokens) });
         else out.skipped++;
       }
       break;
@@ -422,11 +439,66 @@ export function measureReads(reads: AlignedRead[], ref: string, refStart: number
     if (!done) {
       // a read that is all repeat (inside a long expansion)
       const run = motifRun(seq, locus);
-      if (run.units >= 10 && run.bases >= 0.8 * seq.length) { const tokens = tokenize(seq.slice(0, run.bases), locus); out.truncated.push({ ...base, units: Math.round(run.bases / k), tokens, truncated: true, from: 'none', purity: purityOf(tokens) }); }
+      if (run.units >= 10 && run.bases >= 0.8 * seq.length) { const tokens = tokenize(seq.slice(0, run.bases), locus); out.truncated.push({ ...base, seq, hitsL: [], hitsR: [], tract: [0, run.bases], units: Math.round(run.bases / k), tokens, truncated: true, from: 'none', purity: purityOf(tokens) }); }
       else out.skipped++;
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Showing a read
+
+/** A tract as runs of units, as read in the motif's phase: `cls` P B I o, or x for bases skipped to regain the phase. */
+export function unitRuns(tract: string, locus: RepeatLocus): { unit: string; cls: 'P' | 'B' | 'I' | 'o' | 'x'; n: number }[] {
+  const k = locus.k;
+  const P = new Set(locus.pathogenic), B = new Set(locus.benign), I = new Set(locus.interruptions);
+  const out: { unit: string; cls: 'P' | 'B' | 'I' | 'o' | 'x'; n: number }[] = [];
+  const push = (unit: string, cls: 'P' | 'B' | 'I' | 'o' | 'x') => {
+    const last = out[out.length - 1];
+    if (last && last.unit === unit && last.cls === cls && cls !== 'x') last.n++; else out.push({ unit, cls, n: 1 });
+  };
+  let i = 0;
+  for (; i + k <= tract.length;) {
+    const u = tract.substr(i, k);
+    const c = P.has(u) ? 'P' : B.has(u) ? 'B' : I.has(u) ? 'I' : '';
+    if (c) { push(u, c); i += k; continue; }
+    let j = 1;
+    while (j < k && !P.has(tract.substr(i + j, k)) && !B.has(tract.substr(i + j, k))) j++;
+    if (j < k) { push(tract.substr(i, j), 'x'); i += j; continue; }
+    push(u, 'o'); i += k;
+  }
+  if (i < tract.length) push(tract.slice(i), 'x');
+  return out;
+}
+
+/**
+ * A read's flank against the reference's, base to base: an alignment fixed at the tract (`atEnd`: both strings end
+ * there; else both start there) and free at the other end, where the read may stop early or go on. Returns the two
+ * rows with '-' for gaps, the tract side last (atEnd) or first.
+ */
+export function alignFlank(read: string, refFlank: string, atEnd: boolean): { ref: string; read: string } {
+  const a = atEnd ? reverse(refFlank) : refFlank, b = atEnd ? reverse(read) : read;
+  const n = a.length, m = b.length;
+  const D: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = 0; i <= n; i++) D[i][0] = i;
+  for (let j = 0; j <= m; j++) D[0][j] = j;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) D[i][j] = Math.min(D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1), D[i - 1][j] + 1, D[i][j - 1] + 1);
+  // the free end: the best cell of the last row or column
+  let bi = n, bj = m, best = D[n][m];
+  for (let j = 0; j <= m; j++) if (D[n][j] < best) { best = D[n][j]; bi = n; bj = j; }
+  for (let i = 0; i <= n; i++) if (D[i][m] < best) { best = D[i][m]; bi = i; bj = m; }
+  let ra = '', rb = '';
+  let i = bi, j = bj;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && D[i][j] === D[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)) { ra = a[i - 1] + ra; rb = b[j - 1] + rb; i--; j--; }
+    else if (i > 0 && D[i][j] === D[i - 1][j] + 1) { ra = a[i - 1] + ra; rb = '-' + rb; i--; }
+    else { ra = '-' + ra; rb = b[j - 1] + rb; j--; }
+  }
+  // beyond the free end: the rest of the longer one, against nothing
+  ra += a.slice(bi) + ' '.repeat(Math.max(0, (m - bj) - (n - bi)));
+  rb += b.slice(bj) + ' '.repeat(Math.max(0, (n - bi) - (m - bj)));
+  return atEnd ? { ref: reverse(ra), read: reverse(rb) } : { ref: ra, read: rb };
 }
 
 // ---------------------------------------------------------------------------------------------------------------

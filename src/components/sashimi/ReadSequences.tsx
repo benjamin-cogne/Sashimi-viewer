@@ -1,0 +1,178 @@
+/**
+ * The sequences of a repeat inspector's reads (RepeatInspector.tsx): for each read its 5′ flank aligned base to base on
+ * the reference's, its tract as runs of units ("(CGG)10 AGG (CGG)9 …", every unit on demand) and its 3′ flank, with the
+ * anchors underlined; reads that stop inside the repeat show what follows the stretch measured, reads set apart for
+ * their anchors the whole read with every anchor found in it.
+ */
+import { useMemo, useState } from 'react';
+import { ANCHOR, FLANK_SHOWN, alignFlank, unitRuns, type ReadRepeat, type RepeatLocus } from '../../standalone/repeatScan';
+
+const PAGE = 15;
+const UNIT_TEXT: Record<string, string> = { P: '#3b5bb5', B: '#0f766e', I: '#c2410c', o: '#a21caf', x: '#94a3b8' };
+const fmt = (n: number) => n.toLocaleString('en-US');
+
+export function ReadSequences({ locus, title, reads, onClose }: { locus: RepeatLocus; title: string; reads: ReadRepeat[]; onClose: () => void }) {
+  const [desc, setDesc] = useState(true);
+  const [page, setPage] = useState(0);
+  const sorted = useMemo(() => [...reads].sort((a, b) => (desc ? b.units - a.units : a.units - b.units)), [reads, desc]);
+  const pages = Math.max(1, Math.ceil(sorted.length / PAGE));
+  const shown = sorted.slice(page * PAGE, page * PAGE + PAGE);
+  return (
+    <div className="mx-5 mb-4 rounded-lg border border-slate-200">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-slate-200 bg-slate-50 rounded-t-lg text-[12px]">
+        <b>Read sequences · {title}</b>
+        <span className="text-slate-500">{fmt(reads.length)} read{reads.length === 1 ? '' : 's'}</span>
+        {reads.length > 1 && (
+          <button onClick={() => { setDesc(d => !d); setPage(0); }} className="ml-2 rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-100">{desc ? 'longest first ↓' : 'shortest first ↑'}</button>
+        )}
+        {pages > 1 && (
+          <span className="flex items-center gap-1 ml-2">
+            <button disabled={page === 0} onClick={() => setPage(p => p - 1)} className="rounded border border-slate-300 bg-white px-1.5 disabled:opacity-40">‹</button>
+            <span className="tabular-nums text-slate-600">{fmt(page * PAGE + 1)}–{fmt(Math.min(sorted.length, page * PAGE + PAGE))} of {fmt(sorted.length)}</span>
+            <button disabled={page >= pages - 1} onClick={() => setPage(p => p + 1)} className="rounded border border-slate-300 bg-white px-1.5 disabled:opacity-40">›</button>
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-3 text-[11px] text-slate-500">
+          <span><span className="px-1 rounded bg-red-100 text-red-800 font-mono">T</span> differs from the reference</span>
+          <span><span className="px-1 rounded bg-amber-100 text-amber-900 font-mono">A</span> extra base in the read</span>
+          <span><span className="font-mono text-red-700">-</span> base missing</span>
+          <span><span className="font-mono underline decoration-2 decoration-indigo-500">anchor</span></span>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-base leading-none" title="Close the sequences">×</button>
+        </span>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {shown.map(r => <ReadCard key={r.name} r={r} locus={locus} />)}
+        {!shown.length && <div className="px-3 py-4 text-[12px] text-slate-500">No read here.</div>}
+      </div>
+    </div>
+  );
+}
+
+/** One read: its flanks against the reference's, and its tract. */
+function ReadCard({ r, locus }: { r: ReadRepeat; locus: RepeatLocus }) {
+  const [bases, setBases] = useState(false);
+  const [a, b] = r.tract;
+  const chimeric = !!r.note;
+  const leftAnchored = !r.truncated || r.from === 'left';
+  const rightAnchored = !r.truncated || r.from === 'right';
+  const tract = r.seq.slice(a, b);
+  const runs = useMemo(() => (chimeric ? [] : unitRuns(tract, locus)), [tract, locus, chimeric]);
+  const left = useMemo(() => {
+    if (chimeric || !leftAnchored) return null;
+    const from = Math.max(0, a - FLANK_SHOWN - 15), part = r.seq.slice(from, a);
+    return { ...alignFlank(part, locus.refL, true), from, anchor: r.hitsL[0] != null ? [r.hitsL[0] - ANCHOR, r.hitsL[0]] as [number, number] : null };
+  }, [r, a, locus, chimeric, leftAnchored]);
+  const right = useMemo(() => {
+    if (chimeric || !rightAnchored) return null;
+    const part = r.seq.slice(b, b + FLANK_SHOWN + 15);
+    return { ...alignFlank(part, locus.refR, false), from: b, anchor: r.hitsR[0] != null ? [r.hitsR[0], r.hitsR[0] + ANCHOR] as [number, number] : null };
+  }, [r, b, locus, chimeric, rightAnchored]);
+  const ed = (v?: number) => (v == null ? '—' : `${v} edit${v === 1 ? '' : 's'}`);
+  const k = locus.k;
+  return (
+    <div className="px-3 py-2 text-[11.5px]">
+      <div className="flex flex-wrap items-baseline gap-x-3 text-slate-600">
+        <b className="text-slate-900">{r.name}</b>
+        <span>{r.reverse ? 'reverse strand' : 'forward strand'}</span>
+        {!chimeric && <span><b className="text-slate-900">{r.truncated ? '≥ ' : ''}{r.units}</b> {locus.motif} ({fmt(b - a)} bp)</span>}
+        <span>5′ anchor {r.hitsL.length > 1 ? `×${r.hitsL.length}` : ed(r.edL)}</span>
+        <span>3′ anchor {r.hitsR.length > 1 ? `×${r.hitsR.length}` : ed(r.edR)}</span>
+        {!chimeric && <span>{Math.round(r.purity * 100)} % motif units</span>}
+        {r.truncated && <span className="text-amber-700">stops inside the repeat ({r.from === 'left' ? 'no 3′ anchor' : r.from === 'right' ? 'no 5′ anchor' : 'no anchor'})</span>}
+        {r.note && <span className="text-red-700">set apart: {r.note}</span>}
+        <span className="text-slate-400">read {fmt(r.seq.length)} bp</span>
+      </div>
+      {chimeric ? (
+        <WholeRead r={r} />
+      ) : (
+        <div className="mt-1 grid grid-cols-[72px_1fr] gap-x-2 gap-y-0.5 items-start">
+          <span className="text-slate-500 pt-px">5′ flank</span>
+          {left ? <Aligned al={left} /> : <Raw text={r.seq.slice(Math.max(0, a - 60), a)} note={a ? 'the read before the stretch measured (no 5′ anchor)' : 'the read starts here'} />}
+          <span className="text-slate-500 pt-px">repeat</span>
+          <div className="font-mono leading-5 break-all">
+            {runs.map((u, i) => (
+              <span key={i} style={{ color: UNIT_TEXT[u.cls] }} className={u.cls === 'x' ? 'text-[10px] lowercase' : 'font-semibold'}>
+                {u.cls === 'x' ? u.unit.toLowerCase() : u.n > 1 ? `(${u.unit})${u.n}` : u.unit}{' '}
+              </span>
+            ))}
+            <button onClick={() => setBases(v => !v)} className="ml-1 font-sans text-[11px] text-indigo-700 underline">{bases ? 'hide units' : 'every unit'}</button>
+            {bases && <Units runs={runs} k={k} />}
+          </div>
+          <span className="text-slate-500 pt-px">3′ flank</span>
+          {right ? <Aligned al={right} /> : <Raw text={r.seq.slice(b, b + 60)} note={b < r.seq.length ? 'the read after the stretch measured (no 3′ anchor)' : 'the read ends here'} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A flank against the reference's: two rows, differences marked, the anchor underlined in the read. */
+function Aligned({ al }: { al: { ref: string; read: string; from: number; anchor: [number, number] | null } }) {
+  // read positions of the columns, to underline the anchor
+  // every base of the read's part is in the row, in order: the first one is at al.from
+  const cols: { r: string; q: string; pos: number | null }[] = [];
+  let pos = al.from;
+  for (let i = 0; i < al.read.length; i++) {
+    const q = al.read[i], rr = al.ref[i];
+    const here = q !== '-' && q !== ' ' ? pos++ : null;
+    cols.push({ r: rr, q, pos: here });
+  }
+  const edits = cols.filter(c => c.q !== ' ' && c.r !== ' ' && c.q !== c.r).length;
+  return (
+    <div className="font-mono text-[11px] leading-[15px] overflow-x-auto whitespace-pre">
+      <div className="text-slate-400">{cols.map((c, i) => <span key={i}>{c.r}</span>)} <span className="font-sans text-[10px]">reference</span></div>
+      <div>
+        {cols.map((c, i) => {
+          const anchor = al.anchor && c.pos != null && c.pos >= al.anchor[0] && c.pos < al.anchor[1];
+          const cls = c.q === ' ' ? '' : c.q === '-' ? 'text-red-700' : c.r === '-' ? 'bg-amber-100 text-amber-900' : c.r !== ' ' && c.r !== c.q ? 'bg-red-100 text-red-800' : 'text-slate-800';
+          return <span key={i} className={`${cls} ${anchor ? 'underline decoration-2 decoration-indigo-500 underline-offset-2' : ''}`}>{c.q}</span>;
+        })} <span className="font-sans text-[10px] text-slate-500">read · {edits} difference{edits === 1 ? '' : 's'}</span>
+      </div>
+    </div>
+  );
+}
+
+function Raw({ text, note }: { text: string; note: string }) {
+  return <div className="font-mono text-[11px] leading-[15px] break-all text-slate-500">{text || '—'} <span className="font-sans text-[10px] text-slate-400">{note}</span></div>;
+}
+
+/** Every unit of the tract, numbered every 10. */
+function Units({ runs, k }: { runs: { unit: string; cls: string; n: number }[]; k: number }) {
+  const units: { u: string; cls: string }[] = [];
+  for (const r of runs) for (let i = 0; i < (r.cls === 'x' ? 1 : r.n); i++) units.push({ u: r.unit, cls: r.cls });
+  let n = 0;
+  return (
+    <div className="mt-1 font-mono text-[11px] leading-5 break-all">
+      {units.map((x, i) => {
+        if (x.cls !== 'x') n++;
+        return (
+          <span key={i}>
+            {x.cls !== 'x' && (n - 1) % 10 === 0 && <sup className="text-[8px] text-slate-400 mr-px">{n}</sup>}
+            <span style={{ color: UNIT_TEXT[x.cls] }} className={x.cls === 'x' ? 'text-[10px]' : ''}>{x.cls === 'x' ? x.u.toLowerCase() : x.u}</span>
+            {x.cls !== 'x' && <span className="text-slate-300">{k > 1 ? '·' : ''}</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A read set apart for its anchors: the whole read, every anchor found underlined (5′ indigo, 3′ teal). */
+function WholeRead({ r }: { r: ReadRepeat }) {
+  const max = 3000, seq = r.seq.slice(0, max);
+  const inL = (p: number) => r.hitsL.some(h => p >= h - ANCHOR && p < h), inR = (p: number) => r.hitsR.some(h => p >= h && p < h + ANCHOR);
+  const spans: JSX.Element[] = [];
+  let i = 0;
+  while (i < seq.length) {
+    const kind = inL(i) ? 'L' : inR(i) ? 'R' : '';
+    let j = i; while (j < seq.length && (inL(j) ? 'L' : inR(j) ? 'R' : '') === kind) j++;
+    spans.push(<span key={i} className={kind === 'L' ? 'bg-indigo-100 text-indigo-900' : kind === 'R' ? 'bg-teal-100 text-teal-900' : 'text-slate-600'}>{seq.slice(i, j)}</span>);
+    i = j;
+  }
+  return (
+    <div className="mt-1">
+      <div className="text-[10.5px] text-slate-500">5′ anchor at {r.hitsL.map(h => fmt(h - ANCHOR)).join(', ') || 'none'} · 3′ anchor at {r.hitsR.map(h => fmt(h)).join(', ') || 'none'} (read positions; <span className="bg-indigo-100 px-0.5">5′</span> <span className="bg-teal-100 px-0.5">3′</span>)</div>
+      <div className="font-mono text-[10.5px] leading-[14px] break-all max-h-48 overflow-y-auto">{spans}{r.seq.length > max ? ` … (+${fmt(r.seq.length - max)} bp)` : ''}</div>
+    </div>
+  );
+}
