@@ -343,7 +343,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
             </span>
           ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions · click a waterfall row for its sequence.</span>}
         </div>
-        {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} onClose={() => setBrowse(null)} />}
+        {browse && <ReadSequences locus={locus} title={browse.title} reads={browse.list} sample={shortNames(samples.map(x => x.name))[Math.max(0, samples.findIndex(x => x.id === sid))] ?? ''} onClose={() => setBrowse(null)} />}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 pt-1 text-[11.5px] text-slate-600">
           <Swatch c={UNIT_COLOR.P} t={`${locus.pathogenic.join(' / ')}${locus.benign.length ? ' (pathogenic motif)' : ''}`} />
           {locus.benign.length > 0 && <Swatch c={UNIT_COLOR.B} t={`${locus.benign.join(' / ')} (benign or reference motif)`} />}

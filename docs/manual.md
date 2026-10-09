@@ -1020,6 +1020,24 @@ repeat in every read and draws the result.
   - a read set apart for its anchors shows the whole read with every anchor found in it.
 
   Reads are listed longest or shortest first, 15 at a time.
+- **Consensus.** The *Consensus* button of a read list builds the consensus of the reads listed (300
+  at most, evenly by size), in a repeat-aware way:
+  - **Flanks**, base by base: each read's flank is aligned on the reference's, as in the read view,
+    and the majority base, gap or insertion is taken at each position. It goes outward only while half
+    the reads reach the position; further out, the few reads still going are past the amplicon's end
+    (primer, adapter, barcode).
+  - **Tract**, unit by unit: a base-level alignment of reads of different lengths inside a pure repeat
+    is arbitrary, every CGG matching every other. So each read's units (in the motif's phase) are
+    aligned on those of the read of median size, and the majority unit, gap or insertion is taken at
+    each column. Interruptions keep their place, and the consensus has about the median size. Reads
+    stopping inside the repeat are aligned on their anchored end; they make the tract only when no
+    listed read spans it, and the size is then a lower bound.
+  - **Support.** Every position shows the share of the reads covering it that agree. Under 60 % it is
+    written in lowercase (an AGG that some reads carry one unit earlier or later, after a sequencing
+    indel, often is), and a support track runs under the sequence.
+  - **Output.** A one-line structure summary (`(CGG)9 AGG (CGG)9 AGG (CGG)151 · 171 CGG · AGG at 10, 20`)
+    to copy, the sequence to copy, and a FASTA download whose header gives the locus, the sample,
+    the reads used, the size, the median, the mean support and the structure.
 - Primary alignments only, up to 20,000 reads over the locus (every k-th kept past that).
 
 **What is drawn.**
@@ -1357,6 +1375,7 @@ src/standalone/
   strCatalog.ts                  pathogenic tandem-repeat loci (generated from STRchive, MIT License)
   strFlanks.ts                   published flanking sequences of repeat loci (STRique, MIT License)
   repeatScan.ts                  repeat sizing from the reads: rebuilt reads, anchors, units, alleles
+  repeatConsensus.ts             consensus of reads at a repeat: flanks base by base, tract unit by unit
   snps.ts                        dbSNP common variants (UCSC, Ensembl fallback)
   gtex.ts                        GTEx Portal API v2 client
 src/components/
