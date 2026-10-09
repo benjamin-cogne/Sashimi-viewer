@@ -948,7 +948,12 @@ reference tool; `pb-CpG-tools` for PacBio does the same per haplotype):
   its probability is set aside and the other two renormalised (modkit's *traditional* preset);
 - calls whose confidence is below the **10th percentile** of the window's calls are **filtered
   out**, as modkit does by default. The threshold and the calls left out are in the header's
-  tooltip;
+  tooltip. Confidences are kept in 16 bins that narrow towards 1 (from 0.5, 0.65, 0.75 … up to
+  0.992, 0.9945, 0.996, 0.997), since current basecallers put most calls above 0.95. Near 1 a bin
+  is about one ML step (1/256) wide. The filter drops the bins wholly below the percentile, so it
+  removes up to 10 % of the calls: 7.0 % on ONT HG002 (CFTR, 200 kb). Earlier versions used
+  bins of equal width (1/32); 97 % of the calls then fell in the top bin and only 2.7 % were
+  filtered;
 - the tags describe the read as sequenced: a hard-clipped record is used only when its `MN` tag
   confirms its sequence matches them, and a record whose sequence no longer matches is skipped.
   Secondary, duplicate and QC-failed records are left out as elsewhere.

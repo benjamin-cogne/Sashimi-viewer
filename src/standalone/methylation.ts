@@ -15,6 +15,9 @@
  *   probabilities renormalised), then the call is the likelier state and its probability the call's confidence.
  * - **Low-confidence calls filtered**: calls below a threshold estimated from the data, the 10th percentile of the
  *   sample's call confidences (modkit's default filter percentile), are counted apart and left out of the fractions.
+ *   The confidences are binned finer towards 1 (CONF_BINS, confBin): current basecallers put most calls above 0.95, where
+ *   bins of equal width could not place the percentile (on ONT HG002, 97 % of the calls fell in the top 1/32 and only
+ *   2.7 % were filtered instead of 10 %).
  *
  * Counts are kept per CpG, per haplotag (untagged, HP 1, HP 2) and per confidence bin, so the threshold can be applied
  * when a window is read back, from whatever has been counted.
@@ -25,8 +28,14 @@
  * HP 2 from the one set holding most of its tagged calls (`ps`), the other sets' calls joining the untagged ones.
  */
 
-/** Confidence bins over [0.5, 1]: 32nds. */
+/**
+ * Confidence bins over [0.5, 1], finer towards 1: bin k starts at 1 − 2^−(1 + k/2), i.e. 0.5, 0.65, 0.75, 0.82, 0.875,
+ * 0.91, 0.94, 0.956, 0.969, 0.978, 0.984, 0.989, 0.992, 0.9945, 0.9961 and 0.9972 for the last. Near 1 a bin is about
+ * one ML step wide (1/256), so the filter's percentile is placed about as finely as the calls themselves.
+ */
 export const CONF_BINS = 16;
+/** The lower edge of a confidence bin. */
+export const confBinLow = (bin: number) => 1 - Math.pow(2, -(1 + bin / 2));
 const HAPS = 3;                         // 0 untagged (or HP > 2), 1, 2
 /** Share of the sample's calls the threshold filters: its lowest-confidence 10 %, as modkit does by default. */
 export const FILTER_PERCENTILE = 0.1;
@@ -35,7 +44,7 @@ const C = 67, G = 71;
 /** Counts of one CpG: [hap][state 0 unmodified / 1 modified][confidence bin]. */
 export type CpgCounts = Uint16Array;
 const idx = (hap: number, state: number, bin: number) => (hap * 2 + state) * CONF_BINS + bin;
-export const confBin = (conf: number) => Math.max(0, Math.min(CONF_BINS - 1, Math.floor((conf - 0.5) * 2 * CONF_BINS)));
+export const confBin = (conf: number) => conf >= 1 ? CONF_BINS - 1 : Math.max(0, Math.min(CONF_BINS - 1, Math.floor(2 * (-Math.log2(1 - conf) - 1) + 1e-9)));
 
 /** CpG sites of a reference stretch: the positions of their C (0-based). */
 export function cpgSites(start: number, seq: string): Int32Array<ArrayBuffer> {
@@ -276,7 +285,7 @@ export function methylWindow(layers: MethylCounts[], start: number, end: number,
   });
   let cpgs = 0;
   if (refSeq) for (let i = Math.max(0, start - refStart); i + 1 < refSeq.length && refStart + i < end; i++) if ((refSeq.charCodeAt(i) & 0xdf) === C && (refSeq.charCodeAt(i + 1) & 0xdf) === G) cpgs++;
-  return { start, end, pos, mod, total, ps, threshold: 0.5 + tb / (2 * CONF_BINS), filtered, calls, islands: refSeq ? cpgIslands(refSeq, refStart, start, end) : [], cpgs };
+  return { start, end, pos, mod, total, ps, threshold: confBinLow(tb), filtered, calls, islands: refSeq ? cpgIslands(refSeq, refStart, start, end) : [], cpgs };
 }
 
 /**
