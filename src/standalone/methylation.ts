@@ -84,7 +84,8 @@ export function parseModTags(mm: string, ml: ArrayLike<number> | null, codes: Ui
     const codesInEntry = /^\d+$/.test(m[3]) ? [m[3]] : m[3].split('');
     const per = codesInEntry.length;
     if (m[1] !== 'C' || m[2] !== '+') { mlAt += nSkips * per; continue; }
-    const im = codesInEntry.indexOf('m'), ih = codesInEntry.indexOf('h');
+    // the letters or their ChEBI numbers (27551 5mC, 76792 5hmC), as the SAM specification allows
+    const im = codesInEntry.findIndex(c => c === 'm' || c === '27551'), ih = codesInEntry.findIndex(c => c === 'h' || c === '76792');
     if (im < 0 && ih < 0) { mlAt += nSkips * per; continue; }
     if (im >= 0 && m[4] !== '?') implicit = true;
     let p = -1;
