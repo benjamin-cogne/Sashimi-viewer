@@ -21,12 +21,15 @@
  *  5. Haplotags (HP / PS from WhatsHap, LongPhase, HiPhase…), when the reads carry them: each site's haplotype within its
  *     phase set (sitePhase), then same HP cis, different HP trans; two phase sets are not linked. The tool phased through
  *     the heterozygous sites between the two, so it links sites no read spans (two exons 100 kb apart in long reads).
- *  6. The verdict: the reads' when they decide (the haplotags agreeing said so, disagreeing make it conflicting: a
+ *  6. Without haplotags deciding, and no read holding both sites: the reads of the whole stretch between them phased
+ *     by the page (phasing.ts, WhatsHap's principle in a greedy form), the two sites in cis or in trans when one phase
+ *     block holds both, through the heterozygous sites between them (chainPair).
+ *  7. The verdict: the reads' when they decide (the haplotags agreeing said so, disagreeing make it conflicting: a
  *     switch error of the tool, or reads joined that are not one molecule); the haplotags' when the reads cannot
  *     decide (too few fragments, or under MIN_CONFLICT disagreeing among themselves); otherwise the reads' (homozygous,
  *     conflicting fragments).
  */
-import type { AlignedRead, VariantSite } from '../components/sashimi/types';
+import type { AlignedRead, PhaseBlock, PhaseResult, VariantSite } from '../components/sashimi/types';
 import { alleleAt, HET_MAX, HET_MIN, type Allele } from './phasing';
 import { callSites, inBlocks, readJunctions } from './collapse';
 import { siteHaplotypesOf } from './alleles';
@@ -180,7 +183,16 @@ export interface PairHaplotags {
   note: string;
 }
 /** What the verdict rests on: the fragments holding both sites, the file's haplotags, or both agreeing. */
-export type PairSource = 'reads' | 'haplotags' | 'both';
+export type PairSource = 'reads' | 'haplotags' | 'both' | 'chain';
+
+/** The two sites in a phase block of the reads between them: the block, and its sites between them on A's copy (0) or the other (1). */
+export interface PairChain {
+  block: PhaseBlock;
+  /** heterozygous sites of the block strictly between the two, with the copy carrying their allele */
+  between: { pos: number; copy: 0 | 1 }[];
+  /** A's allele on haplotype 1 or 2 of the block */
+  hapA: 1 | 2;
+}
 export interface PairResult {
   /** fragments by allele at A × at B: [alt–alt, alt–ref, ref–alt, ref–ref] */
   table: [number, number, number, number];
@@ -204,6 +216,9 @@ export interface PairResult {
   haplotags: PairHaplotags | null;
   /** each site's reads by haplotag lane, when the reads carry haplotags */
   tagReads: [SiteTagReads | null, SiteTagReads | null];
+  /** the phase block of the reads between the sites that decides (source 'chain'), or why none does */
+  chain?: PairChain;
+  chainNote?: string;
 }
 
 const CELL_CIS = [true, false, false, true];
@@ -326,4 +341,52 @@ export function phasePair(A: VariantSite, B: VariantSite, readsA: AlignedRead[],
     call = tagged; source = 'haplotags';
   }
   return { table, unknown, counted, cis, trans, call, source, readCall, readNote, lod, note, classes, fragments, links, haplotags, tagReads: [ta.tags, tb.tags] };
+}
+
+/** Reads a stretch is phased over (whole fragments past it, as every reads window keeps them). */
+export const CHAIN_READS_CAP = 40_000;
+/**
+ * Long reads phase a stretch on its SNVs alone: their indel errors in homopolymers, called at a third of the reads, broke
+ * the blocks every few kb on ONT HG002 (no pair over 20 kb phased); on SNVs alone, one block runs through CFTR.
+ */
+export const CHAIN_LONG_MIN_INDEL = 1_000_000;
+
+/** Whether the reads between two sites should be phased for this pair: the reads holding both cannot decide, nor the haplotags. */
+export function needsChain(r: PairResult): boolean {
+  return (r.call === 'few' || (r.call === 'conflict' && r.source === 'reads' && r.cis + r.trans < MIN_CONFLICT)) && r.haplotags?.call !== 'cis' && r.haplotags?.call !== 'trans' && !r.classes.includes('hom');
+}
+
+/**
+ * Sites A and B in the page's phasing of the reads of the stretch holding them (`phase`, its blocks): in cis when the
+ * block holding both has their alleles on the same haplotype, in trans on the two; else why not (a site not phased, two
+ * blocks the reads do not link).
+ */
+export function chainPair(phase: PhaseResult, A: VariantSite, B: VariantSite, [nA, nB] = ['A', 'B']): { call: 'cis' | 'trans' | null; note: string; chain?: PairChain } {
+  const at = (x: VariantSite) => phase.sites.findIndex(s => s.pos === x.pos && s.kind === x.kind && s.alt === x.alt);
+  const ia = at(A), ib = at(B);
+  const where = (i: number, n: string) => {
+    if (i < 0) return `${n} is not among the sites phased (fewer than 3 reads with it in the stretch read)`;
+    const u = phase.unphased.find(x => x.site === i);
+    if (u) return `${n} is not phased: ${u.reason === 'low' ? 'its allele fraction is outside the heterozygous range' : u.reason === 'conflict' ? 'the reads linking it disagree' : 'no read links it to another heterozygous site'}`;
+    return null;
+  };
+  const why = where(ia, nA) ?? where(ib, nB);
+  if (why) return { call: null, note: why };
+  const blockOf = (i: number) => phase.blocks.find(b => b.sites.includes(i));
+  const ba = blockOf(ia), bb = blockOf(ib);
+  if (!ba || !bb) return { call: null, note: 'a site outside the phase blocks' };
+  const span = (b: PhaseBlock) => `${(b.start + 1).toLocaleString('en-US')}–${b.end.toLocaleString('en-US')}`;
+  if (ba !== bb) {
+    const later = ba.start < bb.start ? bb : ba;
+    return { call: null, note: `the reads phase ${nA} in the block ${span(ba)} and ${nB} in ${span(bb)}: no read links the two blocks${later.breakBefore === 'conflict' ? ' (the reads between them disagree)' : ''}` };
+  }
+  const hap = (i: number): 1 | 2 => { const k = ba.sites.indexOf(i); return ba.h1[k] === 'alt' ? 1 : 2; };
+  const hapA = hap(ia), hapB = hap(ib);
+  const lo = Math.min(A.pos, B.pos), hi = Math.max(A.pos, B.pos);
+  const between = ba.sites.filter(i => phase.sites[i].pos > lo && phase.sites[i].pos < hi).map(i => ({ pos: phase.sites[i].pos, copy: (hap(i) === hapA ? 0 : 1) as 0 | 1 }));
+  const call = hapA === hapB ? 'cis' : 'trans';
+  return {
+    call, chain: { block: ba, between, hapA },
+    note: `phased through the reads between them: one phase block (${span(ba)}, ${ba.sites.length} heterozygous sites, ${between.length} between the two) holds both, ${call === 'cis' ? 'on the same haplotype' : 'on the two haplotypes'}; ${ba.support[0] + ba.support[1]} fragments assigned, ${ba.conflicting} disagreeing`,
+  };
 }

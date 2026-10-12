@@ -927,10 +927,26 @@ one sample.
   the allele's colour (grey for the reference), with the count of each lane; the lane the site is
   placed on is in bold. The 2×2 table and the fragments are shown only when reads join the two
   sites.
+- **Phasing through the reads between them**: with no haplotags, the reads of the whole stretch
+  between the sites are phased when they leave the pair undetermined. This is the page's
+  read-based phasing (*Collapsed*, WhatsHap's principle in a greedy form): heterozygous sites are
+  joined into a block when at least 2 fragments link them, with at most 20 % disagreeing.
+  - The pair is *in cis* or *in trans* when one block holds both sites. Otherwise the panel says
+    why: a site not phased, or two blocks the reads do not link.
+  - Long reads are phased on their SNVs alone. Their indel errors in homopolymers, called in a
+    third of the reads, broke the blocks every few kb.
+  - The stretch is read once for every such pair, up to the longest reads window. The sites the
+    phasing went through are drawn on the map as small ticks on their copy.
+  - Checked on HG002's ONT BAMs stripped of their haplotags, against the phased VCF, with pairs up
+    to 150 kb apart. CFTR: 200 of 202 right, 145 of them through the stretch. HBB: 195 of 201
+    right. None wrong; the rest are breaks between blocks. Short pairs link sites only within an
+    insert, so they rarely chain over more than a few hundred bases.
 - **Which evidence decides**: the verdict says what it rests on.
   - *From the reads holding both sites*, when they decide. Haplotags that agree are named
     (*reads and haplotags agree*). Haplotags that disagree make the pair *conflicting*: a switch
     error of the phasing tool, or reads joined that are not one molecule.
+  - *From the reads phased through the sites between them*, when neither the reads holding both
+    nor the haplotags decide.
   - *From the file's haplotags*, when the reads cannot decide: fewer than 3 informative fragments,
     or fewer than 10 that disagree among themselves. Both sites must be in the same phase set.
     The matrix marks such a cell `· HP`.
@@ -952,6 +968,10 @@ one sample.
     but in cis with B1 lands on B1's copy. A decided pair that contradicts the placement outlines
     its sites in red.
 - **Moving the panel**: drag it by its title bar.
+- **Picking sites by clicking them**: *⌖ Pick*, in a site's panel or in the phasing panel, turns
+  the variants track into a picker. Each site clicked joins the list, which is phased again; the
+  cursor becomes a cross. Click *⌖* again or press Esc to stop. Drag the panel aside if it covers
+  the sites.
 - **Several positions**: the matrix of every pair (A–B1, A–B2, B1–B2…), each cell its verdict.
   Click a cell for its pair. The sample can be switched at the top: in a trio, the parents' reads
   answer for themselves.

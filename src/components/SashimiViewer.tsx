@@ -2335,6 +2335,9 @@ export default function SashimiViewer({
   /** The phasing panel: a site against positions typed in its variant panel (`chr:pos; …`), from the reads. */
   const [phaseWith, setPhaseWith] = useState('');
   const [pairPanel, setPairPanel] = useState<{ origin: PairPhaseOrigin; text: string; x: number; y: number } | null>(null);
+  /** picking the phasing panel's sites by clicking them in the variants track, and the last one clicked */
+  const [pairPicking, setPairPicking] = useState(false);
+  const [pairPicked, setPairPicked] = useState<{ n: number; chrom: string; site: VariantSite } | null>(null);
   const openVariantPanel = useCallback(async (sid: number, name: string, site: VariantSite, long: boolean, x: number, y: number) => {
     const v = viewRef.current, seq = ++variantSeq.current;
     setVariantPanel({ sid, name, site, long, x, y, busy: true });
@@ -4921,14 +4924,17 @@ export default function SashimiViewer({
           {phaseBack}
           {phaseFront.filter(el => !String(el.key).startsWith('pk'))}
           {/* a click on a site opens its evidence from the reads */}
-          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={L.variants - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? 'pointer' : undefined }}
+          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={L.variants - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? (pairPanel && pairPicking ? 'crosshair' : 'pointer') : undefined }}
             onMouseDown={ev => ev.stopPropagation()}
             onClick={ev => {
               ev.stopPropagation();
               const p = svgPoint(ev);
               let best: (typeof marks)[number] | null = null;
               for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
-              if (best) void openVariantPanel(sid, L.track.sampleName, best.s, long, ev.clientX, ev.clientY);
+              if (!best) return;
+              // picking for the phasing panel: the site goes to its list instead of opening its own panel
+              if (pairPanel && pairPicking) setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, site: best!.s }));
+              else void openVariantPanel(sid, L.track.sampleName, best.s, long, ev.clientX, ev.clientY);
             }} />
           {/* the breaks between phase sets keep their explanation on hover */}
           {phaseFront.filter(el => String(el.key).startsWith('pk'))}
@@ -6781,6 +6787,12 @@ export default function SashimiViewer({
                 <input value={phaseWith} onChange={e => setPhaseWith(e.target.value)} placeholder="chr:pos; chr:pos:A>G; …" spellCheck={false}
                   className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
                   title="Whether this variant and others are on the same haplotype (in cis) or not (in trans), from the reads holding both: positions separated by ; as chr:pos (1-based), pos alone on this chromosome, with an allele chr:pos:A>G (VCF style, indels too) or chr:pos:+2 / -3" />
+                <button type="button" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" title="Pick the other variants by clicking them in the variants track"
+                  onClick={() => {
+                    setPairPanel({ origin: { sid: variantPanel.sid, chrom: currentChrom, site: s }, text: phaseWith, x: variantPanel.x, y: variantPanel.y });
+                    setPairPicking(true);
+                    setVariantPanel(null);
+                  }}>⌖ Pick</button>
                 <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0">Phase</button>
               </form>
               <div className="px-3 pt-1.5">
@@ -6845,7 +6857,8 @@ export default function SashimiViewer({
             knownSites={(sid, chrom) => (dnaSites[sid]?.fetched.chrom === chrom ? dnaSites[sid].sites : [])}
             uniqueOnly={uniqueOnly} x={pairPanel.x} y={pairPanel.y} siteColor={siteColor} siteShort={siteShort} hpColor={(ps, hp) => psTone(ps).hp[hp === 2 ? 1 : 0]}
             gene={transcript && transcript.chrom === pairPanel.origin.chrom ? { name: transcript.gene_name, strand: transcript.strand, exons: transcript.exons.map(e => [e.start - 1, e.end] as [number, number]) } : null}
-            onClose={() => setPairPanel(null)} />
+            picking={pairPicking} onPicking={setPairPicking} picked={pairPicked}
+            onClose={() => { setPairPanel(null); setPairPicking(false); }} />
         )}
         {seqPanel && (
           <div className="absolute z-30 w-[560px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-seq-panel

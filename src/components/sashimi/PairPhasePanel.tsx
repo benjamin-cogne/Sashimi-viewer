@@ -6,7 +6,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import type { AlignedRead, VariantSite } from './types';
-import { EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
+import { READS_REGION_MAX_BP } from './datasource';
+import { CHAIN_LONG_MIN_INDEL, CHAIN_READS_CAP, EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, chainPair, needsChain, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
 import { HET_MAX, HET_MIN } from '../../standalone/phasing';
 import { PHASE_HI, PHASE_LO } from './sitePhase';
 
@@ -28,6 +29,10 @@ interface Props {
   hpColor: (ps: number | null | undefined, hp: number) => string;
   /** the gene shown in the view, on the clicked site's chromosome: its exons (0-based half-open) placed on the map */
   gene?: { name: string; strand: number; exons: [number, number][] } | null;
+  /** picking sites by clicking them in the variants track: on or off, and the last site picked there */
+  picking: boolean;
+  onPicking: (on: boolean) => void;
+  picked: { n: number; chrom: string; site: VariantSite } | null;
   onClose: () => void;
 }
 
@@ -37,7 +42,7 @@ interface Run { sid: number; sites: SiteRow[]; pairs: Map<string, PairCell>; err
 
 export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#9ca3af', hom: '#6b7280' };
 const CALL_WORD: Record<PairCall, string> = { cis: 'in cis', trans: 'in trans', conflict: 'conflicting', few: 'undetermined', hom: 'homozygous' };
-const SOURCE_WORD: Record<PairSource, string> = { reads: 'from the reads holding both sites', haplotags: "from the file's haplotags (HP / PS)", both: 'reads and haplotags agree' };
+const SOURCE_WORD: Record<PairSource, string> = { reads: 'from the reads holding both sites', haplotags: "from the file's haplotags (HP / PS)", both: 'reads and haplotags agree', chain: 'from the reads phased through the sites between them' };
 const REF_FILL = '#d1d5db';
 const LINK_DASH: Record<LinkKind, string | undefined> = { read: undefined, spliced: '1.5 2', pair: '5 3', split: '1.5 2' };
 const LINK_WORD: Record<LinkKind, string> = { read: 'one read', spliced: 'one spliced read', pair: 'two mates', split: 'a split read' };
@@ -49,11 +54,11 @@ function originTarget(o: PairPhaseOrigin): PairTarget {
   return { chrom: o.chrom, pos: s.pos, allele: s.kind === 'snv' ? { kind: 'snv', alt: s.alt } : { kind: s.kind, length: s.length }, text: `${o.chrom}:${fmt(s.pos + 1)}` };
 }
 
-export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, onClose }: Props) {
+export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, picking, onPicking, picked, onClose }: Props) {
   const [sid, setSid] = useState(origin.sid);
   const [text, setText] = useState(text0);
   const [run, setRun] = useState<Run | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<string | false>(false);
   const [pick, setPick] = useState<[number, number]>([0, 1]);
   const abort = useRef<AbortController | null>(null);
 
@@ -61,7 +66,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
     abort.current?.abort();
     const ac = new AbortController();
     abort.current = ac;
-    setBusy(true);
+    setBusy('reading…');
     const { targets, errors } = parseTargets(typed, origin.chrom);
     const all = [originTarget(origin), ...targets];
     const sites: SiteRow[] = await Promise.all(all.map(async (t, i): Promise<SiteRow> => {
@@ -84,12 +89,63 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
       else if (a.site.pos === b.site.pos && a.site.kind === b.site.kind && a.site.alt === b.site.alt) pairs.set(key(i, j), { reason: 'the same variant' });
       else pairs.set(key(i, j), { result: phasePair(a.site, b.site, a.reads, b.reads, [a.label, b.label]) });
     }
+    // pairs neither the reads holding both nor the haplotags decide: the reads of the whole stretch phased, once for
+    // every such pair of the chromosome, linking them through the heterozygous sites between them
+    const open = [...pairs].filter(([, c]) => 'result' in c && needsChain(c.result)).map(([k]) => k.split('-').map(Number) as [number, number]);
+    if (open.length) {
+      const chrom = sites[open[0][0]].target.chrom;
+      const mine = open.filter(([i, j]) => sites[i].target.chrom === chrom && sites[j].target.chrom === chrom);
+      const ps = mine.flatMap(([i, j]) => [sites[i].site!.pos, sites[j].site!.pos]);
+      const lo = Math.max(0, Math.min(...ps) - 1000), hi = Math.max(...ps) + 1000;
+      const note = (t: string) => { for (const [i, j] of mine) { const c = pairs.get(key(i, j)); if (c && 'result' in c) pairs.set(key(i, j), { result: { ...c.result, chainNote: t } }); } };
+      if (hi - lo > READS_REGION_MAX_BP) note(`the stretch between them (${fmt(hi - lo)} bp) is too long to phase from the reads here (${fmt(READS_REGION_MAX_BP)} bp at most)`);
+      else {
+        setBusy('phasing the reads between the sites…');
+        try {
+          const r = await ds.getReads(sampleId, chrom, lo, hi, uniqueOnly, CHAIN_READS_CAP, 'collapsed', 3, 0.05, { haplotypes: 2, phaseSource: 'reads', longReadMinIndel: CHAIN_LONG_MIN_INDEL, signal: ac.signal });
+          if (ac.signal.aborted) return;
+          if (!r.phase) note('the reads between them could not be phased');
+          else for (const [i, j] of mine) {
+            const c = pairs.get(key(i, j));
+            if (!c || !('result' in c)) continue;
+            const ch = chainPair(r.phase, sites[i].site!, sites[j].site!, [sites[i].label, sites[j].label]);
+            const sampledNote = r.total > r.shown ? ` (${fmt(r.shown)} of ${fmt(r.total)} reads, whole fragments)` : '';
+            pairs.set(key(i, j), { result: ch.call
+              ? { ...c.result, call: ch.call, source: 'chain', note: ch.note + sampledNote, chain: ch.chain }
+              : { ...c.result, chainNote: ch.note + sampledNote } });
+          }
+        } catch (err: any) {
+          if (ac.signal.aborted) return;
+          note(`the reads between them could not be read: ${err?.message ?? err}`);
+        }
+      }
+    }
     setRun({ sid: sampleId, sites, pairs, errors });
     setPick(p => (p[1] < sites.length ? p : [0, 1]));
     setBusy(false);
   }, [ds, origin, uniqueOnly, knownSites]);
 
   useEffect(() => { void go(sid, text); return () => abort.current?.abort(); }, [sid]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // a site clicked in the variants track while picking: added to the list (once), the list phased again
+  const seenPick = useRef(picked?.n ?? 0);
+  useEffect(() => {
+    if (!picked || picked.n === seenPick.current) return;
+    seenPick.current = picked.n;
+    const st = picked.site;
+    const one = `${picked.chrom}:${st.pos + 1}:${st.kind === 'snv' ? st.alt : `${st.kind === 'ins' ? '+' : '-'}${st.length}`}`;
+    const same = (t: { chrom: string; pos: number }) => t.chrom === picked.chrom && t.pos === st.pos;
+    if (same({ chrom: origin.chrom, pos: origin.site.pos }) || parseTargets(text, origin.chrom).targets.some(same)) return;
+    const next = text.trim() ? `${text.trim().replace(/;\s*$/, '')}; ${one}` : one;
+    setText(next);
+    void go(sid, next);
+  }, [picked]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!picking) return;
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onPicking(false); };
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [picking, onPicking]);
 
   const sites = run?.sites ?? [];
   const [pi, pj] = pick;
@@ -131,8 +187,11 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
         <input value={text} onChange={e => setText(e.target.value)} placeholder="chr:pos; chr:pos:A>G; …" spellCheck={false}
           className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
           title="Positions separated by ; — chr:pos (1-based), pos alone on this chromosome, an allele as chr:pos:A>G (VCF style, indels too), chr:pos:+2 / -3, or 1-55051215-G-GA" />
-        <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50" disabled={busy}>{busy ? 'reading…' : 'Phase'}</button>
+        <button type="button" onClick={() => onPicking(!picking)} title="Click sites in the variants track to add them to the list (click again or Esc to stop)"
+          className={`rounded border px-2 py-0.5 shrink-0 ${picking ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 hover:bg-gray-50'}`}>{picking ? 'picking…' : '⌖ Pick'}</button>
+        <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" disabled={!!busy}>{busy || 'Phase'}</button>
       </form>
+      {picking && <div className="px-3 pt-1 text-[10px] text-blue-700">Click a site in the variants track to add it (several in a row); ⌖ again or Esc to stop.</div>}
       {run && (run.errors.length > 0 || sites.some(s => s.note || s.error)) && (
         <div className="px-3 pt-1 text-[10px] leading-4">
           {run.errors.map((e, i) => <div key={`e${i}`} className="text-red-600">{e}</div>)}
@@ -240,6 +299,12 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
   const geneSpan = gene && gene.exons.length ? [Math.min(...gene.exons.map(e => e[0])), Math.max(...gene.exons.map(e => e[1]))] : null;
   const showGene = !!geneSpan && geneSpan[1] > lo && geneSpan[0] < hi;
   const bad = new Set(contradictions.flat());
+  // the heterozygous sites through which the reads of the stretch phased a pair with A, on their copy
+  const relay = new Map<number, 0 | 1>();
+  if (side[0] === 0 || side[0] === 1) for (let j = 1; j < sites.length; j++) {
+    const c = pairs.get(key(0, j));
+    if (c && 'result' in c && c.result.source === 'chain' && c.result.chain) for (const b of c.result.chain.between) relay.set(b.pos, (side[0] === 0 ? b.copy : 1 - b.copy) as 0 | 1);
+  }
   const others = sites.filter(r => r.site && r.target.chrom !== chrom);
   return (
     <div className="px-3 pt-2">
@@ -258,6 +323,7 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
             {tagged && h === 0 && <text x={4} y={L1 + 16} fontSize={8.5} fill="#9ca3af">PS {ps ?? 'none'}</text>}
           </g>
         ))}
+        {[...relay].map(([p, c]) => <rect key={`r${p}`} x={xOf(p) - 0.75} y={(c ? L2 : L1) - 5} width={1.5} height={10} fill="#374151" opacity={0.6}><title>{`heterozygous site ${chrom}:${fmt(p + 1)}, a relay of the reads' phasing`}</title></rect>)}
         {drawn.map(({ r, i }) => {
           const st = r.site!, xt = xOf(st.pos), x = xAt.get(i)!, c = siteColor(st), sd = side[i];
           const tip = `${r.label} ${r.target.chrom}:${fmt(st.pos + 1)} ${siteShort(st)} · ${sd == null ? 'not placed: no decided pair links it to the others' : via[i]}${bad.has(i) ? ' · a decided pair contradicts this placement' : ''}`;
@@ -292,6 +358,7 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
       <div className="text-[10px] text-gray-400 leading-4">
         The two copies of {chrom}{showGene ? `, ${gene!.name}'s exons above` : ''}; the axis and the gene to scale, sites close together spread apart, each joined to its position: each site on the copy carrying it ({tagged ? `H1 and H2 of phase set ${ps ?? '(no PS)'}, the file's haplotags` : `${sites[0].label}'s copy drawn first, the haplotypes being unnamed without haplotags`}), placed from the decided pairs; both copies when homozygous; ? when no decided pair places it.
         {contradictions.length > 0 && <span className="text-red-600"> Contradicting pairs: {contradictions.map(([i, j]) => `${sites[i].label}–${sites[j].label}`).join(', ')} (red outline).</span>}
+        {relay.size > 0 && <span> Small dark ticks: the {relay.size} heterozygous sites the reads' phasing went through, on their copy.</span>}
         {others.length > 0 && <span> Not drawn (another chromosome): {others.map(r => r.label).join(', ')}.</span>}
       </div>
     </div>
@@ -394,6 +461,15 @@ function Evidence({ res, a, b, siteColor, hpColor }: { res: PairResult; a: SiteR
         </div>
       )}
       {joined && <Fragments res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />}
+      {(res.chain || res.chainNote) && (
+        <div className="mt-2 text-[11px] leading-4">
+          <span className="font-semibold text-gray-700">Phased through the reads between them</span>{' '}
+          {res.chain
+            ? <span className="text-gray-600">the block {fmt(res.chain.block.start + 1)}–{fmt(res.chain.block.end)}: {res.chain.block.sites.length} heterozygous sites ({res.chain.between.length} between the two), {fmt(res.chain.block.support[0])} fragments on its haplotype 1 and {fmt(res.chain.block.support[1])} on 2, {fmt(res.chain.block.ambiguous)} matching both, {fmt(res.chain.block.conflicting)} disagreeing at a site</span>
+            : <span className="text-gray-500">{res.chainNote}</span>}
+          {res.chain && <div className="text-[10px] text-gray-400">The page's read-based phasing of the stretch (the Collapsed reads' rule, WhatsHap's principle): heterozygous sites joined into a block when at least 2 fragments link them, at most 20 % disagreeing. The sites between the two are drawn on the map above.</div>}
+        </div>
+      )}
       {res.tagReads[0] && res.tagReads[1] && <TagReads res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />}
     </div>
   );
