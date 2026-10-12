@@ -2332,6 +2332,9 @@ export default function SashimiViewer({
   /** The evidence of one variant site, from the reads decoded around it (HTML panel, never exported). */
   const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence } | null>(null);
   const variantSeq = useRef(0);
+  /** where the variant panel was dragged to: the next ones open there too (until the page is reloaded) */
+  const [variantPanelAt, setVariantPanelAt] = useState<{ left: number; top: number } | null>(null);
+  const variantDrag = useRef<{ dx: number; dy: number } | null>(null);
   /** The phasing panel: a site against positions typed in its variant panel (`chr:pos; …`), from the reads. */
   const [phaseWith, setPhaseWith] = useState('');
   const [pairPanel, setPairPanel] = useState<{ origin: PairPhaseOrigin; text: string; x: number; y: number } | null>(null);
@@ -6763,13 +6766,23 @@ export default function SashimiViewer({
           const bqEdges = [0, 10, 20, 30, 40], bqBins = ['<10', '10–19', '20–29', '30–39', '40+'];
           const fw = (l: { fwd: boolean }[]) => l.filter(o => o.fwd).length;
           // kept on screen: it scrolls inside when taller than the room under its top
-          const panelTop = Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470));
+          const panelTop = variantPanelAt ? Math.max(0, Math.min(variantPanelAt.top, window.innerHeight - 40)) : Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470));
+          const panelLeft = variantPanelAt ? Math.max(-300, Math.min(variantPanelAt.left, window.innerWidth - 60)) : Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384));
           return (
             // pinned to the window at the click (the plot's container scrolls and would clip it), kept on screen
             <div className="fixed z-50 w-[372px] max-w-[95vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-variant-panel
-              style={{ left: Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384)), top: panelTop, maxHeight: window.innerHeight - panelTop - 8 }}
+              style={{ left: panelLeft, top: panelTop, maxHeight: window.innerHeight - panelTop - 8 }}
               onMouseDown={e => e.stopPropagation()}>
-              <div className="flex items-start justify-between gap-2 px-3 pt-2">
+              {/* dragged by its head; it keeps that place for the next sites */}
+              <div className="flex items-start justify-between gap-2 px-3 pt-2 cursor-move select-none" title="Drag to move the panel"
+                onPointerDown={e => {
+                  if ((e.target as HTMLElement).closest('button, input, select')) return;
+                  variantDrag.current = { dx: e.clientX - panelLeft, dy: e.clientY - panelTop };
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  e.preventDefault();
+                }}
+                onPointerMove={e => { const d = variantDrag.current; if (d) setVariantPanelAt({ left: e.clientX - d.dx, top: e.clientY - d.dy }); }}
+                onPointerUp={() => { variantDrag.current = null; }} onPointerCancel={() => { variantDrag.current = null; }}>
                 <div className="min-w-0">
                   <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString('en-US')} <span style={{ color }}>{siteShort(s)}</span></div>
                   <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads (full scan)</div>
