@@ -119,6 +119,7 @@ Every control keeps its tooltip, which explains it in full.
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
 | Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapsed**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
+| Are two variants in *cis* or in *trans* (compound heterozygote)? | Click a site of the **variants track** (DNA), then **Phase with** `chr:pos; …`: the reads holding both sites (one read, a spliced read, two mates, a split read), joined by name however far apart, give a 2×2 table, a verdict and a LOD, with the file's haplotags beside; several positions give a matrix of every pair. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -883,6 +884,64 @@ where it should, for short pairs and noisy long reads alike, and the counts equa
 count with pysam. The scan of a phased file takes about a fifth longer (5.0–5.3 s instead of
 4.1–4.6 s for 500 kb of 60× ONT); an unphased file is read as before.
 
+**Two variants in cis or in trans (Phase with).** A site's panel (click it in the variants track)
+has a *Phase with* field. Type one or more positions separated by `;`, then press *Phase*. A panel
+opens with the clicked variant (A) on the left, the other (B) on the right, and between them
+whether they sit on the same molecule (*in cis*) or on the two copies (*in trans*). This is the
+question asked of a possible compound heterozygote, and the panel answers it from the reads of
+one sample.
+- **Positions**: `chr:pos` (1-based), or `pos` alone on the view's chromosome. An allele may be
+  given: `chr:pos:A>G`, VCF style (an indel as `chr:pos:TTTG>T`, its position the anchor base),
+  `chr:pos:+2` / `-3` as the track labels them, or gnomAD's `1-55051215-G-GA`. Without an allele,
+  the most supported one at the position is taken, and the others are named. The variant scan's
+  site is used when there is one; otherwise the site is called from the reads read there.
+- **Reads**: a small window around each site, never the stretch between them, so two exons 200 kb
+  apart cost no more than two neighbours. The reads of the windows are joined by name into
+  fragments: one read holding both sites (long reads), an RNA read spliced across the introns
+  between them (the principle of phASER), the two mates of a pair, or the parts of a split read.
+  - Each site's allele is taken from the copy of the read read at that site, because a read's
+    mismatches are decoded around the window asked for only.
+  - Past 20,000 reads per site, whole fragments are kept by name hash, as the reads track keeps
+    them. The fragments kept at the deeper site are then kept at the other one too.
+- **Alleles**: the page's phasing rule. An allele is unknown under base quality 20, when the read
+  carries another allele, or when two reads of the fragment disagree (overlapping mates, the parts
+  of a split read).
+- **The 2×2 table**: fragments by allele at A × allele at B. With two heterozygous sites, alt–alt
+  and ref–ref say *cis*, while alt–ref and ref–alt say *trans*.
+  - A site under 25 % VAF (mosaic, subclonal) also has reference reads from cells without it. Only
+    the fragments carrying its allele are counted, and the cells left out are greyed.
+  - A site over 75 % is homozygous: it is on both copies, so the question does not arise.
+- **Verdict**: at least 3 informative fragments, with at most 20 % against, give *in cis* or
+  *in trans*. More than 20 % against either gives *conflicting*: a mosaic variant, a mis-mapped
+  paralog or collapsed duplication, a third haplotype, or reads joined that are not one molecule.
+  Fewer than 3 informative fragments give *undetermined*.
+  - The **LOD** is log10 L(cis)/L(trans), with a 1 % error per allele read. It weighs the same
+    counts, so 30 to 0 reads stronger than 3 to 0. It grows with depth whatever the share against,
+    so it is shown but does not decide.
+- **Haplotags**: when the reads carry HP / PS tags, each site is placed in its phase set as the
+  lanes are. Same HP gives *cis* and a different HP gives *trans*; two phase sets are not linked.
+  This line stands beside the read evidence and is never added to it: the tool phased through
+  other sites and other reads.
+- **Fragments**: drawn one line each, not to scale (the sites can be 50 bp or 200 kb apart). Each
+  line joins a box at A and a box at B, in the allele's colour or grey for the reference.
+  - The line is solid for one read, dashed for two mates, and dotted for a spliced or split read.
+  - The cis cells are on top and the trans cells below, each counted. A small square in the
+    phase set's hue gives the fragment's haplotag.
+  - Hovering a line gives the read name.
+- **Several positions**: the matrix of every pair (A–B1, A–B2, B1–B2…), each cell its verdict.
+  Click a cell for its pair. The sample can be switched at the top: in a trio, the parents' reads
+  answer for themselves.
+
+Checked against truth, with the BAM and its container giving the same counts:
+- **ONT HG002**: the phased VCF of the same data (wf-human-variation), pairs of phased heterozygous
+  SNVs of one phase set up to 40 kb apart.
+  - CFTR, 301 pairs: 232 right, none wrong, 69 undetermined (no long read spanning both sites) or
+    conflicting (a site at 28 % VAF the tags do not place either).
+  - HBB, 121 pairs: 99 right, none wrong.
+- **Simulated short pairs** (2×150): every pair within an insert right, none wrong.
+- **Simulated RNA-seq** (2×100, three exons over 25 kb): every pair linked by spliced reads or
+  mates right, including exons 15 kb apart, none wrong.
+
 **Allele balance.** *Common SNPs* stay off by default on DNA tracks as on RNA ones; switch them on
 to separate a known polymorphism from a novel change. With Variants on, the track label then
 summarises the allele balance of the common SNPs covered: how many are heterozygous
@@ -1520,6 +1579,14 @@ If the viewer contributes to a publication, please cite it
   Biotechnol 2024 (TRGT and its read waterfall plots, which the inspector's waterfall follows).
 - Martin M, Patterson M, Garg S et al. *WhatsHap: fast and accurate read-based phasing.* bioRxiv
   2016:085050. doi:10.1101/085050 (WhatsHap, its `haplotag` command writes HP / PS).
+- Patterson M, Marschall T, Pisanti N et al. *WhatsHap: weighted haplotype assembly for
+  future-generation sequencing reads.* J Comput Biol 2015;22:498–509. doi:10.1089/cmb.2014.0157.
+- Edge P, Bafna V, Bansal V. *HapCUT2: robust and accurate haplotype assembly for diverse
+  sequencing technologies.* Genome Res 2017;27:801–812. doi:10.1101/gr.213462.116 (the likelihood
+  behind the pairwise LOD of *Phase with*).
+- Castel SE, Mohammadi P, Chung WK, Shen Y, Lappalainen T. *Rare variant phasing and haplotypic
+  expression from RNA sequencing with phASER.* Nat Commun 2016;7:12817. doi:10.1038/ncomms12817
+  (spliced reads link exonic variants far apart).
 - Lin JH, Chen LC, Yu SC, Huang YT. *LongPhase: an ultra-fast chromosome-scale phasing algorithm
   for small and large variants.* Bioinformatics 2022;38(7):1816–1822.
 - Holt JM et al. *HiPhase: jointly phasing small, structural, and tandem repeat variants from HiFi

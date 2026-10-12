@@ -35,6 +35,7 @@ import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
 import { GeneSuggest } from './sashimi/GeneSuggest';
 import { RepeatInspector } from './sashimi/RepeatInspector';
+import { PairPhasePanel, type PairPhaseOrigin } from './sashimi/PairPhasePanel';
 import { FLANK as REPEAT_FLANK, detectMotif, makeLocus, type RepeatLocus } from '../standalone/repeatScan';
 import { STR_LOCI, type StrLocus } from '../standalone/strCatalog';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
@@ -2331,6 +2332,9 @@ export default function SashimiViewer({
   /** The evidence of one variant site, from the reads decoded around it (HTML panel, never exported). */
   const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence } | null>(null);
   const variantSeq = useRef(0);
+  /** The phasing panel: a site against positions typed in its variant panel (`chr:pos; …`), from the reads. */
+  const [phaseWith, setPhaseWith] = useState('');
+  const [pairPanel, setPairPanel] = useState<{ origin: PairPhaseOrigin; text: string; x: number; y: number } | null>(null);
   const openVariantPanel = useCallback(async (sid: number, name: string, site: VariantSite, long: boolean, x: number, y: number) => {
     const v = viewRef.current, seq = ++variantSeq.current;
     setVariantPanel({ sid, name, site, long, x, y, busy: true });
@@ -6752,10 +6756,12 @@ export default function SashimiViewer({
           const endEdges = [0, 10, 25, 50, 100, 500, 2000], endBins = ['<10', '10–24', '25–49', '50–99', '100–499', '500–1,999', '2,000+'];
           const bqEdges = [0, 10, 20, 30, 40], bqBins = ['<10', '10–19', '20–29', '30–39', '40+'];
           const fw = (l: { fwd: boolean }[]) => l.filter(o => o.fwd).length;
+          // kept on screen: it scrolls inside when taller than the room under its top
+          const panelTop = Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470));
           return (
             // pinned to the window at the click (the plot's container scrolls and would clip it), kept on screen
             <div className="fixed z-50 w-[372px] max-w-[95vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-variant-panel
-              style={{ left: Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384)), top: Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470)), maxHeight: window.innerHeight - 16 }}
+              style={{ left: Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384)), top: panelTop, maxHeight: window.innerHeight - panelTop - 8 }}
               onMouseDown={e => e.stopPropagation()}>
               <div className="flex items-start justify-between gap-2 px-3 pt-2">
                 <div className="min-w-0">
@@ -6764,6 +6770,19 @@ export default function SashimiViewer({
                 </div>
                 <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
               </div>
+              <form className="flex items-center gap-1.5 px-3 pt-1.5"
+                onSubmit={e => {
+                  e.preventDefault();
+                  if (!phaseWith.trim()) return;
+                  setPairPanel({ origin: { sid: variantPanel.sid, chrom: currentChrom, site: s }, text: phaseWith, x: variantPanel.x, y: variantPanel.y });
+                  setVariantPanel(null);
+                }}>
+                <span className="font-semibold text-gray-700 shrink-0">Phase with</span>
+                <input value={phaseWith} onChange={e => setPhaseWith(e.target.value)} placeholder="chr:pos; chr:pos:A>G; …" spellCheck={false}
+                  className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
+                  title="Whether this variant and others are on the same haplotype (in cis) or not (in trans), from the reads holding both: positions separated by ; as chr:pos (1-based), pos alone on this chromosome, with an allele chr:pos:A>G (VCF style, indels too) or chr:pos:+2 / -3" />
+                <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0">Phase</button>
+              </form>
               <div className="px-3 pt-1.5">
                 {checks.map(c => (
                   <div key={c.key} className="flex items-start gap-1.5 leading-4 mb-0.5">
@@ -6820,6 +6839,13 @@ export default function SashimiViewer({
             </div>
           );
         })()}
+        {pairPanel && (
+          <PairPhasePanel key={`${pairPanel.origin.sid}:${pairPanel.origin.site.pos}:${pairPanel.origin.site.alt}:${pairPanel.text}`} ds={ds} origin={pairPanel.origin} text={pairPanel.text}
+            samples={tracks.map(t => ({ id: t.sampleId, name: t.sampleName }))}
+            knownSites={(sid, chrom) => (dnaSites[sid]?.fetched.chrom === chrom ? dnaSites[sid].sites : [])}
+            uniqueOnly={uniqueOnly} x={pairPanel.x} y={pairPanel.y} siteColor={siteColor} siteShort={siteShort} hpColor={(ps, hp) => psTone(ps).hp[hp === 2 ? 1 : 0]}
+            onClose={() => setPairPanel(null)} />
+        )}
         {seqPanel && (
           <div className="absolute z-30 w-[560px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-seq-panel
             style={{ left: Math.min(seqPanel.x + 12, Math.max(8, svgWidth - 572)), top: Math.max(RULER_H, seqPanel.y + 12) }}
