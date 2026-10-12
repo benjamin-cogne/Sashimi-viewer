@@ -967,9 +967,10 @@ one sample.
   - The sites are placed outwards from A through the decided pairs, so a site undetermined with A
     but in cis with B1 lands on B1's copy. A decided pair that contradicts the placement outlines
     its sites in red.
-- **Moving the panels**: drag the phasing panel by its title bar, and a site's panel by its head
-  (position and counts). A site's panel keeps the place it was dragged to: the next sites open
-  there too, until the page is reloaded.
+- **Moving the panels**: press anywhere on the phasing panel or a site's panel, except its fields,
+  buttons and menus, and drag it. It follows once the pointer has moved a few pixels, so a click
+  stays a click. A site's panel keeps the place it was dragged to: the next sites open there too,
+  until the page is reloaded.
 - **Picking sites by clicking them**: *⌖ Pick*, in a site's panel or in the phasing panel, turns
   the variants track into a picker. Each site clicked joins the list, which is phased again; the
   cursor becomes a cross. Click *⌖* again or press Esc to stop. Drag the panel aside if it covers

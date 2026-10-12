@@ -7,6 +7,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import type { AlignedRead, VariantSite } from './types';
 import { READS_REGION_MAX_BP } from './datasource';
+import { startPanelDrag } from './panelDrag';
 import { CHAIN_LONG_MIN_INDEL, CHAIN_READS_CAP, EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, chainPair, needsChain, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
 import { HET_MAX, HET_MIN } from '../../standalone/phasing';
 import { PHASE_HI, PHASE_LO } from './sitePhase';
@@ -150,30 +151,17 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
   const sites = run?.sites ?? [];
   const [pi, pj] = pick;
   const cell = run?.pairs.get(key(pi, pj));
-  // where it opens, kept on screen; dragged by its title bar from there (it scrolls inside when taller than the room under its top)
+  // where it opens, kept on screen; moved by a press anywhere on it but its controls (panelDrag.ts) (it scrolls inside when taller than the room under its top)
   const [at, setAt] = useState(() => ({ left: Math.max(8, Math.min(x - 380, window.innerWidth - 772)), top: Math.max(8, Math.min(y + 12, window.innerHeight - 560)) }));
-  const drag = useRef<{ dx: number; dy: number } | null>(null);
-  const onDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
-    if ((e.target as HTMLElement).closest('select, button, input')) return;
-    drag.current = { dx: e.clientX - at.left, dy: e.clientY - at.top };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    e.preventDefault();
-  };
-  const onDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = drag.current;
-    if (!d) return;
-    setAt({ left: Math.max(8 - 700, Math.min(e.clientX - d.dx, window.innerWidth - 60)), top: Math.max(0, Math.min(e.clientY - d.dy, window.innerHeight - 40)) });
-  };
-  const onDragEnd = () => { drag.current = null; };
   const top = at.top;
   const label = (r: SiteRow) => `${r.target.chrom}:${fmt((r.site?.pos ?? r.target.pos) + 1)}`;
 
   return (
     <div className="fixed z-50 w-[760px] max-w-[96vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-pair-panel
       style={{ left: at.left, top, maxHeight: window.innerHeight - top - 8 }}
+      onPointerDown={e => startPanelDrag(e, at, setAt)}
       onMouseDown={e => e.stopPropagation()}>
-      <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-1 cursor-move select-none" title="Drag to move the panel"
-        onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}>
+      <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-1 cursor-move" title="Drag the panel to move it">
         <div className="font-semibold text-gray-900">Phasing two variants</div>
         <div className="flex items-center gap-2">
           <select value={sid} onChange={e => setSid(Number(e.target.value))} className="border border-gray-300 rounded px-1 py-0.5 text-xs" title="The sample whose reads are read">
