@@ -26,6 +26,8 @@ interface Props {
   siteShort: (s: VariantSite) => string;
   /** the hue of a haplotype of a phase set, as its reads and lanes are drawn */
   hpColor: (ps: number | null | undefined, hp: number) => string;
+  /** the gene shown in the view, on the clicked site's chromosome: its exons (0-based half-open) placed on the map */
+  gene?: { name: string; strand: number; exons: [number, number][] } | null;
   onClose: () => void;
 }
 
@@ -47,7 +49,7 @@ function originTarget(o: PairPhaseOrigin): PairTarget {
   return { chrom: o.chrom, pos: s.pos, allele: s.kind === 'snv' ? { kind: 'snv', alt: s.alt } : { kind: s.kind, length: s.length }, text: `${o.chrom}:${fmt(s.pos + 1)}` };
 }
 
-export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, onClose }: Props) {
+export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, onClose }: Props) {
   const [sid, setSid] = useState(origin.sid);
   const [text, setText] = useState(text0);
   const [run, setRun] = useState<Run | null>(null);
@@ -92,15 +94,30 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
   const sites = run?.sites ?? [];
   const [pi, pj] = pick;
   const cell = run?.pairs.get(key(pi, pj));
-  // kept on screen: it scrolls inside when taller than the room under its top
-  const top = Math.max(8, Math.min(y + 12, window.innerHeight - 560));
+  // where it opens, kept on screen; dragged by its title bar from there (it scrolls inside when taller than the room under its top)
+  const [at, setAt] = useState(() => ({ left: Math.max(8, Math.min(x - 380, window.innerWidth - 772)), top: Math.max(8, Math.min(y + 12, window.innerHeight - 560)) }));
+  const drag = useRef<{ dx: number; dy: number } | null>(null);
+  const onDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('select, button, input')) return;
+    drag.current = { dx: e.clientX - at.left, dy: e.clientY - at.top };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+  const onDragMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    setAt({ left: Math.max(8 - 700, Math.min(e.clientX - d.dx, window.innerWidth - 60)), top: Math.max(0, Math.min(e.clientY - d.dy, window.innerHeight - 40)) });
+  };
+  const onDragEnd = () => { drag.current = null; };
+  const top = at.top;
   const label = (r: SiteRow) => `${r.target.chrom}:${fmt((r.site?.pos ?? r.target.pos) + 1)}`;
 
   return (
     <div className="fixed z-50 w-[760px] max-w-[96vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-pair-panel
-      style={{ left: Math.max(8, Math.min(x - 380, window.innerWidth - 772)), top, maxHeight: window.innerHeight - top - 8 }}
+      style={{ left: at.left, top, maxHeight: window.innerHeight - top - 8 }}
       onMouseDown={e => e.stopPropagation()}>
-      <div className="flex items-center justify-between gap-2 px-3 pt-2">
+      <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-1 cursor-move select-none" title="Drag to move the panel"
+        onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragEnd}>
         <div className="font-semibold text-gray-900">Phasing two variants</div>
         <div className="flex items-center gap-2">
           <select value={sid} onChange={e => setSid(Number(e.target.value))} className="border border-gray-300 rounded px-1 py-0.5 text-xs" title="The sample whose reads are read">
@@ -122,6 +139,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
           {sites.map((s, i) => (s.error || s.note) && <div key={`n${i}`} className={s.error || !s.site ? 'text-red-600' : 'text-gray-500'}>{s.label}: {s.error ?? s.note}</div>)}
         </div>
       )}
+      {run && sites.length >= 2 && <PhaseMap sites={sites} pairs={run.pairs} siteColor={siteColor} siteShort={siteShort} hpColor={hpColor} gene={gene} />}
       {sites.length > 2 && (
         <Matrix sites={sites} pairs={run!.pairs} pick={pick} onPick={(i, j) => setPick([i, j])} siteColor={siteColor} siteShort={siteShort} />
       )}
@@ -140,6 +158,141 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
         Fragments: the reads over each site joined by name (one read, a read spliced between them, two mates, a split read's parts). An allele under base quality 20, another allele, or two reads of a fragment disagreeing: unknown.
         A verdict needs {MIN_FRAGMENTS} informative fragments and at most {MAX_AGAINST * 100} % against; the LOD (log10 cis vs trans, {EPS * 100} % error per allele read) weighs them, it does not decide.
         A site under {HET_MIN * 100} % VAF counts only the fragments carrying it; one over {HET_MAX * 100} % is homozygous. Up to {fmt(PAIR_READS_CAP)} reads per site, whole fragments kept by name past it.
+      </div>
+    </div>
+  );
+}
+
+/** Where each site sits: one of the two copies (0: A's, 1: the other), both (homozygous), or not placed. */
+type Side = 0 | 1 | 'both' | null;
+
+/**
+ * The sites placed on the two copies of the chromosome: A on its haplotag lane when the tags place it (else on the first
+ * copy), each other site from its verdict with a site already placed (cis: the same copy, trans: the other), walking
+ * the decided pairs outwards from A; homozygous sites on both. A decided pair that contradicts the placement is kept.
+ */
+function placeSites(sites: SiteRow[], pairs: Map<string, PairCell>): { side: Side[]; via: (string | null)[]; ps: number | null; tagged: boolean; contradictions: [number, number][] } {
+  const n = sites.length, side: Side[] = new Array(n).fill(null), via: (string | null)[] = new Array(n).fill(null);
+  const res = (i: number, j: number) => { const c = pairs.get(key(Math.min(i, j), Math.max(i, j))); return c && 'result' in c ? c.result : null; };
+  let ps: number | null = null, tagged = false;
+  for (let i = 0; i < n; i++) if (sites[i].site && sites[i].site!.vaf > HET_MAX) { side[i] = 'both'; via[i] = 'homozygous'; }
+  if (sites[0].site && side[0] == null) {
+    side[0] = 0;
+    // A's haplotag lane, from any of its pairs
+    for (let j = 1; j < n && !tagged; j++) {
+      const h = res(0, j)?.haplotags;
+      if (h && (h.a.call === 'h1' || h.a.call === 'h2')) { side[0] = h.a.call === 'h1' ? 0 : 1; ps = h.a.ps; tagged = true; }
+    }
+    via[0] = tagged ? `on H${(side[0] as number) + 1} by its haplotags` : 'the reference copy of this drawing';
+    const queue = [0];
+    while (queue.length) {
+      const i = queue.shift()!;
+      for (let j = 0; j < n; j++) {
+        if (side[j] != null || !sites[j].site || sites[j].target.chrom !== sites[0].target.chrom) continue;
+        const r = res(i, j);
+        if (!r || (r.call !== 'cis' && r.call !== 'trans')) continue;
+        const si = side[i] as 0 | 1;
+        side[j] = r.call === 'cis' ? si : ((1 - si) as 0 | 1);
+        via[j] = `${CALL_WORD[r.call]} with ${sites[i].label} (${SOURCE_WORD[r.source]})`;
+        queue.push(j);
+      }
+    }
+  }
+  const contradictions: [number, number][] = [];
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    const r = res(i, j), a = side[i], b = side[j];
+    if (!r || (r.call !== 'cis' && r.call !== 'trans') || (a !== 0 && a !== 1) || (b !== 0 && b !== 1)) continue;
+    if ((r.call === 'cis') !== (a === b)) contradictions.push([i, j]);
+  }
+  return { side, via, ps, tagged, contradictions };
+}
+
+/**
+ * The two copies of the chromosome drawn as two lines, the sites at their positions (to scale) on the copy that carries
+ * them, the view's gene and its exons above; a site not placed sits between the lines with a question mark.
+ */
+function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites: SiteRow[]; pairs: Map<string, PairCell>; siteColor: (s: VariantSite) => string; siteShort: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string; gene?: Props['gene'] }) {
+  const chrom = sites[0].target.chrom;
+  const drawn = sites.map((r, i) => ({ r, i })).filter(({ r }) => r.site && r.target.chrom === chrom);
+  if (drawn.length < 1 || !sites[0].site) return null;
+  const { side, via, ps, tagged, contradictions } = placeSites(sites, pairs);
+  const W = 712, X0 = 92, X1 = W - 14, GENE_Y = 16, L1 = 50, L2 = 92, AXIS = 122, H = 140;
+  const pos = drawn.map(d => d.r.site!.pos);
+  let lo = Math.min(...pos), hi = Math.max(...pos);
+  const pad = Math.max(50, Math.round((hi - lo) * 0.06));
+  lo = Math.max(0, lo - pad); hi += pad + 1;
+  const xOf = (p: number) => X0 + ((p - lo) / (hi - lo)) * (X1 - X0);
+  const lineColor = (h: 0 | 1) => (tagged ? hpColor(ps, h + 1) : '#9ca3af');
+  const lineLabel = (h: 0 | 1) => (tagged ? `H${h + 1}` : h === 0 ? `copy with ${sites[0].label}` : 'other copy');
+  // markers at least GAP apart: sites a few kb apart on a 100 kb map are spread, each joined to its true position on
+  // the axis (and the gene) by a leader line
+  const GAP = 26;
+  const order = drawn.map(d => d.i).sort((p, q) => sites[p].site!.pos - sites[q].site!.pos);
+  const xs = order.map(i => xOf(sites[i].site!.pos));
+  for (let k = 1; k < xs.length; k++) xs[k] = Math.max(xs[k], xs[k - 1] + GAP);
+  if (xs.length && xs[xs.length - 1] > X1) {
+    xs[xs.length - 1] = X1;
+    for (let k = xs.length - 2; k >= 0; k--) xs[k] = Math.min(xs[k], xs[k + 1] - GAP);
+  }
+  const xAt = new Map(order.map((i, k) => [i, xs[k]]));
+  const ticks = [lo, Math.round((lo + hi) / 2), hi];
+  const exons = gene ? gene.exons.filter(([s, e]) => e > lo && s < hi) : [];
+  const geneSpan = gene && gene.exons.length ? [Math.min(...gene.exons.map(e => e[0])), Math.max(...gene.exons.map(e => e[1]))] : null;
+  const showGene = !!geneSpan && geneSpan[1] > lo && geneSpan[0] < hi;
+  const bad = new Set(contradictions.flat());
+  const others = sites.filter(r => r.site && r.target.chrom !== chrom);
+  return (
+    <div className="px-3 pt-2">
+      <svg width={W} height={H} className="block" style={{ maxWidth: '100%' }}>
+        {showGene && (
+          <g>
+            <line x1={xOf(Math.max(lo, geneSpan![0]))} y1={GENE_Y} x2={xOf(Math.min(hi, geneSpan![1]))} y2={GENE_Y} stroke="#6b7280" strokeWidth={1} />
+            {exons.map(([s, e], k) => <rect key={k} x={xOf(Math.max(lo, s))} y={GENE_Y - 5} width={Math.max(1.5, xOf(Math.min(hi, e)) - xOf(Math.max(lo, s)))} height={10} fill="#1f2937" />)}
+            <text x={4} y={GENE_Y + 4} fontSize={10} fontWeight={700} fill="#374151">{gene!.name} <tspan fontWeight={400} fill="#9ca3af">{gene!.strand < 0 ? '←' : '→'}</tspan></text>
+          </g>
+        )}
+        {([0, 1] as const).map(h => (
+          <g key={h}>
+            <line x1={X0} y1={h ? L2 : L1} x2={X1} y2={h ? L2 : L1} stroke={lineColor(h)} strokeWidth={4} strokeLinecap="round" />
+            <text x={4} y={(h ? L2 : L1) + 4} fontSize={10} fontWeight={700} fill={tagged ? lineColor(h) : '#4b5563'}>{lineLabel(h)}</text>
+            {tagged && h === 0 && <text x={4} y={L1 + 16} fontSize={8.5} fill="#9ca3af">PS {ps ?? 'none'}</text>}
+          </g>
+        ))}
+        {drawn.map(({ r, i }) => {
+          const st = r.site!, xt = xOf(st.pos), x = xAt.get(i)!, c = siteColor(st), sd = side[i];
+          const tip = `${r.label} ${r.target.chrom}:${fmt(st.pos + 1)} ${siteShort(st)} · ${sd == null ? 'not placed: no decided pair links it to the others' : via[i]}${bad.has(i) ? ' · a decided pair contradicts this placement' : ''}`;
+          const marks: React.ReactNode[] = [];
+          const dot = (yy: number, k: string) => <circle key={k} cx={x} cy={yy} r={6} fill={c} stroke={bad.has(i) ? '#b91c1c' : '#fff'} strokeWidth={bad.has(i) ? 2 : 1.5} />;
+          if (sd === 'both') { marks.push(dot(L1, 'a'), dot(L2, 'b')); }
+          else if (sd === 0 || sd === 1) marks.push(dot(sd ? L2 : L1, 'a'));
+          else marks.push(<g key="q"><circle cx={x} cy={(L1 + L2) / 2} r={7} fill="#fff" stroke={c} strokeWidth={1.5} strokeDasharray="2 2" /><text x={x} y={(L1 + L2) / 2 + 3.5} textAnchor="middle" fontSize={10} fontWeight={700} fill={c}>?</text></g>);
+          // the label above the first copy, or below the second when the site sits there alone
+          const below = sd === 1;
+          const ly = below ? L2 + 17 : L1 - 10;
+          return (
+            <g key={i}>
+              <title>{tip}</title>
+              {showGene && <line x1={xt} y1={GENE_Y - 7} x2={xt} y2={GENE_Y + 7} stroke={c} strokeWidth={1.5} />}
+              <line x1={x} y1={L1 - 6} x2={x} y2={L2 + 6} stroke={c} strokeWidth={0.8} strokeDasharray="2 3" opacity={0.7} />
+              <line x1={x} y1={L2 + (below ? 22 : 6)} x2={xt} y2={AXIS} stroke={c} strokeWidth={0.8} opacity={0.7} />
+              <circle cx={xt} cy={AXIS} r={2} fill={c} />
+              {marks}
+              <text x={x} y={ly} textAnchor="middle" fontSize={10} fontWeight={700} fill={c}>{r.label}</text>
+            </g>
+          );
+        })}
+        <line x1={X0} y1={AXIS} x2={X1} y2={AXIS} stroke="#d1d5db" />
+        {ticks.map((t, k) => (
+          <g key={k}>
+            <line x1={xOf(t)} y1={AXIS} x2={xOf(t)} y2={AXIS + 4} stroke="#9ca3af" />
+            <text x={xOf(t)} y={AXIS + 14} fontSize={9} fill="#6b7280" textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}>{k === 0 ? `${chrom}:` : ''}{fmt(t + 1)}</text>
+          </g>
+        ))}
+      </svg>
+      <div className="text-[10px] text-gray-400 leading-4">
+        The two copies of {chrom}{showGene ? `, ${gene!.name}'s exons above` : ''}; the axis and the gene to scale, sites close together spread apart, each joined to its position: each site on the copy carrying it ({tagged ? `H1 and H2 of phase set ${ps ?? '(no PS)'}, the file's haplotags` : `${sites[0].label}'s copy drawn first, the haplotypes being unnamed without haplotags`}), placed from the decided pairs; both copies when homozygous; ? when no decided pair places it.
+        {contradictions.length > 0 && <span className="text-red-600"> Contradicting pairs: {contradictions.map(([i, j]) => `${sites[i].label}–${sites[j].label}`).join(', ')} (red outline).</span>}
+        {others.length > 0 && <span> Not drawn (another chromosome): {others.map(r => r.label).join(', ')}.</span>}
       </div>
     </div>
   );

@@ -941,6 +941,17 @@ one sample.
   - The cis cells are on top and the trans cells below, each counted. A small square in the
     phase set's hue gives the fragment's haplotag.
   - Hovering a line gives the read name.
+- **The map of the two copies**, at the top: two lines, the chromosome's two copies, with each site
+  at its position on the copy that carries it. Homozygous sites sit on both copies. A site no
+  decided pair places sits between the lines with a `?`.
+  - The view's gene and its exons are drawn above, and the axis is to scale. Sites a few kb apart
+    on a 100 kb map are spread apart, each joined to its true position by a leader line.
+  - With haplotags, the copies are H1 and H2 of A's phase set, in its hues. Without them, A's copy
+    is drawn first.
+  - The sites are placed outwards from A through the decided pairs, so a site undetermined with A
+    but in cis with B1 lands on B1's copy. A decided pair that contradicts the placement outlines
+    its sites in red.
+- **Moving the panel**: drag it by its title bar.
 - **Several positions**: the matrix of every pair (A–B1, A–B2, B1–B2…), each cell its verdict.
   Click a cell for its pair. The sample can be switched at the top: in a trio, the parents' reads
   answer for themselves.
