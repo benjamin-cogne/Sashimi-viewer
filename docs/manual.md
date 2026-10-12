@@ -921,7 +921,12 @@ one sample.
 - **Haplotags**: when the reads carry HP / PS tags, each site is placed in its phase set as the
   lanes are. Same HP gives *cis* and a different HP gives *trans*; two phase sets are not linked.
   The tool phased through the heterozygous sites between the two, so it links sites no read spans,
-  such as two exons 100 kb apart in long reads.
+  such as two exons 100 kb apart in long reads. The panel draws **the reads by haplotag** at each
+  site, lane by lane with A on the left and B on the right: H1 and H2 of the site's phase set
+  (a bar in its hue), then the reads of another set and the untagged ones. Each read is a box in
+  the allele's colour (grey for the reference), with the count of each lane; the lane the site is
+  placed on is in bold. The 2×2 table and the fragments are shown only when reads join the two
+  sites.
 - **Which evidence decides**: the verdict says what it rests on.
   - *From the reads holding both sites*, when they decide. Haplotags that agree are named
     (*reads and haplotags agree*). Haplotags that disagree make the pair *conflicting*: a switch

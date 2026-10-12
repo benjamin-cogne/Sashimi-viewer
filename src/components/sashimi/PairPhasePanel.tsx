@@ -6,8 +6,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import type { AlignedRead, VariantSite } from './types';
-import { EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairSource, type PairResult, type PairTarget } from '../../standalone/pairPhase';
+import { EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
 import { HET_MAX, HET_MIN } from '../../standalone/phasing';
+import { PHASE_HI, PHASE_LO } from './sitePhase';
 
 export interface PairPhaseOrigin { sid: number; chrom: string; site: VariantSite }
 
@@ -220,32 +221,90 @@ function Evidence({ res, a, b, siteColor, hpColor }: { res: PairResult; a: SiteR
   const counted = new Set(res.counted);
   const cellStyle = (i: number): React.CSSProperties => ({ color: counted.has(i) ? ([0, 3].includes(i) ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#9ca3af', fontWeight: counted.has(i) ? 700 : 400 });
   const links = (Object.keys(res.links) as LinkKind[]).filter(k => res.links[k]).map(k => `${fmt(res.links[k])} by ${LINK_WORD[k]}`);
-  const h = res.haplotags;
+  // the reads joined over both sites: their table and fragments; none (sites farther apart than the reads) leaves them out
+  const joined = res.fragments.length + res.unknown > 0;
   return (
     <div className="mt-2">
-      <div className="flex flex-wrap items-start gap-x-6 gap-y-1">
-        <table className="text-[11px] text-gray-700">
-          <tbody>
-            <tr><td /><td className="px-2 font-semibold" style={{ color: cb }}>{b.label} alt</td><td className="px-2 font-semibold text-gray-500">{b.label} ref</td></tr>
-            <tr><td className="pr-2 font-semibold" style={{ color: ca }}>{a.label} alt</td><td className="px-2 text-center" style={cellStyle(0)}>{res.table[0]}</td><td className="px-2 text-center" style={cellStyle(1)}>{res.table[1]}</td></tr>
-            <tr><td className="pr-2 font-semibold text-gray-500">{a.label} ref</td><td className="px-2 text-center" style={cellStyle(2)}>{res.table[2]}</td><td className="px-2 text-center" style={cellStyle(3)}>{res.table[3]}</td></tr>
-          </tbody>
-        </table>
-        <div className="text-[10px] text-gray-500 leading-4 max-w-[430px]">
-          <div><span style={{ color: PAIR_COLORS.cis }} className="font-semibold">cis</span> cells: alt–alt, ref–ref · <span style={{ color: PAIR_COLORS.trans }} className="font-semibold">trans</span> cells: alt–ref, ref–alt{res.counted.length < 4 ? ' · grey: not counted' : ''}</div>
-          <div>Fragments over both sites: {links.length ? links.join(', ') : 'none'}{res.unknown ? `; ${res.unknown} more with an allele unknown` : ''}</div>
-          {h && (
-            <div className="mt-0.5">
-              <span className="font-semibold text-gray-700">Haplotags</span> (the file's HP / PS):{' '}
-              <span style={{ color: h.call === 'cis' ? PAIR_COLORS.cis : h.call === 'trans' ? PAIR_COLORS.trans : undefined }} className={h.call === 'cis' || h.call === 'trans' ? 'font-semibold' : ''}>
-                {h.call === 'cis' || h.call === 'trans' ? `${CALL_WORD[h.call]}, ` : ''}{h.note}
-              </span>
-              <div className="text-gray-400">{a.label}: {h.a.note.split(' · ')[0]} · {b.label}: {h.b.note.split(' · ')[0]}</div>
-            </div>
-          )}
+      {joined && (
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-1">
+          <table className="text-[11px] text-gray-700">
+            <tbody>
+              <tr><td /><td className="px-2 font-semibold" style={{ color: cb }}>{b.label} alt</td><td className="px-2 font-semibold text-gray-500">{b.label} ref</td></tr>
+              <tr><td className="pr-2 font-semibold" style={{ color: ca }}>{a.label} alt</td><td className="px-2 text-center" style={cellStyle(0)}>{res.table[0]}</td><td className="px-2 text-center" style={cellStyle(1)}>{res.table[1]}</td></tr>
+              <tr><td className="pr-2 font-semibold text-gray-500">{a.label} ref</td><td className="px-2 text-center" style={cellStyle(2)}>{res.table[2]}</td><td className="px-2 text-center" style={cellStyle(3)}>{res.table[3]}</td></tr>
+            </tbody>
+          </table>
+          <div className="text-[10px] text-gray-500 leading-4 max-w-[430px]">
+            <div><span style={{ color: PAIR_COLORS.cis }} className="font-semibold">cis</span> cells: alt–alt, ref–ref · <span style={{ color: PAIR_COLORS.trans }} className="font-semibold">trans</span> cells: alt–ref, ref–alt{res.counted.length < 4 ? ' · grey: not counted' : ''}</div>
+            <div>Fragments over both sites: {links.length ? links.join(', ') : 'none'}{res.unknown ? `; ${res.unknown} more with an allele unknown` : ''}</div>
+          </div>
         </div>
+      )}
+      {joined && <Fragments res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />}
+      {res.tagReads[0] && res.tagReads[1] && <TagReads res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />}
+    </div>
+  );
+}
+
+/**
+ * The reads over each site by haplotag lane, one box per read in the allele's colour (grey: reference): H1 and H2 of the
+ * site's phase set, then the reads of another set and the untagged ones. Lane by lane, A on the left and B on the right.
+ */
+function TagReads({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow; b: SiteRow; ca: string; cb: string; hpColor: (ps: number | null | undefined, hp: number) => string }) {
+  const [ta, tb] = res.tagReads as [SiteTagReads, SiteTagReads];
+  const h = res.haplotags;
+  const W = 712, LABEL = 64, HALF = (W - LABEL) / 2, BOX = 4, STEP = 5, LINE = 9, AREA = HALF - 96, PER_LINE = Math.floor(AREA / STEP), MAX = PER_LINE * 6;
+  const lanes: { key: TagLane; label: string; hp?: 1 | 2 }[] = [
+    { key: 'h1', label: 'H1', hp: 1 }, { key: 'h2', label: 'H2', hp: 2 }, { key: 'other', label: 'other set' }, { key: 'none', label: 'untagged' },
+  ];
+  const shown = lanes.filter(l => ta.lanes[l.key].alt + ta.lanes[l.key].ref + tb.lanes[l.key].alt + tb.lanes[l.key].ref > 0);
+  const lines = (t: SiteTagReads, k: TagLane) => Math.max(1, Math.ceil(Math.min(MAX, t.lanes[k].alt + t.lanes[k].ref) / PER_LINE));
+  // where each site's allele sits: the lane the haplotags place it on, bold
+  const on = (p: PairHaplotags['a'] | undefined): TagLane | null => (p?.call === 'h1' ? 'h1' : p?.call === 'h2' ? 'h2' : null);
+  const onA = on(h?.a), onB = on(h?.b);
+  let y = 24;
+  const els: React.ReactNode[] = [];
+  for (const l of shown) {
+    const n = Math.max(lines(ta, l.key), lines(tb, l.key)), hgt = n * LINE;
+    els.push(<line key={`g${l.key}`} x1={0} y1={y - 3} x2={W} y2={y - 3} stroke="#f3f4f6" />);
+    els.push(<text key={`l${l.key}`} x={4} y={y + 8} fontSize={10} fontWeight={700} fill={l.hp ? '#374151' : '#9ca3af'}>{l.label}</text>);
+    ([[ta, ca, LABEL, onA, a], [tb, cb, LABEL + HALF, onB, b]] as const).forEach(([t, color, x0, mine, row], side) => {
+      const c = t.lanes[l.key], total = c.alt + c.ref;
+      if (l.hp) els.push(<rect key={`h${l.key}${side}`} x={x0} y={y} width={6} height={hgt - 1} fill={hpColor(t.ps, l.hp)}><title>{`HP ${l.hp} of phase set ${t.ps ?? '(no PS)'}`}</title></rect>);
+      const boxes: React.ReactNode[] = [];
+      for (let i = 0; i < Math.min(total, MAX); i++) {
+        const col = i % PER_LINE, ln = Math.floor(i / PER_LINE);
+        boxes.push(<rect key={i} x={x0 + 10 + col * STEP} y={y + ln * LINE} width={BOX} height={LINE - 2} fill={i < c.alt ? color : REF_FILL} />);
+      }
+      els.push(<g key={`b${l.key}${side}`}><title>{`${row.label} · ${l.label}: ${c.alt} reads with the allele, ${c.ref} with the reference`}</title>{boxes}</g>);
+      els.push(
+        <text key={`n${l.key}${side}`} x={x0 + 10 + AREA + 6} y={y + 8} fontSize={10} fill={total ? '#374151' : '#9ca3af'} fontWeight={mine === l.key ? 700 : 400}>
+          {total ? `${c.alt} / ${total} alt${total > MAX ? ` (+${total - MAX})` : ''}` : '–'}
+        </text>,
+      );
+    });
+    y += hgt + 6;
+  }
+  const head = (row: SiteRow, t: SiteTagReads, color: string, x: number) => (
+    <text x={x + 10} y={12} fontSize={10} fontWeight={700} fill={color}>{row.label} <tspan fill="#6b7280" fontWeight={400}>{row.target.chrom}:{fmt(row.site!.pos + 1)} · PS {t.ps ?? 'none'}</tspan></text>
+  );
+  return (
+    <div className="mt-2">
+      <div className="text-[11px] text-gray-700">
+        <span className="font-semibold">Reads by haplotag</span> <span className="text-gray-500">(the file's HP / PS){h ? ': ' : ''}</span>
+        {h && <span style={{ color: h.call === 'cis' ? PAIR_COLORS.cis : h.call === 'trans' ? PAIR_COLORS.trans : undefined }} className={h.call === 'cis' || h.call === 'trans' ? 'font-semibold' : ''}>{h.call === 'cis' || h.call === 'trans' ? `${CALL_WORD[h.call]}, ` : ''}{h.note}</span>}
       </div>
-      <Fragments res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />
+      <div className="mt-1 max-h-[320px] overflow-y-auto border border-gray-100 rounded">
+        <svg width={W} height={y} className="block" style={{ maxWidth: '100%' }}>
+          {head(a, ta, ca, LABEL)}
+          {head(b, tb, cb, LABEL + HALF)}
+          <line x1={LABEL + HALF - 4} y1={2} x2={LABEL + HALF - 4} y2={y} stroke="#e5e7eb" />
+          {els}
+        </svg>
+      </div>
+      <div className="mt-0.5 text-[10px] text-gray-400">
+        One box per read over the site, in the allele's colour (grey: the reference), every base quality as the variants track counts. A site is on a haplotype when at least {Math.round(PHASE_HI * 100)} % of its reads carry the allele and at most {Math.round(PHASE_LO * 100)} % of the other's; H1 and H2 are the phasing tool's, numbered afresh in each phase set.
+      </div>
     </div>
   );
 }

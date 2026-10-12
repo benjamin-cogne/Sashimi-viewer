@@ -202,25 +202,47 @@ export interface PairResult {
   /** fragments by how they link the sites, among those with both alleles known */
   links: Record<LinkKind, number>;
   haplotags: PairHaplotags | null;
+  /** each site's reads by haplotag lane, when the reads carry haplotags */
+  tagReads: [SiteTagReads | null, SiteTagReads | null];
 }
 
 const CELL_CIS = [true, false, false, true];
 const LOD_STEP = Math.log10(((1 - EPS) ** 2 + EPS ** 2) / (2 * EPS * (1 - EPS)));
 
-/** A site's haplotype within its phase set, from the reads over it (every base quality, as the scan counts). */
-export function readsSitePhase(reads: AlignedRead[], s: VariantSite): SitePhase | null {
+/**
+ * The reads over a site by haplotag lane, with their allele: H1 and H2 of the site's phase set (the set holding the most
+ * tagged reads over it), the reads tagged in another set, the untagged ones. What the panel draws when the haplotags
+ * phase the pair.
+ */
+export type TagLane = 'h1' | 'h2' | 'other' | 'none';
+export interface SiteTagReads {
+  /** the site's phase set, null when its tagged reads carry no PS */
+  ps: number | null;
+  lanes: Record<TagLane, { alt: number; ref: number }>;
+}
+
+/** A site's haplotype within its phase set and its reads by lane, from the reads over it (every base quality, as the scan counts). */
+export function siteTags(reads: AlignedRead[], s: VariantSite): { phase: SitePhase | null; tags: SiteTagReads | null } {
   const per = new Map<string, { ps: number | null; hp: number; depth: number; alt: number }>();
+  const seen: { ps: number | null; hp: number | null; a: Allele }[] = [];
   for (const r of reads) {
-    if (r.hp == null) continue;
     const x = alleleAt(r, s, 0);
     if (x < 0) continue;
+    seen.push({ ps: r.ps ?? null, hp: r.hp ?? null, a: x });
+    if (r.hp == null) continue;
     const k = `${r.ps ?? ''}\t${r.hp}`;
     let e = per.get(k);
     if (!e) per.set(k, e = { ps: r.ps ?? null, hp: r.hp, depth: 0, alt: 0 });
     e.depth++; if (x === 1) e.alt++;
   }
   const hap = siteHaplotypesOf([...per.values()]);
-  return hap ? sitePhase({ ...s, hap }) : null;
+  if (!hap) return { phase: null, tags: null };
+  const lanes: SiteTagReads['lanes'] = { h1: { alt: 0, ref: 0 }, h2: { alt: 0, ref: 0 }, other: { alt: 0, ref: 0 }, none: { alt: 0, ref: 0 } };
+  for (const x of seen) {
+    const lane: TagLane = x.hp == null ? 'none' : x.ps === hap.ps && (x.hp === 1 || x.hp === 2) ? (x.hp === 1 ? 'h1' : 'h2') : 'other';
+    if (x.a === 1) lanes[lane].alt++; else lanes[lane].ref++;
+  }
+  return { phase: sitePhase({ ...s, hap }), tags: { ps: hap.ps, lanes } };
 }
 
 export function haplotagPair(a: SitePhase | null, b: SitePhase | null, [nA, nB] = ['A', 'B']): PairHaplotags | null {
@@ -286,7 +308,8 @@ export function phasePair(A: VariantSite, B: VariantSite, readsA: AlignedRead[],
     note = `${cis} fragments say cis, ${trans} trans: more than ${MAX_AGAINST * 100} % against either. A mosaic variant, a mis-mapped paralog or collapsed duplication, a third haplotype, or reads joined that are not one molecule?`;
   }
   if (classes.includes('low') && call !== 'hom') note += ` · ${classes[0] === 'low' && classes[1] === 'low' ? 'both sites' : classes[0] === 'low' ? names[0] : names[1]} under ${HET_MIN * 100} % VAF: only the fragments carrying ${classes[0] === 'low' && classes[1] === 'low' ? 'an' : 'its'} allele counted`;
-  const haplotags = haplotagPair(readsSitePhase(readsA, A), readsSitePhase(readsB, B), names);
+  const ta = siteTags(readsA, A), tb = siteTags(readsB, B);
+  const haplotags = haplotagPair(ta.phase, tb.phase, names);
   const readCall = call, readNote = note;
   let source: PairSource = 'reads';
   const tagged = haplotags && (haplotags.call === 'cis' || haplotags.call === 'trans') ? haplotags.call : null;
@@ -302,5 +325,5 @@ export function phasePair(A: VariantSite, B: VariantSite, readsA: AlignedRead[],
       : `${haplotags!.note}: the phasing tool linked them through the heterozygous sites between them (${readNote.replace(/^no fragment/, 'no read')})`;
     call = tagged; source = 'haplotags';
   }
-  return { table, unknown, counted, cis, trans, call, source, readCall, readNote, lod, note, classes, fragments, links, haplotags };
+  return { table, unknown, counted, cis, trans, call, source, readCall, readNote, lod, note, classes, fragments, links, haplotags, tagReads: [ta.tags, tb.tags] };
 }
