@@ -119,7 +119,7 @@ Every control keeps its tooltip, which explains it in full.
 | Does this intronic or synonymous VUS create a cryptic splice site or exon skipping? | A **red dashed arc** for a junction absent from the comparison samples; click it for donor/acceptor **c. positions**, the predicted transcript in **r. notation**, the reading frame and the **NMD verdict** (55-nt rule, last-exon escape). |
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
 | Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapsed**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
-| Are two variants in *cis* or in *trans* (compound heterozygote)? | Click a site of the **variants track** (DNA), then **Phase with** `chr:pos; …`: the reads holding both sites (one read, a spliced read, two mates, a split read), joined by name however far apart, give a 2×2 table, a verdict and a LOD, with the file's haplotags beside; several positions give a matrix of every pair. |
+| Are two variants in *cis* or in *trans* (compound heterozygote)? | Click a site of the **variants track** (DNA), then **Phase with** `chr:pos; …`: the reads holding both sites (one read, a spliced read, two mates, a split read), joined by name however far apart, give a 2×2 table, a verdict and a LOD; the file's haplotags decide when no read holds both; several positions give a matrix of every pair. |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -920,8 +920,16 @@ one sample.
     so it is shown but does not decide.
 - **Haplotags**: when the reads carry HP / PS tags, each site is placed in its phase set as the
   lanes are. Same HP gives *cis* and a different HP gives *trans*; two phase sets are not linked.
-  This line stands beside the read evidence and is never added to it: the tool phased through
-  other sites and other reads.
+  The tool phased through the heterozygous sites between the two, so it links sites no read spans,
+  such as two exons 100 kb apart in long reads.
+- **Which evidence decides**: the verdict says what it rests on.
+  - *From the reads holding both sites*, when they decide. Haplotags that agree are named
+    (*reads and haplotags agree*). Haplotags that disagree make the pair *conflicting*: a switch
+    error of the phasing tool, or reads joined that are not one molecule.
+  - *From the file's haplotags*, when the reads cannot decide: fewer than 3 informative fragments,
+    or fewer than 10 that disagree among themselves. Both sites must be in the same phase set.
+    The matrix marks such a cell `· HP`.
+  - Two phase sets, or a site the tags do not place, leave the pair *undetermined* without reads.
 - **Fragments**: drawn one line each, not to scale (the sites can be 50 bp or 200 kb apart). Each
   line joins a box at A and a box at B, in the allele's colour or grey for the reference.
   - The line is solid for one read, dashed for two mates, and dotted for a spliced or split read.
@@ -934,10 +942,13 @@ one sample.
 
 Checked against truth, with the BAM and its container giving the same counts:
 - **ONT HG002**: the phased VCF of the same data (wf-human-variation), pairs of phased heterozygous
-  SNVs of one phase set up to 40 kb apart.
-  - CFTR, 301 pairs: 232 right, none wrong, 69 undetermined (no long read spanning both sites) or
-    conflicting (a site at 28 % VAF the tags do not place either).
-  - HBB, 121 pairs: 99 right, none wrong.
+  SNVs of one phase set.
+  - Up to 40 kb apart, CFTR: 294 of 301 pairs right, none wrong. From the reads alone, 232 right
+    and none wrong; the rest had no long read spanning both sites.
+  - Up to 150 kb apart: CFTR 198 of 202 right, HBB 201 of 201, none wrong. Most of these pairs rest
+    on the haplotags. Those come from the same pipeline as the VCF, so they check the panel's
+    reading of the tags, not the tool's phasing.
+  - The pairs left undetermined hold a site at 28–32 % VAF that the tags do not place.
 - **Simulated short pairs** (2×150): every pair within an insert right, none wrong.
 - **Simulated RNA-seq** (2×100, three exons over 25 kb): every pair linked by spliced reads or
   mates right, including exons 15 kb apart, none wrong.

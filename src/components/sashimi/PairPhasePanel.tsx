@@ -6,7 +6,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import type { AlignedRead, VariantSite } from './types';
-import { EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairResult, type PairTarget } from '../../standalone/pairPhase';
+import { EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairSource, type PairResult, type PairTarget } from '../../standalone/pairPhase';
 import { HET_MAX, HET_MIN } from '../../standalone/phasing';
 
 export interface PairPhaseOrigin { sid: number; chrom: string; site: VariantSite }
@@ -34,6 +34,7 @@ interface Run { sid: number; sites: SiteRow[]; pairs: Map<string, PairCell>; err
 
 export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#9ca3af', hom: '#6b7280' };
 const CALL_WORD: Record<PairCall, string> = { cis: 'in cis', trans: 'in trans', conflict: 'conflicting', few: 'undetermined', hom: 'homozygous' };
+const SOURCE_WORD: Record<PairSource, string> = { reads: 'from the reads holding both sites', haplotags: "from the file's haplotags (HP / PS)", both: 'reads and haplotags agree' };
 const REF_FILL = '#d1d5db';
 const LINK_DASH: Record<LinkKind, string | undefined> = { read: undefined, spliced: '1.5 2', pair: '5 3', split: '1.5 2' };
 const LINK_WORD: Record<LinkKind, string> = { read: 'one read', spliced: 'one spliced read', pair: 'two mates', split: 'a split read' };
@@ -99,7 +100,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
       style={{ left: Math.max(8, Math.min(x - 380, window.innerWidth - 772)), top, maxHeight: window.innerHeight - top - 8 }}
       onMouseDown={e => e.stopPropagation()}>
       <div className="flex items-center justify-between gap-2 px-3 pt-2">
-        <div className="font-semibold text-gray-900">Phasing from the reads</div>
+        <div className="font-semibold text-gray-900">Phasing two variants</div>
         <div className="flex items-center gap-2">
           <select value={sid} onChange={e => setSid(Number(e.target.value))} className="border border-gray-300 rounded px-1 py-0.5 text-xs" title="The sample whose reads are read">
             {samples.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -166,9 +167,9 @@ function Matrix({ sites, pairs, pick, onPick, siteColor, siteShort }: { sites: S
                 const on = pick[0] === i && pick[1] === j;
                 return (
                   <td key={j} className="p-0.5">
-                    <button onClick={() => onPick(i, j)} title={c ? ('result' in c ? `${a.label}–${sites[j].label}: ${CALL_WORD[c.result.call]} · ${c.result.note}` : c.reason) : ''}
-                      className={`w-[74px] rounded px-1 py-0.5 text-white ${on ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`} style={{ background: call ? PAIR_COLORS[call] : '#e5e7eb', color: call ? '#fff' : '#6b7280' }}>
-                      {call ? CALL_WORD[call] : '—'}
+                    <button onClick={() => onPick(i, j)} title={c ? ('result' in c ? `${a.label}–${sites[j].label}: ${CALL_WORD[c.result.call]}${c.result.call === 'cis' || c.result.call === 'trans' ? ` (${SOURCE_WORD[c.result.source]})` : ''} · ${c.result.note}` : c.reason) : ''}
+                      className={`w-[84px] rounded px-1 py-0.5 text-white ${on ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`} style={{ background: call ? PAIR_COLORS[call] : '#e5e7eb', color: call ? '#fff' : '#6b7280' }}>
+                      {call ? CALL_WORD[call] : '—'}{c && 'result' in c && c.result.source === 'haplotags' ? ' · HP' : ''}
                     </button>
                   </td>
                 );
@@ -204,6 +205,7 @@ function Verdict({ cell, a, b }: { cell: PairCell; a: SiteRow; b: SiteRow }) {
   return (
     <div className="w-[230px] text-center">
       <div className="text-[15px] font-bold uppercase tracking-wide" style={{ color: PAIR_COLORS[r.call] }}>{CALL_WORD[r.call]}</div>
+      {(r.call === 'cis' || r.call === 'trans') && <div className="text-[10px] font-semibold text-gray-500">{SOURCE_WORD[r.source]}</div>}
       <div className="text-gray-600 leading-4 mt-0.5">{r.note}</div>
       <div className="text-[10px] text-gray-400 mt-0.5">
         {r.cis + r.trans > 0 && <>LOD {Math.abs(r.lod) >= 99.95 ? '>99' : Math.abs(r.lod).toFixed(1)}{r.lod > 0 ? ' for cis' : r.lod < 0 ? ' for trans' : ''} · </>}

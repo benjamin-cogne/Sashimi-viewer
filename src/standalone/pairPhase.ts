@@ -15,12 +15,16 @@
  *     - a site under HET_MIN (mosaic, subclonal): its reference reads come from cells without it too, so only the
  *       fragments carrying its allele count (the other site's allele on them: alt cis, ref trans);
  *     - a homozygous site (over HET_MAX) is on both haplotypes: the question does not arise.
- *  4. Verdict: at least MIN_FRAGMENTS informative fragments, at most MAX_AGAINST of them against. The LOD weighs the
- *     same counts, log10 L(cis) / L(trans) with an error of EPS per allele read, so that 30 to 0 reads stronger than 3
- *     to 0; it is shown, not used to decide (it grows with depth whatever the share against).
+ *  4. The reads' verdict: at least MIN_FRAGMENTS informative fragments, at most MAX_AGAINST of them against. The LOD
+ *     weighs the same counts, log10 L(cis) / L(trans) with an error of EPS per allele read, so that 30 to 0 reads
+ *     stronger than 3 to 0; it is shown, not used to decide (it grows with depth whatever the share against).
  *  5. Haplotags (HP / PS from WhatsHap, LongPhase, HiPhase…), when the reads carry them: each site's haplotype within its
- *     phase set (sitePhase), then same HP cis, different HP trans; two phase sets are not linked. Shown beside the read
- *     evidence, never added to it: the tool's phasing went through other sites and other reads.
+ *     phase set (sitePhase), then same HP cis, different HP trans; two phase sets are not linked. The tool phased through
+ *     the heterozygous sites between the two, so it links sites no read spans (two exons 100 kb apart in long reads).
+ *  6. The verdict: the reads' when they decide (the haplotags agreeing said so, disagreeing make it conflicting: a
+ *     switch error of the tool, or reads joined that are not one molecule); the haplotags' when the reads cannot
+ *     decide (too few fragments, or under MIN_CONFLICT disagreeing among themselves); otherwise the reads' (homozygous,
+ *     conflicting fragments).
  */
 import type { AlignedRead, VariantSite } from '../components/sashimi/types';
 import { alleleAt, HET_MAX, HET_MIN, type Allele } from './phasing';
@@ -29,6 +33,8 @@ import { siteHaplotypesOf } from './alleles';
 import { sitePhase, type SitePhase } from '../components/sashimi/sitePhase';
 
 export const MIN_FRAGMENTS = 3, MAX_AGAINST = 0.2, MIN_BQ = 20, EPS = 0.01;
+/** Informative fragments under which the reads disagreeing among themselves leave the verdict to the haplotags. */
+export const MIN_CONFLICT = 10;
 /** Reads asked for around each site; past it the source keeps whole fragments by name hash. */
 export const PAIR_READS_CAP = 20_000;
 
@@ -111,7 +117,8 @@ export function resolveTarget(t: PairTarget, reads: AlignedRead[], ref: string |
   // the counts of the reads read here, the scan's quality and haplotype evidence kept
   const mine = here.find(s => s.pos === best.pos && s.kind === best.kind && s.alt === best.alt);
   const site: VariantSite = { ...best, ...(mine ? { alt_count: mine.alt_count, depth: mine.depth, vaf: mine.vaf } : {}) };
-  const others = (scan.length ? scan : here).filter(s => s !== best);
+  // the other alleles worth naming: a single noisy read's indel (long reads) is not one
+  const others = (scan.length ? scan : here).filter(s => s !== best && s.alt_count >= Math.max(2, 0.05 * s.depth));
   return { site, note: !t.allele && others.length ? `${t.text}: ${others.length} other allele${others.length > 1 ? 's' : ''} there (${others.map(s => `${s.alt} ×${s.alt_count}`).join(', ')}); the most supported taken, add it to the position to choose (chr:pos:A>G)` : undefined };
 }
 
@@ -172,6 +179,8 @@ export interface PairHaplotags {
   a: SitePhase; b: SitePhase;
   note: string;
 }
+/** What the verdict rests on: the fragments holding both sites, the file's haplotags, or both agreeing. */
+export type PairSource = 'reads' | 'haplotags' | 'both';
 export interface PairResult {
   /** fragments by allele at A × at B: [alt–alt, alt–ref, ref–alt, ref–ref] */
   table: [number, number, number, number];
@@ -180,7 +189,12 @@ export interface PairResult {
   /** the cells counted, as indices into `table`, and the informative fragments for cis and for trans */
   counted: number[];
   cis: number; trans: number;
+  /** the verdict, from `source` */
   call: PairCall;
+  source: PairSource;
+  /** the reads' own verdict and its words, whatever the haplotags say */
+  readCall: PairCall;
+  readNote: string;
   lod: number;
   note: string;
   classes: [SiteClass, SiteClass];
@@ -272,5 +286,21 @@ export function phasePair(A: VariantSite, B: VariantSite, readsA: AlignedRead[],
     note = `${cis} fragments say cis, ${trans} trans: more than ${MAX_AGAINST * 100} % against either. A mosaic variant, a mis-mapped paralog or collapsed duplication, a third haplotype, or reads joined that are not one molecule?`;
   }
   if (classes.includes('low') && call !== 'hom') note += ` · ${classes[0] === 'low' && classes[1] === 'low' ? 'both sites' : classes[0] === 'low' ? names[0] : names[1]} under ${HET_MIN * 100} % VAF: only the fragments carrying ${classes[0] === 'low' && classes[1] === 'low' ? 'an' : 'its'} allele counted`;
-  return { table, unknown, counted, cis, trans, call, lod, note, classes, fragments, links, haplotags: haplotagPair(readsSitePhase(readsA, A), readsSitePhase(readsB, B), names) };
+  const haplotags = haplotagPair(readsSitePhase(readsA, A), readsSitePhase(readsB, B), names);
+  const readCall = call, readNote = note;
+  let source: PairSource = 'reads';
+  const tagged = haplotags && (haplotags.call === 'cis' || haplotags.call === 'trans') ? haplotags.call : null;
+  if (tagged && (call === 'cis' || call === 'trans')) {
+    if (tagged === call) { source = 'both'; note += ` · the haplotags agree (${haplotags!.note})`; }
+    else {
+      call = 'conflict';
+      note = `the reads say ${readCall} (${readNote}), the haplotags ${tagged} (${haplotags!.note}): a switch error of the phasing tool, or reads joined that are not one molecule?`;
+    }
+  } else if (tagged && (call === 'few' || (call === 'conflict' && n < MIN_CONFLICT))) {
+    note = call === 'conflict'
+      ? `${haplotags!.note} · the ${n} reads holding both disagree (${cis} cis, ${trans} trans), too few to weigh against the phasing`
+      : `${haplotags!.note}: the phasing tool linked them through the heterozygous sites between them (${readNote.replace(/^no fragment/, 'no read')})`;
+    call = tagged; source = 'haplotags';
+  }
+  return { table, unknown, counted, cis, trans, call, source, readCall, readNote, lod, note, classes, fragments, links, haplotags };
 }
