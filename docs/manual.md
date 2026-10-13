@@ -126,7 +126,7 @@ Every control keeps its tooltip, which explains it in full.
 | Is this an exon-level deletion or duplication? | Exon usage panel: median depth of each coding MANE exon relative to the other exons of the gene, per sample. |
 | Is this junction normal in some tissues? | **GTEx tissue tracks** (v10, v8 fallback, hg38) as reference splicing profiles. |
 | Can I open it straight from the variant page of my interpretation tool? | **Deep links** (`#variant=NC_000017.11:g.43094464G>A&pad=100`) open the browser on the variant ±100 bp with the variant marked; the BAM/CRAM files added afterwards appear as tracks. See *Open on a variant from another tool*. |
-| Is this "mismatch" a known polymorphism? | **Common SNPs** track (dbSNP 155, MAF ≥ 1 %) and **Variant sites (★)** called from the reads of the window. |
+| Is this "mismatch" a known polymorphism? | **Common SNPs** track (dbSNP 155, MAF ≥ 1 %) and **Variant sites (★)** scanned from every read of the window, reads track open or not; click one for its supporting reads, allele fraction and allelic balance. |
 | What does the protein look like afterwards? | **Splicing cartoon** (experimental): animated pre-mRNA, spliced mRNA, translation with UniProt/Pfam domains, NMD verdict, exportable as SVG/PNG. |
 
 Plots export as **SVG** (vector, publication-ready) for reports.
@@ -760,7 +760,27 @@ is 9 px wide; the start codon is green, a stop red, and a codon split by an intr
 sides. With a minus-strand gene drawn 5′→3′ (RNA pages), the transcript strand is added above the +
 strand. Wider views show one line saying how far to zoom. The bases come from the FASTA when one is
 loaded, else from the UCSC / Ensembl APIs, else (an exported page) from the reference its reads came
-with. The reads track keeps its own reference rows above the reads.
+with. The reads track has no reference rows of its own: the strip shows the bases and amino acids
+once, above every track.
+
+**Variant sites on RNA tracks.** The *Variants* pill of the *Show* section (RNA tracks, on by
+default) scans every read of the window for variant sites, as a DNA track's variants layer does. It
+runs in the background, for views up to 3 Mb, and follows the window. The reads track does not have
+to be open.
+- Each site gets a star in the strip above the track and an allele bar on the coverage: the
+  alternate allele in its base colour over the reference share. *min VAF* sets the threshold, and a
+  site also needs at least 3 alternate reads.
+- With *Strands* on and the reads track open, the sites stay those of the reads track, counted on
+  the gene's strand.
+- **Click a star or a bar** for a short summary from the reads over the site:
+  - the supporting and the reference reads, each by strand, and the allele fraction;
+  - the **allelic balance**, an exact binomial test against 50 %. It is named *balanced*, *tilted*,
+    or near-monoallelic one way or the other. In RNA the fraction follows expression as well as the
+    genotype: nonsense-mediated decay, allelic silencing or imprinting tilt it;
+  - the median mapping and base qualities, the median distance to a read end, and the four quality
+    cells in one line;
+  - whether the site is a common SNP.
+- *Phase with* works there too. Spliced reads link exonic variants far apart (see the phasing panel).
 
 **Layers.** Four layers make a DNA track, switched in the *Layers* section of the toolbar,
 **C Coverage · V Variants · M Methylation · R Reads**. A filled letter is a layer that is on; a click switches it for every DNA sample

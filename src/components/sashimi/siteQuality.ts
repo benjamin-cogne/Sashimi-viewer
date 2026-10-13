@@ -132,3 +132,16 @@ export function readEvidence(reads: AlignedRead[], s: VariantSite): ReadEvidence
   }
   return out;
 }
+
+/**
+ * Two-sided exact binomial test of k successes in n trials against p = 1/2 (the allelic balance of a heterozygous site in
+ * RNA): twice the smaller tail, at most 1.
+ */
+export function binomialHalf(k: number, n: number): number {
+  if (n <= 0) return 1;
+  const m = Math.min(k, n - k);
+  // P(X <= m), the terms summed in log space from P(X = 0) = 2^-n
+  let lp = -n * Math.LN2, tail = Math.exp(lp);
+  for (let i = 0; i < m; i++) { lp += Math.log((n - i) / (i + 1)); tail += Math.exp(lp); }
+  return Math.min(1, 2 * tail);
+}

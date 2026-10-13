@@ -4,7 +4,7 @@ import type { LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/t
 import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
-import { Q_COLORS, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence } from './sashimi/siteQuality';
+import { Q_COLORS, binomialHalf, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence, type SiteObs } from './sashimi/siteQuality';
 import { PHASE_HI, PHASE_LO, PHASE_MIN_DEPTH, sitePhase } from './sashimi/sitePhase';
 import type { MethylWindow } from '../standalone/methylation';
 import {
@@ -130,6 +130,8 @@ export interface ViewerSettings {
   longReadMinVafPct?: number;
   /** DNA tracks: draw the variant sites called from the reads as allele bars on the coverage (default on); off = plain coverage */
   coverageVariants?: boolean;
+  /** RNA tracks: the variant sites of the window scanned from every read and drawn on the coverage (stars and allele bars), reads track open or not (default on) */
+  rnaVariants?: boolean;
   /** long-read DNA tracks: CpG methylation from the MM / ML tags, a panel under the coverage and colours on the reads (default off) */
   methylation?: boolean;
   /** no longer used (the sequence strip is always drawn under the gene model); ignored in sessions that have it */
@@ -1162,6 +1164,7 @@ export default function SashimiViewer({
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
+  const [rnaVariants, setRnaVariants] = useState(init.rnaVariants ?? true);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
   const [seqRef, setSeqRef] = useState<{ chrom: string; start: number; seq: string } | null>(null);
   /** the last fetch for the strip found no reference (no FASTA, the web APIs unreachable) */
@@ -2237,15 +2240,25 @@ export default function SashimiViewer({
    * counts kept in the worker released) and the reads of the reads track. They are read again when switched back on;
    * until then the page holds and redraws nothing for them, so it stays as light as before they were asked for.
    */
-  const variantsWereOn = useRef(false), readsWereOn = useRef(false);
+  const variantsWereOn = useRef(false), rnaVariantsWereOn = useRef(false), readsWereOn = useRef(false);
+  /** the variants of the DNA (or RNA) tracks let go; the worker's counts too once neither kind wants them */
+  const dropVariants = (dna: boolean, other: boolean) => {
+    const sids = new Set([...Object.keys(dnaSites).map(Number), ...dnaSitesAbort.current.keys()]);
+    for (const sid of sids) if (isDnaSample(sid) === dna) { dnaSitesAbort.current.get(sid)?.abort(); forgetVariants(sid); }
+    if (!other) ds.release?.('variants');
+  };
   useEffect(() => {
     if (coverageVariants) { variantsWereOn.current = true; return; }
     if (!variantsWereOn.current) return;
     variantsWereOn.current = false;
-    for (const sid of Object.keys(dnaSites).map(Number)) forgetVariants(sid);
-    for (const [sid, c] of dnaSitesAbort.current) { c.abort(); forgetVariants(sid); }
-    ds.release?.('variants');
+    dropVariants(true, rnaVariants);
   }, [coverageVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (rnaVariants) { rnaVariantsWereOn.current = true; return; }
+    if (!rnaVariantsWereOn.current) return;
+    rnaVariantsWereOn.current = false;
+    dropVariants(false, coverageVariants);
+  }, [rnaVariants]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (showReads) { readsWereOn.current = true; return; }
     if (!readsWereOn.current) return;
@@ -2907,8 +2920,8 @@ export default function SashimiViewer({
     const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
     const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
 
-    // the reference rows (amino acids, transcript strand, + strand) above the reads: the same as the sequence strip's
-    const { aaRowH, revRowH, seqRowH, els: seqEls, note: refNote } = sequenceRows(ref, yOff + READS_HEADER_H + sitesRowH);
+    // no reference rows over the reads: the sequence strip under the gene model shows the bases and amino acids already
+    const aaRowH = 0, revRowH = 0, seqRowH = 0;
     const bodyTop = yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH;
 
     const refSourceLabel: Record<string, string> = { fasta: 'REFERENCE_FASTA', ensembl: 'Ensembl (server)', browser: 'UCSC API (browser)' };
@@ -2924,11 +2937,7 @@ export default function SashimiViewer({
           <defs><clipPath id={clipId}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} /></clipPath></defs>
           {frame(height)}
           {header(info, !fresh && readsError[sid] ? UNIQUE_COLOR : undefined)}
-          {aaRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>aa</text>}
-          {revRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}><title>transcript strand (−): complement of the genomic bases, 5′→3′ left to right</title>ref −</text>}
-          {ref && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>{revRowH > 0 ? 'ref +' : 'ref'}</text>}
-          {refNote && <text x={PLOT_LEFT + 8} y={yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH - 5} fill={INK.faint} fontSize={9}>{refNote}</text>}
-          <g clipPath={`url(#${clipId})`}>{seqEls}{body}</g>
+          <g clipPath={`url(#${clipId})`}>{body}</g>
         </g>
       ),
     });
@@ -3877,7 +3886,7 @@ export default function SashimiViewer({
    */
   const scannedTooFar = (f: FetchWindow, v: { start: number; end: number }) => f.end - f.start > Math.max(5_000_000, 4 * (v.end - v.start));
   useEffect(() => {
-    if (!coverageVariants || !ds.getVariantSites) return;
+    if ((!coverageVariants && !rnaVariants) || !ds.getVariantSites) return;
     const v = viewRef.current;
     if (v.end - v.start > VARIANTS_MAX_VIEW_BP) return;
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
@@ -3885,8 +3894,8 @@ export default function SashimiViewer({
     for (const t of tracks) {
       const sid = t.sampleId;
       const e = dnaSites[sid];
-      if (t.gtex || t.group || !isDnaSample(sid) || dnaSitesLoading[sid]) continue;
-      // every DNA track is scanned while Variants is on: its first window, or again after a failure elsewhere
+      if (t.gtex || t.group || dnaSitesLoading[sid] || !(isDnaSample(sid) ? coverageVariants : rnaVariants)) continue;
+      // every DNA track is scanned while Variants is on (every RNA track while its Variants pill is): its first window, or again after a failure elsewhere
       if (!e || (e.error && !covers(e.fetched, v))) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
       if (!e.full || e.error) continue;
       const f = e.fetched;
@@ -3900,7 +3909,7 @@ export default function SashimiViewer({
     if (!jobs.length) return;
     const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
     return () => clearTimeout(timer);
-  }, [tracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, rnaVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
   const layouts: TrackLayout[] = useMemo(() => {
     let y = tracksTop;
     const out: TrackLayout[] = [];
@@ -3939,9 +3948,11 @@ export default function SashimiViewer({
         if (!covers && !dnaSitesLoading[track.sampleId]) return [];
         return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
       };
-      // a DNA track's sites come from the full scan of its window (the variants track, with their quality evidence), an
-      // RNA track's from its reads track
-      const trackSites: VariantSite[] = dnaTrack ? (coverageVariants ? chipSites() : []) : readsBelow?.loaded ? readsBelow.sites : [];
+      // a DNA track's sites come from the full scan of its window (the variants track, with their quality evidence); an
+      // RNA track's from the same scan while its Variants pill is on (reads track open or not), else from its reads track.
+      // Strands shown with the reads open: the reads track's, counted on the gene's strand
+      const rnaScan = !dnaTrack && rnaVariants && !(showStrands && readsBelow?.loaded) ? chipSites() : [];
+      const trackSites: VariantSite[] = dnaTrack ? (coverageVariants ? chipSites() : []) : rnaScan.length || !readsBelow?.loaded ? rnaScan : readsBelow.sites;
       // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
       const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
@@ -4250,7 +4261,7 @@ export default function SashimiViewer({
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     });
     return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -4790,6 +4801,11 @@ export default function SashimiViewer({
   });
   const siteShort = (s: VariantSite) => s.kind === 'snv' ? `${s.ref}>${s.alt}` : s.kind === 'ins' ? `ins ${s.length} bp` : `del ${s.length} bp`;
   const siteColor = (s: VariantSite) => s.kind === 'snv' ? (BASE_COLORS[s.alt] || BASE_COLORS.N) : s.kind === 'ins' ? INSERTION_COLOR : DEL_COLOR;
+  /** a site clicked (variants track, or an RNA track's star or allele bar): its panel, or the phasing panel's list while picking */
+  const clickSite = (sid: number, name: string, st: VariantSite, ev: { clientX: number; clientY: number }) => {
+    if (pairPanel && pairPicking) setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, site: st }));
+    else void openVariantPanel(sid, name, st, !!dnaSites[sid]?.long, ev.clientX, ev.clientY);
+  };
 
   /**
    * The variants track of a DNA track, under its coverage: the sites of the full scan of the window, each as its
@@ -4934,10 +4950,7 @@ export default function SashimiViewer({
               const p = svgPoint(ev);
               let best: (typeof marks)[number] | null = null;
               for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
-              if (!best) return;
-              // picking for the phasing panel: the site goes to its list instead of opening its own panel
-              if (pairPanel && pairPicking) setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, site: best!.s }));
-              else void openVariantPanel(sid, L.track.sampleName, best.s, long, ev.clientX, ev.clientY);
+              if (best) clickSite(sid, L.track.sampleName, best.s, ev);
             }} />
           {/* the breaks between phase sets keep their explanation on hover */}
           {phaseFront.filter(el => String(el.key).startsWith('pk'))}
@@ -5243,8 +5256,9 @@ export default function SashimiViewer({
               const widthOf = (t: string) => t.length * size * 0.62 + 4;
               const text = !lead ? null : (st.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= widthOf(short) ? short : null;
               return (
-                <g key={`vaf${st.pos}${st.kind}${st.alt}`}>
-                  <title>{siteLabel(st)}</title>
+                <g key={`vaf${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
+                  onMouseDown={ev => ev.stopPropagation()} onClick={ev => { ev.stopPropagation(); clickSite(track.sampleId, track.sampleName, st, ev); }}>
+                  <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                   {lead && <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />}
                   {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#9ca3af" />}
                   <rect x={left} y={baseline - under - altH} width={w} height={altH} fill={colr} />
@@ -6120,14 +6134,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -6353,6 +6367,16 @@ export default function SashimiViewer({
                     + `The strand of a read comes from the library's orientation: reverse (dUTP: read 2 on the transcript's strand, read 1 opposite) or forward (read 1 or the single read on it), detected from the spliced reads of the gene's introns or set on the sample chip. An unstranded sample stays whole.\n${per}${none ? '\nNo shown sample is known to be stranded yet.' : ''}`} />
               );
             })()}
+            {anyRna && !!ds.getVariantSites && (
+              <>
+                <Pill on={rnaVariants} onChange={setRnaVariants} label="Variants" icon="star"
+                  title={`RNA tracks: the variant sites of the window, from a scan of every read (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window), with the reads track open or not. Each site is a star above the track and an allele bar on the coverage (the alternate allele in its base colour over the reference share). Click one for its summary: supporting and reference reads by strand, allele fraction and allelic balance, qualities.`} />
+                {rnaVariants && !showReads && (
+                  <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                    title="Minimum alternate-allele fraction for a variant site to be shown (a star and an allele bar on an RNA track). Sites also need at least 3 alternate reads." />
+                )}
+              </>
+            )}
             <Pill on={showAllTx} onChange={setShowAllTx} label="All transcripts" icon="tx"
               title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
             <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
@@ -6611,8 +6635,9 @@ export default function SashimiViewer({
                   const cx = scale.x(st.kind === 'ins' ? st.pos : st.kind === 'del' ? st.pos + st.length / 2 : st.pos + 0.5);
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (
-                    <g key={`site${st.pos}${st.kind}${st.alt}`}>
-                      <title>{siteLabel(st)}</title>
+                    <g key={`site${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
+                      onMouseDown={ev => ev.stopPropagation()} onClick={ev => { ev.stopPropagation(); clickSite(L.track.sampleId, L.track.sampleName, st, ev); }}>
+                      <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                       <line x1={cx} y1={cy + 7} x2={cx} y2={bottom} stroke={STAR_COLOR} strokeWidth={1} strokeDasharray="2 3" opacity={0.75} />
                       {knownSnp(st) && <circle cx={cx} cy={cy} r={9.5} fill="none" stroke={SNP_KNOWN_RING} strokeWidth={1.6} />}
                       <path d={starPath(cx, cy, 7)} fill={STAR_COLOR} stroke="#92400e" strokeWidth={0.8} />
@@ -6761,6 +6786,7 @@ export default function SashimiViewer({
         {variantPanel && (() => {
           const { site: s, ev } = variantPanel, color = siteColor(s);
           const { checks } = cachedChecks(s, variantPanel.long);
+          const rna = !isDnaSample(variantPanel.sid);
           const mqEdges = [0, 10, 20, 30, 40, 50, 60], mqBins = ['0–9', '10–19', '20–29', '30–39', '40–49', '50–59', '60+'];
           const endEdges = [0, 10, 25, 50, 100, 500, 2000], endBins = ['<10', '10–24', '25–49', '50–99', '100–499', '500–1,999', '2,000+'];
           const bqEdges = [0, 10, 20, 30, 40], bqBins = ['<10', '10–19', '20–29', '30–39', '40+'];
@@ -6778,7 +6804,7 @@ export default function SashimiViewer({
               <div className="flex items-start justify-between gap-2 px-3 pt-2 cursor-move" title="Drag the panel to move it">
                 <div className="min-w-0">
                   <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString('en-US')} <span style={{ color }}>{siteShort(s)}</span></div>
-                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads (full scan)</div>
+                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads ({s.q ? 'variant scan' : 'reads shown'})</div>
                 </div>
                 <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
               </div>
@@ -6801,6 +6827,55 @@ export default function SashimiViewer({
                   }}>⌖ Pick</button>
                 <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0">Phase</button>
               </form>
+              {rna ? (
+                // an RNA site: a short summary from the reads over it (supporting reads, strands, qualities, the allelic
+                // balance, which expression can tilt), the quality cells in one line
+                <div className="px-3 pb-2 pt-1.5">
+                  {variantPanel.busy && <div className="text-gray-400">reading the reads over the site…</div>}
+                  {variantPanel.error && <div className="text-red-600">{variantPanel.error}</div>}
+                  {ev && (() => {
+                    const nAlt = ev.alt.length, nRef = ev.ref.length, n = nAlt + nRef;
+                    const med = (xs: number[]) => { if (!xs.length) return null; const o = [...xs].sort((p, q) => p - q); return o[o.length >> 1]; };
+                    const frac = n ? nAlt / n : 0, p = binomialHalf(nAlt, n);
+                    const balance = !n ? '–' : p >= 0.01 ? 'balanced (both alleles expressed alike)'
+                      : frac >= 0.9 ? 'nearly the alternate allele alone: monoallelic expression, the reference allele lost or not transcribed?'
+                      : frac <= 0.1 ? 'the alternate allele barely expressed: nonsense-mediated decay, allelic silencing, or a low-level change?'
+                      : `tilted towards the ${frac > 0.5 ? 'alternate' : 'reference'} allele (allelic imbalance)`;
+                    const mq = (l: SiteObs[]) => med(l.map(o => o.mq)), end = (l: SiteObs[]) => med(l.map(o => o.end));
+                    const row = (label: string, value: React.ReactNode, note?: string) => (
+                      <tr><td className="pr-3 py-[1px] text-gray-500 align-top whitespace-nowrap">{label}</td><td className="py-[1px] text-gray-800">{value}{note && <span className="text-gray-400"> {note}</span>}</td></tr>
+                    );
+                    return (
+                      <>
+                        <table className="text-[11px]">
+                          <tbody>
+                            {row('Supporting reads', <b style={{ color }}>{nAlt.toLocaleString('en-US')}</b>, `(${fw(ev.alt)} + strand, ${nAlt - fw(ev.alt)} − strand)`)}
+                            {row('Reference reads', nRef.toLocaleString('en-US'), `(${fw(ev.ref)} +, ${nRef - fw(ev.ref)} −)`)}
+                            {ev.other > 0 && row('Other allele', ev.other.toLocaleString('en-US'))}
+                            {row('Allele fraction', n ? `${(frac * 100).toFixed(frac < 0.1 ? 1 : 0)} %` : '–', `of ${n.toLocaleString('en-US')} reads over the site`)}
+                            {row('Allelic balance', balance, n ? `binomial test against 50 %: p = ${p < 1e-4 ? p.toExponential(1) : p.toFixed(p < 0.01 ? 4 : 2)}` : undefined)}
+                            {row('Mapping quality', `${mq(ev.alt) ?? '–'} / ${mq(ev.ref) ?? '–'}`, '(median, alternate / reference reads)')}
+                            {s.kind === 'snv' && row('Base quality', `${med(ev.alt.map(o => o.bq ?? 0)) ?? '–'}`, '(median of the alternate bases)')}
+                            {row('From a read end', `${end(ev.alt) ?? '–'} / ${end(ev.ref) ?? '–'} bp`, '(median, alternate / reference)')}
+                            {knownSnp(s) && row('Known', 'a common SNP (dbSNP)')}
+                          </tbody>
+                        </table>
+                        {checks.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-gray-600">
+                            {checks.map(c => (
+                              <span key={c.key} className="inline-flex items-center gap-1" title={c.detail}>
+                                <span className="inline-block h-2 w-2 rounded-sm" style={{ background: Q_COLORS[c.level] }} />{c.key}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="mt-1 text-[10px] text-gray-400">The reads decoded at the site (up to 5,000): a spliced read whose intron spans it is not over it. In RNA the allele fraction follows expression as well as the genotype.</div>
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <>
               <div className="px-3 pt-1.5">
                 {checks.map(c => (
                   <div key={c.key} className="flex items-start gap-1.5 leading-4 mb-0.5">
@@ -6854,6 +6929,8 @@ export default function SashimiViewer({
                   </>
                 )}
               </div>
+                </>
+              )}
             </div>
           );
         })()}
