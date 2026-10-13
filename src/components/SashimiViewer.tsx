@@ -37,6 +37,8 @@ import { GeneSuggest } from './sashimi/GeneSuggest';
 import { RepeatInspector } from './sashimi/RepeatInspector';
 import { PairPhasePanel, type PairPhaseOrigin } from './sashimi/PairPhasePanel';
 import { startPanelDrag } from './sashimi/panelDrag';
+import { variantCoordinates } from './sashimi/variantText';
+import { RETENTION_FLANK, retentionEffect, retentionHgvs } from './sashimi/retention';
 import { FLANK as REPEAT_FLANK, detectMotif, makeLocus, type RepeatLocus } from '../standalone/repeatScan';
 import { STR_LOCI, type StrLocus } from '../standalone/strCatalog';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
@@ -437,6 +439,8 @@ function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number
 const READS_MAX_ROWS = 120;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
+/** a retained intron's bases are read for its stop codons up to this length */
+const IR_SEQ_MAX_BP = 200_000;
 /** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
 const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
@@ -1248,7 +1252,11 @@ export default function SashimiViewer({
     /** a junction of the opposite strand of a stranded sample, drawn under the baseline */
     | { kind: 'anti'; key: string; j: JunctionArc; x: number; y: number }
     | { kind: 'exon'; exon: { start: number; end: number; rank: number }; x: number; y: number }
+    /** an intron retention pill (usage mode): the intron [start, end) of the model */
+    | { kind: 'retention'; key: string; start: number; end: number; fromExon: number; toExon: number; x: number; y: number }
     | null>(null);
+  /** the bases of the retained intron of the popover, with RETENTION_FLANK exon bases each side (its reading frame) */
+  const [irSeq, setIrSeq] = useState<{ key: string; seq: string | null; error?: string } | null>(null);
   const dragMoved = useRef(false);
   /** Splicing cartoon opened from a junction popover (experimental). */
   const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string } | null>(null);
@@ -2344,7 +2352,11 @@ export default function SashimiViewer({
   type SeqItem = { label: string; seq?: string; note?: string; action?: { label: string; run: () => void } };
   const [seqPanel, setSeqPanel] = useState<{ title: string; subtitle?: string; x: number; y: number; items: SeqItem[]; busy?: string; error?: string } | null>(null);
   /** The evidence of one variant site, from the reads decoded around it (HTML panel, never exported). */
-  const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence } | null>(null);
+  const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence;
+    /** the reference around the site (an indel's anchor base) and, for an insertion, the inserted bases most reads carry */
+    ref?: { start: number; seq: string } | null; insSeq?: string } | null>(null);
+  /** the coordinate text last copied from the variant panel (a tick on its chip for a moment) */
+  const [variantCopied, setVariantCopied] = useState<string | null>(null);
   const variantSeq = useRef(0);
   /** where the variant panel was dragged to: the next ones open there too (until the page is reloaded) */
   const [variantPanelAt, setVariantPanelAt] = useState<{ left: number; top: number } | null>(null);
@@ -2361,7 +2373,14 @@ export default function SashimiViewer({
       const end = site.pos + (site.kind === 'del' ? site.length : 1);
       const data = await ds.getReads(sid, v.chrom, Math.max(0, site.pos - 1), end + 1, v.uniqueOnly, 5000, 'reads', 1, 0.01, {});
       if (variantSeq.current !== seq) return;
-      setVariantPanel(p => p && { ...p, busy: false, ev: readEvidence(data.reads, site) });
+      // an insertion's bases: the sequence most of its reads carry
+      let insSeq: string | undefined;
+      if (site.kind === 'ins') {
+        const n = new Map<string, number>();
+        for (const r of data.reads) r.i.forEach(([p, l], k) => { const b = r.is?.[k]; if (p === site.pos && l === site.length && b) n.set(b, (n.get(b) ?? 0) + 1); });
+        insSeq = [...n].sort((a, b) => b[1] - a[1])[0]?.[0];
+      }
+      setVariantPanel(p => p && { ...p, busy: false, ev: readEvidence(data.reads, site), ref: data.reference ?? null, insSeq });
     } catch (err: any) {
       if (variantSeq.current === seq) setVariantPanel(p => p && { ...p, busy: false, error: err?.message ?? String(err) });
     }
@@ -3808,7 +3827,7 @@ export default function SashimiViewer({
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
     /** Intron-retention pills on the baseline (usage mode). */
-    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void }[];
+    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void; hint?: string }[];
     /** variant sites drawn in the strip and as allele bars: from the reads track, or from the "variants" chip scan of a DNA track (none when the Variants toggle is off) */
     sites: VariantSite[];
     /** allele balance of the heterozygous common SNPs of a DNA track */
@@ -4214,8 +4233,14 @@ export default function SashimiViewer({
         .map(r => {
           const xa = scale.x(Math.max(r.start, viewStart)), xb = scale.x(Math.min(r.end, viewEnd));
           const deltas = otherGroups.map(o => ({ text: deltaText(r.pct - (o.group!.agg.retention.find(x => x.start === r.start && x.end === r.end)?.pct ?? 0)), color: o.group!.color, name: o.sampleName }));
+          const key = `ir:${r.start}-${r.end}`;
           return {
             x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`, deltas,
+            hint: '\nclick for its summary: HGVS, reading frame, supporting reads',
+            onClick: (e: { clientX: number; clientY: number }) => {
+              const p = svgPoint(e);
+              setPopover(prev => (prev?.kind === 'retention' && prev.key === key ? null : { kind: 'retention', key, start: r.start, end: r.end, fromExon: r.fromExon, toExon: r.toExon, x: p.x, y: p.y }));
+            },
             title: `${pctLabel(r.pct)} ${r.note}\n${track.group ? 'reads pooled over the group' : track.sampleName} · unspliced through both boundaries, ≥ 6 aligned bases on the exon side and ≥ 10 on the intron side` +
               deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join(''),
           };
@@ -5298,7 +5323,7 @@ export default function SashimiViewer({
             const w = pillWidth(r);
             return (
               <g key={`ir-${i}`} onClick={r.onClick ? e => { e.stopPropagation(); r.onClick!(e); } : undefined} style={r.onClick ? { cursor: 'pointer' } : undefined}>
-                <title>{r.title}{r.onClick ? '\nclick for the consensus of the clipped sequences' : ''}</title>
+                <title>{r.title}{r.onClick ? r.hint ?? '\nclick for the consensus of the clipped sequences' : ''}</title>
                 <rect x={r.x - w / 2} y={r.y - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={r.color ?? RETENTION_COLOR} strokeWidth={1} />
                 <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={r.color ?? RETENTION_COLOR} fontSize={9.5} fontWeight={700}>
                   {r.text}
@@ -5988,6 +6013,54 @@ export default function SashimiViewer({
           `A transcript of the other strand (antisense gene, read-through) has introns of its own, usually with GT…AG read on its strand. No HGVS, reading frame or usage: they belong to ${gene}'s strand. "Supporting reads" lists the opposite strand's reads only.`,
       };
     }
+    if (popover.kind === 'retention') {
+      const { start, end, fromExon, toExon } = popover;
+      const L = end - start, model = tx;
+      const h = model ? retentionHgvs(start, end, model) : null;
+      const seqHere = irSeq?.key === popover.key ? irSeq : null;
+      const effect = h && model && seqHere?.seq ? retentionEffect(start, end, seqHere.seq, h, model) : null;
+      const regionNote = !h ? null
+        : h.region === 'cds' ? (effect ? `protein: ${effect.text}` : seqHere?.error ? `reading frame: the intron's bases could not be read (${seqHere.error})` : L > IR_SEQ_MAX_BP ? `reading frame: ${L % 3 === 0 ? 'in frame' : 'frameshift'} (${L.toLocaleString('en-US')} nt); the intron is too long to read for its stop codons` : 'reading frame: reading the intron\'s bases…')
+        : h.region === 'utr5' ? 'in the 5′ UTR: the coding sequence itself is unchanged (an upstream ORF or the start codon\'s context may change)'
+        : h.region === 'utr3' ? 'in the 3′ UTR: after the stop codon, the coding sequence is unchanged (the 3′ UTR and its exon junctions change: a junction more than 50–55 nt after the stop is lost or kept)'
+        : h.region === 'noncoding' ? 'non-coding transcript: no reading frame'
+        : 'across a boundary of the CDS: check the start or stop codon by hand';
+      const hgvsLines = h ? [h.r, `intron ${h.index + 1} of ${h.count} (exon ${fromExon} → exon ${toExon}) · ${currentChrom}:g.${start + 1}_${end} · ${formatBp(L)}`, ...(regionNote ? [regionNote] : [])]
+        : ['no MANE Select model with this intron loaded'];
+      // per sample: the unspliced reads through each boundary (transcript order: 5′ the donor side), the canonical
+      // junction, the share shown, the rMATS-style ratio, and the intron's depth against the junction (IRFinder-style)
+      const plus = (model?.strand ?? 1) > 0;
+      const lo = Math.max(start, viewStart), hi = Math.min(end, viewEnd);
+      const medianDepth = (cov: CoverageRun[]) => {
+        if (hi <= lo) return null;
+        const n = Math.min(201, hi - lo), xs: number[] = [];
+        for (let i = 0; i < n; i++) xs.push(depthAt(cov, lo + Math.floor(((i + 0.5) * (hi - lo)) / n)));
+        xs.sort((a, b) => a - b);
+        return xs[xs.length >> 1];
+      };
+      const fmt0 = (v: number) => (Number.isInteger(v) ? v.toLocaleString('en-US') : v.toFixed(1));
+      const rows = displayTracks.filter(t => !t.gtex && !isDnaTrack(t)).map(t => {
+        const agg = t.group ? t.group.agg : usageEvents.get(t.sampleId);
+        const r = agg?.retention.find(x => x.start === start && x.end === end);
+        if (!r) return [t.sampleName, '—', '—', '—', '—', '—', '—', '—'];
+        const five = plus ? r.rStart : r.rEnd, three = plus ? r.rEnd : r.rStart, R = r.rStart + r.rEnd, C = r.canonical;
+        const d = medianDepth(t.coverage);
+        return [t.sampleName, fmt0(five), fmt0(three), fmt0(C), pctLabel(r.pct), R + 2 * C > 0 ? pctLabel(R / (R + 2 * C)) : '—',
+          d == null ? '—' : fmt0(d), d == null || d + C <= 0 ? '—' : pctLabel(d / (d + C))];
+      });
+      return {
+        title: `Intron retention · ${currentChrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}`,
+        subtitle: `intron ${formatBp(L)} · exon ${fromExon} → exon ${toExon}${h ? ` · ${h.before} | ${h.after}` : ''}`,
+        cartoon: null, hgvs: hgvsLines,
+        tables: [{ head: ['sample', '5′ boundary', '3′ boundary', 'canonical junction', 'IR (shown)', 'IR vs canonical', `intron depth${hi - lo < L ? ' (in view)' : ''}`, 'IR ratio'], rows }],
+        strip: null,
+        note: `5′ / 3′ boundary: reads unspliced through the donor and the acceptor side of the intron, at least ${SPAN_EXON_ANCHOR} aligned bases on the exon side and ${SPAN_INTRON_ANCHOR} on the intron side. ` +
+          'IR (shown) = the mean of the two / the reads competing at the intron (canonical junction, alternative sites, pseudo-exons, skipping), as on the pill. ' +
+          'IR vs canonical = (5′ + 3′) / (5′ + 3′ + 2 × canonical), rMATS-style. ' +
+          'IR ratio = median intron depth / (median intron depth + canonical junction reads), after IRFinder (Middleton et al. 2017, which takes the spliced reads at either end of the intron): depth inside the intron, not only at its ends, so a pre-mRNA or a cryptic exon inside it raises it too. ' +
+          '"Supporting reads" opens the reads track on the reads through either boundary, with their mates. HGVS: the intron inserted between its two exon bases (r. numbering); the reading frame from the intron\'s own bases, not 3′-normalised.',
+      };
+    }
     if (popover.kind === 'junction') {
       const j = popover.j;
       const { model, info, foreign } = junctionContext(j);
@@ -6029,6 +6102,7 @@ export default function SashimiViewer({
         status: tables.length > 1 ? status : undefined,
       };
     }
+    if (popover.kind !== 'exon') return null;
     const ex = popover.exon;
     const cFirst = tx ? cdnaPosition(tx.strand > 0 ? ex.start : ex.end - 1, tx).label : null;
     const cLast = tx ? cdnaPosition(tx.strand > 0 ? ex.end - 1 : ex.start, tx).label : null;
@@ -6051,7 +6125,19 @@ export default function SashimiViewer({
         ' ψ = mean inclusion junction reads / (mean inclusion + skipping reads).',
       status,
     };
-  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands]);
+  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands, irSeq, usageEvents, viewStart, viewEnd, isDnaTrack]);
+
+  // a retention popover reads the intron's bases (with a few exon bases each side) for its reading frame
+  useEffect(() => {
+    if (popover?.kind !== 'retention') return;
+    const { key, start, end } = popover;
+    if (irSeq?.key === key || end - start > IR_SEQ_MAX_BP) return;
+    let live = true;
+    ds.getReference(currentChrom, start - RETENTION_FLANK, end + RETENTION_FLANK)
+      .then(seq => { if (live) setIrSeq({ key, seq: seq ?? null, ...(seq ? {} : { error: 'no reference available' }) }); })
+      .catch(err => { if (live) setIrSeq({ key, seq: null, error: err?.message ?? String(err) }); });
+    return () => { live = false; };
+  }, [popover, currentChrom, ds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!popover) return;
@@ -6099,7 +6185,14 @@ export default function SashimiViewer({
    * reads (not collapsed), shown if they were not. Tolerances: long-read junctions counted within JUNCTION_SNAP_BP
    * (junctionSnap.ts); structural events merge breakpoints within 5 % of their length, 20–100 bp, after 5 bp rounding.
    */
-  const showSupporting = useCallback((p: { kind: 'junction' | 'anti'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind }) => {
+  const showSupporting = useCallback((p: { kind: 'junction' | 'anti'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind } | { kind: 'retention'; start: number; end: number; fromExon: number; toExon: number }) => {
+    if (p.kind === 'retention') {
+      const pos = `${currentChrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`;
+      setReadsSupport({ arc: { kind: 'retention', start: p.start, end: p.end, tol: 0 }, label: `the reads unspliced through the intron ${pos} (exon ${p.fromExon} → ${p.toExon})`, side: 'sense' });
+      setCollapseReads(false);
+      setShowReads(true);
+      return;
+    }
     const { j } = p;
     const pos = `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`;
     let arc: ArcSupport, label: string, side: 'sense' | 'anti' | undefined;
@@ -6808,6 +6901,21 @@ export default function SashimiViewer({
                 </div>
                 <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
               </div>
+              {(() => {
+                const forms = variantCoordinates(s, currentChrom, variantPanel.ref ?? null, variantPanel.insSeq, tx);
+                return (
+                  <div className="flex flex-wrap items-center gap-1 px-3 pt-1.5">
+                    <span className="font-semibold text-gray-700 mr-0.5">Copy</span>
+                    {forms.map(f => (
+                      <button key={f.label} type="button" title={`${f.title}: click to copy\n${f.text}`}
+                        onClick={() => { copyText(f.text); setVariantCopied(f.text); window.setTimeout(() => setVariantCopied(c => (c === f.text ? null : c)), 1500); }}
+                        className={`max-w-full truncate rounded border px-1.5 py-0.5 font-mono text-[10.5px] ${variantCopied === f.text ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                        {variantCopied === f.text ? '✓ copied' : f.text}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
               <form className="flex items-center gap-1.5 px-3 pt-1.5"
                 onSubmit={e => {
                   e.preventDefault();
@@ -6995,7 +7103,7 @@ export default function SashimiViewer({
                   <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
                 )}
-                {popover.kind !== 'exon' && (() => {
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && (() => {
                   const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;
                   return (
                     <span className="flex items-center gap-1" title="Size of this junction's label, on every track (saved with the session)">
@@ -7008,9 +7116,9 @@ export default function SashimiViewer({
                 })()}
                 {popover.kind !== 'exon' && (
                   <button onClick={() => { showSupporting(popover); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px] font-medium`}
-                    title={`Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : popover.kind === 'anti' ? ' (on a sample whose strands are shown, its reads of the opposite strand only)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
+                    title={popover.kind === 'retention' ? `Reads track: only the reads unspliced through either boundary of this intron (at least ${SPAN_EXON_ANCHOR} exon and ${SPAN_INTRON_ANCHOR} intron bases), with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.` : `Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : popover.kind === 'anti' ? ' (on a sample whose strands are shown, its reads of the opposite strand only)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
                 )}
-                {popover.kind !== 'exon' && (
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && (
                   <button onClick={() => { hideArc(popover.j, popover.kind === 'anti'); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
                     title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
                 )}

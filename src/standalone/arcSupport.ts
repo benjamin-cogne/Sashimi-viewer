@@ -18,8 +18,9 @@
  */
 import type { AlignedRead } from '../components/sashimi/types';
 import { plusStrand } from './coverage';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR } from './alignments';
 
-export type ArcSupportKind = 'junction' | 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
+export type ArcSupportKind = 'junction' | 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant' | 'retention';
 export interface ArcSupport {
   kind: ArcSupportKind; start: number; end: number;
   /** discordant pairs: their class */
@@ -35,6 +36,7 @@ export interface ArcSupport {
 /** Soft or hard clip after which an alignment end counts as a break (as the rescue of clipped reads: alignments.ts). */
 const MIN_CLIP = 8;
 const MIN_DELETION = 50;
+
 /**
  * A discordant arc's ends are where its pairs' reads point (or, in files exported before, the edges of 500 bp bins
  * joined within one bin): a supporting pair has a read starting within this of each end.
@@ -104,6 +106,12 @@ function breakpoints(r: ArcRead, chrom: string): number[] {
 export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
   if (a.strand && plusStrand(r.flags) !== (a.strand === 'plus')) return false;
   switch (a.kind) {
+    case 'retention': {
+      // unspliced through a boundary of the intron, anchored as the retention percentages count (alignments.ts): [lo, hi)
+      // aligned without a skip (N) across it; a deletion inside is still the unspliced molecule
+      const through = (lo: number, hi: number) => r.start <= lo && r.end >= hi && !r.gaps.some(([s, e, op]) => op === 'N' && s < hi && e > lo);
+      return through(a.start - SPAN_EXON_ANCHOR, a.start + SPAN_INTRON_ANCHOR) || through(a.end - SPAN_INTRON_ANCHOR, a.end + SPAN_EXON_ANCHOR);
+    }
     case 'junction':
       return r.gaps.some(([s, e, op]) => op === 'N' && near(s, a.start, a.tol) && near(e, a.end, a.tol));
     case 'deletion':

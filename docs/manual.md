@@ -280,7 +280,26 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   same value on both arcs, exon skipping S, and intron retention weighted (R5 + R3) / 2 from the
   reads that run unspliced through the two boundaries of the intron (one aligned block with at
   least 6 bases on the exon side and 10 on the intron side), shown as a teal *IR* pill on the intron
-  baseline. An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
+  baseline. **Click an IR pill** for the intron's summary, as an arc's:
+  - its HGVS description on the transcript, the intron inserted between its two exon bases
+    (`NM_…:r.290_291ins290+1_291-1`), and its place (intron *n* of *N*, the genomic span and the
+    length);
+  - what retaining it does to the protein. For an intron inside the CDS, the frame and the first
+    stop codon, read from the intron's bases with the codon it splits. A premature stop with exon
+    junctions downstream makes the transcript a likely target of nonsense-mediated decay; in the
+    last intron it does not. An intron in a UTR or a non-coding transcript leaves the coding
+    sequence as it is;
+  - a row per sample:
+    - the reads unspliced through the 5′ (donor) and the 3′ (acceptor) boundary, and the canonical
+      junction's reads;
+    - the share shown on the pill, and the rMATS-style ratio against the canonical junction;
+    - the median depth inside the intron (the part in view), and an IRFinder-style IR ratio
+      (Middleton et al. 2017): intron depth / (intron depth + canonical junction reads). IRFinder
+      takes the spliced reads at either end of the intron; here, the canonical junction's;
+  - *Supporting reads* opens the reads track on the reads through either boundary, with their
+    mates.
+
+  An exon-skipping arc spans two introns and shows 2·S over the two totals, which is the
   rMATS value 2·S / (I₁ + I₂ + 2·S) when nothing else competes at those introns; its tooltip gives
   its share at each intron. When that skipping arc is the only competitor on both sides of the
   skipped exon, the two inclusion junctions show the inclusion level of the event pooled over the
@@ -780,6 +799,15 @@ to be open.
   - the median mapping and base qualities, the median distance to a read end, and the four quality
     cells in one line;
   - whether the site is a common SNP.
+- **Copy** chips under the site's position put its coordinates on the clipboard, one click each:
+  - the position (`chr1:5291`);
+  - gnomAD / VCF style (`1-5291-C-A`), an indel with the base before it as anchor and an
+    insertion with the bases most of its reads carry;
+  - HGVS genomic (`chr1:g.5291C>A`);
+  - HGVS on the shown transcript (`NM_…:c.281C>A`), bases on its strand.
+
+  Indels are placed where the reads put them, not shifted 3′ as HGVS asks. DNA sites have the
+  same chips.
 - *Phase with* works there too. Spliced reads link exonic variants far apart (see the phasing panel).
 
 **Layers.** Four layers make a DNA track, switched in the *Layers* section of the toolbar,
@@ -1630,6 +1658,9 @@ If the viewer contributes to a publication, please cite it
   2015;31:143–145 (the assembly map used to lift coordinates between GRCh38 and GRCh37).
 - Schneider VA et al. *Evaluation of GRCh38 and de novo haploid genome assemblies demonstrates the
   enduring quality of the reference assembly.* Genome Res 2017;27:849–864.
+- Middleton R et al. *IRFinder: assessing the impact of intron retention on
+  mammalian gene expression.* Genome Biol 2017;18:51. doi:10.1186/s13059-017-1184-4 (the IR ratio
+  of the retention summary).
 - Hiatt L, Weisburd B, Dolzhenko E et al. *STRchive: a dynamic resource detailing population-level
   and locus-specific insights at tandem repeat disease loci.* Genome Med 2025;17:29.
   doi:10.1186/s13073-025-01454-4 (the repeat loci, motifs and ranges; data under the MIT License).
