@@ -79,6 +79,8 @@ export function buildSession(args: {
     samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
     consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, rnaVariants: state.rnaVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands, readsColor: state.readsColor,
+    // the panel order names its samples by name (ids are the page's own, renumbered at each load)
+    panelOrder: state.panelOrder?.length ? state.panelOrder.map(k => (k.startsWith('s:') ? `s:${nameOf(Number(k.slice(2))) ?? k.slice(2)}` : k)) : undefined,
   });
   const geneOf = (state: ViewerState): SessionGene => ({ name: state.gene.name, id: state.gene.id, chrom: state.gene.chrom, start: state.gene.start, end: state.gene.end, view: { ...state.view }, mark: state.mark });
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));
@@ -161,6 +163,7 @@ export function viewerSettingsOf(session: SessionFile | { viewer: SessionViewer 
     readsSample: readsSample ? idOf(readsSample) ?? null : null,
     ...(shown ? { shownSamples: shown.map(idOf).filter((id): id is number => id != null) } : {}),
     groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
+    ...(v.panelOrder ? { panelOrder: v.panelOrder.map(k => (k.startsWith('s:') ? (idOf(k.slice(2)) != null ? `s:${idOf(k.slice(2))}` : null) : k)).filter((k): k is string => !!k) } : {}),
   };
 }
 

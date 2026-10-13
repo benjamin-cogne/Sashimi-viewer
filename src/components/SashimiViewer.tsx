@@ -174,6 +174,12 @@ export interface ViewerSettings {
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
   /**
+   * the order of the panels under the ruler, as dragged by their grips: 'tx' (gene model), 'seq', 'known', 'snps', 'alt'
+   * (all transcripts), 's:<sample id>', 'grp:<group id>', 'gtex:<tissue id>'; what it does not name keeps its default
+   * place. Absent: the default order (annotations, then the samples)
+   */
+  panelOrder?: string[];
+  /**
    * the samples shown as tracks, in track order (the primary first): a view opens with exactly these (none when empty);
    * absent = a first view, which shows the primary sample and one comparison sample
    */
@@ -439,6 +445,11 @@ function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number
 const READS_MAX_ROWS = 120;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
+/** the annotation panels under the ruler, in their default order: gene model, sequence, known variants, SNPs, all transcripts */
+const ANNOT_KEYS = ['tx', 'seq', 'known', 'snps', 'alt'];
+const ANNOT_NAMES: Record<string, string> = { tx: 'the gene model', seq: 'the sequence strip', known: 'the known variants', snps: 'the common SNPs', alt: 'all transcripts' };
+/** a sample, group or GTEx track's key in the panel order */
+const panelKeyOf = (t: { sampleId: number; gtex?: { tissue: { id: string } }; group?: { id: number } }) => (t.gtex ? `gtex:${t.gtex.tissue.id}` : t.group ? `grp:${t.group.id}` : `s:${t.sampleId}`);
 /** a retained intron's bases are read for its stop codons up to this length */
 const IR_SEQ_MAX_BP = 200_000;
 /** GTEx tracks: the longest exon taken from a tissue's junctions alone (an acceptor and the next donor) */
@@ -1171,6 +1182,9 @@ export default function SashimiViewer({
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [rnaVariants, setRnaVariants] = useState(init.rnaVariants ?? true);
+  const [panelOrder, setPanelOrder] = useState<string[]>(init.panelOrder ?? []);
+  /** a panel being dragged by its grip: its key and where the pointer is (SVG y) */
+  const [panelDrag, setPanelDrag] = useState<{ key: string; y: number } | null>(null);
   const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
   const [seqRef, setSeqRef] = useState<{ chrom: string; start: number; seq: string } | null>(null);
   /** the last fetch for the strip found no reference (no FASTA, the web APIs unreachable) */
@@ -3858,7 +3872,6 @@ export default function SashimiViewer({
     antiPaths: CoveragePaths | null;
   }
 
-  const transcriptY = RULER_H;
   // the sequence strip under the gene model: the rows once bases can be drawn, else one line saying how far to zoom
   const stripRef = (() => {
     if (viewEnd - viewStart > SEQ_MAX_BP) return null;
@@ -3872,12 +3885,26 @@ export default function SashimiViewer({
   })();
   const seqRows = sequenceRows(stripRef, 0, 2);
   const seqPanelH = !seqRows ? 0 : seqRows.drawn ? seqRows.aaRowH + seqRows.revRowH + seqRows.seqRowH + 2 : SEQ_NOTE_H;
-  const seqY = transcriptY + transcriptPanelH + TRACK_GAP;
-  const knownY = seqY + (seqPanelH ? seqPanelH + TRACK_GAP : 0);
-  const snpY = knownY + (knownPanelH ? knownPanelH + TRACK_GAP : 0);
   const snpPanelH = showSnps ? SNP_PANEL_H : 0;
-  const altY = snpY + (snpPanelH ? snpPanelH + TRACK_GAP : 0);
-  const tracksTop = altY + (altPanelH ? altPanelH + TRACK_GAP : 0);
+  /** the annotation panels' heights, by their key in the panel order (0: not shown, no room taken) */
+  const annotH: Record<string, number> = { tx: transcriptPanelH, seq: seqPanelH, known: knownPanelH, snps: snpPanelH, alt: altPanelH };
+  /**
+   * The panels under the ruler in the order drawn: the stored order (panels dragged by their grips) of those shown, each
+   * one it does not name at its default place, after the panel that comes before it by default.
+   */
+  const orderKeys = useMemo(() => {
+    const def = [...ANNOT_KEYS, ...displayTracks.map(panelKeyOf)];
+    const present = new Set(def);
+    const out = panelOrder.filter(k => present.has(k));
+    const have = new Set(out);
+    def.forEach((k, i) => {
+      if (have.has(k)) return;
+      let at = 0;
+      for (let j = i - 1; j >= 0; j--) { const p = out.indexOf(def[j]); if (p >= 0) { at = p + 1; break; } }
+      out.splice(at, 0, k); have.add(k);
+    });
+    return out;
+  }, [panelOrder, displayTracks]);
 
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
@@ -3943,16 +3970,17 @@ export default function SashimiViewer({
     const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
     return () => clearTimeout(timer);
   }, [tracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, rnaVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
-  const layouts: TrackLayout[] = useMemo(() => {
-    let y = tracksTop;
+  const { layouts, annotY } = useMemo(() => {
+    let y = RULER_H;
     const out: TrackLayout[] = [];
+    const annotY: Record<string, number> = {};
     const plotRight = PLOT_LEFT + plotWidth;
     const hiddenSet = new Set(hiddenArcs);
     /** difference in percentage points with another group, signed */
     const deltaText = (d: number) => (Math.abs(d) < 0.0005 ? '±0 %' : `${d < 0 ? '−' : '+'}${pctLabel(Math.abs(d))}`);
     // the samples with a methylation panel: with two or more, each panel gets the row of the island differences
     const methylDiffRow = showMethyl && !!ds.getMethylation && displayTracks.filter(t => isDnaTrack(t) && !t.gtex && !t.group).length >= 2;
-    displayTracks.forEach((track, idx) => {
+    const place = (track: TrackData, idx: number) => {
       const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? TRACK_COLORS[idx % TRACK_COLORS.length];
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
       const trackEvents = trackAgg?.events;
@@ -4298,9 +4326,17 @@ export default function SashimiViewer({
       out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow, mirror, antiPaths });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
-    });
-    return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+    };
+    // the panels in their order: an annotation takes its height, a sample its track (and its reads track); the colours
+    // stay the samples' own (their place among the samples, not on the page)
+    const byKey = new Map(displayTracks.map((t, idx) => [panelKeyOf(t), { t, idx }]));
+    for (const k of orderKeys) {
+      if (k in annotH) { annotY[k] = y; if (annotH[k]) y += annotH[k] + TRACK_GAP; continue; }
+      const e = byKey.get(k);
+      if (e) place(e.t, e.idx);
+    }
+    return { layouts: out, annotY };
+  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -4319,7 +4355,12 @@ export default function SashimiViewer({
     return out;
   }, [layouts, methylData, currentChrom]);
 
-  const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
+  const seqY = annotY.seq ?? RULER_H, knownY = annotY.known ?? RULER_H, snpY = annotY.snps ?? RULER_H, altY = annotY.alt ?? RULER_H;
+  const transcriptYAt = annotY.tx ?? RULER_H;
+  // the bottom of the stack: its last sample (in the order drawn) or an annotation panel dragged under the samples
+  const lastLayout = layouts.reduce<TrackLayout | null>((m, L) => (!m || L.yOff > m.yOff ? L : m), null);
+  const annotBottom = Math.max(RULER_H, ...Object.keys(annotH).map(k => (annotH[k] ? (annotY[k] ?? RULER_H) + annotH[k] + TRACK_GAP : RULER_H)));
+  const lastTrackBottom = Math.max(annotBottom, lastLayout ? lastLayout.yOff + lastLayout.height + TRACK_GAP : RULER_H);
   /** Each reads track sits right under the coverage track of its sample. */
   const readsPlacements = [...readsTracks].map(([sid, rt]) => {
     const L = layouts.find(l => l.track.sampleId === sid);
@@ -4327,6 +4368,72 @@ export default function SashimiViewer({
   });
   // A reads track may sit under the last coverage track, so it can extend the stack
   const tracksBottom = readsPlacements.reduce((m, p) => Math.max(m, p.y + p.rt.height + TRACK_GAP), lastTrackBottom);
+
+  /** Each panel shown, in its order, with its extent (a sample with its reads track): what the grips move. */
+  const panelSpans = orderKeys.map(k => {
+    if (k in annotH) return annotH[k] ? { key: k, top: annotY[k], bottom: annotY[k] + annotH[k], name: ANNOT_NAMES[k] ?? k } : null;
+    const L = layouts.find(l => panelKeyOf(l.track) === k);
+    if (!L) return null;
+    const rt = readsPlacements.find(p => p.sid === L.track.sampleId);
+    return { key: k, top: L.yOff, bottom: rt ? rt.y + rt.rt.height : L.yOff + L.height, name: L.track.sampleName };
+  }).filter((x): x is { key: string; top: number; bottom: number; name: string } => !!x);
+  const panelSpansRef = useRef(panelSpans);
+  panelSpansRef.current = panelSpans;
+  const orderKeysRef = useRef(orderKeys);
+  orderKeysRef.current = orderKeys;
+  /** Where a panel dragged to `y` lands: after the last other panel whose middle is above `y` (null: before them all). */
+  const dropAfter = (key: string, y: number) => {
+    let after: string | null = null;
+    for (const sp of panelSpansRef.current) if (sp.key !== key && (sp.top + sp.bottom) / 2 < y) after = sp.key;
+    return after;
+  };
+  const startPanelMove = (key: string, e: React.MouseEvent) => {
+    e.stopPropagation(); e.preventDefault();
+    setPanelDrag({ key, y: svgPoint(e).y });
+    const move = (ev: MouseEvent) => setPanelDrag(d => d && { ...d, y: svgPoint(ev).y });
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      setPanelDrag(null);
+      const after = dropAfter(key, svgPoint(ev).y);
+      const order = orderKeysRef.current.filter(k => k !== key);
+      const first = panelSpansRef.current.find(sp => sp.key !== key)?.key;
+      const at = after != null ? order.indexOf(after) + 1 : first != null ? order.indexOf(first) : 0;
+      order.splice(Math.max(0, at), 0, key);
+      if (order.join('\n') !== orderKeysRef.current.join('\n')) setPanelOrder(order);
+    };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+  };
+  /** A grip at the left of every panel, and while one is dragged, the line where it would land. Never exported. */
+  const renderPanelGrips = () => (
+    <g data-export="skip">
+      {panelSpans.map(sp => {
+        const dragged = panelDrag?.key === sp.key;
+        return (
+          <g key={`grip-${sp.key}`} style={{ cursor: panelDrag ? 'grabbing' : 'grab' }} onMouseDown={e => startPanelMove(sp.key, e)}
+            onDoubleClick={e => { e.stopPropagation(); setPanelOrder([]); }}>
+            <title>{`Drag to move ${sp.name} up or down (with its reads track); double-click a grip to bring back the default order`}</title>
+            <rect x={1} y={sp.top + 1} width={13} height={18} rx={3} fill={dragged ? withAlpha(INK.select, 0.25) : INK.bg} stroke={withAlpha(INK.select, dragged ? 0.9 : 0.35)} strokeWidth={0.8} />
+            {[0, 1, 2].map(r => [0, 1].map(c => <circle key={`${r}${c}`} cx={5.5 + c * 4} cy={sp.top + 5.5 + r * 4.5} r={1.1} fill={INK.select} opacity={0.8} />))}
+          </g>
+        );
+      })}
+      {panelDrag && (() => {
+        const sp = panelSpans.find(x => x.key === panelDrag.key);
+        if (!sp) return null;
+        const after = dropAfter(panelDrag.key, panelDrag.y);
+        const others = panelSpans.filter(x => x.key !== panelDrag.key);
+        const at = after != null ? others.find(x => x.key === after)!.bottom + TRACK_GAP / 2 : (others[0]?.top ?? sp.top) - TRACK_GAP / 2;
+        return (
+          <g pointerEvents="none">
+            <rect x={0} y={sp.top} width={PLOT_LEFT + plotWidth} height={Math.max(0, sp.bottom - sp.top)} fill={withAlpha(INK.select, 0.06)} />
+            <line x1={0} y1={at} x2={PLOT_LEFT + plotWidth} y2={at} stroke={INK.select} strokeWidth={2.5} />
+            <rect x={PLOT_LEFT + 6} y={at - 9} width={sp.name.length * 5.6 + 70} height={16} rx={3} fill={INK.select} />
+            <text x={PLOT_LEFT + 12} y={at + 3} fill="#fff" fontSize={10} fontWeight={600}>{`move ${sp.name} here`}</text>
+          </g>
+        );
+      })()}
+    </g>
+  );
 
 
   /** Legend items (local y), laid out left to right and wrapped into rows that fit the plot width. */
@@ -5743,7 +5850,8 @@ export default function SashimiViewer({
   /** Guide lines / bands of the primary sample's known variants through every track, and small marks on the other samples' tracks. */
   const renderKnownOverlay = () => {
     if (!showKnown) return null;
-    const top = knownY + knownPanelH, bottom = tracksBottom - TRACK_GAP;
+    // through every sample, wherever the panels were dragged: from the known panel's bottom or the highest sample
+    const top = Math.min(knownY + knownPanelH, ...layouts.map(L => L.yOff)), bottom = tracksBottom - TRACK_GAP;
     const guides = primaryKnownHere.map(v => {
       const xa = scale.x(v.start), xb = scale.x(v.end);
       const left = Math.max(PLOT_LEFT, Math.min(xa, xb)), right = Math.min(plotRight, Math.max(xa, xb));
@@ -6242,14 +6350,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -6722,7 +6830,7 @@ export default function SashimiViewer({
           })()}
 
           {renderRuler()}
-          {renderTranscript(transcriptY)}
+          {renderTranscript(transcriptYAt)}
           {seqPanelH > 0 && renderSequence(seqY)}
           {knownPanelH > 0 && renderKnown(knownY)}
           {showSnps && renderSnps(snpY)}
@@ -6756,6 +6864,7 @@ export default function SashimiViewer({
             );
           })}
           {renderKnownOverlay()}
+          {renderPanelGrips()}
           {renderLegend(legendY)}
 
           {tracks.length === 0 && (

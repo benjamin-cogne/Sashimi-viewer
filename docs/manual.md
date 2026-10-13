@@ -112,6 +112,15 @@ When the reads track is on, a **reads strip** tinted indigo appears under the to
 
 Every control keeps its tooltip, which explains it in full.
 
+**Moving the panels.** Every panel under the ruler has a grip (⋮⋮) at its left edge: the gene model,
+the sequence strip, the known variants, the common SNPs, all transcripts, and each sample, group or
+GTEx track.
+- Drag a grip up or down. A blue line says where the panel will land; release to drop it there.
+  For example, take a sample and drop it right under the gene model.
+- A sample moves with its reads track and keeps its colour.
+- Double-click any grip to bring back the default order: the annotations first, then the samples.
+- The order is saved with the session, its samples by name.
+
 ## What it answers
 
 | Clinical question | What the viewer shows |
