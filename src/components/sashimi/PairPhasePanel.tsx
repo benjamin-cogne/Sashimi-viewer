@@ -30,6 +30,8 @@ interface Props {
   hpColor: (ps: number | null | undefined, hp: number) => string;
   /** the gene shown in the view, on the clicked site's chromosome: its exons (0-based half-open) placed on the map */
   gene?: { name: string; strand: number; exons: [number, number][] } | null;
+  /** the view runs right to left (a minus-strand gene drawn 5′→3′ on an RNA page): the map of the two copies too */
+  reverse?: boolean;
   /** picking sites by clicking them in the variants track: on or off, and the last site picked there */
   picking: boolean;
   onPicking: (on: boolean) => void;
@@ -55,7 +57,7 @@ function originTarget(o: PairPhaseOrigin): PairTarget {
   return { chrom: o.chrom, pos: s.pos, allele: s.kind === 'snv' ? { kind: 'snv', alt: s.alt } : { kind: s.kind, length: s.length }, text: `${o.chrom}:${fmt(s.pos + 1)}` };
 }
 
-export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, picking, onPicking, picked, onClose }: Props) {
+export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, reverse, picking, onPicking, picked, onClose }: Props) {
   const [sid, setSid] = useState(origin.sid);
   const [text, setText] = useState(text0);
   const [run, setRun] = useState<Run | null>(null);
@@ -186,7 +188,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
           {sites.map((s, i) => (s.error || s.note) && <div key={`n${i}`} className={s.error || !s.site ? 'text-red-600' : 'text-gray-500'}>{s.label}: {s.error ?? s.note}</div>)}
         </div>
       )}
-      {run && sites.length >= 2 && <PhaseMap sites={sites} pairs={run.pairs} siteColor={siteColor} siteShort={siteShort} hpColor={hpColor} gene={gene} />}
+      {run && sites.length >= 2 && <PhaseMap sites={sites} pairs={run.pairs} siteColor={siteColor} siteShort={siteShort} hpColor={hpColor} gene={gene} reverse={!!reverse} />}
       {sites.length > 2 && (
         <Matrix sites={sites} pairs={run!.pairs} pick={pick} onPick={(i, j) => setPick([i, j])} siteColor={siteColor} siteShort={siteShort} />
       )}
@@ -258,7 +260,7 @@ function placeSites(sites: SiteRow[], pairs: Map<string, PairCell>): { side: Sid
  * The two copies of the chromosome drawn as two lines, the sites at their positions (to scale) on the copy that carries
  * them, the view's gene and its exons above; a site not placed sits between the lines with a question mark.
  */
-function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites: SiteRow[]; pairs: Map<string, PairCell>; siteColor: (s: VariantSite) => string; siteShort: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string; gene?: Props['gene'] }) {
+function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }: { sites: SiteRow[]; pairs: Map<string, PairCell>; siteColor: (s: VariantSite) => string; siteShort: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string; gene?: Props['gene']; reverse: boolean }) {
   const chrom = sites[0].target.chrom;
   const drawn = sites.map((r, i) => ({ r, i })).filter(({ r }) => r.site && r.target.chrom === chrom);
   if (drawn.length < 1 || !sites[0].site) return null;
@@ -268,13 +270,14 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
   let lo = Math.min(...pos), hi = Math.max(...pos);
   const pad = Math.max(50, Math.round((hi - lo) * 0.06));
   lo = Math.max(0, lo - pad); hi += pad + 1;
-  const xOf = (p: number) => X0 + ((p - lo) / (hi - lo)) * (X1 - X0);
+  // the view's orientation: a minus-strand gene of an RNA page runs 5′→3′ left to right, its coordinates decreasing
+  const xOf = (p: number) => (reverse ? X1 - ((p - lo) / (hi - lo)) * (X1 - X0) : X0 + ((p - lo) / (hi - lo)) * (X1 - X0));
   const lineColor = (h: 0 | 1) => (tagged ? hpColor(ps, h + 1) : '#9ca3af');
   const lineLabel = (h: 0 | 1) => (tagged ? `H${h + 1}` : h === 0 ? `copy with ${sites[0].label}` : 'other copy');
   // markers at least GAP apart: sites a few kb apart on a 100 kb map are spread, each joined to its true position on
   // the axis (and the gene) by a leader line
   const GAP = 26;
-  const order = drawn.map(d => d.i).sort((p, q) => sites[p].site!.pos - sites[q].site!.pos);
+  const order = drawn.map(d => d.i).sort((p, q) => xOf(sites[p].site!.pos) - xOf(sites[q].site!.pos));
   const xs = order.map(i => xOf(sites[i].site!.pos));
   for (let k = 1; k < xs.length; k++) xs[k] = Math.max(xs[k], xs[k - 1] + GAP);
   if (xs.length && xs[xs.length - 1] > X1) {
@@ -282,7 +285,8 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
     for (let k = xs.length - 2; k >= 0; k--) xs[k] = Math.min(xs[k], xs[k + 1] - GAP);
   }
   const xAt = new Map(order.map((i, k) => [i, xs[k]]));
-  const ticks = [lo, Math.round((lo + hi) / 2), hi];
+  // left to right as drawn
+  const ticks = reverse ? [hi, Math.round((lo + hi) / 2), lo] : [lo, Math.round((lo + hi) / 2), hi];
   const exons = gene ? gene.exons.filter(([s, e]) => e > lo && s < hi) : [];
   const geneSpan = gene && gene.exons.length ? [Math.min(...gene.exons.map(e => e[0])), Math.max(...gene.exons.map(e => e[1]))] : null;
   const showGene = !!geneSpan && geneSpan[1] > lo && geneSpan[0] < hi;
@@ -300,8 +304,8 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
         {showGene && (
           <g>
             <line x1={xOf(Math.max(lo, geneSpan![0]))} y1={GENE_Y} x2={xOf(Math.min(hi, geneSpan![1]))} y2={GENE_Y} stroke="#6b7280" strokeWidth={1} />
-            {exons.map(([s, e], k) => <rect key={k} x={xOf(Math.max(lo, s))} y={GENE_Y - 5} width={Math.max(1.5, xOf(Math.min(hi, e)) - xOf(Math.max(lo, s)))} height={10} fill="#1f2937" />)}
-            <text x={4} y={GENE_Y + 4} fontSize={10} fontWeight={700} fill="#374151">{gene!.name} <tspan fontWeight={400} fill="#9ca3af">{gene!.strand < 0 ? '←' : '→'}</tspan></text>
+            {exons.map(([s, e], k) => { const xa = xOf(Math.max(lo, s)), xb = xOf(Math.min(hi, e)); return <rect key={k} x={Math.min(xa, xb)} y={GENE_Y - 5} width={Math.max(1.5, Math.abs(xb - xa))} height={10} fill="#1f2937" />; })}
+            <text x={4} y={GENE_Y + 4} fontSize={10} fontWeight={700} fill="#374151">{gene!.name} <tspan fontWeight={400} fill="#9ca3af">{(gene!.strand < 0) !== reverse ? '←' : '→'}</tspan></text>
           </g>
         )}
         {([0, 1] as const).map(h => (
@@ -344,7 +348,7 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene }: { sites
         ))}
       </svg>
       <div className="text-[10px] text-gray-400 leading-4">
-        The two copies of {chrom}{showGene ? `, ${gene!.name}'s exons above` : ''}; the axis and the gene to scale, sites close together spread apart, each joined to its position: each site on the copy carrying it ({tagged ? `H1 and H2 of phase set ${ps ?? '(no PS)'}, the file's haplotags` : `${sites[0].label}'s copy drawn first, the haplotypes being unnamed without haplotags`}), placed from the decided pairs; both copies when homozygous; ? when no decided pair places it.
+        The two copies of {chrom}{showGene ? `, ${gene!.name}'s exons above` : ''}{reverse ? ', drawn as the view: 5′→3′ of the gene, coordinates decreasing to the right' : ''}; the axis and the gene to scale, sites close together spread apart, each joined to its position: each site on the copy carrying it ({tagged ? `H1 and H2 of phase set ${ps ?? '(no PS)'}, the file's haplotags` : `${sites[0].label}'s copy drawn first, the haplotypes being unnamed without haplotags`}), placed from the decided pairs; both copies when homozygous; ? when no decided pair places it.
         {contradictions.length > 0 && <span className="text-red-600"> Contradicting pairs: {contradictions.map(([i, j]) => `${sites[i].label}–${sites[j].label}`).join(', ')} (red outline).</span>}
         {relay.size > 0 && <span> Small dark ticks: the {relay.size} heterozygous sites the reads' phasing went through, on their copy.</span>}
         {others.length > 0 && <span> Not drawn (another chromosome): {others.map(r => r.label).join(', ')}.</span>}

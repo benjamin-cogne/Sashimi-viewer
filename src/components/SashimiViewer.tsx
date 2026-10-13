@@ -7048,7 +7048,7 @@ export default function SashimiViewer({
             knownSites={(sid, chrom) => (dnaSites[sid]?.fetched.chrom === chrom ? dnaSites[sid].sites : [])}
             uniqueOnly={uniqueOnly} x={pairPanel.x} y={pairPanel.y} siteColor={siteColor} siteShort={siteShort} hpColor={(ps, hp) => psTone(ps).hp[hp === 2 ? 1 : 0]}
             gene={transcript && transcript.chrom === pairPanel.origin.chrom ? { name: transcript.gene_name, strand: transcript.strand, exons: transcript.exons.map(e => [e.start - 1, e.end] as [number, number]) } : null}
-            picking={pairPicking} onPicking={setPairPicking} picked={pairPicked}
+            reverse={reverse} picking={pairPicking} onPicking={setPairPicking} picked={pairPicked}
             onClose={() => { setPairPanel(null); setPairPicking(false); }} />
         )}
         {seqPanel && (

@@ -1008,7 +1008,9 @@ one sample.
 - **The map of the two copies**, at the top: two lines, the chromosome's two copies, with each site
   at its position on the copy that carries it. Homozygous sites sit on both copies. A site no
   decided pair places sits between the lines with a `?`.
-  - The view's gene and its exons are drawn above, and the axis is to scale. Sites a few kb apart
+  - The view's gene and its exons are drawn above, and the axis is to scale. The map runs as the
+    view does: a minus-strand gene of an RNA page reads 5′→3′ left to right, coordinates
+    decreasing to the right. Sites a few kb apart
     on a 100 kb map are spread apart, each joined to its true position by a leader line.
   - With haplotags, the copies are H1 and H2 of A's phase set, in its hues. Without them, A's copy
     is drawn first.
