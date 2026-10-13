@@ -5397,7 +5397,8 @@ export default function SashimiViewer({
           <g transform={`translate(${PLOT_LEFT + 8}, ${baseline - COVERAGE_H + 30})`}>
             <title>{gtexWarn}</title>
             <rect x={-4} y={-11} width={Math.min(plotWidth - 12, gtexWarn.length * 5.3 + 24)} height={15} rx={3} fill={INK.bg} opacity={0.92} />
-            <text x={0} y={0} fill={UNIQUE_COLOR} fontSize={9}>⚠ {gtexWarn.length > Math.floor((plotWidth - 40) / 5.3) ? gtexWarn.slice(0, Math.floor((plotWidth - 40) / 5.3) - 1) + '…' : gtexWarn}</text>
+            {/* an error in red; a note on partial data (junctions only) in grey */}
+            <text x={0} y={0} fill={track.error ? UNIQUE_COLOR : INK.muted} fontSize={9}>{track.error ? '⚠' : 'ⓘ'} {gtexWarn.length > Math.floor((plotWidth - 40) / 5.3) ? gtexWarn.slice(0, Math.floor((plotWidth - 40) / 5.3) - 1) + '…' : gtexWarn}</text>
           </g>
         )}
 
