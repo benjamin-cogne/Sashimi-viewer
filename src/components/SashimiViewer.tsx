@@ -441,6 +441,8 @@ const READS_MAX_ROWS = 120;
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
 /** a retained intron's bases are read for its stop codons up to this length */
 const IR_SEQ_MAX_BP = 200_000;
+/** GTEx tracks: the longest exon taken from a tissue's junctions alone (an acceptor and the next donor) */
+const GTEX_ALT_EXON_MAX_BP = 3000;
 /** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
 const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
@@ -2598,7 +2600,8 @@ export default function SashimiViewer({
   }, [currentGeneName, currentGeneId, gtexTracks, loadGtex]);
   /**
    * Sample tracks followed by the GTEx tissue tracks, as drawn. A tissue track's profile is the usage of
-   * each MANE exon (0–1) computed from the tissue's junction medians at both exon boundaries; tissues
+   * each exon (0–1) computed from the tissue's junction medians at both exon boundaries: the MANE exons, and those
+   * of other transcripts its junctions use; tissues
    * where the gene's median TPM is below GTEX_MIN_TPM show nothing but "low coverage".
    */
   /** One pooled track per sample group: summed coverage, summed junction reads, per-intron shares of every splicing event. */
@@ -2627,13 +2630,24 @@ export default function SashimiViewer({
     const withProfile = gtexTracks.map(t => {
       if (!t.gtex || t.gtex.lowCoverage) return { ...t, coverage: [], junctions: t.gtex?.lowCoverage ? [] : t.junctions };
       if (!tx) return t;
+      // the transcript's exons, and the exons the tissue's own junctions imply outside them (an acceptor followed by a
+      // donor within GTEX_ALT_EXON_MAX_BP: an exon of another transcript, a cryptic exon), each at its usage from the
+      // junction medians at its two boundaries; overlapping ones split at every boundary, the higher usage drawn
+      const segs = tx.exons.map(e => ({ start: e.start, end: e.end }));
+      const inModel = (a: number, b: number) => tx.exons.some(e => e.start < b && e.end > a);
+      const donors = [...new Set(t.junctions.map(j => j.start))].sort((x, y) => x - y);
+      for (const a of new Set(t.junctions.map(j => j.end))) {
+        const b = donors.find(d => d > a);
+        if (b != null && b - a <= GTEX_ALT_EXON_MAX_BP && !inModel(a, b)) segs.push({ start: a, end: b });
+      }
+      const usage = segs.map(sg => exonSiteUsage(sg, t.junctions).usage ?? 0);
+      const cuts = [...new Set(segs.flatMap(sg => [sg.start, sg.end]))].sort((x, y) => x - y);
       const coverage: CoverageRun[] = [];
-      let cursor = tx.exons.length ? tx.exons[0].start : 0;
-      for (const ex of tx.exons) {
-        const u = exonSiteUsage(ex, t.junctions).usage;
-        if (ex.start > cursor) coverage.push({ start: cursor, end: ex.start, depth: 0 });
-        coverage.push({ start: ex.start, end: ex.end, depth: u ?? 0 });
-        cursor = ex.end;
+      for (let k = 0; k + 1 < cuts.length; k++) {
+        const x = cuts[k], y = cuts[k + 1];
+        let d = -1;
+        segs.forEach((sg, i) => { if (sg.start <= x && sg.end >= y) d = Math.max(d, usage[i]); });
+        coverage.push({ start: x, end: y, depth: Math.max(0, d) });
       }
       return { ...t, coverage };
     });

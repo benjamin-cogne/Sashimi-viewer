@@ -235,8 +235,8 @@ export function getGtexProfile(geneName: string, geneId: string | undefined, tis
         if (erows.length && !ex.length) console.warn('[sashimi] GTEx exon rows could not be placed', { exonRow: erows[0], referenceExon: exons[0], exonRows: erows.length, referenceExons: exons.length, source: refExons.source });
         const warning = lastError ? `partial: ${lastError}`
           : !junctions.length ? `no junction data (${jrows.length} rows, first: ${brief(jrows[0])})`
-          // the details go to the console (above); the track says it in a few words
-          : !ex.length ? `junctions only: GTEx's ${erows.length} exon depths could not be placed on the gene model (${exons.length} exons${refExons.source === 'merged' ? ', rebuilt from the transcripts' : ''})`
+          // exon depths that could not be placed say so in the console (above) only: the tracks draw exon usage from the
+          // junction medians, not these depths
           : undefined;
         return { dataset, gencodeId: gene.gencodeId, tissue, junctions, exons: ex, coverage, unit: String(jrows[0]?.unit || erows[0]?.unit || 'median read count'), warning, tpm };
       }
