@@ -35,7 +35,7 @@ import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
 import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
 import { GeneSuggest } from './sashimi/GeneSuggest';
 import { RepeatInspector } from './sashimi/RepeatInspector';
-import { PairPhasePanel, type PairPhaseOrigin } from './sashimi/PairPhasePanel';
+import { PairPhasePanel, type PairPhaseOrigin, type PairPicked } from './sashimi/PairPhasePanel';
 import { startPanelDrag } from './sashimi/panelDrag';
 import { variantCoordinates } from './sashimi/variantText';
 import { RETENTION_FLANK, retentionEffect, retentionHgvs } from './sashimi/retention';
@@ -2385,7 +2385,10 @@ export default function SashimiViewer({
   const [pairPanel, setPairPanel] = useState<{ origin: PairPhaseOrigin; text: string; x: number; y: number } | null>(null);
   /** picking the phasing panel's sites by clicking them in the variants track, and the last one clicked */
   const [pairPicking, setPairPicking] = useState(false);
-  const [pairPicked, setPairPicked] = useState<{ n: number; chrom: string; site: VariantSite } | null>(null);
+  const [pairPicked, setPairPicked] = useState<PairPicked | null>(null);
+  /** picking for the phasing panel, for the handlers built in memos (the IR labels) */
+  const pairPickingRef = useRef(false);
+  pairPickingRef.current = !!pairPanel && pairPicking;
   const openVariantPanel = useCallback(async (sid: number, name: string, site: VariantSite, long: boolean, x: number, y: number) => {
     const v = viewRef.current, seq = ++variantSeq.current;
     setVariantPanel({ sid, name, site, long, x, y, busy: true });
@@ -4284,6 +4287,8 @@ export default function SashimiViewer({
             x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`, deltas,
             hint: '\nclick for its summary: HGVS, reading frame, supporting reads',
             onClick: (e: { clientX: number; clientY: number }) => {
+              // picking for the phasing panel: the intron's junction, whose use the fragments unspliced through it count against
+              if (pairPickingRef.current) { setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, junction: { start: r.start, end: r.end } })); return; }
               const p = svgPoint(e);
               setPopover(prev => (prev?.kind === 'retention' && prev.key === key ? null : { kind: 'retention', key, start: r.start, end: r.end, fromExon: r.fromExon, toExon: r.toExon, x: p.x, y: p.y }));
             },
@@ -5366,7 +5371,7 @@ export default function SashimiViewer({
           {/* Junction arcs */}
           {arcs.map(a => (
             <g key={a.key}
-              style={{ cursor: junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
+              style={{ cursor: pairPanel && pairPicking && !a.sv ? 'crosshair' : junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
               onMouseEnter={() => setHoverArc(a.dragKey)} onMouseLeave={() => setHoverArc(h => (h === a.dragKey ? null : h))}
               onMouseDown={e => {
                 e.stopPropagation();
@@ -5376,6 +5381,8 @@ export default function SashimiViewer({
               onClick={e => {
                 e.stopPropagation();
                 if (dragMoved.current) return;
+                // picking for the phasing panel: a splice junction (not a structural arc) joins its list
+                if (pairPanel && pairPicking && !a.sv) { setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, junction: { start: a.j.start, end: a.j.end } })); return; }
                 const p = svgPoint(e);
                 setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
@@ -7063,10 +7070,10 @@ export default function SashimiViewer({
                   setVariantPanel(null);
                 }}>
                 <span className="font-semibold text-gray-700 shrink-0">Phase with</span>
-                <input value={phaseWith} onChange={e => setPhaseWith(e.target.value)} placeholder="chr:pos; chr:pos:A>G; …" spellCheck={false}
+                <input value={phaseWith} onChange={e => setPhaseWith(e.target.value)} placeholder={rna ? "chr:pos; chr:first-last (junction); …" : "chr:pos; chr:pos:A>G; …"} spellCheck={false}
                   className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
-                  title="Whether this variant and others are on the same haplotype (in cis) or not (in trans), from the reads holding both: positions separated by ; as chr:pos (1-based), pos alone on this chromosome, with an allele chr:pos:A>G (VCF style, indels too) or chr:pos:+2 / -3" />
-                <button type="button" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" title="Pick the other variants by clicking them in the variants track"
+                  title="Whether this variant and others are on the same haplotype (in cis) or not (in trans), from the reads holding both: positions separated by ; as chr:pos (1-based), pos alone on this chromosome, with an allele chr:pos:A>G (VCF style, indels too) or chr:pos:+2 / -3. A splice junction as chr:first-last (the intron's first and last bases): which copy uses it" />
+                <button type="button" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" title={rna ? "Pick the other variants, or junction arcs and IR labels, by clicking them in the tracks" : "Pick the other variants by clicking them in the variants track"}
                   onClick={() => {
                     setPairPanel({ origin: { sid: variantPanel.sid, chrom: currentChrom, site: s }, text: phaseWith, x: variantPanel.x, y: variantPanel.y });
                     setPairPicking(true);

@@ -31,7 +31,7 @@
  */
 import type { AlignedRead, PhaseBlock, PhaseResult, VariantSite } from '../components/sashimi/types';
 import { alleleAt, HET_MAX, HET_MIN, type Allele } from './phasing';
-import { callSites, inBlocks, readJunctions } from './collapse';
+import { callSites, inBlocks, jKey, junctionSnap, readJunctions } from './collapse';
 import { siteHaplotypesOf } from './alleles';
 import { sitePhase, type SitePhase } from '../components/sashimi/sitePhase';
 
@@ -52,6 +52,8 @@ export interface PairTarget {
   /** a VCF-style REF>ALT: an indel's position is its anchor base, the base before the event */
   vcf?: boolean;
   allele?: AlleleSpec;
+  /** a splice junction rather than a variant: the intron [start, end), 0-based half-open (`pos` is its start) */
+  junction?: { start: number; end: number };
   /** as typed, for the messages */
   text: string;
 }
@@ -61,13 +63,22 @@ const sameChrom = (a: string, b: string) => a.replace(/^chr/i, '').toUpperCase()
 /**
  * Positions typed as `chr:pos`, separated by `;` (or new lines): `pos` alone is on `chrom`; an allele may follow, as
  * `chr:pos:A>G`, `chr:pos A>G`, `chr:pos:G`, `chr:pos:+2` / `-3` (the viewer's labels), or gnomAD's `1-55051215-G-GA`.
- * A chromosome written with or without `chr` is the view's when it names the same one.
+ * A splice junction is `chr:first-last`, the intron's first and last bases (1-based, as STAR's SJ.out.tab and the arcs'
+ * panels give them). A chromosome written with or without `chr` is the view's when it names the same one.
  */
 export function parseTargets(text: string, chrom: string): { targets: PairTarget[]; errors: string[] } {
   const targets: PairTarget[] = [], errors: string[] = [];
   for (const raw of text.split(/[;\n]+/)) {
     const t = raw.trim();
     if (!t) continue;
+    const j = /^([^\s:]+):\s*([\d,]+)\s*[-–]\s*([\d,]+)\s*$/.exec(t);
+    if (j) {
+      const a = parseInt(j[2].replace(/,/g, ''), 10), b = parseInt(j[3].replace(/,/g, ''), 10);
+      if (!(a >= 1 && b > a)) { errors.push(`${t}: a junction is chr:first-last, the intron's first and last bases`); continue; }
+      const c = sameChrom(j[1], chrom) ? chrom : j[1];
+      targets.push({ chrom: c, pos: a - 1, junction: { start: a - 1, end: b }, text: t });
+      continue;
+    }
     const m = /^(?:([^\s:]+?)[:\s-])?\s*([\d,]+)(?:[\s:-]+([ACGTN]+)\s*[>/-]\s*([ACGTN]+)|[\s:-]+([ACGTN])|[\s:]+([+-])(\d+))?\s*$/i.exec(t);
     if (!m) { errors.push(`${t}: not a position (chr:pos, chr:pos:A>G, chr:pos:+2)`); continue; }
     const pos1 = parseInt(m[2].replace(/,/g, ''), 10);
@@ -176,7 +187,8 @@ function linkOf(ra: AlignedRead, rb: AlignedRead, pa: number, pb: number): LinkK
 export type SiteClass = 'het' | 'low' | 'hom';
 export const siteClass = (vaf: number): SiteClass => vaf > HET_MAX ? 'hom' : vaf < HET_MIN ? 'low' : 'het';
 
-export type PairCall = 'cis' | 'trans' | 'conflict' | 'few' | 'hom';
+/** 'shared': a junction used on both copies (variant × junction pairs only) */
+export type PairCall = 'cis' | 'trans' | 'conflict' | 'few' | 'hom' | 'shared';
 export interface PairHaplotags {
   call: 'cis' | 'trans' | 'unlinked' | 'hom' | 'undecided';
   a: SitePhase; b: SitePhase;
@@ -389,4 +401,142 @@ export function chainPair(phase: PhaseResult, A: VariantSite, B: VariantSite, [n
     call, chain: { block: ba, between, hapA },
     note: `phased through the reads between them: one phase block (${span(ba)}, ${ba.sites.length} heterozygous sites, ${between.length} between the two) holds both, ${call === 'cis' ? 'on the same haplotype' : 'on the two haplotypes'}; ${ba.support[0] + ba.support[1]} fragments assigned, ${ba.conflicting} disagreeing`,
   };
+}
+
+// ---------------------------------------------------------------- a variant and a splice junction
+
+/**
+ * Which copy of the gene uses a splice junction, from the fragments holding a heterozygous variant: allele-specific
+ * splicing, the question asked of a variant thought to create, move or abolish a splice site, or of a distant marker SNP
+ * telling which allele makes an aberrant transcript (phASER's and the allele-specific splicing studies' principle).
+ *
+ *  1. Reads: the variant's window as for two variants, and the reads over the junction's two splice sites (each read
+ *     over either). Joined by name into fragments as for two variants.
+ *  2. Each fragment at the junction (junctionUse): it uses it (a read spliced from its first to its last intronic base;
+ *     long reads' junctions snapped as the arcs count them), or it passes one of its splice sites otherwise (unspliced
+ *     through it, spliced to another site, skipping it), with JUNCTION_ANCHOR bases aligned on each side; else nothing.
+ *  3. The 2×2 table, fragments by allele × junction: [alt–uses, alt–other, ref–uses, ref–other]. The junction's usage on
+ *     each copy (uses / (uses + other), its PSI by allele) and a two-sided Fisher exact test of the association.
+ *  4. The verdict, from the fragments using the junction (at least MIN_FRAGMENTS): on the variant's copy when at most
+ *     MAX_AGAINST of them carry the reference; on the other copy when at most MAX_AGAINST carry the variant, the variant's
+ *     copy seen passing the splice sites otherwise in MIN_FRAGMENTS fragments at least; on both copies otherwise. A
+ *     homozygous variant says nothing: both copies carry it.
+ * The counts are of molecules that reached the library: a transcript degraded by nonsense-mediated decay is
+ * under-counted on its copy.
+ */
+export const JUNCTION_ANCHOR = 5;
+
+/** A read and the junction [s, e): 1 uses it, 0 passes one of its splice sites otherwise, -1 says nothing. */
+export function junctionUse(r: AlignedRead, s: number, e: number, snap?: Map<number, [number, number]>): Allele {
+  let uses = false;
+  readJunctions(r, (_, a, b) => { const [x, y] = snap?.get(jKey(a, b)) ?? [a, b]; if (x === s && y === e) uses = true; });
+  if (uses) return 1;
+  const over = (b: number) => r.s <= b - JUNCTION_ANCHOR && r.e >= b + JUNCTION_ANCHOR;
+  return over(s) || over(e) ? 0 : -1;
+}
+
+/** Reads over the junction's splice sites: using it, passing them otherwise (each read once). */
+export function junctionReads(reads: AlignedRead[], s: number, e: number): { uses: number; other: number } {
+  const snap = junctionSnap(reads);
+  let uses = 0, other = 0;
+  for (const r of reads) { const u = junctionUse(r, s, e, snap); if (u === 1) uses++; else if (u === 0) other++; }
+  return { uses, other };
+}
+
+const lnFactCache: number[] = [0];
+function lnFact(n: number): number {
+  for (let i = lnFactCache.length; i <= n; i++) lnFactCache[i] = lnFactCache[i - 1] + Math.log(i);
+  return lnFactCache[n];
+}
+/** Two-sided Fisher exact test of the 2×2 table [[a, b], [c, d]]: the tables of the same margins no likelier than it. */
+export function fisherExact(a: number, b: number, c: number, d: number): number {
+  const r1 = a + b, r2 = c + d, c1 = a + c, n = r1 + r2;
+  if (!n) return 1;
+  const k = lnFact(r1) + lnFact(r2) + lnFact(c1) + lnFact(n - c1) - lnFact(n);
+  const lp = (x: number) => k - lnFact(x) - lnFact(r1 - x) - lnFact(c1 - x) - lnFact(r2 - c1 + x);
+  const p0 = lp(a);
+  let p = 0;
+  for (let x = Math.max(0, c1 - r2); x <= Math.min(r1, c1); x++) { const q = lp(x); if (q <= p0 + 1e-7) p += Math.exp(q); }
+  return Math.min(1, p);
+}
+
+export interface JunctionPairResult {
+  /** fragments by allele at the site × at the junction: [alt–uses, alt–other, ref–uses, ref–other] */
+  table: [number, number, number, number];
+  /** fragments over both whose allele or use of the junction is unknown */
+  unknown: number;
+  /** cis: on the variant's copy; trans: on the other copy only; shared: on both */
+  call: 'cis' | 'trans' | 'shared' | 'few' | 'hom';
+  note: string;
+  /** the junction's usage on each copy, fragments using it over those passing its splice sites: the variant's, the reference's */
+  usage: [number | null, number | null];
+  /** two-sided Fisher exact test of allele × junction use; null without fragments */
+  p: number | null;
+  /** b: 1 uses the junction, 0 passes its splice sites otherwise */
+  fragments: PairFragment[];
+  links: Record<LinkKind, number>;
+  siteClass: SiteClass;
+}
+
+export const fmtP = (p: number) => (p >= 0.001 ? p.toPrecision(2) : p.toExponential(1));
+
+/** A variant site and a junction [start, end) of the same chromosome, from the reads over each (see the head of this part). */
+export function phaseJunction(A: VariantSite, J: { start: number; end: number }, readsA: AlignedRead[], readsJ: AlignedRead[], [nA, nJ] = ['A', 'B']): JunctionPairResult {
+  const table: [number, number, number, number] = [0, 0, 0, 0];
+  const links: Record<LinkKind, number> = { read: 0, spliced: 0, pair: 0, split: 0 };
+  const fragments: PairFragment[] = [];
+  const snap = junctionSnap(readsJ);
+  let unknown = 0;
+  const atJ = byName(readsJ);
+  for (const [name, fa] of byName(readsA)) {
+    const fj = atJ.get(name);
+    if (!fj) continue;
+    const xa = alleleOf(fa, A);
+    let u: Allele = -1, by: AlignedRead | null = null, conflict = false;
+    for (const r of fj) {
+      const x = junctionUse(r, J.start, J.end, snap);
+      if (x < 0) continue;
+      if (u < 0) { u = x; by = r; } else if (u !== x) { conflict = true; u = -1; by = null; break; }
+    }
+    const overA = xa.by || xa.conflict || fa.some(r => inBlocks(r, A.pos));
+    if (!overA || (u < 0 && !conflict)) continue;
+    if (xa.a < 0 || u < 0) { unknown++; continue; }
+    const near = Math.abs(J.start - A.pos) <= Math.abs(J.end - A.pos) ? J.start : J.end;
+    const link = linkOf(xa.by!, by!, A.pos, near);
+    links[link]++;
+    table[(xa.a ? 0 : 2) + (u ? 0 : 1)]++;
+    const tagged = fa.find(r => r.hp != null) ?? fj.find(r => r.hp != null);
+    fragments.push({ name, a: xa.a, b: u, link, ...(tagged ? { hp: tagged.hp, ps: tagged.ps } : {}), ...(xa.conflict || conflict ? { conflict: true } : {}) });
+  }
+  const cls = siteClass(A.vaf);
+  const [aU, aO, rU, rO] = table, uses = aU + rU, altN = aU + aO, refN = rU + rO, n = altN + refN;
+  const usage: [number | null, number | null] = [altN ? aU / altN : null, refN ? rU / refN : null];
+  const p = n ? fisherExact(aU, aO, rU, rO) : null;
+  const pc = (x: number, of: number) => `${Math.round((100 * x) / of)} %`;
+  let call: JunctionPairResult['call'], note: string;
+  if (cls === 'hom') {
+    call = 'hom';
+    note = `${nA} is homozygous (VAF over ${HET_MAX * 100} %): both copies carry it, so its reads cannot tell them apart`;
+  } else if (uses < MIN_FRAGMENTS) {
+    call = 'few';
+    note = uses ? `only ${uses} fragment${uses > 1 ? 's' : ''} holding ${nA} use${uses > 1 ? '' : 's'} ${nJ} (${MIN_FRAGMENTS} needed)`
+      : n ? `none of the ${n} fragments holding ${nA} and passing ${nJ}'s splice sites uses it` : `no fragment holds both ${nA} and ${nJ}'s splice sites`;
+  } else if (rU <= MAX_AGAINST * uses) {
+    call = 'cis';
+    note = `${aU} of ${uses} fragments using ${nJ} carry ${nA} (${pc(aU, uses)})`;
+  } else if (aU <= MAX_AGAINST * uses) {
+    if (altN < MIN_FRAGMENTS) {
+      call = 'few';
+      note = `the ${uses} fragments using ${nJ} carry the reference allele, but only ${altN} fragment${altN === 1 ? '' : 's'} carry ${nA}: too few to tell how its copy splices`;
+    } else {
+      call = 'trans';
+      note = `${rU} of ${uses} fragments using ${nJ} carry the reference allele (${pc(rU, uses)}); the copy with ${nA} passes its splice sites otherwise in ${aO} of ${altN}`;
+    }
+  } else {
+    call = 'shared';
+    note = `both copies use it: ${aU} fragments with ${nA}, ${rU} with the reference`;
+    if (p != null && p < 0.01 && usage[0] != null && usage[1] != null) note += `, more on the ${usage[0] > usage[1] ? `copy with ${nA}` : 'reference copy'} (p = ${fmtP(p)})`;
+  }
+  if (cls === 'low' && call !== 'hom') note += ` · ${nA} under ${HET_MIN * 100} % VAF: its reference reads come from cells without it too`;
+  return { table, unknown, call, note, usage, p, fragments, links, siteClass: cls };
 }

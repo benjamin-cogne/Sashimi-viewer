@@ -1,18 +1,22 @@
 /**
  * Phasing panel: a variant site against one or more positions typed (`chr:pos; chr:pos:A>G; …`), in cis or in trans
  * from the reads of one sample (pairPhase.ts). Each pair shows its two sites side by side, the verdict, the fragments
- * by allele and how they link the sites; several positions give a matrix of every pair. HTML, never exported.
+ * by allele and how they link the sites; several positions give a matrix of every pair. A splice junction
+ * (`chr:first-last`, or an arc picked) is phased with each variant: which copy uses it (phaseJunction). HTML, never
+ * exported.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { SashimiDataSource } from './datasource';
 import type { AlignedRead, VariantSite } from './types';
 import { READS_REGION_MAX_BP } from './datasource';
 import { startPanelDrag } from './panelDrag';
-import { CHAIN_LONG_MIN_INDEL, CHAIN_READS_CAP, EPS, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, chainPair, needsChain, parseTargets, phasePair, resolveTarget, targetWindow, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
+import { CHAIN_LONG_MIN_INDEL, CHAIN_READS_CAP, EPS, JUNCTION_ANCHOR, MAX_AGAINST, MIN_FRAGMENTS, PAIR_READS_CAP, chainPair, fmtP, junctionReads, needsChain, parseTargets, phaseJunction, phasePair, resolveTarget, targetWindow, type JunctionPairResult, type LinkKind, type PairCall, type PairFragment, type PairHaplotags, type PairSource, type SiteTagReads, type TagLane, type PairResult, type PairTarget } from '../../standalone/pairPhase';
 import { HET_MAX, HET_MIN } from '../../standalone/phasing';
 import { PHASE_HI, PHASE_LO } from './sitePhase';
 
 export interface PairPhaseOrigin { sid: number; chrom: string; site: VariantSite }
+/** A site or a junction (the intron [start, end), 0-based half-open) clicked while picking; `n` counts the clicks. */
+export interface PairPicked { n: number; chrom: string; site?: VariantSite; junction?: { start: number; end: number } }
 
 interface Props {
   ds: SashimiDataSource;
@@ -32,25 +36,39 @@ interface Props {
   gene?: { name: string; strand: number; exons: [number, number][] } | null;
   /** the view runs right to left (a minus-strand gene drawn 5′→3′ on an RNA page): the map of the two copies too */
   reverse?: boolean;
-  /** picking sites by clicking them in the variants track: on or off, and the last site picked there */
+  /** picking sites by clicking them in the variants track (or junction arcs): on or off, and the last one picked there */
   picking: boolean;
   onPicking: (on: boolean) => void;
-  picked: { n: number; chrom: string; site: VariantSite } | null;
+  picked: PairPicked | null;
   onClose: () => void;
 }
 
-interface SiteRow { label: string; target: PairTarget; site: VariantSite | null; note?: string; reads: AlignedRead[]; total: number; shown: number; error?: string }
-type PairCell = { result: PairResult } | { reason: string };
+interface SiteRow {
+  label: string; target: PairTarget; site: VariantSite | null;
+  /** a junction target: its intron and the reads over its splice sites using it or passing them otherwise */
+  junction?: { start: number; end: number; uses: number; other: number };
+  note?: string; reads: AlignedRead[]; total: number; shown: number; error?: string;
+}
+/** a variant pair (`result`), a variant and a junction (`jresult`, with the rows of the site and of the junction), or why not */
+type PairCell = { result: PairResult } | { jresult: JunctionPairResult; si: number; ji: number } | { reason: string };
 interface Run { sid: number; sites: SiteRow[]; pairs: Map<string, PairCell>; errors: string[] }
 
-export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#9ca3af', hom: '#6b7280' };
-const CALL_WORD: Record<PairCall, string> = { cis: 'in cis', trans: 'in trans', conflict: 'conflicting', few: 'undetermined', hom: 'homozygous' };
+const key = (i: number, j: number) => `${i}-${j}`;
+const fmt = (n: number) => n.toLocaleString('en-US');
+export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#9ca3af', hom: '#6b7280', shared: '#0f766e' };
+const CALL_WORD: Record<PairCall, string> = { cis: 'in cis', trans: 'in trans', conflict: 'conflicting', few: 'undetermined', hom: 'homozygous', shared: 'both copies' };
+/** a junction's verdict, with the variant it is phased with */
+const JCALL_WORD: Record<JunctionPairResult['call'], string> = { cis: "on the variant's copy", trans: 'on the other copy', shared: 'on both copies', few: 'undetermined', hom: 'homozygous variant' };
+const JCALL_SHORT: Record<JunctionPairResult['call'], string> = { cis: 'variant copy', trans: 'other copy', shared: 'both copies', few: 'undetermined', hom: 'homozygous' };
+/** junctions in the panel: their arcs, boxes and labels */
+const JUNCTION_COLOR = '#7c3aed';
+const isJ = (r: SiteRow) => !!r.target.junction;
+const jText = (chrom: string, j: { start: number; end: number }) => `${chrom}:${fmt(j.start + 1)}-${fmt(j.end)}`;
+const callOf = (c: PairCell | undefined): PairCall | null => (!c ? null : 'result' in c ? c.result.call : 'jresult' in c ? c.jresult.call : null);
 const SOURCE_WORD: Record<PairSource, string> = { reads: 'from the reads holding both sites', haplotags: "from the file's haplotags (HP / PS)", both: 'reads and haplotags agree', chain: 'from the reads phased through the sites between them' };
 const REF_FILL = '#d1d5db';
 const LINK_DASH: Record<LinkKind, string | undefined> = { read: undefined, spliced: '1.5 2', pair: '5 3', split: '1.5 2' };
 const LINK_WORD: Record<LinkKind, string> = { read: 'one read', spliced: 'one spliced read', pair: 'two mates', split: 'a split read' };
-const key = (i: number, j: number) => `${i}-${j}`;
-const fmt = (n: number) => n.toLocaleString('en-US');
 
 function originTarget(o: PairPhaseOrigin): PairTarget {
   const s = o.site;
@@ -75,6 +93,16 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
     const sites: SiteRow[] = await Promise.all(all.map(async (t, i): Promise<SiteRow> => {
       const label = i ? (all.length > 2 ? `B${i}` : 'B') : 'A';
       try {
+        if (t.junction) {
+          // the reads over either splice site (a read spliced across it is over both), each once
+          const { start: js, end: je } = t.junction;
+          const got = await Promise.all([[js - 1, js + 1], [je - 1, je + 1]].map(([a, b]) => ds.getReads(sampleId, t.chrom, Math.max(0, a), b, minMapq, PAIR_READS_CAP, 'reads', 1, 0.01, { signal: ac.signal })));
+          const seen = new Set<string>(), reads: AlignedRead[] = [];
+          for (const r of got.flatMap(g => g.reads)) { const k = `${r.n}|${r.s}|${r.e}|${r.f}`; if (!seen.has(k)) { seen.add(k); reads.push(r); } }
+          const c = junctionReads(reads, js, je);
+          return { label, target: t, site: null, junction: { start: js, end: je, ...c }, reads, total: Math.max(got[0].total, got[1].total), shown: Math.max(got[0].shown, got[1].shown),
+            note: c.uses ? undefined : `${t.text}: none of the ${fmt(c.other)} reads over its splice sites uses this junction` };
+        }
         const [s, e] = targetWindow(t);
         const r = await ds.getReads(sampleId, t.chrom, s, e, minMapq, PAIR_READS_CAP, 'reads', 1, 0.01, { signal: ac.signal });
         const got = resolveTarget(t, r.reads, r.reference?.seq ?? null, r.reference?.start ?? 0, knownSites(sampleId, t.chrom));
@@ -87,6 +115,15 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
     const pairs = new Map<string, PairCell>();
     for (let i = 0; i < sites.length; i++) for (let j = i + 1; j < sites.length; j++) {
       const a = sites[i], b = sites[j];
+      if (isJ(a) && isJ(b)) { pairs.set(key(i, j), { reason: 'two junctions: phase each with a variant' }); continue; }
+      if (isJ(a) || isJ(b)) {
+        const [si, ji] = isJ(a) ? [j, i] : [i, j], sr = sites[si], jr = sites[ji];
+        if (!sr.site) pairs.set(key(i, j), { reason: `${sr.label} not found in this sample` });
+        else if (!jr.junction) pairs.set(key(i, j), { reason: `${jr.label} could not be read` });
+        else if (sr.target.chrom !== jr.target.chrom) pairs.set(key(i, j), { reason: 'on different chromosomes: no read joins them' });
+        else pairs.set(key(i, j), { jresult: phaseJunction(sr.site, jr.junction, sr.reads, jr.reads, [sr.label, jr.label]), si, ji });
+        continue;
+      }
       if (!a.site || !b.site) pairs.set(key(i, j), { reason: `${!a.site ? a.label : b.label} not found in this sample` });
       else if (a.target.chrom !== b.target.chrom) pairs.set(key(i, j), { reason: 'on different chromosomes: no read joins them' });
       else if (a.site.pos === b.site.pos && a.site.kind === b.site.kind && a.site.alt === b.site.alt) pairs.set(key(i, j), { reason: 'the same variant' });
@@ -135,10 +172,17 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
   useEffect(() => {
     if (!picked || picked.n === seenPick.current) return;
     seenPick.current = picked.n;
-    const st = picked.site;
-    const one = `${picked.chrom}:${st.pos + 1}:${st.kind === 'snv' ? st.alt : `${st.kind === 'ins' ? '+' : '-'}${st.length}`}`;
-    const same = (t: { chrom: string; pos: number }) => t.chrom === picked.chrom && t.pos === st.pos;
-    if (same({ chrom: origin.chrom, pos: origin.site.pos }) || parseTargets(text, origin.chrom).targets.some(same)) return;
+    const st = picked.site, jn = picked.junction;
+    let one: string, same: (t: PairTarget) => boolean;
+    if (jn) {
+      one = `${picked.chrom}:${jn.start + 1}-${jn.end}`;
+      same = t => t.chrom === picked.chrom && !!t.junction && t.junction.start === jn.start && t.junction.end === jn.end;
+    } else if (st) {
+      one = `${picked.chrom}:${st.pos + 1}:${st.kind === 'snv' ? st.alt : `${st.kind === 'ins' ? '+' : '-'}${st.length}`}`;
+      same = t => t.chrom === picked.chrom && !t.junction && t.pos === st.pos;
+      if (picked.chrom === origin.chrom && st.pos === origin.site.pos) return;
+    } else return;
+    if (parseTargets(text, origin.chrom).targets.some(same)) return;
     const next = text.trim() ? `${text.trim().replace(/;\s*$/, '')}; ${one}` : one;
     setText(next);
     void go(sid, next);
@@ -156,7 +200,8 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
   // where it opens, kept on screen; moved by a press anywhere on it but its controls (panelDrag.ts) (it scrolls inside when taller than the room under its top)
   const [at, setAt] = useState(() => ({ left: Math.max(8, Math.min(x - 380, window.innerWidth - 772)), top: Math.max(8, Math.min(y + 12, window.innerHeight - 560)) }));
   const top = at.top;
-  const label = (r: SiteRow) => `${r.target.chrom}:${fmt((r.site?.pos ?? r.target.pos) + 1)}`;
+  const label = (r: SiteRow) => (r.target.junction ? jText(r.target.chrom, r.target.junction) : `${r.target.chrom}:${fmt((r.site?.pos ?? r.target.pos) + 1)}`);
+  const hasJ = sites.some(isJ);
 
   return (
     <div className="fixed z-50 w-[760px] max-w-[96vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-pair-panel
@@ -164,7 +209,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
       onPointerDown={e => startPanelDrag(e, at, setAt)}
       onMouseDown={e => e.stopPropagation()}>
       <div className="flex items-center justify-between gap-2 px-3 pt-2 pb-1 cursor-move" title="Drag the panel to move it">
-        <div className="font-semibold text-gray-900">Phasing two variants</div>
+        <div className="font-semibold text-gray-900">{hasJ ? 'Phasing variants and splice junctions' : 'Phasing two variants'}</div>
         <div className="flex items-center gap-2">
           <select value={sid} onChange={e => setSid(Number(e.target.value))} className="border border-gray-300 rounded px-1 py-0.5 text-xs" title="The sample whose reads are read">
             {samples.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -174,14 +219,14 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
       </div>
       <form className="flex items-center gap-1.5 px-3 pt-1.5" onSubmit={e => { e.preventDefault(); void go(sid, text); }}>
         <span className="text-gray-500 shrink-0 font-mono">{origin.chrom}:{fmt(origin.site.pos + 1)} <span style={{ color: siteColor(origin.site) }}>{siteShort(origin.site)}</span> with</span>
-        <input value={text} onChange={e => setText(e.target.value)} placeholder="chr:pos; chr:pos:A>G; …" spellCheck={false}
+        <input value={text} onChange={e => setText(e.target.value)} placeholder="chr:pos; chr:pos:A>G; chr:first-last (junction); …" spellCheck={false}
           className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
-          title="Positions separated by ; — chr:pos (1-based), pos alone on this chromosome, an allele as chr:pos:A>G (VCF style, indels too), chr:pos:+2 / -3, or 1-55051215-G-GA" />
-        <button type="button" onClick={() => onPicking(!picking)} title="Click sites in the variants track to add them to the list (click again or Esc to stop)"
+          title="Positions separated by ; — chr:pos (1-based), pos alone on this chromosome, an allele as chr:pos:A>G (VCF style, indels too), chr:pos:+2 / -3, or 1-55051215-G-GA; a splice junction as chr:first-last, the intron's first and last bases (as an arc's panel and STAR's SJ.out.tab give them)" />
+        <button type="button" onClick={() => onPicking(!picking)} title="Click sites in the variants track, or junction arcs and IR labels of an RNA track, to add them to the list (click again or Esc to stop)"
           className={`rounded border px-2 py-0.5 shrink-0 ${picking ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-gray-300 hover:bg-gray-50'}`}>{picking ? 'picking…' : '⌖ Pick'}</button>
         <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" disabled={!!busy}>{busy || 'Phase'}</button>
       </form>
-      {picking && <div className="px-3 pt-1 text-[10px] text-blue-700">Click a site in the variants track to add it (several in a row); ⌖ again or Esc to stop.</div>}
+      {picking && <div className="px-3 pt-1 text-[10px] text-blue-700">Click a site in the variants track, or a junction arc (or an IR label) of an RNA track, to add it (several in a row); ⌖ again or Esc to stop.</div>}
       {run && (run.errors.length > 0 || sites.some(s => s.note || s.error)) && (
         <div className="px-3 pt-1 text-[10px] leading-4">
           {run.errors.map((e, i) => <div key={`e${i}`} className="text-red-600">{e}</div>)}
@@ -200,6 +245,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
             <SiteCard row={sites[pj]} siteColor={siteColor} siteShort={siteShort} label={label(sites[pj])} right />
           </div>
           {'result' in cell && <Evidence res={cell.result} a={sites[pi]} b={sites[pj]} siteColor={siteColor} hpColor={hpColor} />}
+          {'jresult' in cell && <JunctionEvidence res={cell.jresult} s={sites[cell.si]} j={sites[cell.ji]} siteColor={siteColor} hpColor={hpColor} />}
         </div>
       )}
       {!run && <div className="px-3 py-2 text-gray-400">reading the reads over each site…</div>}
@@ -207,6 +253,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, m
         Fragments: the reads over each site joined by name (one read, a read spliced between them, two mates, a split read's parts). An allele under base quality 20, another allele, or two reads of a fragment disagreeing: unknown.
         A verdict needs {MIN_FRAGMENTS} informative fragments and at most {MAX_AGAINST * 100} % against; the LOD (log10 cis vs trans, {EPS * 100} % error per allele read) weighs them, it does not decide.
         A site under {HET_MIN * 100} % VAF counts only the fragments carrying it; one over {HET_MAX * 100} % is homozygous. Up to {fmt(PAIR_READS_CAP)} reads per site, whole fragments kept by name past it.
+        {hasJ && <> A junction: each fragment over its splice sites uses it, or passes them otherwise (unspliced, spliced elsewhere, skipping it; {JUNCTION_ANCHOR} bases aligned on each side); its copy is the variant's when at most {MAX_AGAINST * 100} % of the {MIN_FRAGMENTS}+ fragments using it carry the reference, the other copy's when at most {MAX_AGAINST * 100} % carry the variant, else both. Usage by copy: fragments using it over all those passing its splice sites, with a two-sided Fisher exact test; transcripts degraded by NMD are under-counted on their copy.</>}
       </div>
     </div>
   );
@@ -222,7 +269,8 @@ type Side = 0 | 1 | 'both' | null;
  */
 function placeSites(sites: SiteRow[], pairs: Map<string, PairCell>): { side: Side[]; via: (string | null)[]; ps: number | null; tagged: boolean; contradictions: [number, number][] } {
   const n = sites.length, side: Side[] = new Array(n).fill(null), via: (string | null)[] = new Array(n).fill(null);
-  const res = (i: number, j: number) => { const c = pairs.get(key(Math.min(i, j), Math.max(i, j))); return c && 'result' in c ? c.result : null; };
+  const cellOf = (i: number, j: number) => pairs.get(key(Math.min(i, j), Math.max(i, j)));
+  const res = (i: number, j: number) => { const c = cellOf(i, j); return c && 'result' in c ? c.result : null; };
   let ps: number | null = null, tagged = false;
   for (let i = 0; i < n; i++) if (sites[i].site && sites[i].site!.vaf > HET_MAX) { side[i] = 'both'; via[i] = 'homozygous'; }
   if (sites[0].site && side[0] == null) {
@@ -237,7 +285,16 @@ function placeSites(sites: SiteRow[], pairs: Map<string, PairCell>): { side: Sid
     while (queue.length) {
       const i = queue.shift()!;
       for (let j = 0; j < n; j++) {
-        if (side[j] != null || !sites[j].site || sites[j].target.chrom !== sites[0].target.chrom) continue;
+        if (side[j] != null || !(sites[j].site || sites[j].junction) || sites[j].target.chrom !== sites[0].target.chrom) continue;
+        if (isJ(sites[j])) {
+          // a junction, from its verdict with a variant placed: on that variant's copy, the other, or both (placing nothing further)
+          const c = cellOf(i, j);
+          if (!c || !('jresult' in c)) continue;
+          const r = c.jresult;
+          if (r.call === 'shared') { side[j] = 'both'; via[j] = `used on both copies (phased with ${sites[i].label})`; }
+          else if (r.call === 'cis' || r.call === 'trans') { side[j] = r.call === 'cis' ? side[i] as 0 | 1 : ((1 - (side[i] as number)) as 0 | 1); via[j] = `${JCALL_WORD[r.call]}, phased with ${sites[i].label}`; }
+          continue;
+        }
         const r = res(i, j);
         if (!r || (r.call !== 'cis' && r.call !== 'trans')) continue;
         const si = side[i] as 0 | 1;
@@ -262,11 +319,13 @@ function placeSites(sites: SiteRow[], pairs: Map<string, PairCell>): { side: Sid
  */
 function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }: { sites: SiteRow[]; pairs: Map<string, PairCell>; siteColor: (s: VariantSite) => string; siteShort: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string; gene?: Props['gene']; reverse: boolean }) {
   const chrom = sites[0].target.chrom;
-  const drawn = sites.map((r, i) => ({ r, i })).filter(({ r }) => r.site && r.target.chrom === chrom);
+  const drawn = sites.map((r, i) => ({ r, i })).filter(({ r }) => (r.site || r.junction) && r.target.chrom === chrom);
   if (drawn.length < 1 || !sites[0].site) return null;
+  // where a row sits: a site's position, a junction's middle (its arc drawn to scale)
+  const at = (r: SiteRow) => (r.junction ? (r.junction.start + r.junction.end) / 2 : r.site!.pos);
   const { side, via, ps, tagged, contradictions } = placeSites(sites, pairs);
   const W = 712, X0 = 92, X1 = W - 14, GENE_Y = 16, L1 = 50, L2 = 92, AXIS = 122, H = 140;
-  const pos = drawn.map(d => d.r.site!.pos);
+  const pos = drawn.flatMap(d => (d.r.junction ? [d.r.junction.start, d.r.junction.end] : [d.r.site!.pos]));
   let lo = Math.min(...pos), hi = Math.max(...pos);
   const pad = Math.max(50, Math.round((hi - lo) * 0.06));
   lo = Math.max(0, lo - pad); hi += pad + 1;
@@ -277,8 +336,8 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
   // markers at least GAP apart: sites a few kb apart on a 100 kb map are spread, each joined to its true position on
   // the axis (and the gene) by a leader line
   const GAP = 26;
-  const order = drawn.map(d => d.i).sort((p, q) => xOf(sites[p].site!.pos) - xOf(sites[q].site!.pos));
-  const xs = order.map(i => xOf(sites[i].site!.pos));
+  const order = drawn.map(d => d.i).sort((p, q) => xOf(at(sites[p])) - xOf(at(sites[q])));
+  const xs = order.map(i => xOf(at(sites[i])));
   for (let k = 1; k < xs.length; k++) xs[k] = Math.max(xs[k], xs[k - 1] + GAP);
   if (xs.length && xs[xs.length - 1] > X1) {
     xs[xs.length - 1] = X1;
@@ -297,7 +356,7 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
     const c = pairs.get(key(0, j));
     if (c && 'result' in c && c.result.source === 'chain' && c.result.chain) for (const b of c.result.chain.between) relay.set(b.pos, (side[0] === 0 ? b.copy : 1 - b.copy) as 0 | 1);
   }
-  const others = sites.filter(r => r.site && r.target.chrom !== chrom);
+  const others = sites.filter(r => (r.site || r.junction) && r.target.chrom !== chrom);
   return (
     <div className="px-3 pt-2">
       <svg width={W} height={H} className="block" style={{ maxWidth: '100%' }}>
@@ -317,6 +376,24 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
         ))}
         {[...relay].map(([p, c]) => <rect key={`r${p}`} x={xOf(p) - 0.75} y={(c ? L2 : L1) - 5} width={1.5} height={10} fill="#374151" opacity={0.6}><title>{`heterozygous site ${chrom}:${fmt(p + 1)}, a relay of the reads' phasing`}</title></rect>)}
         {drawn.map(({ r, i }) => {
+          if (r.junction) {
+            // a junction: its arc to scale on the copy using it (both, or dashed between the lines when not placed)
+            const jn = r.junction, xa = xOf(jn.start), xb = xOf(jn.end), lo2 = Math.min(xa, xb), hi2 = Math.max(xa, xb), mid = (lo2 + hi2) / 2;
+            const ja = Math.min(lo2, mid - 5), jb = Math.max(hi2, mid + 5), x = xAt.get(i)!, sd = side[i], c = JUNCTION_COLOR;
+            const arc = (yy: number, k: string, dashed = false) => <path key={k} d={`M ${ja} ${yy} Q ${(ja + jb) / 2} ${yy - 16} ${jb} ${yy}`} fill="none" stroke={c} strokeWidth={2.2} strokeDasharray={dashed ? '3 2' : undefined} />;
+            const tip = `${r.label} junction ${jText(chrom, jn)} · ${sd == null ? 'not placed: no decided pair with a variant' : via[i]}`;
+            return (
+              <g key={i}>
+                <title>{tip}</title>
+                {showGene && <line x1={xa} y1={GENE_Y - 7} x2={xb} y2={GENE_Y - 7} stroke={c} strokeWidth={1.5} />}
+                {sd === 'both' ? [arc(L1, 'a'), arc(L2, 'b')] : sd === 0 || sd === 1 ? arc(sd ? L2 : L1, 'a') : arc((L1 + L2) / 2 + 6, 'q', true)}
+                {sd == null && <text x={mid} y={(L1 + L2) / 2 + 2} textAnchor="middle" fontSize={10} fontWeight={700} fill={c}>?</text>}
+                <line x1={x} y1={(sd === 1 ? L2 : L1) - 14} x2={mid} y2={(sd === 1 ? L2 : L1) - 10} stroke={c} strokeWidth={0.8} opacity={0.6} />
+                <line x1={lo2} y1={AXIS} x2={hi2} y2={AXIS} stroke={c} strokeWidth={2} />
+                <text x={x} y={(sd === 1 ? L2 + 17 : L1 - 16)} textAnchor="middle" fontSize={10} fontWeight={700} fill={c}>{r.label}</text>
+              </g>
+            );
+          }
           const st = r.site!, xt = xOf(st.pos), x = xAt.get(i)!, c = siteColor(st), sd = side[i];
           const tip = `${r.label} ${r.target.chrom}:${fmt(st.pos + 1)} ${siteShort(st)} · ${sd == null ? 'not placed: no decided pair links it to the others' : via[i]}${bad.has(i) ? ' · a decided pair contradicts this placement' : ''}`;
           const marks: React.ReactNode[] = [];
@@ -369,20 +446,24 @@ function Matrix({ sites, pairs, pick, onPick, siteColor, siteShort }: { sites: S
           {sites.slice(0, -1).map((a, i) => (
             <tr key={i}>
               <td className="pr-2 font-semibold text-gray-700 whitespace-nowrap" title={a.target.text}>
-                {a.label} <span className="font-normal text-gray-500 font-mono">{a.target.chrom}:{fmt((a.site?.pos ?? a.target.pos) + 1)}</span>
+                {a.label} <span className="font-normal text-gray-500 font-mono">{a.target.junction ? jText(a.target.chrom, a.target.junction) : `${a.target.chrom}:${fmt((a.site?.pos ?? a.target.pos) + 1)}`}</span>
                 {a.site && <span className="font-normal" style={{ color: siteColor(a.site) }}> {siteShort(a.site)}</span>}
+                {a.target.junction && <span className="font-normal" style={{ color: JUNCTION_COLOR }}> junction</span>}
               </td>
               {sites.slice(1).map((_, jj) => {
                 const j = jj + 1;
                 if (j <= i) return <td key={j} />;
                 const c = pairs.get(key(i, j));
-                const call = c && 'result' in c ? c.result.call : null;
+                const call = callOf(c);
                 const on = pick[0] === i && pick[1] === j;
+                const tip = !c ? '' : 'result' in c ? `${a.label}–${sites[j].label}: ${CALL_WORD[c.result.call]}${c.result.call === 'cis' || c.result.call === 'trans' ? ` (${SOURCE_WORD[c.result.source]})` : ''} · ${c.result.note}`
+                  : 'jresult' in c ? `${sites[c.ji].label} (junction) ${JCALL_WORD[c.jresult.call]} · ${c.jresult.note}` : c.reason;
+                const word = !c ? '—' : 'result' in c ? `${CALL_WORD[c.result.call]}${c.result.source === 'haplotags' ? ' · HP' : ''}` : 'jresult' in c ? JCALL_SHORT[c.jresult.call] : '—';
                 return (
                   <td key={j} className="p-0.5">
-                    <button onClick={() => onPick(i, j)} title={c ? ('result' in c ? `${a.label}–${sites[j].label}: ${CALL_WORD[c.result.call]}${c.result.call === 'cis' || c.result.call === 'trans' ? ` (${SOURCE_WORD[c.result.source]})` : ''} · ${c.result.note}` : c.reason) : ''}
+                    <button onClick={() => onPick(i, j)} title={tip}
                       className={`w-[84px] rounded px-1 py-0.5 text-white ${on ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`} style={{ background: call ? PAIR_COLORS[call] : '#e5e7eb', color: call ? '#fff' : '#6b7280' }}>
-                      {call ? CALL_WORD[call] : '—'}{c && 'result' in c && c.result.source === 'haplotags' ? ' · HP' : ''}
+                      {word}
                     </button>
                   </td>
                 );
@@ -396,11 +477,17 @@ function Matrix({ sites, pairs, pick, onPick, siteColor, siteShort }: { sites: S
 }
 
 function SiteCard({ row, label, right, siteColor, siteShort }: { row: SiteRow; label: string; right?: boolean; siteColor: (s: VariantSite) => string; siteShort: (s: VariantSite) => string }) {
-  const s = row.site;
+  const s = row.site, jn = row.junction;
   return (
     <div className={`min-w-0 ${right ? 'text-right' : ''}`}>
       <div className="font-semibold text-gray-900"><span className="text-gray-400 mr-1">{row.label}</span><span className="font-mono">{label}</span></div>
-      {s ? (
+      {row.target.junction ? (jn ? (
+        <>
+          <div className="font-semibold" style={{ color: JUNCTION_COLOR }}>splice junction · intron {fmt(jn.end - jn.start)} bp</div>
+          <div className="text-gray-600">{fmt(jn.uses)} reads use it, {fmt(jn.other)} pass its splice sites otherwise{jn.uses + jn.other ? ` (${Math.round((100 * jn.uses) / (jn.uses + jn.other))} %)` : ''}</div>
+          <div className="text-[10px] text-gray-400">reads over its two splice sites{row.total > row.shown ? ` · ${fmt(row.shown)} of ${fmt(row.total)} read (whole fragments)` : ''}</div>
+        </>
+      ) : <div className="text-red-600">{row.error ?? 'could not be read'}</div>) : s ? (
         <>
           <div className="font-semibold" style={{ color: siteColor(s) }}>{siteShort(s)}</div>
           <div className="text-gray-600">VAF {Math.round(s.vaf * 100)} % · {fmt(s.alt_count)} of {fmt(s.depth)} reads</div>
@@ -413,7 +500,22 @@ function SiteCard({ row, label, right, siteColor, siteShort }: { row: SiteRow; l
 
 function Verdict({ cell, a, b }: { cell: PairCell; a: SiteRow; b: SiteRow }) {
   const d = a.site && b.site && a.target.chrom === b.target.chrom ? Math.abs(b.site.pos - a.site.pos) : null;
-  if (!('result' in cell)) return <div className="w-[230px] text-center text-gray-500 pt-1">{cell.reason}</div>;
+  if ('reason' in cell) return <div className="w-[230px] text-center text-gray-500 pt-1">{cell.reason}</div>;
+  if ('jresult' in cell) {
+    const r = cell.jresult, jr = isJ(a) ? a : b, sr = jr === a ? b : a;
+    const jn = jr.junction!, near = sr.site ? Math.min(Math.abs(jn.start - sr.site.pos), Math.abs(jn.end - sr.site.pos)) : null;
+    const pct = (x: number | null) => (x == null ? '–' : `${Math.round(x * 100)} %`);
+    return (
+      <div className="w-[230px] text-center">
+        <div className="text-[13px] font-bold uppercase tracking-wide" style={{ color: PAIR_COLORS[r.call === 'hom' ? 'hom' : r.call] }}>{JCALL_WORD[r.call]}</div>
+        <div className="text-[10px] font-semibold text-gray-500">{jr.label}, the junction, with {sr.label}</div>
+        <div className="text-gray-600 leading-4 mt-0.5">{r.note}</div>
+        <div className="text-[10px] text-gray-400 mt-0.5">
+          usage: {sr.label} copy {pct(r.usage[0])}, reference copy {pct(r.usage[1])}{r.p != null ? ` · Fisher p = ${fmtP(r.p)}` : ''}{near != null ? ` · ${fmt(near)} bp from its nearer splice site` : ''}
+        </div>
+      </div>
+    );
+  }
   const r = cell.result;
   return (
     <div className="w-[230px] text-center">
@@ -463,6 +565,36 @@ function Evidence({ res, a, b, siteColor, hpColor }: { res: PairResult; a: SiteR
         </div>
       )}
       {res.tagReads[0] && res.tagReads[1] && <TagReads res={res} a={a} b={b} ca={ca} cb={cb} hpColor={hpColor} />}
+    </div>
+  );
+}
+
+/** A variant and a junction: fragments by allele × use of the junction, the usage on each copy, the fragments drawn. */
+function JunctionEvidence({ res, s, j, siteColor, hpColor }: { res: JunctionPairResult; s: SiteRow; j: SiteRow; siteColor: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string }) {
+  const ca = siteColor(s.site!);
+  const links = (Object.keys(res.links) as LinkKind[]).filter(k => res.links[k]).map(k => `${fmt(res.links[k])} by ${LINK_WORD[k]}`);
+  const pct = (x: number | null) => (x == null ? '–' : `${Math.round(x * 100)} %`);
+  const t = res.table;
+  const cell = (i: number) => <td className="px-2 text-center font-semibold" style={{ color: [0, 3].includes(i) ? PAIR_COLORS.cis : PAIR_COLORS.trans }}>{t[i]}</td>;
+  if (!res.fragments.length && !res.unknown) return null;
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-1">
+        <table className="text-[11px] text-gray-700">
+          <tbody>
+            <tr><td /><td className="px-2 font-semibold" style={{ color: JUNCTION_COLOR }}>uses {j.label}</td><td className="px-2 font-semibold text-gray-500">passes otherwise</td><td className="px-2 font-semibold text-gray-500">usage</td></tr>
+            <tr><td className="pr-2 font-semibold" style={{ color: ca }}>{s.label} alt</td>{cell(0)}{cell(1)}<td className="px-2 text-center">{pct(res.usage[0])}</td></tr>
+            <tr><td className="pr-2 font-semibold text-gray-500">{s.label} ref</td>{cell(2)}{cell(3)}<td className="px-2 text-center">{pct(res.usage[1])}</td></tr>
+          </tbody>
+        </table>
+        <div className="text-[10px] text-gray-500 leading-4 max-w-[400px]">
+          <div><span style={{ color: PAIR_COLORS.cis }} className="font-semibold">blue</span> cells: the junction on the variant's copy (alt–uses, ref–otherwise) · <span style={{ color: PAIR_COLORS.trans }} className="font-semibold">orange</span>: on the other copy</div>
+          <div>Usage: fragments using {j.label} over those passing its splice sites, on each copy{res.p != null ? `; Fisher exact test of allele × use p = ${fmtP(res.p)}` : ''}</div>
+          <div>Fragments over both: {links.length ? links.join(', ') : 'none'}{res.unknown ? `; ${res.unknown} more with the allele or the junction's use unknown` : ''}</div>
+        </div>
+      </div>
+      <Fragments res={{ fragments: res.fragments, counted: [0, 1, 2, 3] }} a={s} b={j} ca={ca} cb={JUNCTION_COLOR} hpColor={hpColor}
+        words={{ bAlt: `uses ${j.label}`, bRef: `${j.label} not used`, cis: '(junction on the variant\'s copy)', trans: '(junction on the other copy)' }} />
     </div>
   );
 }
@@ -539,11 +671,14 @@ function tagsOf(frags: PairFragment[]): string {
 }
 
 /** The fragments, one line each between a box at A (left) and at B (right), not to scale: cis cells on top, trans below. */
-function Fragments({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow; b: SiteRow; ca: string; cb: string; hpColor: (ps: number | null | undefined, hp: number) => string }) {
+/** What a band of fragments is called: B's two states (alt / ref, or using the junction / not) and the two kinds of cells. */
+interface BandWords { bAlt: string; bRef: string; cis: string; trans: string }
+function Fragments({ res, a, b, ca, cb, hpColor, words }: { res: { fragments: PairFragment[]; counted: number[] }; a: SiteRow; b: SiteRow; ca: string; cb: string; hpColor: (ps: number | null | undefined, hp: number) => string; words?: BandWords }) {
   const W = 712, XA = 190, XB = W - 120, ROW = 5, PER_BAND = 80, HEAD = 13;
+  const w = words ?? { bAlt: `${b.label} alt`, bRef: `${b.label} ref`, cis: '(cis)', trans: '(trans)' };
   const bands: { cell: number; title: string; frags: PairFragment[] }[] = [
-    { cell: 0, title: `${a.label} alt · ${b.label} alt`, frags: [] }, { cell: 3, title: `${a.label} ref · ${b.label} ref`, frags: [] },
-    { cell: 1, title: `${a.label} alt · ${b.label} ref`, frags: [] }, { cell: 2, title: `${a.label} ref · ${b.label} alt`, frags: [] },
+    { cell: 0, title: `${a.label} alt · ${w.bAlt}`, frags: [] }, { cell: 3, title: `${a.label} ref · ${w.bRef}`, frags: [] },
+    { cell: 1, title: `${a.label} alt · ${w.bRef}`, frags: [] }, { cell: 2, title: `${a.label} ref · ${w.bAlt}`, frags: [] },
   ];
   for (const f of res.fragments) bands.find(x => x.cell === (f.a ? 0 : 2) + (f.b ? 0 : 1))!.frags.push(f);
   const order: LinkKind[] = ['read', 'spliced', 'pair', 'split'];
@@ -557,14 +692,14 @@ function Fragments({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow
     const isCis = band.cell === 0 || band.cell === 3, on = counted.has(band.cell);
     els.push(
       <text key={`h${band.cell}`} x={4} y={yy + 9} fontSize={10} fontWeight={700} fill={on ? (isCis ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#9ca3af'}>
-        {band.title} — {band.frags.length} {on ? (isCis ? '(cis)' : '(trans)') : '(not counted)'}{tagsOf(band.frags)}
+        {band.title} — {band.frags.length} {on ? (isCis ? w.cis : w.trans) : '(not counted)'}{tagsOf(band.frags)}
       </text>,
     );
     yy += HEAD;
     const rows = band.frags.slice(0, PER_BAND);
     rows.forEach((f, k) => {
       const y = yy + k * ROW + ROW / 2;
-      const tip = `${f.name}\n${LINK_WORD[f.link]}: ${a.label} ${f.a ? 'alt' : 'ref'}, ${b.label} ${f.b ? 'alt' : 'ref'}${f.hp != null ? `\nHP ${f.hp}${f.ps != null ? `, PS ${f.ps}` : ''}` : ''}${f.conflict ? '\nits reads disagree at a site, the other site counted' : ''}`;
+      const tip = `${f.name}\n${LINK_WORD[f.link]}: ${a.label} ${f.a ? 'alt' : 'ref'}, ${f.b ? w.bAlt : w.bRef}${f.hp != null ? `\nHP ${f.hp}${f.ps != null ? `, PS ${f.ps}` : ''}` : ''}${f.conflict ? '\nits reads disagree at a site, the other site counted' : ''}`;
       els.push(
         <g key={`${band.cell}-${k}`} opacity={on ? 1 : 0.4}>
           <title>{tip}</title>

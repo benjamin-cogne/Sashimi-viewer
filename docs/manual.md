@@ -129,6 +129,7 @@ GTEx track.
 | Would skipping this exon keep the reading frame? | A small red **frameshift sign** above every coding exon whose coding length is not a multiple of three (skipping it alone shifts the frame); the first and last coding exons carry none, since skipping them removes the start or stop codon. Hover or click an exon for its coding length and codon phases. |
 | Is the aberrant junction in *cis* with the variant? | **Reads track** with mismatches (primary sample by default, any sample, or *All samples* for one reads track under each coverage track), then **Collapsed**: read-based **phasing** into two haplotypes per phase block (the alleles seen together in the same reads and mates), each drawn with its own junctions and those the two haplotypes use differently flagged (Fisher's exact test), or *Haplotypes: any* for consensus groups (local haplotype × splicing pattern) where the alternate allele seen only in exon-skipping reads is explicit. |
 | Are two variants in *cis* or in *trans* (compound heterozygote)? | Click a site of the **variants track** (DNA), then **Phase with** `chr:pos; …`: the reads holding both sites (one read, a spliced read, two mates, a split read), joined by name however far apart, give a 2×2 table, a verdict and a LOD; the file's haplotags decide when no read holds both; several positions give a matrix of every pair. |
+| Which allele makes a splicing event (allele-specific splicing)? | Click an RNA variant, **Phase with** → *⌖ Pick*, then click a junction arc or an *IR* label (or type `chr:first-last`): the fragments holding both give the junction's usage on each copy, a Fisher test and a verdict (on the variant's copy, the other, both). |
 | How much of the transcript is affected? | Per-sample **ψ** (rMATS-style inclusion) of the junction against its canonical alternative; **exon usage** from read depth compared across the open files (DEXSeq-style relative usage, robust z-score). |
 | Is the gene on the minus strand? | The axis is reversed so the transcript reads 5′→3′ left to right (positions decrease to the right, unlike IGV); the transcript track then carries a **red antisense warning** so nobody misreads a coordinate. |
 | Is there intron retention or a cryptic exon? | Switch from **equal introns** (exon-focused review, MISO / ggsashimi convention) to **genomic scale** and look at the coverage. |
@@ -1044,6 +1045,33 @@ one sample.
   the variants track into a picker. Each site clicked joins the list, which is phased again; the
   cursor becomes a cross. Click *⌖* again or press Esc to stop. Drag the panel aside if it covers
   the sites.
+- **A variant and a splice junction (RNA)**: which copy of the gene uses a junction, from the
+  fragments holding a heterozygous variant. It is allele-specific splicing: does the variant create
+  the cryptic junction, or abolish the canonical one, on its own copy? A distant heterozygous SNP
+  can also serve as a marker, telling which allele makes an aberrant transcript.
+  - Adding one: while picking, click a junction arc of an RNA track, or an *IR* label, which adds
+    the intron it retains. Or type it as `chr:first-last`, the intron's first and last bases
+    (1-based, as an arc's panel and STAR's `SJ.out.tab` give them), e.g. `chr1:101,151-102,000`.
+  - Each fragment over the junction's splice sites either uses it, or passes them otherwise:
+    unspliced through them (retained intron), spliced to another site, or skipping the exon.
+    It must align 5 bases on each side. Long reads' junctions are snapped as the arcs count them.
+  - The table crosses the variant's allele with the junction's use. The **usage on each copy** is
+    the fragments using the junction over all those passing its splice sites: a PSI per allele.
+    A two-sided Fisher exact test measures the association.
+  - The verdict comes from the fragments using the junction (3 at least):
+    - **on the variant's copy** when at most 20 % of them carry the reference allele;
+    - **on the other copy** when at most 20 % carry the variant, and the variant's copy is seen
+      passing the splice sites otherwise in 3 fragments or more;
+    - **on both copies** otherwise. When the usage differs with p < 0.01, the copy that uses it
+      more is named.
+  - A homozygous variant cannot tell the copies apart. Two junctions are not phased with each
+    other: phase each with a variant.
+  - On the map of the two copies, the junction is drawn as an arc to scale, on the copy that uses
+    it.
+  - What it counts is molecules that reached the library: a transcript degraded by nonsense-mediated
+    decay is under-counted on its copy, which can tilt the usage. Short reads link a junction and a
+    variant only within a fragment (the read itself, or its mate); long reads link them across the
+    whole transcript.
 - **Several positions**: the matrix of every pair (A–B1, A–B2, B1–B2…), each cell its verdict.
   Click a cell for its pair. The sample can be switched at the top: in a trio, the parents' reads
   answer for themselves.
