@@ -1386,7 +1386,18 @@ one folds the first into a tab under the sample chips (a *Views* row appears fro
 on); opening a third keeps the two. Click a tab to reopen that view exactly as you left it: the
 gene, the window, the highlight, and every option of the viewer (depth axis, filters, groups,
 reads track, chosen transcript, hidden arcs, label sizes), since each view keeps its own full
-snapshot. × forgets a view. A new view starts with the options of the view you came from. Views
+snapshot. × forgets a view. A new view starts with the options of the view you came from.
+
+**One view per gene or locus.** Searching a gene that already has a view switches to that view
+instead of opening a copy. The same goes for a locus searched again: the same coordinates, not
+just the same gene. This covers Enter pressed several times, a suggestion clicked after Enter, and
+the gene searched again later. A note under the header says which view it switched to.
+- A search still running is not run a second time; a different search typed meanwhile replaces it.
+- A view that has since moved to another gene no longer counts as that gene's view.
+- **Shift+Enter** (or Shift+click on *Open*) opens a second view of the same gene on purpose, for
+  example to compare two sets of options.
+
+Views
 are saved with the session and are what the HTML export carries. **SVG · N views** (header) saves
 every view on one SVG page, stacked vertically under their titles (gene, locus and window), each
 drawn with its own options: each tab is shown in turn while its plot is captured, then the current

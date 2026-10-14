@@ -58,7 +58,13 @@ const EMBEDDED = readEmbedded();
 /** A region open in the viewer: the gene (1-based inclusive bounds) and, optionally, the window, the pinned locus and the reads track. */
 type Opened = { geneName: string; geneId?: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; /** undefined: the window itself is pinned when there is one; null: nothing pinned */ mark?: { start: number; end: number } | null; reads?: boolean };
 /** A registered view (tab): its region, the last state the viewer reported for it, and the options it must start with when reopened. */
-interface ViewTab { id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings> }
+interface ViewTab {
+  id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings>;
+  /** what the search box asked for when the tab was opened (searchKey), kept while the view moves: a second search for it switches to this tab */
+  asked?: string;
+}
+/** A search's target: the gene (whole), or the locus searched (its gene opened, the locus pinned). */
+const searchKey = (o: Opened) => (o.mark ? `l:${o.chrom.replace(/^chr/i, '').toUpperCase()}:${o.mark.start}-${o.mark.end}` : `g:${o.geneName.toUpperCase()}`);
 const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
 /** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
 const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
@@ -226,7 +232,7 @@ function App() {
     const id = tabSeq.current++;
     const prev = viewerStateRef.current;
     pendingSettingsRef.current = prev ? { ...prev, transcriptId: prev.gene.name === o.geneName ? prev.transcriptId : undefined } : undefined;
-    setViews(tabs => [...snapshot(tabs), { id, label: labelOf(o), opened: o, state: null }]);
+    setViews(tabs => [...snapshot(tabs), { id, label: labelOf(o), opened: o, state: null, asked: searchKey(o) }]);
     setActiveId(id);
     setGene(o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : o.geneName);
   }, [snapshot]);
@@ -494,9 +500,33 @@ function App() {
     if (LINK && !autoOpened.current) { autoOpened.current = true; openLink(); }
   }, [openLink]);
 
+  /**
+   * A search's result: its tab when one was opened for the same gene (or the same locus) already, switched to rather than
+   * opened twice (Enter pressed again, a suggestion clicked after Enter, the gene searched again later); a new tab
+   * otherwise, or always with Shift (Shift+Enter, Shift+click on Open): a second view of the gene on purpose.
+   */
+  const openSearched = useCallback((o: Opened, force: boolean) => {
+    const k = searchKey(o);
+    // the gene each tab shows now (the active one as its viewer last reported): a tab moved to another gene is not this search's
+    const geneNow = (v: ViewTab) => (v.id === activeIdRef.current && viewerStateRef.current?.gene.chrom ? viewerStateRef.current.gene.name : v.opened.geneName);
+    const have = force ? undefined : views.find(v => (v.asked ?? searchKey(v.opened)) === k && geneNow(v).toUpperCase() === o.geneName.toUpperCase());
+    if (!have) { openNew(o); return; }
+    const what = o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : o.geneName;
+    if (have.id === activeIdRef.current) setNotes([`${what} is the view shown already. Shift+Enter opens a second view of it.`]);
+    else { activateTab(have.id); setNotes([`${what} has a view already: switched to it (${have.label}). Shift+Enter opens a second one.`]); }
+  }, [views, openNew, activateTab]);
+  /** The search running: its text (the same asked again while it runs is not run twice) and its number (a later search supersedes it). */
+  const searching = useRef<{ q: string; seq: number } | null>(null);
+  const searchSeq = useRef(0);
+  /** Shift held on the Enter or the click that submitted the search: a new view even when one shows that gene */
+  const forceNewView = useRef(false);
+
   const open = useCallback(async () => {
     const q = gene.trim();
+    const force = forceNewView.current;
+    forceNewView.current = false;
     if (!q) return;
+    if (searching.current && searching.current.q.toUpperCase() === q.toUpperCase()) return;
     if (LINK && q === LINK_TEXT) return openLink();
     // c. positions and exon numbers are read on the transcript of a view: this box opens genes, so
     // it says where they work rather than sending them to a gene lookup that cannot resolve them
@@ -505,6 +535,9 @@ function App() {
       return;
     }
     setBusy(true); setError(null);
+    const seq = ++searchSeq.current;
+    searching.current = { q, seq };
+    const latest = () => searchSeq.current === seq;
     try {
       const locus = parseLocus(q);
       if (locus) {
@@ -513,17 +546,21 @@ function App() {
         const ov = (g: { start: number; end: number }) => Math.min(g.end, locus.end) - Math.max(g.start, locus.start);
         const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
         if (!best) throw new Error(`no RefSeq gene at ${q}`);
+        if (!latest()) return;
         const point = locus.start === locus.end;
-        openNew({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } });
+        openSearched({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } }, force);
       } else {
         const t = await ds.getTranscript(q, q.toUpperCase().startsWith('ENSG') ? q : undefined);
-        openNew({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end });
+        if (!latest()) return;
+        openSearched({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end }, force);
       }
     } catch (e: any) {
-      setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+      if (latest()) setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+    } finally {
+      // a superseded search leaves the box to the one that replaced it
+      if (latest()) { searching.current = null; setBusy(false); }
     }
-    setBusy(false);
-  }, [gene, ds, openLink, openNew]);
+  }, [gene, ds, openLink, openSearched]);
 
   // Options the viewer starts with: a reopened tab's snapshot or a loaded session, else the live options of the
   // viewer being remounted (a sample added, the build changed)
@@ -854,7 +891,7 @@ function App() {
 
   /** The gene / locus search, with the genome build in it: in the app bar, folded or not. */
   const searchForm = (
-    <form onSubmit={e => { e.preventDefault(); open(); }}
+    <form onSubmit={e => { e.preventDefault(); open(); }} onKeyDown={e => { if (e.key === 'Enter') forceNewView.current = e.shiftKey; }}
       className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
       <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
         title={`Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other build asks first: its coordinates over the views', or everything moved to it.`}
@@ -866,7 +903,7 @@ function App() {
       <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
         title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
         className="flex-1 min-w-0 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400" />
-      <button type="submit" disabled={busy || !gene.trim()} className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+      <button type="submit" disabled={busy || !gene.trim()} onClick={e => { forceNewView.current = e.shiftKey; }} title="Open the gene or the locus: its view when it has one already, a new one with Shift" className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
     </form>
   );
   /** The registered views as tabs: click one to reopen it, × to forget it. */
