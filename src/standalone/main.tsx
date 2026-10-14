@@ -606,7 +606,7 @@ function App() {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' && SV_HINTS ? 'rna' as const : false;
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
               // a stranded sample of a view showing the strands keeps them split in the page
               strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
@@ -621,7 +621,7 @@ function App() {
           const mine = new Set(breakpointsOf(c.structural).map(b => `${b.kind}:${b.start}-${b.end}`));
           const cand = others.filter(b => !mine.has(`${b.kind}:${b.start}-${b.end}`));
           if (!cand.length) continue;
-          try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.uniqueOnly); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
+          try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.minMapq); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
         }
         for (const [sid, c] of raw) coverage[String(sid)] = await encodeCoverageV2(c, { start: ws, end: we });
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
@@ -637,7 +637,7 @@ function App() {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
               progress(`${t.label}: reads of ${smp.name}`);
               try {
-                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05, { secondary: !!st.secondary });
+                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, 0.05, { secondary: !!st.secondary });
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
@@ -645,7 +645,7 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, uniqueOnly: st.uniqueOnly, coverage, reads });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, coverage, reads });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,

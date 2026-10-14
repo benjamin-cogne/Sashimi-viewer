@@ -13,8 +13,8 @@ import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import { READS_REGION_MAX_BP, type CoverageOptions, type ReadsOptions, type SashimiDataSource, type SampleRef, type VariantScan, type VariantScanOptions } from '../components/sashimi/datasource';
 import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
-import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, keepFlagsWith, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, uniqueFrom, type RawRead, type StrandnessCall } from './alignments';
-import { CoverageState, Layer, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
+import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, keepFlagsWith, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, type RawRead, type StrandnessCall } from './alignments';
+import { CoverageState, Layer, mapqThreshold, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
@@ -120,8 +120,6 @@ const METHYL_MAX_SPAN = 6_000_000, METHYL_CACHE_BYTES = 256 * 1024 * 1024;
 const ALLELE_CACHE_BYTES = 384 * 1024 * 1024;
 /** Partial coverage is handed to the caller at most this often while a deep view fills. */
 const PROGRESS_MS = 200;
-/** Records looked at for an NH tag before a file without one is taken as having none (uniqueness then from MAPQ). */
-const NH_PROBE = 2_000;
 /**
  * Decoded records the alignment libraries keep, all files of this data source together (the page and the variant
  * worker each have one). The libraries default to 1 GB per file, sized for a genome browser that decodes the same
@@ -314,7 +312,7 @@ export { isLongRead };
 
 /** Runs full variant scans away from the page's thread (see variantClient.ts); the data source hands them over. */
 export interface VariantScanner {
-  scan(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  scan(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
   /** the sample's files changed or it was removed: what was counted for it no longer holds */
   forget(sampleId: number): void;
   /** the reference changed: mismatches are read against it */
@@ -324,7 +322,7 @@ export interface VariantScanner {
   /** drop the counts kept for these */
   release?(what: 'methylation' | 'variants'): void;
   /** a collapsed reads window (consensus groups or haplotypes) decoded and computed in the worker */
-  collapse?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
+  collapse?(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
 }
 
 export class LocalDataSource implements SashimiDataSource {
@@ -376,9 +374,9 @@ export class LocalDataSource implements SashimiDataSource {
       const k = fileKind(s.kind);
       if (k) this.providers.set(s.id, k.open(s, this.host));
     }
-    this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.nhMode.delete(s.id); this.variantScanner?.forget(s.id); }
+    this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.providers.get(id)?.dispose?.(); this.providers.delete(id); this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.nhMode.delete(id); this.variantScanner?.forget(id); }
+  removeSample(id: number) { this.providers.get(id)?.dispose?.(); this.providers.delete(id); this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.variantScanner?.forget(id); }
   /** one byte budget for the decoded records of every alignment file of this source (see RECORD_CACHE_BYTES) */
   private recordBudget = new SharedBudget(RECORD_CACHE_BYTES);
   /**
@@ -561,7 +559,7 @@ export class LocalDataSource implements SashimiDataSource {
    * The tile width comes from the index, and the thread is handed back between tiles, so neither the memory
    * nor the pauses grow with the depth of the library. `opts.signal` drops the decoding and the fetch in flight.
    */
-  private async scan(id: number, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number, light: boolean, opts: ScanOptions = {}): Promise<Scan> {
+  private async scan(id: number, chrom: string, start: number, end: number, minMapq: number, cap: number, light: boolean, opts: ScanOptions = {}): Promise<Scan> {
     const { structural = false, signal, filter, pairs = false, secondary = false } = opts;
     const loc = await this.locate(id, chrom);
     if (!loc) return { total: 0, rate: 1, kept: [] };
@@ -580,7 +578,7 @@ export class LocalDataSource implements SashimiDataSource {
         if (ts > start && view.start(r) < ts) continue; // already counted in the previous tile
         seen++;
         if (!keepFlagsWith(view.flags(r), secondary)) continue;
-        if (uniqueOnly && !uniqueFrom(view.nh(r), view.mapq(r))) continue;
+        if (minMapq > 0 && view.mapq(r) < mapqThreshold(minMapq)) continue;
         if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
         if (pairs) {
           // a record without a name (a CRAM written without them) is a fragment of its own
@@ -629,10 +627,10 @@ export class LocalDataSource implements SashimiDataSource {
 
   // ---- SashimiDataSource ----
   /** Clipped reads of this sample rescued at breakpoints seen in other samples: only the reads around the breakpoint ends are read. */
-  async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]> {
+  async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], minMapq: number): Promise<RescuedClips[]> {
     if (!breakpoints.length) return [];
     const k = this.providerOf(sampleId);
-    if (k) return (await k.p.rescueClips?.(k.s, chrom, breakpoints, uniqueOnly)) ?? [];
+    if (k) return (await k.p.rescueClips?.(k.s, chrom, breakpoints, minMapq)) ?? [];
     const loc = await this.locate(sampleId, chrom);
     if (!loc) return [];
     const ends = [...new Set(breakpoints.flatMap(b => [b.start, b.end]))].sort((a, b) => a - b);
@@ -644,7 +642,7 @@ export class LocalDataSource implements SashimiDataSource {
     // full records (names included) over short stretches: a read overlapping two stretches is kept once
     const seen = new Set<string>(); const reads: RawRead[] = [];
     for (const r of ranges) {
-      const { kept } = await this.scan(sampleId, chrom, r.start, r.end, uniqueOnly, Number.MAX_SAFE_INTEGER, false, { structural: true });
+      const { kept } = await this.scan(sampleId, chrom, r.start, r.end, minMapq, Number.MAX_SAFE_INTEGER, false, { structural: true });
       for (const x of kept) { const k = `${x.name}:${x.start}:${x.flags}:${x.cigar}`; if (!seen.has(k)) { seen.add(k); reads.push(x); } }
     }
     const clipped = clipEnds(reads).filter(e => ends.some(p => Math.abs(p - e.pos) <= RESCUE_TOLERANCE_BP));
@@ -656,7 +654,7 @@ export class LocalDataSource implements SashimiDataSource {
   async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null> {
     const k = this.providerOf(sampleId);
     if (k) return (await k.p.getPrimaryRecord?.(k.s, chrom, start, name)) ?? null;
-    const { kept } = await this.scan(sampleId, chrom, start, start + 1, false, Number.MAX_SAFE_INTEGER, false, { structural: true });
+    const { kept } = await this.scan(sampleId, chrom, start, start + 1, 0, Number.MAX_SAFE_INTEGER, false, { structural: true });
     const r = kept.find(x => x.start === start && x.name === name && !(x.flags & 2048) && x.seq);
     return r ? { seq: r.seq, flags: r.flags, cigar: r.cigar } : null;
   }
@@ -678,11 +676,11 @@ export class LocalDataSource implements SashimiDataSource {
    * Every variant site above the thresholds in [start, end), from every read of the window: exact counts, no
    * sampling. Handed to the variant scanner when one is set, counted here otherwise.
    */
-  getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+  getVariantSites(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
     const s = this.samples.get(sampleId);
     if (!s) return Promise.reject(new Error('Sample not found'));
-    if (this.variantScanner && !s.embedded) return this.variantScanner.scan(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
-    return this.countVariants(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
+    if (this.variantScanner && !s.embedded) return this.variantScanner.scan(sampleId, chrom, start, end, minMapq, minVaf, opts);
+    return this.countVariants(sampleId, chrom, start, end, minMapq, minVaf, opts);
   }
 
   /** The sample's allele state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
@@ -788,9 +786,9 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The allele counting itself: grows the sample's allele state over [start, end), then reads the sites back. */
-  countVariants(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+  countVariants(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
     const k = this.providerOf(sampleId);
-    if (k) return k.p.countVariants ? k.p.countVariants(k.s, chrom, start, end, uniqueOnly, minVaf, opts) : Promise.reject(new Error(`no variant scan for ${k.s.file.name}`));
+    if (k) return k.p.countVariants ? k.p.countVariants(k.s, chrom, start, end, minMapq, minVaf, opts) : Promise.reject(new Error(`no variant scan for ${k.s.file.name}`));
     const signal = opts?.signal;
     return this.locked(this.alleleLocks, sampleId, async () => {
       throwIfAborted(signal);
@@ -816,15 +814,14 @@ export class LocalDataSource implements SashimiDataSource {
       const count = (layer: AlleleLayer, r: any) => {
         const flags = view.flags(r);
         if (!keepFlags(flags)) return;
-        // every read is counted, unique or not ("unique only" is read back from the counts, not scanned again)
-        const unique = this.isUnique(sampleId, view, r);
+        // every read is counted, whatever its MAPQ (a minimum MAPQ is read back from the counts, not scanned again)
         const ops = view.ops(r);
         const n = view.seqCodes(r, scratch);
         const start0 = view.start(r);
         // a phased file: the read's haplotag (HP 1, 2, … within the phase set PS) numbered for the counts
         const t = view.hap(r);
         const g = t.hp ? st.groups.of(t.hp, t.ps ?? null) : 0;
-        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, unique, (flags & 16) !== 0, view.mapq(r), g);
+        layer.add(start0, ops, scratch.a, n, view.quals(r), ref, (flags & 16) !== 0, view.mapq(r), g);
         if (st.longReads == null) {
           let span = 0;
           // aligned bases, not the introns (N) nor the deletions (D): see isLongRead
@@ -845,7 +842,7 @@ export class LocalDataSource implements SashimiDataSource {
       const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
       const siteRef = refWindow(start, await this.getReferenceSeq(chrom, start, end));
       throwIfAborted(signal);
-      const { sites, reads, haplotagged } = sitesFromCounts([st.owned, st.spill], uniqueOnly, start, end, siteRef, vaf, minIndel, st.groups);
+      const { sites, reads, haplotagged } = sitesFromCounts([st.owned, st.spill], minMapq, start, end, siteRef, vaf, minIndel, st.groups);
       return { sites, total: reads, long_reads: longReads, ...(haplotagged ? { haplotagged } : {}) };
     });
   }
@@ -888,7 +885,7 @@ export class LocalDataSource implements SashimiDataSource {
   private strandCalls = new Map<number, StrandnessCall>();
 
   /** Every loaded file is the "run": per-exon depth of each of them, strand-aware when the library is detected as stranded. */
-  async getExonUsage(_runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
+  async getExonUsage(_runId: number, chrom: string, strand: number, exons: [number, number][], minMapq: number): Promise<ExonUsageResponse> {
     const geneStrand = strand >= 0 ? 1 : -1;
     const samples: SampleExonDepths[] = [];
     for (const s of this.list()) {
@@ -896,7 +893,7 @@ export class LocalDataSource implements SashimiDataSource {
         const perExon: Scan[] = [];
         const k = this.providerOf(s.id);
         if (k && !k.p.exonReads) throw new Error('exon depths are not available for this file');
-        for (const [a, b] of exons) perExon.push(k ? await k.p.exonReads!(k.s, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS) : await this.scan(s.id, chrom, a, b, uniqueOnly, EXON_USAGE_MAX_READS, true));
+        for (const [a, b] of exons) perExon.push(k ? await k.p.exonReads!(k.s, chrom, a, b, minMapq, EXON_USAGE_MAX_READS) : await this.scan(s.id, chrom, a, b, minMapq, EXON_USAGE_MAX_READS, true));
         let strandness = this.strandCalls.get(s.id), fraction: number | null = null;
         if (!strandness) {
           const call = detectStrandness(perExon.flatMap(x => x.kept), geneStrand);
@@ -929,24 +926,11 @@ export class LocalDataSource implements SashimiDataSource {
   /** Requests of one sample run one after the other: they grow the same state. */
   private coverageLocks = new Map<number, Promise<unknown>>();
   /** Whether a file's records carry NH (uniqueness from it) or not (from MAPQ), or how many were probed so far. */
-  private nhMode = new Map<number, 'tag' | 'mapq' | number>();
 
   private locked<T>(locks: Map<number, Promise<unknown>>, id: number, job: () => Promise<T>): Promise<T> {
     const run = (locks.get(id) ?? Promise.resolve()).catch(() => undefined).then(job);
     locks.set(id, run.catch(() => undefined));
     return run;
-  }
-
-  /** Uniquely mapped, as uniqueFrom decides; NH is not looked for in files that do not carry it (a tag lookup per record costs). */
-  private isUnique(id: number, view: RecordView<any>, r: any): boolean {
-    const mode = this.nhMode.get(id);
-    if (mode === 'mapq') return view.mapq(r) >= 30;
-    const nh = view.nh(r);
-    if (mode !== 'tag') {
-      if (nh != null) this.nhMode.set(id, 'tag');
-      else { const seen = (typeof mode === 'number' ? mode : 0) + 1; this.nhMode.set(id, seen >= NH_PROBE ? 'mapq' : seen); }
-    }
-    return uniqueFrom(nh, view.mapq(r));
   }
 
   /**
@@ -958,11 +942,11 @@ export class LocalDataSource implements SashimiDataSource {
   private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false): void {
     const flags = view.flags(r);
     if (!keepFlagsWith(flags, secondary)) return;
-    const unique = this.isUnique(id, view, r);
+    const mapq = view.mapq(r);
     const ops = view.ops(r);
     const start = view.start(r);
     const insert = (flags & 1) && (flags & 2) ? Math.abs(view.tlen(r)) : 0;
-    layer.add(start, ops, unique, insert, flags);
+    layer.add(start, ops, mapq, insert, flags);
     if (!structural) return;
     let keep = false, refLen = 0;
     for (let k = 0; k < ops.length; k++) {
@@ -980,7 +964,7 @@ export class LocalDataSource implements SashimiDataSource {
       keep = mate >= 0 && (mate !== seqId || rev === ((flags & 32) !== 0) || Math.abs(view.tlen(r)) > 1000 || (Math.abs(mp - start) > OUTWARD_MIN_BP && (rev ? start < mp : mp < start)));
     }
     if (!keep) keep = typeof view.sa(r) === 'string';
-    if (keep) layer.sv.push({ r: view.raw(r, true, true, refNames), unique, end: start + refLen });
+    if (keep) layer.sv.push({ r: view.raw(r, true, true, refNames), mapq, end: start + refLen });
   }
 
   /**
@@ -1086,25 +1070,25 @@ export class LocalDataSource implements SashimiDataSource {
    * margins follow within `opts.maxReads` (an index estimate of what they cost) and the returned
    * `window` says how far they went. Everything counted stays with the sample for later requests.
    */
-  async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
+  async getCoverage(sampleId: number, chrom: string, start: number, end: number, minMapq: number, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
     if (end - start > MAX_REGION_BP) throw new Error(`Region too large (${(end - start).toLocaleString('en-US')} bp); maximum is ${MAX_REGION_BP.toLocaleString('en-US')} bp`);
     const k = this.providerOf(sampleId);
-    if (k) return k.p.getCoverage(k.s, chrom, start, end, uniqueOnly, boundaries, opts);
+    if (k) return k.p.getCoverage(k.s, chrom, start, end, minMapq, boundaries, opts);
     const signal = opts?.signal;
     const loc = await this.locate(sampleId, chrom);
     const result = (w: { start: number; end: number }, sl: CoverageSlice, strands?: SampleCoverage['strands']): SampleCoverage => ({
       sample_id: sampleId, sample_name: s.name, coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning, window: w, spliced: sl.spliced, strands,
     });
-    if (!loc) return result({ start, end }, await readSlice([], uniqueOnly, start, end, boundaries));
+    if (!loc) return result({ start, end }, await readSlice([], minMapq, start, end, boundaries));
     return this.locked(this.coverageLocks, sampleId, async () => {
       throwIfAborted(signal);
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
       const structural = opts?.structural || false;
       const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands);
-      const strandsOf = (w: { start: number; end: number }) => (opts?.strands ? strandSlices(st, uniqueOnly, w.start, w.end, boundaries) : Promise.resolve(undefined));
+      const strandsOf = (w: { start: number; end: number }) => (opts?.strands ? strandSlices(st, minMapq, w.start, w.end, boundaries) : Promise.resolve(undefined));
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
       // one waits at least PROGRESS_MS and 4× what the last one took, so the partials never take over the reading
@@ -1115,7 +1099,7 @@ export class LocalDataSource implements SashimiDataSource {
         if (!force && t0 < next) return;
         const w = exact();
         if (w.end <= w.start) return;
-        const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+        const sl = await st.slice(minMapq, w.start, w.end, boundaries, yieldToUi);
         const strands = await strandsOf(w);
         throwIfAborted(signal);
         const t1 = performance.now();
@@ -1135,7 +1119,7 @@ export class LocalDataSource implements SashimiDataSource {
       }
       this.trimCoverage(sampleId);
       const w = exact();
-      const sl = await st.slice(uniqueOnly, w.start, w.end, boundaries, yieldToUi);
+      const sl = await st.slice(minMapq, w.start, w.end, boundaries, yieldToUi);
       const strands = await strandsOf(w);
       throwIfAborted(signal);
       const out = result(w, sl, strands);
@@ -1181,7 +1165,7 @@ export class LocalDataSource implements SashimiDataSource {
     });
   }
 
-  async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+  async getReads(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
     const s = this.samples.get(sampleId);
     if (!s) throw new Error('Sample not found');
@@ -1189,9 +1173,9 @@ export class LocalDataSource implements SashimiDataSource {
     const collapsed = mode === 'collapsed';
     // a collapsed window decodes up to 40 000 reads and groups or phases them, which froze the page on deep data: the
     // worker does it, and only the answer (sites, groups, haplotypes; no read) comes back
-    if (collapsed && this.variantScanner?.collapse && !s.embedded) return this.variantScanner.collapse(sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts);
+    if (collapsed && this.variantScanner?.collapse && !s.embedded) return this.variantScanner.collapse(sampleId, chrom, start, end, minMapq, maxReads, minSupport, minVaf, opts);
     const k = this.providerOf(sampleId);
-    if (k) return k.p.getReads(k.s, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
+    if (k) return k.p.getReads(k.s, chrom, start, end, minMapq, maxReads, mode, minSupport, minVaf, opts);
     const support = !collapsed ? opts?.support : undefined;
     // reads phased in reads mode: more of them read for the phasing, `maxReads` of them returned (answerReads)
     const phased = !collapsed && !support && !!opts?.phase;
@@ -1201,7 +1185,7 @@ export class LocalDataSource implements SashimiDataSource {
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
     // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
     // are sampled as reads, and their mates in the window added afterwards
-    const scanned = await this.scan(sampleId, chrom, start, end, uniqueOnly, cap, false,
+    const scanned = await this.scan(sampleId, chrom, start, end, minMapq, cap, false,
       { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
@@ -1210,7 +1194,7 @@ export class LocalDataSource implements SashimiDataSource {
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
       const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
       if (want.size) {
-        const extra = await this.scan(sampleId, chrom, start, end, uniqueOnly, Infinity, false,
+        const extra = await this.scan(sampleId, chrom, start, end, minMapq, Infinity, false,
           { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`), secondary: !!opts?.secondary });
         mates = extra.kept.length;
         raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);

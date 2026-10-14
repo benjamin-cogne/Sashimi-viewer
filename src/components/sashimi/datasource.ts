@@ -103,8 +103,8 @@ export interface SashimiDataSource {
   getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData>;
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts>;
   /** Coverage runs and junctions for a 0-based half-open window; `boundaries` asks for unspliced reads through those exon–intron boundaries too (junction ends are always counted). */
-  getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
-  getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+  getCoverage(sampleId: number, chrom: string, start: number, end: number, minMapq: number, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
+  getReads(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
   /** All samples that can be added as tracks. */
   getRunSamples(runId: number): Promise<SampleRef[]>;
@@ -117,7 +117,7 @@ export interface SashimiDataSource {
    * the cohort that normalises exon usage. `strand` is the gene strand (sense reads only when the
    * library is detected as stranded).
    */
-  getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse>;
+  getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], minMapq: number): Promise<ExonUsageResponse>;
   /** Reference sequence (+ strand, upper case) of a 0-based half-open window; null when no reference is available. */
   getReference(chrom: string, start: number, end: number): Promise<string | null>;
   /** Protein domains (UniProt / Pfam) of a coding model, amino-acid coordinates. */
@@ -128,7 +128,7 @@ export interface SashimiDataSource {
    * sampled systematically (VAFs are unchanged, counts scaled back) and `sampled` says so. Absent when the
    * source cannot scan (no alignment file behind the sample).
    */
-  getVariantSites?(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  getVariantSites?(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
   /** CpG methylation of a window from the reads' MM / ML tags (long reads), per haplotag; counted once and kept (methylation.ts) */
   getMethylation?(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   /** the viewer no longer shows these: what was counted and kept for them (every sample) can be dropped */
@@ -137,7 +137,7 @@ export interface SashimiDataSource {
    * Clipped reads of a sample rescued at breakpoints seen in other samples (their clipped bases matching the reference
    * at the other end): scanned around the breakpoint ends only. Absent when the source has no alignment file.
    */
-  rescueClips?(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]>;
+  rescueClips?(sampleId: number, chrom: string, breakpoints: Breakpoint[], minMapq: number): Promise<RescuedClips[]>;
   /**
    * The primary record of a read (the one carrying the whole sequence, soft-clipped) at a known 0-based start, for
    * the bases a supplementary record hard-clipped; null when not found. Absent when the source has no alignment file.

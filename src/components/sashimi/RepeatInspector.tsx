@@ -70,7 +70,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
     setResults(p => ({ ...p, [sid]: { loading: true } }));
     (async () => {
       const a = locus.start - FLANK - 300, b = locus.end + FLANK + 300;
-      const resp = await ds.getReads(sid, locus.chrom, a, b, false, INSPECT_MAX_READS, 'reads', 0, 1, {});
+      const resp = await ds.getReads(sid, locus.chrom, a, b, 0, INSPECT_MAX_READS, 'reads', 0, 1, {});
       const reads = resp.reads;
       let lo = Math.min(a, ...reads.map(r => r.s)), hi = Math.max(b, ...reads.map(r => r.e));
       lo = Math.max(0, lo);

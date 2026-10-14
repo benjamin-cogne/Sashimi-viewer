@@ -22,7 +22,7 @@ interface Props {
   samples: { id: number; name: string }[];
   /** the variant scan's sites of a sample on a chromosome, preferred to a call from the reads read here */
   knownSites: (sid: number, chrom: string) => VariantSite[];
-  uniqueOnly: boolean;
+  minMapq: number;
   x: number; y: number;
   siteColor: (s: VariantSite) => string;
   siteShort: (s: VariantSite) => string;
@@ -57,7 +57,7 @@ function originTarget(o: PairPhaseOrigin): PairTarget {
   return { chrom: o.chrom, pos: s.pos, allele: s.kind === 'snv' ? { kind: 'snv', alt: s.alt } : { kind: s.kind, length: s.length }, text: `${o.chrom}:${fmt(s.pos + 1)}` };
 }
 
-export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, uniqueOnly, x, y, siteColor, siteShort, hpColor, gene, reverse, picking, onPicking, picked, onClose }: Props) {
+export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, minMapq, x, y, siteColor, siteShort, hpColor, gene, reverse, picking, onPicking, picked, onClose }: Props) {
   const [sid, setSid] = useState(origin.sid);
   const [text, setText] = useState(text0);
   const [run, setRun] = useState<Run | null>(null);
@@ -76,7 +76,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
       const label = i ? (all.length > 2 ? `B${i}` : 'B') : 'A';
       try {
         const [s, e] = targetWindow(t);
-        const r = await ds.getReads(sampleId, t.chrom, s, e, uniqueOnly, PAIR_READS_CAP, 'reads', 1, 0.01, { signal: ac.signal });
+        const r = await ds.getReads(sampleId, t.chrom, s, e, minMapq, PAIR_READS_CAP, 'reads', 1, 0.01, { signal: ac.signal });
         const got = resolveTarget(t, r.reads, r.reference?.seq ?? null, r.reference?.start ?? 0, knownSites(sampleId, t.chrom));
         return { label, target: t, site: got.site, note: got.note, reads: r.reads, total: r.total, shown: r.shown };
       } catch (err: any) {
@@ -105,7 +105,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
       else {
         setBusy('phasing the reads between the sites…');
         try {
-          const r = await ds.getReads(sampleId, chrom, lo, hi, uniqueOnly, CHAIN_READS_CAP, 'collapsed', 3, 0.05, { haplotypes: 2, phaseSource: 'reads', longReadMinIndel: CHAIN_LONG_MIN_INDEL, signal: ac.signal });
+          const r = await ds.getReads(sampleId, chrom, lo, hi, minMapq, CHAIN_READS_CAP, 'collapsed', 3, 0.05, { haplotypes: 2, phaseSource: 'reads', longReadMinIndel: CHAIN_LONG_MIN_INDEL, signal: ac.signal });
           if (ac.signal.aborted) return;
           if (!r.phase) note('the reads between them could not be phased');
           else for (const [i, j] of mine) {
@@ -126,7 +126,7 @@ export function PairPhasePanel({ ds, origin, text: text0, samples, knownSites, u
     setRun({ sid: sampleId, sites, pairs, errors });
     setPick(p => (p[1] < sites.length ? p : [0, 1]));
     setBusy(false);
-  }, [ds, origin, uniqueOnly, knownSites]);
+  }, [ds, origin, minMapq, knownSites]);
 
   useEffect(() => { void go(sid, text); return () => abort.current?.abort(); }, [sid]); // eslint-disable-line react-hooks/exhaustive-deps
 

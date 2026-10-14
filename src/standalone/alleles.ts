@@ -19,7 +19,7 @@
  * qualities, and the reference over the record's span.
  */
 import type { SiteHaplotypes, VariantSite } from '../components/sashimi/types';
-import { Hist } from './coverage';
+import { Hist, bucketsUnder, mapqBucket } from './coverage';
 
 /**
  * Supporting reads a site needs; the base quality under which an alternate base is flagged. The scan counts every
@@ -240,14 +240,18 @@ class AlleleCounts {
   }
 }
 
-/** The reads of one part of a scan: every read goes to `all`, a read that is not uniquely mapped to `multi` as well. */
+/**
+ * The reads of one part of a scan: every read goes to `all`, a read under MAPQ 30 to the counts of its MAPQ bucket as
+ * well (coverage.ts mapqBucket), so the sites are read at any minimum MAPQ of MAPQ_THRESHOLDS without counting again.
+ */
 export class AlleleLayer {
   all = new AlleleCounts();
-  multi = new AlleleCounts();
-  get bytes(): number { return this.all.bytes + this.multi.bytes; }
-  add(start: number, ops: ArrayLike<number>, codes: Uint8Array, seqLen: number, quals: ArrayLike<number> | null, ref: RefWindow | null, unique: boolean, reverse = false, mapq = 60, g = 0): void {
+  low: (AlleleCounts | undefined)[] = [];
+  get bytes(): number { let n = this.all.bytes; for (const c of this.low) n += c?.bytes ?? 0; return n; }
+  add(start: number, ops: ArrayLike<number>, codes: Uint8Array, seqLen: number, quals: ArrayLike<number> | null, ref: RefWindow | null, reverse = false, mapq = 60, g = 0): void {
     this.all.add(start, ops, codes, seqLen, quals, ref, reverse, mapq, g);
-    if (!unique) this.multi.add(start, ops, codes, seqLen, quals, ref, reverse, mapq, g);
+    const b = mapqBucket(mapq);
+    if (b >= 0) (this.low[b] ??= new AlleleCounts()).add(start, ops, codes, seqLen, quals, ref, reverse, mapq, g);
   }
 }
 
@@ -276,10 +280,11 @@ export class AlleleState {
  * same with the depth at its position; a deletion with d + n (the deleting reads are not in the blocks).
  * `ref` gives the reference base of an SNV ('?' without one). Also the reads over [start, end).
  */
-export function sitesFromCounts(layers: AlleleLayer[], uniqueOnly: boolean, start: number, end: number, ref: RefWindow | null,
+export function sitesFromCounts(layers: AlleleLayer[], minMapq: number, start: number, end: number, ref: RefWindow | null,
   minVaf: number, minIndel: number, groups?: HapGroups): { sites: VariantSite[]; reads: number; haplotagged: number } {
   const parts: [AlleleCounts, number][] = [];
-  for (const l of layers) { parts.push([l.all, 1]); if (uniqueOnly) parts.push([l.multi, -1]); }
+  const under = bucketsUnder(minMapq);
+  for (const l of layers) { parts.push([l.all, 1]); for (let b = 0; b < under; b++) if (l.low[b]) parts.push([l.low[b]!, -1]); }
   const w = Math.max(0, end - start);
   /** a block quantity (depth, + strand depth, …) at every position of the window */
   const dense = (s: (c: AlleleCounts) => Hist, e: (c: AlleleCounts) => Hist): Int32Array => {

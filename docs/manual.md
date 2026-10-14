@@ -93,7 +93,7 @@ The page has three bands, top to bottom.
   - **Show**: *Reads* (RNA), *All transcripts*, *SNPs*, *Equal introns*, *Known variants*.
   - **Layers** (DNA): *Coverage*, *Variants*, *Methylation*, *Reads*.
   - **Depth**: *shared | own | % max*.
-  - **Filters**: *Unique reads* and *Secondary alignments*. A badge counts the filters on.
+  - **Filters**: *Minimum MAPQ* and *Secondary alignments*. A badge counts the filters on.
 
   Each section sits on a pastel panel of its own colour: Arcs (or Structure) indigo, Show green,
   Layers orange, Depth blue. Filters stays plain, on the right.
@@ -177,12 +177,20 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   from the UCSC API, which is slower and requires the network. A FASTA also makes the reads track
   (mismatches) work offline for BAM files.
 - **Read filters** follow `samtools` defaults: unmapped, secondary, QC-fail and duplicate reads are
-  ignored, and supplementary records are kept. **Unique reads** (in *Filters*) keeps `NH:1` reads (STAR/HISAT2) or
-  MAPQ ≥ 30 when no `NH` tag is present.
+  ignored, and supplementary records are kept.
+- **Minimum MAPQ** (in *Filters*): *all*, ≥ 1, ≥ 10, ≥ 20 or ≥ 30, the same as `samtools view -q`. Alignments placed with
+  a lower mapping quality are left out of coverage, junction arcs, variant sites and the reads track. The scale is
+  the aligner's: STAR gives 255 to a unique read and 3, 1, 0 to a read placed at 2, 3–4, 5 or more loci; HISAT2 gives 60,
+  1 or 0; bwa and minimap2 estimate it from 0 to 60, a Phred-scaled chance that the placement is wrong (20: 1 in 100,
+  30: 1 in 1,000). So ≥ 10 keeps the uniquely mapped reads of STAR and HISAT2, and ≥ 20–30 the confident placements of
+  bwa and minimap2. Coverage and arcs are recounted from what was already read; the reads track is read again.
+  Sessions saved with the former *Unique reads* switch on open at ≥ 30, which keeps the same reads with these aligners.
 - **Secondary alignments** (in *Filters*): also counts the secondary alignments (flag `0x100`, the other placements of a
   multi-mapped read), in coverage, junction arcs and the reads track, as IGV does by default. A
   junction can then read like IGV's: a fusion read that STAR also places elsewhere is often a
-  secondary alignment. Turning it on turns *Unique reads* off and reads the window again.
+  secondary alignment. The window is read again. It is independent of the minimum MAPQ, which applies to secondary
+  alignments as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so a
+  threshold of 1 or more leaves most of them out.
 - **Ambiguous placements**: in the reads track, reads with a mapping quality under 10 are drawn
   hollow, with an outline and no fill, as IGV draws its MAPQ 0 reads. That covers STAR's 3 (2 loci),
   1 (3–4 loci) and 0 (more), while its 255 (unique) is drawn as usual. Their mismatches stay drawn,
@@ -246,7 +254,7 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   as far as about 2 million reads of margin; past that they shrink, and panning out of them costs a
   new read. What has been counted stays with the sample while you stay in that part of the chromosome (a jump
   further than a window away starts over): panning
-  back, *Unique reads*, another transcript model or its exon boundaries are answered from the
+  back, the *Minimum MAPQ*, another transcript model or its exon boundaries are answered from the
   tallies at once, without reading the file again (up to 8 Mb per sample and 256 MB for all samples;
   the least recently used are dropped first). A junction is the `N` operation of a read's CIGAR, as
   STAR's `SJ.out.tab`, regtools or pysam count it. The reads track and the exon-usage statistics still

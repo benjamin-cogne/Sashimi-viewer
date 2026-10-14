@@ -35,19 +35,19 @@ export interface ProviderHost {
  * leaves the sample out.
  */
 export interface SampleProvider {
-  getCoverage(s: LocalSample, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
-  getReads(s: LocalSample, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+  getCoverage(s: LocalSample, chrom: string, start: number, end: number, minMapq: number, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage>;
+  getReads(s: LocalSample, chrom: string, start: number, end: number, minMapq: number, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
   /** every variant site of the window (LocalDataSource.countVariants: in the worker when there is one) */
-  countVariants?(s: LocalSample, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
+  countVariants?(s: LocalSample, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan>;
   /** CpG methylation of the window (LocalDataSource.countMethylation) */
   countMethylation?(s: LocalSample, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow>;
   getLibraryType?(s: LocalSample): Promise<LibraryEvidence>;
   /** the build the file was aligned on (assembly.ts assemblyOfHeader on its header) */
   getAssembly?(s: LocalSample): Promise<AssemblyCall | null>;
   /** reads over one exon for exon usage and strandness, one in `rate` kept (as LocalDataSource scans them) */
-  exonReads?(s: LocalSample, chrom: string, start: number, end: number, uniqueOnly: boolean, cap: number): Promise<{ total: number; rate: number; kept: RawRead[] }>;
-  rescueClips?(s: LocalSample, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean): Promise<RescuedClips[]>;
+  exonReads?(s: LocalSample, chrom: string, start: number, end: number, minMapq: number, cap: number): Promise<{ total: number; rate: number; kept: RawRead[] }>;
+  rescueClips?(s: LocalSample, chrom: string, breakpoints: Breakpoint[], minMapq: number): Promise<RescuedClips[]>;
   getPrimaryRecord?(s: LocalSample, chrom: string, start: number, name: string): Promise<{ seq: string; flags: number; cigar: string } | null>;
   setReference?(reference: ReferenceChoice): void;
   /** drop what was kept for an overlay switched off, or decoded records */

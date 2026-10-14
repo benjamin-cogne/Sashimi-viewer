@@ -71,7 +71,7 @@ export function buildSession(args: {
   const nameOf = (id: number | null | undefined) => samples.find(s => s.id === id)?.name ?? null;
   const viewerOf = (state: ViewerState): SessionViewer => ({
     equalIntrons: state.equalIntrons, intronWidth: state.intronWidth ?? null, allTranscripts: state.allTranscripts, commonSnps: state.commonSnps, snpMinAf: state.snpMinAf,
-    depthAxis: state.depthAxis, uniqueOnly: state.uniqueOnly,
+    depthAxis: state.depthAxis, minMapq: state.minMapq,
     reads: state.reads, readsAll: state.readsAll, readsSample: nameOf(state.readsSample), collapseReads: state.collapseReads, minVafPct: state.minVafPct,
     minJunctionReads: state.minJunctionReads, minJunctionReadsSet: state.minJunctionReadsSet, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
@@ -121,6 +121,8 @@ export function parseSession(text: string): SessionFile {
   const parseViewer = (v: any): SessionViewer | null => v && typeof v === 'object' ? {
     ...v,
     groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [], color: typeof x.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : undefined })) : [],
+    // sessions saved before the MAPQ threshold had "uniqueOnly" (NH:1, or MAPQ ≥ 30 without NH): MAPQ ≥ 30 keeps the same reads with the usual aligners (STAR 255, HISAT2 60 for NH:1)
+    minMapq: typeof v.minMapq === 'number' && Number.isFinite(v.minMapq) ? Math.max(0, v.minMapq) : v.uniqueOnly === true ? 30 : 0,
     readsSample: typeof v.readsSample === 'string' ? v.readsSample : null,
     samples: Array.isArray(v.samples) ? v.samples.filter((x: any) => typeof x === 'string') : undefined,
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],

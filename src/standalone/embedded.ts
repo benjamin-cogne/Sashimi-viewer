@@ -15,7 +15,8 @@ import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpa
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { READS_PHASE_CAP, answerReads, supportAndCap } from './readsWindow';
-import { keepFlags, rawOfRead, structuralEvidence, uniqueFrom } from './alignments';
+import { keepFlags, rawOfRead, structuralEvidence } from './alignments';
+import { mapqThreshold } from './coverage';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
 import type { SampleKind } from './fileKinds';
@@ -94,7 +95,10 @@ export interface EmbeddedView {
   regionGenes?: GeneModel[];
   /** the window fetched (0-based half-open), the view plus margins */
   window: { chrom: string; start: number; end: number };
-  uniqueOnly: boolean;
+  /** minimum MAPQ of the alignments counted (0 = all) */
+  minMapq?: number;
+  /** pages exported before the MAPQ threshold: NH:1, or MAPQ ≥ 30 without NH */
+  uniqueOnly?: boolean;
   /** by sample id; the JSON form of version 1 exports or the columnar form of version 2 */
   coverage: Record<string, EncodedCoverage | EncodedCoverageV2>;
   /** reads by sample id, for views exported with their reads track on */
@@ -254,17 +258,17 @@ export class EmbeddedDataSource extends LocalDataSource {
     void this.prefetch(active).then(() => idle(next));
   }
   /** An exported sample has no file to scan: its variant sites come from the exported reads of the window, when they were exported. */
-  override async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
-    if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
-    const r = await this.getReads(sampleId, chrom, start, end, uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
+  override async getVariantSites(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, minMapq, minVaf, opts);
+    const r = await this.getReads(sampleId, chrom, start, end, minMapq, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
     opts?.onProgress?.(1);
     // a phased file's reads keep their haplotags: the sites get their counts by haplotype as from the file
     const haplotagged = addSiteHaplotypesFromReads(r.reads, r.sites);
     return { sites: r.sites, total: r.total, long_reads: !!r.long_reads, ...(haplotagged ? { haplotagged } : {}) };
   }
-  override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean) {
+  override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], minMapq: number) {
     if (this.names.has(sampleId)) return [];   // an embedded sample has no reads to go back to
-    return super.rescueClips(sampleId, chrom, breakpoints, uniqueOnly);
+    return super.rescueClips(sampleId, chrom, breakpoints, minMapq);
   }
   override async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string) {
     if (this.names.has(sampleId)) return null;   // embedded reads carry no names and no file to go back to
@@ -299,8 +303,8 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (v?.regionGenes) return structuredClone(v.regionGenes.filter(g => !exclude || (g.gene_name !== exclude && g.gene_id !== exclude)));
     try { return await super.getRegionGenes(chrom, start, end, exclude); } catch { return []; }
   }
-  override async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
-    if (!this.names.has(sampleId)) return super.getCoverage(sampleId, chrom, start, end, uniqueOnly, boundaries, opts);
+  override async getCoverage(sampleId: number, chrom: string, start: number, end: number, minMapq: number, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
+    if (!this.names.has(sampleId)) return super.getCoverage(sampleId, chrom, start, end, minMapq, boundaries, opts);
     const name = this.names.get(sampleId)!;
     const core = opts?.core ?? { start, end };
     // the exported window overlapping the view the most (several views may hold the same sample)
@@ -315,7 +319,7 @@ export class EmbeddedDataSource extends LocalDataSource {
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
     const strands = opts?.strands ? await this.decodedStrands(bestVi, sampleId) : undefined;
-    const structural = b.structural ?? (opts?.structural === 'rna' ? await this.fusionEvidence(bestVi, sampleId, chrom, uniqueOnly, b.spliced?.reads) : undefined);
+    const structural = b.structural ?? (opts?.structural === 'rna' ? await this.fusionEvidence(bestVi, sampleId, chrom, minMapq, b.spliced?.reads) : undefined);
     return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural, strands, unavailable: b.unavailable, error: b.error };
   }
   /**
@@ -324,14 +328,14 @@ export class EmbeddedDataSource extends LocalDataSource {
    * reads them from the file (split reads and clipped reads placed by realignment). Over the reads window only.
    */
   private fusionCache = new Map<string, Promise<StructuralEvidence | undefined>>();
-  private fusionEvidence(vi: number, sid: number, chrom: string, uniqueOnly: boolean, spliced?: number): Promise<StructuralEvidence | undefined> {
-    const key = `${vi}|${sid}|${uniqueOnly ? 'u' : 'a'}`;
+  private fusionEvidence(vi: number, sid: number, chrom: string, minMapq: number, spliced?: number): Promise<StructuralEvidence | undefined> {
+    const key = `${vi}|${sid}|${mapqThreshold(minMapq)}`;
     let p = this.fusionCache.get(key);
     if (!p) {
       p = (async () => {
         if (!this.payload.views[vi].reads?.[String(sid)]) return undefined;
         const rp = await this.decodedReads(vi, sid);
-        const kept = rp.reads.filter(r => keepFlags(r.f) && (!uniqueOnly || uniqueFrom(r.nh, r.q)));
+        const kept = rp.reads.filter(r => keepFlags(r.f) && r.q >= mapqThreshold(minMapq));
         // an export capped below the window's reads holds one in `rate` of them: the counts are scaled back
         const rate = kept.length && rp.total > kept.length ? rp.total / kept.length : 1;
         const raw = kept.map(r => rawOfRead(r, chrom, rp.reference));
@@ -341,9 +345,9 @@ export class EmbeddedDataSource extends LocalDataSource {
     }
     return p;
   }
-  override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+  override async getReads(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
-    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
+    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, minMapq, maxReads, mode, minSupport, minVaf, opts);
     const name = this.names.get(sampleId)!;
     // the exported reads window overlapping the request the most
     let bestOv = 0, bestVi = -1;
@@ -364,8 +368,8 @@ export class EmbeddedDataSource extends LocalDataSource {
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
     return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts, phased ? maxReads : undefined);
   }
-  override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
-    const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };
+  override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], minMapq: number): Promise<ExonUsageResponse> {
+    const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, minMapq) : { run_id: runId, chrom, exons, samples: [] };
     const embedded = [...this.names].map(([id, name]) => ({ sample_id: id, sample_name: name, strandness: 'unknown' as const, strand_fraction: null, exons: [], error: 'exon depths are not part of this exported file' }));
     return { ...local, samples: [...embedded, ...local.samples] };
   }

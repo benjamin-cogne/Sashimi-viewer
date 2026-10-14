@@ -37,7 +37,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
   };
 
   const scanner: VariantScanner = {
-    scan(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    scan(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
       const s = ds.sampleFiles(sampleId);
       if (!s) return Promise.reject(new Error('Sample not found'));
       if (opts?.signal?.aborted) return Promise.reject(abortError());
@@ -50,7 +50,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
       return new Promise<VariantScan>((resolve, reject) => {
         pending.set(id, { resolve, reject, onProgress: opts?.onProgress });
         opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
-        worker.postMessage({ type: 'scan', req: id, sampleId, chrom, start, end, uniqueOnly, minVaf,
+        worker.postMessage({ type: 'scan', req: id, sampleId, chrom, start, end, minMapq, minVaf,
           opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes, phaseSource: opts?.phaseSource } });
       });
     },
@@ -71,7 +71,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
       });
     },
     release(what: 'methylation' | 'variants') { worker.postMessage({ type: 'release', what }); },
-    collapse(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
+    collapse(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
       const s = ds.sampleFiles(sampleId);
       if (!s) return Promise.reject(new Error('Sample not found'));
       if (opts?.signal?.aborted) return Promise.reject(abortError());
@@ -85,7 +85,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
         pending.set(id, { resolve, reject });
         opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
         const { signal: _, ...plain } = opts ?? {};
-        worker.postMessage({ type: 'collapse', req: id, sampleId, chrom, start, end, uniqueOnly, maxReads, minSupport, minVaf, opts: plain });
+        worker.postMessage({ type: 'collapse', req: id, sampleId, chrom, start, end, minMapq, maxReads, minSupport, minVaf, opts: plain });
       });
     },
     forget(sampleId: number) { if (sent.delete(sampleId)) worker.postMessage({ type: 'forget', id: sampleId }); },

@@ -21,9 +21,9 @@ type In =
   | { type: 'forget'; id: number }
   | { type: 'cancel'; req: number }
   | { type: 'release'; what: 'methylation' | 'variants' }
-  | { type: 'collapse'; req: number; sampleId: number; chrom: string; start: number; end: number; uniqueOnly: boolean; maxReads: number; minSupport: number; minVaf: number; opts: Omit<ReadsOptions, 'signal'> }
+  | { type: 'collapse'; req: number; sampleId: number; chrom: string; start: number; end: number; minMapq: number; maxReads: number; minSupport: number; minVaf: number; opts: Omit<ReadsOptions, 'signal'> }
   | { type: 'methyl'; req: number; sampleId: number; chrom: string; start: number; end: number }
-  | { type: 'scan'; req: number; sampleId: number; chrom: string; start: number; end: number; uniqueOnly: boolean; minVaf: number; opts: Omit<VariantScanOptions, 'signal' | 'onProgress'> };
+  | { type: 'scan'; req: number; sampleId: number; chrom: string; start: number; end: number; minMapq: number; minVaf: number; opts: Omit<VariantScanOptions, 'signal' | 'onProgress'> };
 
 const ds = new LocalDataSource({ build: 'GRCh38' });
 const running = new Map<number, AbortController>();
@@ -54,7 +54,7 @@ self.onmessage = (e: MessageEvent<In>) => {
     // a collapsed reads window: decoded, grouped or phased here; the answer holds no read
     const ctl = new AbortController();
     running.set(m.req, ctl);
-    ds.getReads(m.sampleId, m.chrom, m.start, m.end, m.uniqueOnly, m.maxReads, 'collapsed', m.minSupport, m.minVaf, { ...m.opts, signal: ctl.signal })
+    ds.getReads(m.sampleId, m.chrom, m.start, m.end, m.minMapq, m.maxReads, 'collapsed', m.minSupport, m.minVaf, { ...m.opts, signal: ctl.signal })
       .then(result => post({ type: 'done', req: m.req, result }))
       .catch((err: any) => post({ type: 'error', req: m.req, name: err?.name ?? 'Error', message: err?.message ?? String(err) }))
       .finally(() => settle(m.req));
@@ -62,7 +62,7 @@ self.onmessage = (e: MessageEvent<In>) => {
   else if (m.type === 'scan') {
     const ctl = new AbortController();
     running.set(m.req, ctl);
-    ds.countVariants(m.sampleId, m.chrom, m.start, m.end, m.uniqueOnly, m.minVaf,
+    ds.countVariants(m.sampleId, m.chrom, m.start, m.end, m.minMapq, m.minVaf,
       { ...m.opts, signal: ctl.signal, onProgress: fraction => post({ type: 'progress', req: m.req, fraction }) })
       .then(result => post({ type: 'done', req: m.req, result }))
       .catch((err: any) => post({ type: 'error', req: m.req, name: err?.name ?? 'Error', message: err?.message ?? String(err) }))

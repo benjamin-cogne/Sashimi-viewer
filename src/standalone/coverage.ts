@@ -17,8 +17,9 @@
  * - junctions (the CIGAR N operations), counted as the reads go by.
  *
  * so any window, and any list of boundaries (the ones of a gene model chosen later included), is
- * answered from the same pass. Reads that are not uniquely mapped go into a second, usually tiny,
- * layer: "unique only" is the first minus the second, so toggling it costs nothing either.
+ * answered from the same pass. Reads under MAPQ 30 are counted again in the count of their MAPQ
+ * bucket, usually small: a minimum MAPQ is the first minus the buckets under it, so changing it costs
+ * nothing either.
  *
  * Nothing here decodes: the caller hands over each record's start, packed CIGAR and flags.
  */
@@ -201,37 +202,56 @@ export function plusStrand(flags: number): boolean {
 }
 
 /**
- * The reads of one part of a scan: every read goes to `all`, a read that is not uniquely mapped to `multi` as well.
- * With `strands`, the reads on + under the reverse rule also go to `plus` (and `plusMulti`): the − strand is then
- * `all` − `plus`, so a strand costs one more set of counts, not two.
+ * The minimum mapping qualities a window can be read at, without reading it again: MAPQ ≥ 0 (every read), ≥ 1, ≥ 10,
+ * ≥ 20, ≥ 30. Aligners grade differently (STAR: 255 unique, 3 / 1 / 0 for 2, 3–4, more loci; HISAT2: 60, 1, 0; bwa
+ * and minimap2: 0–60), and these steps cover them: ≥ 10 is "uniquely mapped" for STAR and HISAT2, ≥ 20–30 a confident
+ * placement for bwa and minimap2.
+ */
+export const MAPQ_THRESHOLDS = [0, 1, 10, 20, 30] as const;
+/** The threshold a minimum MAPQ is read at: the largest of MAPQ_THRESHOLDS not above it. */
+export const mapqThreshold = (q: number): number => [...MAPQ_THRESHOLDS].reverse().find(t => t <= q) ?? 0;
+/** How many MAPQ buckets a minimum MAPQ takes out (those wholly under its threshold). */
+export const bucketsUnder = (minMapq: number): number => { const t = mapqThreshold(minMapq); return MAPQ_THRESHOLDS.filter(x => x > 0 && x <= t).length; };
+/** The MAPQ bucket a read is counted in besides `all`: [0], [1, 10), [10, 20), [20, 30); none from 30 up. */
+export const mapqBucket = (q: number): number => (q < 1 ? 0 : q < 10 ? 1 : q < 20 ? 2 : q < 30 ? 3 : -1);
+
+/**
+ * The reads of one part of a scan: every read goes to `all`, and a read under MAPQ 30 to the count of its MAPQ bucket
+ * as well (made when a first read falls in it), so a window is read at any of MAPQ_THRESHOLDS by taking the buckets
+ * under it out. With `strands`, the reads on + under the reverse rule also go to `plus` (and its buckets): the − strand
+ * is then `all` − `plus`, so a strand costs one more set of counts, not two.
  */
 export class Layer {
   all = new Counts();
-  multi = new Counts();
+  /** the reads of each MAPQ bucket (mapqBucket), counted again */
+  low: (Counts | undefined)[] = [];
   plus: Counts | null;
-  plusMulti: Counts | null;
+  plusLow: (Counts | undefined)[] = [];
   /** records the structural evidence needs (split, clipped, deleted, discordant), when it was asked for */
-  sv: { r: RawRead; unique: boolean; end: number }[] = [];
+  sv: { r: RawRead; mapq: number; end: number }[] = [];
 
   constructor(readonly strands = false) {
     this.plus = strands ? new Counts() : null;
-    this.plusMulti = strands ? new Counts() : null;
   }
 
-  get bytes(): number { return this.all.bytes + this.multi.bytes + (this.plus?.bytes ?? 0) + (this.plusMulti?.bytes ?? 0) + this.sv.length * 400; }
+  get bytes(): number {
+    let n = this.all.bytes + (this.plus?.bytes ?? 0) + this.sv.length * 400;
+    for (const c of [...this.low, ...this.plusLow]) n += c?.bytes ?? 0;
+    return n;
+  }
 
   /**
    * One alignment. `insert` is the |template length| of a proper pair (0 otherwise), `flags` its SAM flag (its
    * strand). Counting starts at the record's own start, wherever the caller's window is: the caller decides which
    * layer owns which reads so that each is counted once.
    */
-  add(start: number, ops: ArrayLike<number>, unique: boolean, insert: number, flags: number): void {
-    const plus = plusStrand(flags);
+  add(start: number, ops: ArrayLike<number>, mapq: number, insert: number, flags: number): void {
+    const plus = plusStrand(flags), b = mapqBucket(mapq);
     this.all.add(start, ops, insert, plus);
-    if (!unique) this.multi.add(start, ops, insert, plus);
+    if (b >= 0) (this.low[b] ??= new Counts()).add(start, ops, insert, plus);
     if (plus && this.plus) {
       this.plus.add(start, ops, insert, true);
-      if (!unique) this.plusMulti!.add(start, ops, insert, true);
+      if (b >= 0) (this.plusLow[b] ??= new Counts()).add(start, ops, insert, true);
     }
   }
 }
@@ -289,14 +309,16 @@ const SLICE_STEP_MS = 8;
  * given, is awaited every SLICE_STEP_MS of the depth sweep, so a wide window never holds the page;
  * the layers must not change meanwhile (the caller holds the sample's lock).
  */
-export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint,
+export async function readSlice(layers: Layer[], minMapq: number, start: number, end: number, boundaries?: BoundaryHint,
   pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
   const parts: [Counts, number][] = [];
+  // the MAPQ buckets under the threshold, taken out
+  const t = mapqThreshold(minMapq), under = bucketsUnder(minMapq);
   for (const l of layers) {
     if (strand && !l.plus) throw new Error('these counts were made without the strands');
-    // − is everything but +: all − plus, and the same for the multi-mapped reads taken out by uniqueOnly
-    if (strand !== 'plus') { parts.push([l.all, 1]); if (uniqueOnly) parts.push([l.multi, -1]); }
-    if (strand) { const sg = strand === 'plus' ? 1 : -1; parts.push([l.plus!, sg]); if (uniqueOnly) parts.push([l.plusMulti!, -sg]); }
+    // − is everything but +: all − plus, and the same for each bucket taken out
+    if (strand !== 'plus') { parts.push([l.all, 1]); for (let b = 0; b < under; b++) if (l.low[b]) parts.push([l.low[b]!, -1]); }
+    if (strand) { const sg = strand === 'plus' ? 1 : -1; parts.push([l.plus!, sg]); for (let b = 0; b < under; b++) if (l.plusLow[b]) parts.push([l.plusLow[b]!, -sg]); }
   }
   /** block starts ≤ x, block ends ≤ x */
   const startsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.S.below(x + 1); return n; };
@@ -378,7 +400,7 @@ export async function readSlice(layers: Layer[], uniqueOnly: boolean, start: num
   }
   const sv: RawRead[] = [];
   // the records of the reads overlapping the window, as a scan of the window would have handed them over
-  for (const l of layers) for (const x of l.sv) if ((!uniqueOnly || x.unique) && x.r.start < end && x.end > start) sv.push(x.r);
+  for (const l of layers) for (const x of l.sv) if (x.mapq >= t && x.r.start < end && x.end > start) sv.push(x.r);
 
   return { coverage, junctions, spanning, spliced: { reads, fraction: reads ? spliced / reads : 0 }, sv, insertMedian };
 }
@@ -404,15 +426,15 @@ export class CoverageState {
   get empty(): boolean { return this.pe <= this.ps; }
   get bytes(): number { return this.owned.bytes + this.spill.bytes; }
   covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }
-  slice(uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
-    return readSlice([this.owned, this.spill], uniqueOnly, start, end, boundaries, pause, strand);
+  slice(minMapq: number, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
+    return readSlice([this.owned, this.spill], minMapq, start, end, boundaries, pause, strand);
   }
 }
 
 /** The two strands of a window, from counts made with the strands (`SampleCoverage.strands`). */
-export async function strandSlices(st: CoverageState, uniqueOnly: boolean, start: number, end: number, boundaries?: BoundaryHint): Promise<{ plus: StrandSlice; minus: StrandSlice }> {
+export async function strandSlices(st: CoverageState, minMapq: number, start: number, end: number, boundaries?: BoundaryHint): Promise<{ plus: StrandSlice; minus: StrandSlice }> {
   const one = async (strand: StrandPick): Promise<StrandSlice> => {
-    const sl = await st.slice(uniqueOnly, start, end, boundaries, yieldStrand, strand);
+    const sl = await st.slice(minMapq, start, end, boundaries, yieldStrand, strand);
     return { coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning };
   };
   return { plus: await one('plus'), minus: await one('minus') };
