@@ -2319,7 +2319,7 @@ export default function SashimiViewer({
     if (!extend) setDnaSites(p => { if (!p[sid]) return p; const { [sid]: _, ...rest } = p; return rest; });
     const live = () => dnaSitesSeq.current.get(sid) === seq;
     const span = ranges.reduce((t, r) => t + (r.end - r.start), 0);
-    const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
+    const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, secondary: v.secondary, signal: ctl.signal };
     (async () => {
       const sites: VariantSite[] = [];
       let total = 0, done = 0, rate = 1, long = false, haplotagged = 0;
@@ -2339,14 +2339,14 @@ export default function SashimiViewer({
           const old = p[sid];
           const lo = Math.min(...ranges.map(r => r.start)), hi = Math.max(...ranges.map(r => r.end));
           const keep = extend && old && !old.error && old.fetched.chrom === v.chrom;
-          const fetched: FetchWindow = { chrom: v.chrom, minMapq: v.minMapq, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
+          const fetched: FetchWindow = { chrom: v.chrom, minMapq: v.minMapq, secondary: v.secondary, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
           const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
           const rate = Math.max(data.rate, keep ? old.rate ?? 1 : 1);
           const haplotagged = (keep ? old.haplotagged ?? 0 : 0) + data.haplotagged;
           return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined, long: data.long, ...(haplotagged ? { haplotagged } : {}) } };
         });
       })
-      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, minMapq: v.minMapq }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
+      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, minMapq: v.minMapq, secondary: v.secondary }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
       .finally(() => { if (live()) { setDnaSitesLoading(p => ({ ...p, [sid]: false })); if (dnaSitesAbort.current.get(sid) === ctl) dnaSitesAbort.current.delete(sid); } });
   }, [minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2391,7 +2391,7 @@ export default function SashimiViewer({
     setVariantPanel({ sid, name, site, long, x, y, busy: true });
     try {
       const end = site.pos + (site.kind === 'del' ? site.length : 1);
-      const data = await ds.getReads(sid, v.chrom, Math.max(0, site.pos - 1), end + 1, v.minMapq, 5000, 'reads', 1, 0.01, {});
+      const data = await ds.getReads(sid, v.chrom, Math.max(0, site.pos - 1), end + 1, v.minMapq, 5000, 'reads', 1, 0.01, { secondary: v.secondary });
       if (variantSeq.current !== seq) return;
       // an insertion's bases: the sequence most of its reads carry
       let insSeq: string | undefined;
@@ -2455,7 +2455,7 @@ export default function SashimiViewer({
     const v = viewRef.current;
     const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString('en-US')}`;
     setSeqPanel({ title, subtitle: `${count.toLocaleString('en-US')} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
-    ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.minMapq, 5000, 'reads', 1, 0.05, {})
+    ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.minMapq, 5000, 'reads', 1, 0.05, { secondary: v.secondary })
       .then(res => {
         const k = side === 'left' ? 0 : 1;
         const reads = res.reads.filter(r => (side === 'left' ? r.s === pos : r.e === pos) && r.c[k] >= SV_MIN_CLIP);
@@ -3963,7 +3963,7 @@ export default function SashimiViewer({
       if (!e || (e.error && !covers(e.fetched, v))) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
       if (!e.full || e.error) continue;
       const f = e.fetched;
-      const same = f.chrom === v.chrom && f.minMapq === v.minMapq && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
+      const same = f.chrom === v.chrom && f.minMapq === v.minMapq && !!f.secondary === !!v.secondary && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
       if (!same || v.end <= f.start || v.start >= f.end || scannedTooFar(f, v)) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
       const ranges: { start: number; end: number }[] = [];
       if (v.start < f.start) ranges.push({ start: v.start, end: f.start });
@@ -3973,7 +3973,7 @@ export default function SashimiViewer({
     if (!jobs.length) return;
     const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
     return () => clearTimeout(timer);
-  }, [tracks, viewStart, viewEnd, currentChrom, minMapq, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, rnaVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tracks, viewStart, viewEnd, currentChrom, minMapq, showSecondary, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, rnaVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
   const { layouts, annotY } = useMemo(() => {
     let y = RULER_H;
     const out: TrackLayout[] = [];
@@ -4008,7 +4008,7 @@ export default function SashimiViewer({
       const chipSites = (): VariantSite[] => {
         const e = dnaSites[track.sampleId];
         const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-        if (!e || !e.full || e.error || e.fetched.chrom !== currentChrom || e.fetched.minMapq !== minMapq || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
+        if (!e || !e.full || e.error || e.fetched.chrom !== currentChrom || e.fetched.minMapq !== minMapq || !!e.fetched.secondary !== showSecondary || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
         const covers = e.fetched.start <= viewStart && e.fetched.end >= viewEnd;
         if (!covers && !dnaSitesLoading[track.sampleId]) return [];
         return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
@@ -6688,7 +6688,7 @@ export default function SashimiViewer({
             </div>
             <SwitchRow on={showSecondary} onChange={setShowSecondary} label="Secondary alignments"
               hint="The other placements of multi-mapped reads (flag 0x100), as IGV shows them. Most aligners give them a low MAPQ, so a threshold above leaves many out. The window is read again."
-              title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs and the reads track, as IGV does by default. Off: primary and supplementary records only. The minimum MAPQ above applies to them as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so any threshold of 1 or more leaves most out. Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
+              title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs, variant sites and the reads track, as IGV does by default. A variant in a paralogue or a pseudogene can then show at both copies. Off: primary and supplementary records only. The minimum MAPQ above applies to them as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so any threshold of 1 or more leaves most out. Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
             <div className="flex items-center gap-2 mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">
               <span className="w-[22px] h-[9px] rounded-sm border border-slate-400 bg-white shrink-0" aria-hidden="true" />
               <span className="flex-1">Reads placed with MAPQ under {LOW_MAPQ} are drawn hollow</span>

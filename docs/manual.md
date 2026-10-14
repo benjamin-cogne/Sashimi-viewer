@@ -186,9 +186,11 @@ Plots export as **SVG** (vector, publication-ready) for reports.
   bwa and minimap2. Coverage and arcs are recounted from what was already read; the reads track is read again.
   Sessions saved with the former *Unique reads* switch on open at ≥ 30, which keeps the same reads with these aligners.
 - **Secondary alignments** (in *Filters*): also counts the secondary alignments (flag `0x100`, the other placements of a
-  multi-mapped read), in coverage, junction arcs and the reads track, as IGV does by default. A
-  junction can then read like IGV's: a fusion read that STAR also places elsewhere is often a
-  secondary alignment. The window is read again. It is independent of the minimum MAPQ, which applies to secondary
+  multi-mapped read), in coverage, junction arcs, variant sites (their counts, allele balance and
+  panels) and the reads track, as IGV does by default. A junction can then read like IGV's: a fusion read that STAR
+  also places elsewhere is often a secondary alignment; and a variant of a paralogue or a pseudogene shows at both
+  copies, with the reads of both. Methylation stays counted on primary alignments (modkit's rule). The window is read
+  again. It is independent of the minimum MAPQ, which applies to secondary
   alignments as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so a
   threshold of 1 or more leaves most of them out.
 - **Ambiguous placements**: in the reads track, reads with a mapping quality under 10 are drawn

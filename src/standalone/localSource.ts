@@ -684,12 +684,12 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's allele state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private alleleState(id: number, chrom: string, start: number, end: number): AlleleState {
+  private alleleState(id: number, chrom: string, start: number, end: number, secondary = false): AlleleState {
     let st = this.alleleStates.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
-    if (!st || st.chrom !== chrom || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > ALLELE_MAX_SPAN)) {
-      st = new AlleleState(chrom);
+      st = new AlleleState(chrom, secondary);
       this.alleleStates.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -795,7 +795,7 @@ export class LocalDataSource implements SashimiDataSource {
       const loc = await this.locate(sampleId, chrom);
       if (!loc) return { sites: [], total: 0, long_reads: false };
       const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-      const st = this.alleleState(sampleId, loc.name, start, end);
+      const st = this.alleleState(sampleId, loc.name, start, end, !!opts?.secondary);
       const scratch = { a: new Uint8Array(512) };
       // the reference over the records of the tile about to be counted, fetched before the (synchronous) counting
       let ref: RefWindow | null = null;
@@ -813,7 +813,7 @@ export class LocalDataSource implements SashimiDataSource {
       };
       const count = (layer: AlleleLayer, r: any) => {
         const flags = view.flags(r);
-        if (!keepFlags(flags)) return;
+        if (!keepFlagsWith(flags, st.secondary)) return;
         // every read is counted, whatever its MAPQ (a minimum MAPQ is read back from the counts, not scanned again)
         const ops = view.ops(r);
         const n = view.seqCodes(r, scratch);

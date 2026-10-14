@@ -51,7 +51,7 @@ export function attachVariantWorker(ds: LocalDataSource): boolean {
         pending.set(id, { resolve, reject, onProgress: opts?.onProgress });
         opts?.signal?.addEventListener('abort', () => worker.postMessage({ type: 'cancel', req: id }), { once: true });
         worker.postMessage({ type: 'scan', req: id, sampleId, chrom, start, end, minMapq, minVaf,
-          opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes, phaseSource: opts?.phaseSource } });
+          opts: { longReadMinIndel: opts?.longReadMinIndel, longReadMinVaf: opts?.longReadMinVaf, haplotypes: opts?.haplotypes, phaseSource: opts?.phaseSource, secondary: opts?.secondary } });
       });
     },
     methyl(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
