@@ -104,6 +104,37 @@ const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
 type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
+/**
+ * Names for samples being added, none taken by another sample (sessions, groups and exports refer to samples by
+ * name): a file's name without its extension, and where two files share it (STAR writes Aligned.sortedByCoord.out.bam
+ * in one folder per sample) the folders it is in, from the nearest, as many as tell it apart; a number after it when
+ * nothing else does.
+ */
+function uniqueSampleNames(adding: { name: string; path?: string }[], taken: Iterable<string>): string[] {
+  const used = new Set(taken);
+  const dirsOf = (a: { path?: string }) => (a.path ?? '').split('/').slice(0, -1).filter(Boolean);
+  const label = (a: { name: string; path?: string }, k: number) => `${dirsOf(a).slice(-k).join('/')}/${a.name}`;
+  const byName = new Map<string, number[]>();
+  adding.forEach((a, i) => { const l = byName.get(a.name); if (l) l.push(i); else byName.set(a.name, [i]); });
+  const out: string[] = [];
+  for (const [name, idx] of byName) {
+    if (idx.length === 1 && !used.has(name)) { out[idx[0]] = name; used.add(name); continue; }
+    // the fewest folders that tell these files apart, giving names no other sample has
+    const most = Math.min(...idx.map(i => dirsOf(adding[i]).length));
+    let k = 1;
+    for (; k <= most; k++) { const ls = idx.map(i => label(adding[i], k)); if (new Set(ls).size === ls.length && ls.every(l => !used.has(l))) break; }
+    for (const i of idx) {
+      let n = k <= most ? label(adding[i], k) : used.has(name) ? '' : name;
+      for (let c = 2; !n || used.has(n); c++) n = `${name} (${c})`;
+      out[i] = n; used.add(n);
+    }
+  }
+  return out;
+}
+/** A sample already loaded: the same relative path, or without paths the same file name, size and index. */
+const sameSample = (a: { file: File; index: File; path?: string }, b: { file: File; index: File; path?: string }) =>
+  a.path && b.path ? a.path === b.path : a.file.name === b.file.name && a.file.size === b.file.size && a.index.name === b.index.name;
+
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
 function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
   const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
@@ -172,6 +203,9 @@ function App() {
   /** the build was chosen by hand (or by a session or a link): the files' headers no longer set it */
   const buildChosen = useRef(!!(EMBEDDED || LINK));
   const [samples, setSamples] = useState<LocalSample[]>(() => (EMBEDDED ? embeddedSamples(EMBEDDED) : []));
+  /** the samples as they are now, those just added included (their state lands at the next render) */
+  const samplesRef = useRef(samples);
+  samplesRef.current = samples;
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
@@ -267,11 +301,15 @@ function App() {
 
   const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
     const files = Array.from(list as ArrayLike<File | PathedFile>);
-    const { samples: found, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
+    const { samples: paired, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
     const msgs: string[] = [];
-    const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s, pending: true }));
+    // a file already loaded is not added again (a session reopening its files while they arrive by another way)
+    const have = samplesRef.current;
+    const found = paired.filter(s => !have.some(x => !x.embedded && sameSample(x, s)));
+    const names = uniqueSampleNames(found, have.map(x => x.name));
+    const added: LocalSample[] = found.map((s, i) => ({ id: nextId.current++, ...s, name: names[i], pending: true }));
     for (const s of added) ds.addSample(s);
-    if (added.length) setSamples(prev => [...prev, ...added]);
+    if (added.length) { samplesRef.current = [...have, ...added]; setSamples(prev => [...prev, ...added]); }
     // library type from the header (the aligner); the reads of the first gene opened confirm or correct it. The chip pulses until the file is open.
     for (const s of added) {
       const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...ev, strand: x.lib?.strand } : x.lib } : x)));
@@ -344,9 +382,11 @@ function App() {
   const loadSessionRef = useRef<((file: File) => Promise<void>) | null>(null);
 
   const renameSample = useCallback((id: number, raw: string) => {
-    const name = raw.trim();
+    const typed = raw.trim();
     setRenaming(null);
-    if (!name) return;
+    if (!typed) return;
+    // a name another sample has would merge the two in sessions and exports: numbered
+    const name = uniqueSampleNames([{ name: typed }], samplesRef.current.filter(s => s.id !== id).map(s => s.name))[0];
     ds.renameSample(id, name);
     setSamples(prev => prev.map(s => (s.id === id ? { ...s, name } : s)));
   }, [ds]);
@@ -805,9 +845,12 @@ function App() {
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
     if (session.knownVariants) setKnown(session.knownVariants.map(k => variantOfInterest(k.text, k.label, `user${nextKnownId.current++}`)).filter((v): v is KnownVariant => !!v).map((v, i) => ({ ...v, id: `session${i + 1}` })));
-    const { matched } = matchSession(session, samples);
-    for (const { entry, sample } of matched) if (sample.name !== entry.name) ds.renameSample(sample.id, entry.name);
-    const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name, lib: m.entry.library ?? s.lib } : s; });
+    const now = samplesRef.current;
+    const { matched } = matchSession(session, now);
+    // the session's names (a session saved before names were kept apart may give two samples one: numbered)
+    const given = uniqueSampleNames(matched.map(m => ({ name: m.entry.name })), now.filter(s => !matched.some(m => m.sample.id === s.id)).map(s => s.name));
+    matched.forEach((m, i) => { if (m.sample.name !== given[i]) ds.renameSample(m.sample.id, given[i]); });
+    const renamed = now.map(s => { const i = matched.findIndex(x => x.sample.id === s.id); return i >= 0 ? { ...s, name: given[i], lib: matched[i].entry.library ?? s.lib } : s; });
     const ordered = [...matched.map(m => renamed.find(s => s.id === m.sample.id)!), ...renamed.filter(s => !matched.some(m => m.sample.id === s.id))];
     setSamples(ordered);
     setSessionSeq(n => n + 1);
@@ -837,7 +880,7 @@ function App() {
    */
   const reopenSession = useCallback(async (session: SessionFile, ask: boolean) => {
     if (!hasFileSystemAccess()) { setReopenState(session.folder ? { folder: session.folder, ready: false } : null); return; }
-    const { missing } = matchSession(session, samples);
+    const { missing } = matchSession(session, samplesRef.current);
     if (!missing.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
@@ -902,7 +945,7 @@ function App() {
     } catch (e: any) {
       setError(`Could not load the session ${file.name}: ${e.message}`);
     }
-  }, [build, ds, fasta]);
+  }, [build, ds, fasta, reopenSession]);
 
   // An exported page opens its views at once (its samples are embedded)
   const embeddedOpened = useRef(false);

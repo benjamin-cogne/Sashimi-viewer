@@ -1501,6 +1501,11 @@ primary), the FASTA, the gene and the window shown, and every option of the view
 arc labels, thresholds, reads track, groups (by sample name), the chosen reference transcript…
 The variants of interest of the header are saved too.
 
+A sample is named after its file without the extension, and no two samples share a name: files of the same
+name in different folders (STAR's `Aligned.sortedByCoord.out.bam`, one folder per sample) take the folders
+that tell them apart (`p1/Aligned.sortedByCoord.out`), and a number when nothing else does (`x (2)`), as does a
+sample renamed to a name already given. A file already loaded is not added a second time.
+
 Give the files through **+ Add › Run folder…** (or drop the folder on the page): the page lists the
 BAM/CRAM files with their index and the FASTA found inside, without reading them, and remembers
 their relative paths. **+ Add › Files…** adds individual files as before. Some browsers word their folder
