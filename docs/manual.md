@@ -1529,7 +1529,7 @@ The viewer is a static file: deploy it the way you deploy a PDF.
 |---|---|---|
 | **Shared drive / intranet** | Copy `sashimi-viewer.html` from a release to a network folder or any intranet web server. | Validated, versioned copy for the whole lab; no dependence on github.com. |
 | **GitHub Pages** | *Settings → Pages*, then either *Source: Deploy from a branch* (the root page forwards to `sashimi-viewer.html`, no Actions needed) or *Source: GitHub Actions* (`.github/workflows/pages.yml` builds and publishes on every push to `main`). | Always-current URL to share with colleagues. |
-| **Release asset** | `git tag v1.1.0 && git push --tags`: the build workflow attaches the viewer to a GitHub release. | Traceable versions for your quality system. |
+| **Release asset** | `git tag v1.2.0 && git push --tags`: the build workflow attaches the viewer to a GitHub release. | Traceable versions for your quality system. |
 
 **Network.** The reads never leave the machine. The browser only queries public annotation APIs
 with a gene name or a genomic interval, so these hosts must be reachable through the hospital
