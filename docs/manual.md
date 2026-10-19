@@ -861,7 +861,13 @@ or another *Min VAF* are answered at once. Each site is drawn in a track of its 
 coverage, never on it:
 - a **bar** as high as its alternate-allele fraction, on a 0–100 % axis with a 50 % guide, in the
   colour of the alternate base (purple for an insertion, black for a deletion). The grey above it
-  is the reference share. The fraction is written over the bar where there is room;
+  is the reference share. The fraction is written over the bar where there is room. An indel's
+  fraction is of every read spanning its position, as a pileup counts it (`samtools depth -J`): the
+  reads with a base there and the reads deleting it, whatever their deletion. Earlier versions left
+  out the other deletions over the position, so two deletion lengths at one start, or a long read's
+  insertion followed by a deletion (frequent in homopolymers), could add up to more than 100 %;
+  the track lets a press through to the plot, so dragging it pans the view, and only a click without
+  a drag opens a site;
 - four **quality cells** under the bar, green (pass), amber (check), red (likely artefact) or grey
   (too few reads to judge). Where sites are too close for four cells, a single cell takes the
   colour of the worst check. From left to right:
@@ -1193,8 +1199,8 @@ red for methylated, blue for unmethylated. Calls below the confidence threshold 
 so the read's grey reads as "no confident call". *group: HP tags* then shows the two
 haplotypes' reads apart, and an allele-specific region stands out as a red block over a blue one.
 Wider than about 15 kb (under 0.08 pixel per base), a read's consecutive calls of one kind (within
-100 bp of each other) are drawn as one bar rather than one line each. The panel is not part of exported pages, which carry no
-base-modification tags.
+100 bp of each other) are drawn as one bar rather than one line each. Exported pages keep the panel and
+the reads' CpG calls of every view exported with *Methylation* on (see *Export HTML*).
 
 **CpG islands only.** Once *Methylation* is on, a second option, *CpG islands only*, restricts
 the panel to the CpG islands of the reference. Only their CpGs are counted in the ribbon, the
@@ -1441,6 +1447,15 @@ exact where you had it exact and marked ≈ where the source had sampled it.
 sample, with the reference bases, the mismatches and the mate positions, so the recipient sees the
 same pile-up with its pairs, can switch between reads, phased haplotypes and consensus groups and
 change *Min VAF*. Read names are replaced by numbers.
+
+**Methylation and phasing.** A view exported with *Methylation* on also embeds, for every long-read
+DNA sample, the CpG counts of its window (up to 2 Mb around the view): the panel, its haplotype lanes,
+the differences and the allele-specific frames read back as on the page. The reads carry their own
+CpG calls for the reads track. A view whose reads were grouped by the page's phasing (*phased
+here*) keeps that phasing: the reads are phased when exporting as the page phases them, over every
+read of the window the view asks for (up to 10,000) rather than only the reads embedded, and each
+read keeps its haplotype. The recipient therefore sees the same haplotypes and blocks. If they change
+*Min VAF* or *long reads*, or pan outside that window, the embedded reads are phased again.
 
 **Size.** Reads and coverage are stored in a compact binary form (columns of small integers,
 compressed with the browser's own deflate, written in base64): about 6 bytes per read with its

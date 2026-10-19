@@ -11,7 +11,7 @@
  * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
  */
 import { addSiteHaplotypesFromReads } from './haplotypes';
-import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
+import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { READS_PHASE_CAP, answerReads, supportAndCap } from './readsWindow';
@@ -19,6 +19,7 @@ import { keepFlags, rawOfRead, structuralEvidence } from './alignments';
 import { mapqThreshold } from './coverage';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
+import type { MethylWindow } from './methylation';
 import type { SampleKind } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 
@@ -103,6 +104,49 @@ export interface EmbeddedView {
   coverage: Record<string, EncodedCoverage | EncodedCoverageV2>;
   /** reads by sample id, for views exported with their reads track on */
   reads?: Record<string, EncodedReads | EncodedReadsV2>;
+  /** CpG methylation by sample id (long-read DNA samples), for views exported with their Methylation layer on */
+  methylation?: Record<string, EncodedMethyl>;
+  /** the page's phasing of the reads by sample id, for views exported with their reads grouped by it (phased here) */
+  phase?: Record<string, EmbeddedPhase>;
+}
+/**
+ * A window of CpG methylation counts (MethylWindow) as JSON: CpG positions as differences from the previous one, the
+ * counts per haplotag lane, each CpG's phase set (null for none).
+ */
+export interface EncodedMethyl {
+  start: number; end: number;
+  pos: number[]; mod: [number[], number[], number[]]; total: [number[], number[], number[]]; ps: (number | null)[];
+  thresholds: MethylWindow['thresholds']; threshold: number; filtered: number; calls: number;
+  islands: [number, number][]; cpgs: number; note?: string;
+}
+export function encodeMethyl(w: MethylWindow): EncodedMethyl {
+  const pos: number[] = [];
+  let prev = 0;
+  for (const p of w.pos) { pos.push(p - prev); prev = p; }
+  return {
+    start: w.start, end: w.end, pos, mod: w.mod.map(a => Array.from(a)) as EncodedMethyl['mod'], total: w.total.map(a => Array.from(a)) as EncodedMethyl['total'],
+    ps: Array.from(w.ps, p => (Number.isNaN(p) ? null : p)), thresholds: w.thresholds, threshold: w.threshold, filtered: w.filtered, calls: w.calls,
+    islands: w.islands, cpgs: w.cpgs, ...(w.note ? { note: w.note } : {}),
+  };
+}
+function decodeMethyl(e: EncodedMethyl): MethylWindow {
+  const pos = new Int32Array(e.pos.length);
+  for (let i = 0, p = 0; i < e.pos.length; i++) { p += e.pos[i]; pos[i] = p; }
+  return {
+    start: e.start, end: e.end, pos, mod: e.mod.map(a => Uint16Array.from(a)) as MethylWindow['mod'], total: e.total.map(a => Uint16Array.from(a)) as MethylWindow['total'],
+    ps: Float64Array.from(e.ps, p => (p == null ? NaN : p)), thresholds: e.thresholds ?? [], threshold: e.threshold, filtered: e.filtered, calls: e.calls,
+    islands: e.islands, cpgs: e.cpgs, ...(e.note ? { note: e.note } : {}),
+  };
+}
+/**
+ * The page's phasing of a view's reads when it was exported: computed over every read of the window (up to
+ * READS_PHASE_CAP, as on the page), where the embedded reads, fewer, would phase into other blocks. Used while the
+ * reader keeps the thresholds it was computed with; otherwise phased again from the embedded reads.
+ */
+export interface EmbeddedPhase {
+  /** the window phased: the one the view asked for when it was exported */
+  window?: { start: number; end: number };
+  minVaf: number; longReadMinIndel?: number; longReadMinVaf?: number; result: PhaseResult;
 }
 export interface EmbeddedExport {
   app: typeof EMBEDDED_APP;
@@ -366,8 +410,29 @@ export class EmbeddedDataSource extends LocalDataSource {
     const phased = !collapsed && !support && !!opts?.phase;
     const { reads, total, mates } = supportAndCap(best.reads.filter(r => r.e > start && r.s < end), chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support);
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
+    // the phasing exported with the view, for a window within the one it phased and while its thresholds are the
+    // reader's (the reads carry their `ph` / `pb`); elsewhere the embedded reads are phased again
+    const stored = phased ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
+    if (stored && (!stored.window || (stored.window.start <= start && stored.window.end >= end)) && stored.minVaf === minVaf && (stored.longReadMinIndel ?? 1) === (opts?.longReadMinIndel ?? 1) && (stored.longReadMinVaf ?? 0.2) === (opts?.longReadMinVaf ?? 0.2))
+      return { ...answerReads(base, reads, start, end, mode, minSupport, minVaf, { ...opts, phase: false }), phase: stored.result };
     return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts, phased ? maxReads : undefined);
   }
+  /** The CpG methylation exported with the views: the window of the view on `chrom` overlapping [start, end) the most. */
+  override async getMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+    if (!this.names.has(sampleId)) return super.getMethylation(sampleId, chrom, start, end, opts);
+    let bestOv = 0, best: EncodedMethyl | null = null;
+    for (const v of this.payload.views) {
+      const m = v.methylation?.[String(sampleId)];
+      if (!m || !sameChrom(v.window.chrom, chrom)) continue;
+      const ov = Math.min(m.end, end) - Math.max(m.start, start);
+      if (ov > bestOv) { bestOv = ov; best = m; }
+    }
+    if (!best) throw new Error('the methylation of this window is not part of this exported file (it is embedded for the views exported with their Methylation layer on): add the alignment file');
+    let w = this.methylCache.get(best);
+    if (!w) this.methylCache.set(best, w = decodeMethyl(best));
+    return w;
+  }
+  private methylCache = new WeakMap<EncodedMethyl, MethylWindow>();
   override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], minMapq: number): Promise<ExonUsageResponse> {
     const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, minMapq) : { run_id: runId, chrom, exons, samples: [] };
     const embedded = [...this.names].map(([id, name]) => ({ sample_id: id, sample_name: name, strandness: 'unknown' as const, strand_fraction: null, exons: [], error: 'exon depths are not part of this exported file' }));

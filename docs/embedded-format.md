@@ -60,7 +60,7 @@ u   kind                       0 reads, 1 coverage
 u   number of sections
 per section:
   u   name code                0 core, 1 pairs, 2 clips, 3 inserts, 4 sa, 5 mods, 6 reference,
-                               7 runs, 8 junctions, 9 methylation, 11 hap, 12 seq;
+                               7 runs, 8 junctions, 9 methylation, 11 hap, 12 seq, 13 cpg, 14 phased;
                                10 = escape: a string with the name follows
   [string name]                only for code 10
   u   fields                   bit 1 block, 2 start, 4 end, 8 n: which of them follow
@@ -80,7 +80,8 @@ The codes are append-only: a code never changes meaning, and the escape stays 10
 the list grows, so a section a reader does not know still travels under code 10 with its name.
 A reader that meets a code it does not know skips that section by its length, like an unknown
 name. `mods` (5), `methylation` (9) and `seq` (12, whole read sequences) are sections written by other
-producers of these streams; this viewer neither writes nor reads them. JSON cost about 226 bytes a stream, the varints about
+producers of these streams; this viewer neither writes nor reads them. `cpg` (13) and `phased` (14) are written
+by the page's export only (3.8, 3.9); the converter never writes them. JSON cost about 226 bytes a stream, the varints about
 25: most of a small window's stream, and it adds up over the many windows of a page.
 
 - `v` is the format version of this document (5). A reader refuses a higher version, and must
@@ -267,6 +268,28 @@ n × string     the SA tag as the aligner wrote it ("rname,pos,strand,CIGAR,mapQ
 per read:  varint  HP     haplotype (1, 2, …) written by the phasing tool; 0 = untagged, nothing follows
            varint  PS+1   phase set + 1, 0 when the record has no PS tag        (tagged reads only)
            varint  PC+1   assignment confidence (Phred) + 1, 0 when absent       (tagged reads only)
+```
+
+### 3.8 `cpg` section (per block, exported pages: present when any read of the block carries CpG calls)
+
+Each read's CpG calls as the reads track colours them (`me`), written when the view was exported with its
+Methylation layer on.
+
+```
+per read:  varint  n      calls of the read (0: none follow)
+per call:  varint  Δpos   the CpG's C (0-based) minus the previous call's, the first minus (read start − 2)
+           varint  p      P(5mC) × 255
+```
+
+### 3.9 `phased` section (per block, exported pages: present when any read of the block is phased by the page)
+
+Each read's haplotype in the page's own read-based phasing (`ph`, `pb`), written when the view's reads were
+grouped by it (*phased here*). The phasing itself (its blocks and sites) travels in the view's JSON (`phase`),
+with the window and thresholds it was computed with.
+
+```
+per read:  varint  ph     1 or 2; 0 = not phased, nothing follows
+           varint  pb     start (0-based) of the read's phase block
 ```
 
 ### 3.7 `reference` section

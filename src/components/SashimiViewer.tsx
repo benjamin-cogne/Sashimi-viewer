@@ -2484,6 +2484,11 @@ export default function SashimiViewer({
       .catch((err: any) => setSeqPanel(p => p && { ...p, busy: undefined, error: err.message }));
   }, [ds]);
 
+  /**
+   * The press that started the pan has moved the view: the click that ends it is not a click on what lies under it (a
+   * variant site), so the site marks let the press through to the pan and ignore such a click.
+   */
+  const panMoved = useRef(false);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const { x } = svgPoint(e);
@@ -2494,6 +2499,7 @@ export default function SashimiViewer({
     } else {
       setDragging(true);
       dragStart.current = { x: e.clientX, vStart: scale.vStart, vEnd: scale.vEnd };
+      panMoved.current = false;
     }
     setHover(null);
   }, [scale]);
@@ -2518,6 +2524,7 @@ export default function SashimiViewer({
       }
       if (dragging && dragStart.current) {
         const dx = m.x - dragStart.current.x;
+        if (Math.abs(dx) > 3) panMoved.current = true;
         const vSpan = dragStart.current.vEnd - dragStart.current.vStart;
         const dv = (reverse ? 1 : -1) * (dx / plotWidth) * vSpan;
         setViewFromV(dragStart.current.vStart + dv, dragStart.current.vEnd + dv);
@@ -5111,9 +5118,9 @@ export default function SashimiViewer({
           {phaseFront.filter(el => !String(el.key).startsWith('pk'))}
           {/* a click on a site opens its evidence from the reads */}
           <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={L.variants - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? (pairPanel && pairPicking ? 'crosshair' : 'pointer') : undefined }}
-            onMouseDown={ev => ev.stopPropagation()}
             onClick={ev => {
               ev.stopPropagation();
+              if (panMoved.current) return;
               const p = svgPoint(ev);
               let best: (typeof marks)[number] | null = null;
               for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
@@ -5426,7 +5433,7 @@ export default function SashimiViewer({
               const text = !lead ? null : (st.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= widthOf(short) ? short : null;
               return (
                 <g key={`vaf${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
-                  onMouseDown={ev => ev.stopPropagation()} onClick={ev => { ev.stopPropagation(); clickSite(track.sampleId, track.sampleName, st, ev); }}>
+                  onClick={ev => { ev.stopPropagation(); if (!panMoved.current) clickSite(track.sampleId, track.sampleName, st, ev); }}>
                   <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                   {lead && <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />}
                   {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#9ca3af" />}
@@ -6886,7 +6893,7 @@ export default function SashimiViewer({
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (
                     <g key={`site${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
-                      onMouseDown={ev => ev.stopPropagation()} onClick={ev => { ev.stopPropagation(); clickSite(L.track.sampleId, L.track.sampleName, st, ev); }}>
+                      onClick={ev => { ev.stopPropagation(); if (!panMoved.current) clickSite(L.track.sampleId, L.track.sampleName, st, ev); }}>
                       <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                       <line x1={cx} y1={cy + 7} x2={cx} y2={bottom} stroke={STAR_COLOR} strokeWidth={1} strokeDasharray="2 3" opacity={0.75} />
                       {knownSnp(st) && <circle cx={cx} cy={cy} r={9.5} fill="none" stroke={SNP_KNOWN_RING} strokeWidth={1.6} />}

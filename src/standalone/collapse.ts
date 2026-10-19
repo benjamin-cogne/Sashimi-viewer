@@ -55,14 +55,21 @@ export function callSites(reads: AlignedRead[], start: number, end: number, ref:
   };
   for (let i = 0; i < snv.length; i++) if (snv[i] >= minAlt) addSnv(start + Math.floor(i / 5), CODE_BASE[i % 5], snv[i]);
   for (const [k, n] of otherSnv) { const [p, base] = k.split('\t'); addSnv(parseInt(p), base, n); }
+  // an indel's depth: every read spanning its position, with a base there or deleting it (as sitesFromCounts counts it)
+  const delOver = new Int32Array(w + 1);
+  for (const r of reads) for (const [ds, de] of r.d) {
+    const a = Math.max(start, ds), b = Math.min(end, de);
+    if (b > a) { delOver[a - start]++; delOver[b - start]--; }
+  }
+  for (let i = 1; i < w; i++) delOver[i] += delOver[i - 1];
   for (const [k, n] of ins) {
     const pos = Math.floor(k / INDEL_KEY), len = k % INDEL_KEY;
-    const d = pos - start < depth.length ? depth[pos - start] : 0;
+    const d = Math.max(n, pos - start < depth.length ? depth[pos - start] + delOver[pos - start] : 0);
     if (n >= minAlt && d && n / d >= minVaf) sites.push({ pos, kind: 'ins', ref: '', alt: `+${len}`, length: len, alt_count: n, depth: d, vaf: n / d });
   }
   for (const [k, n] of del) {
     const ds = Math.floor(k / INDEL_KEY), len = k % INDEL_KEY;
-    const d = depth[ds - start] + n;
+    const d = Math.max(n, depth[ds - start] + delOver[ds - start]);
     if (n >= minAlt && d && n / d >= minVaf) sites.push({ pos: ds, kind: 'del', ref: '', alt: `-${len}`, length: len, alt_count: n, depth: d, vaf: n / d });
   }
   return sites.sort((x, y) => x.pos - y.pos || x.kind.localeCompare(y.kind) || (x.alt < y.alt ? -1 : x.alt > y.alt ? 1 : 0));

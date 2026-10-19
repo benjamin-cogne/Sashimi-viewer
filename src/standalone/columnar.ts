@@ -146,10 +146,12 @@ export interface Directory {
  *
  * `mods` (5), `methylation` (9) and `seq` (12, whole read sequences) are companion sections written by other
  * producers of these streams; this viewer does not write them and skips them unless the caller of decodeReads decodes
- * them itself. Code 10 is the escape,
+ * them itself. `cpg` (13, each read's CpG calls, `me`) and `phased` (14, each read's haplotype in the page's own
+ * phasing, `ph` / `pb`) are written by the page's export only, for the reads track of the views it embeds. Code 10 is
+ * the escape,
  * fixed for good, so growing the table never moves it; the empty name at 10 only keeps the codes in place.
  */
-const SECTION_NAMES = ['core', 'pairs', 'clips', 'inserts', 'sa', 'mods', 'reference', 'runs', 'junctions', 'methylation', '', 'hap', 'seq'];
+const SECTION_NAMES = ['core', 'pairs', 'clips', 'inserts', 'sa', 'mods', 'reference', 'runs', 'junctions', 'methylation', '', 'hap', 'seq', 'cpg', 'phased'];
 const NAME_ESCAPE = 10;
 const F_BLOCK = 1, F_START = 2, F_END = 4, F_N = 8;
 const M_WINDOW = 1, M_TOTAL = 2, M_READS = 4, M_SOURCE = 8;
@@ -582,6 +584,43 @@ function decodeHapBlock(bytes: Uint8Array, reads: AlignedRead[]) {
   }
 }
 
+/**
+ * A block's CpG calls (`me`: position of the CpG's C, P(5mC) × 255, flat), read by read: their number, then each call's
+ * position (the first from two bases before the read's start, the others from the previous call; the calls are in
+ * reference order) and its probability byte.
+ */
+function encodeCpgBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) {
+    const me = r.me ?? [];
+    w.u(me.length / 2);
+    let prev = r.s - 2;
+    for (let k = 0; k < me.length; k += 2) { w.u(Math.max(0, me[k] - prev)); prev = me[k]; w.u(me[k + 1]); }
+  }
+  return w.done();
+}
+function decodeCpgBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) {
+    const n = rd.u();
+    if (!n) continue;
+    const me: number[] = [];
+    let prev = r.s - 2;
+    for (let k = 0; k < n; k++) { prev += rd.u(); me.push(prev, rd.u()); }
+    r.me = me;
+  }
+}
+/** A block's haplotypes in the page's own phasing: `ph` (0 none), then the start of its block `pb`. */
+function encodePhasedBlock(reads: AlignedRead[]): Uint8Array {
+  const w = new Writer();
+  for (const r of reads) { w.u(r.ph ?? 0); if (r.ph) w.u(r.pb ?? 0); }
+  return w.done();
+}
+function decodePhasedBlock(bytes: Uint8Array, reads: AlignedRead[]) {
+  const rd = new Reader(bytes);
+  for (const r of reads) { const ph = rd.u(); if (ph === 1 || ph === 2) { r.ph = ph; r.pb = rd.u(); } else if (ph) rd.u(); }
+}
+
 /** Encodes the reads of a window: blocks of READS_PER_BLOCK, a pairs section per block when any read has a mate, the reference bases. */
 export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
   const sorted = [...p.reads].sort((a, b) => a.s - b.s || a.e - b.e);
@@ -613,6 +652,14 @@ export async function encodeReads(p: ReadsPayload): Promise<Uint8Array> {
     if (block.some(r => r.hp)) {
       const hap = await deflate(encodeHapBlock(block));
       sections.push({ name: 'hap', block: b, bytes: hap.length }); parts.push(hap);
+    }
+    if (block.some(r => r.me?.length)) {
+      const cpg = await deflate(encodeCpgBlock(block));
+      sections.push({ name: 'cpg', block: b, bytes: cpg.length }); parts.push(cpg);
+    }
+    if (block.some(r => r.ph)) {
+      const ph = await deflate(encodePhasedBlock(block));
+      sections.push({ name: 'phased', block: b, bytes: ph.length }); parts.push(ph);
     }
   }
   if (p.reference) {
@@ -754,6 +801,8 @@ export async function decodeReads(stream: Uint8Array, range?: { start: number; e
         else if (c.name === 'inserts') decodeInsertBlock(await data(), block);
         else if (c.name === 'sa') decodeSaBlock(await data(), block);
         else if (c.name === 'hap') decodeHapBlock(await data(), block);
+        else if (c.name === 'cpg') decodeCpgBlock(await data(), block);
+        else if (c.name === 'phased') decodePhasedBlock(await data(), block);
         else if (opts?.sections?.[c.name]) opts.sections[c.name](await data(), block, dir.v);
       }
       block.forEach((r, k) => returned.set(s.block! * READS_PER_BLOCK + k, r));

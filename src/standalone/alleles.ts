@@ -319,16 +319,28 @@ export function sitesFromCounts(layers: AlleleLayer[], minMapq: number, start: n
     const pos = Math.floor(k / 256);
     if (pos >= start && pos < end) snv(pos, String.fromCharCode(k % 256), n);
   }
+  // An indel's depth is every read spanning its position, as a pileup counts it: the reads with a base there and the
+  // reads deleting it (any deletion over it, of any length, not only the allele's own). The blocks alone left out the
+  // other deletions over a deletion's start, so two deletion lengths at one start, or an insertion followed by a
+  // deletion in a read (frequent in long reads' homopolymers), could read over 100 %.
+  const dels = merged(c => c.del);
+  const delOver = new Int32Array(w + 1);
+  for (const [k, n] of dels) {
+    const ds = Math.floor(k / KEY), a = Math.max(start, ds), b = Math.min(end, ds + (k % KEY));
+    if (b > a && n) { delOver[a - start] += n; delOver[b - start] -= n; }
+  }
+  for (let i = 1; i < w; i++) delOver[i] += delOver[i - 1];
+  const spanning = (pos: number) => depth[pos - start] + delOver[pos - start];
   for (const [k, n] of merged(c => c.ins)) {
     const pos = Math.floor(k / KEY), len = k % KEY;
     if (len < minIndel || pos < start || pos >= end) continue;
-    const d = depth[pos - start];
+    const d = Math.max(n, spanning(pos));
     if (n >= MIN_ALT && d && n / d >= minVaf) sites.push({ pos, kind: 'ins', ref: '', alt: `+${len}`, length: len, alt_count: n, depth: d, vaf: n / d });
   }
-  for (const [k, n] of merged(c => c.del)) {
+  for (const [k, n] of dels) {
     const ds = Math.floor(k / KEY), len = k % KEY;
     if (len < minIndel || ds < start || ds >= end) continue;
-    const d = depth[ds - start] + n;
+    const d = Math.max(n, spanning(ds));
     if (n >= MIN_ALT && d && n / d >= minVaf) sites.push({ pos: ds, kind: 'del', ref: '', alt: `-${len}`, length: len, alt_count: n, depth: d, vaf: n / d });
   }
   if (sites.length) addSiteQuality(sites, parts, dense, depth, start, ref);
@@ -355,6 +367,7 @@ function addSiteHaplotypes(sites: VariantSite[], parts: [AlleleCounts, number][]
   for (const s of sites) {
     const over = glist.filter(([, [a, b]]) => a <= s.pos && b > s.pos).map(([g]) => g);
     if (!over.length) continue;
+    // reads by group spanning the site (their span, deletions included: an indel's depth as sitesFromCounts counts it)
     const depthOf = (g: number) => { let d = 0; for (const [c, sign] of hparts) d += sign * c.hap.depth(g, s.pos); return d; };
     const altOf = (g: number) => {
       let n = 0;

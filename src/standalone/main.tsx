@@ -11,9 +11,10 @@ import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type Viewe
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
 import { FOLDER_MAX_FILES, fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
-import { LocalDataSource, type LocalSample } from './localSource';
+import { LocalDataSource, METHYL_MAX_BP, type LocalSample } from './localSource';
+import { READS_PHASE_CAP } from './readsWindow';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
-import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
+import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeMethyl, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2, type EmbeddedPhase, type EncodedMethyl } from './embedded';
 import type { GenomeBuild } from './ensembl';
 import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
@@ -614,7 +615,8 @@ function App() {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
       // one step per view (annotation), per sample coverage, per sample reads when exported, plus the file itself
-      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= readsWindowOfView(t.state!) ? samples.length : 0), 0);
+      const dnaSamples = samples.filter(s => s.lib?.type === 'dna');
+      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= readsWindowOfView(t.state!) ? samples.length : 0) + (t.state!.methylation ? dnaSamples.length : 0), 0);
       progress('Preparing…');
       const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
@@ -663,6 +665,7 @@ function App() {
         for (const [sid, c] of raw) coverage[String(sid)] = await encodeCoverageV2(c, { start: ws, end: we });
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
+        let phase: Record<string, EmbeddedPhase> | undefined;
         if (st.reads) {
           const readsMax = readsWindowOfView(st);
           if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
@@ -670,11 +673,30 @@ function App() {
             const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
             const rs = Math.max(0, vs - half), re = ve + half;
             reads = {};
+            // as the view asks for them: grouped by the page's phasing, phased over every read of the window (as the page
+            // does, up to READS_PHASE_CAP) before they are thinned to the export's cap, the phasing kept with them; long
+            // reads with their CpG calls while Methylation is on
+            const phased = st.readsGroup === 'phase' && !st.collapseReads;
+            const minVaf = Math.min(1, Math.max(0, st.minVafPct / 100)), longReadMinVaf = (st.longReadMinVafPct ?? 20) / 100;
             for (const smp of samples) {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
               progress(`${t.label}: reads of ${smp.name}`);
               try {
-                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, 0.05, { secondary: !!st.secondary });
+                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, minVaf, {
+                  secondary: !!st.secondary, methylation: !!st.methylation && smp.lib?.type === 'dna',
+                });
+                if (phased) {
+                  // phased over the window the view itself asks for (the view and a quarter of it on each side), so the
+                  // exported reads fall into the same haplotypes as on the page; each exported read takes its haplotype
+                  const m = Math.floor(span * 0.25), pw = { start: Math.max(rs, vs - m), end: Math.min(re, ve + m) };
+                  const ph = await ds.getReads(smp.id, st.gene.chrom, pw.start, pw.end, st.minMapq, READS_PHASE_CAP, 'reads', 1, minVaf,
+                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf });
+                  if (ph.phase) {
+                    const of = new Map(ph.reads.filter(x => x.ph).map(x => [`${x.n}|${x.s}|${x.f}`, x]));
+                    for (const x of r.reads) { const y = of.get(`${x.n}|${x.s}|${x.f}`); if (y) { x.ph = y.ph; x.pb = y.pb; } }
+                    (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase };
+                  }
+                }
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
@@ -682,7 +704,23 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, coverage, reads });
+        // CpG methylation of each long-read DNA sample when the view shows it: the counts over the window (2 Mb at most,
+        // around the view), read back by the exported page as the live one reads its own
+        let methylation: Record<string, EncodedMethyl> | undefined;
+        if (st.methylation && ds.getMethylation && span <= METHYL_MAX_BP) {
+          const extra = Math.max(0, Math.floor((METHYL_MAX_BP - span) / 2));
+          const ms = Math.max(ws, vs - extra), me = Math.min(we, ve + extra);
+          for (const smp of dnaSamples) {
+            setNotes([`Exporting ${t.label}: methylation of ${smp.name}…`]);
+            progress(`${t.label}: methylation of ${smp.name}`);
+            try {
+              const w = await ds.getMethylation(smp.id, st.gene.chrom, ms, me);
+              if (w.calls || w.filtered) (methylation ??= {})[String(smp.id)] = encodeMethyl(w);
+            } catch (e: any) { skipped.push(`${t.label} / methylation of ${smp.name}: ${e?.message || e}`); }
+            done++;
+          }
+        }
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
