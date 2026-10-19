@@ -1985,12 +1985,11 @@ export default function SashimiViewer({
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    if (initialSettings?.shownSamples) {
-      // exactly the tracks the view had: a view reduced to one sample stays so (a random comparison came back each time)
-      for (const sid of initialSettings.shownSamples) {
-        if (sampleNames && sampleNames[sid] == null && sid !== sampleId) continue;   // a sample no longer loaded
-        loadCoverage(sid, sampleNames?.[sid] ?? (sid === sampleId ? sampleName : `sample ${sid}`));
-      }
+    // exactly the tracks the view had: a view reduced to one sample stays so (a random comparison came back each time);
+    // a view whose samples are all gone (or that had none, opened before any file) starts as a new view does
+    const kept = (initialSettings?.shownSamples ?? []).filter(sid => !(sampleNames && sampleNames[sid] == null && sid !== sampleId));
+    if (initialSettings?.shownSamples && (kept.length || !initialSettings.shownSamples.length)) {
+      for (const sid of kept) loadCoverage(sid, sampleNames?.[sid] ?? (sid === sampleId ? sampleName : `sample ${sid}`));
     } else if (sampleId > 0) {
       loadCoverage(sampleId, sampleName);
       ds.getRandomSample(runId, sampleId)
@@ -6380,12 +6379,12 @@ export default function SashimiViewer({
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
       viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
-      shownSamples: shownKey ? shownKey.split(',').map(Number) : [],
+      shownSamples: shownKey ? shownKey.split(',').map(Number) : sampleId > 0 ? [] : undefined,   // none: no file yet
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',

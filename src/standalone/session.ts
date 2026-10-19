@@ -160,10 +160,12 @@ export function viewerSettingsOf(session: SessionFile | { viewer: SessionViewer 
   if (!v) return undefined;
   const idOf = (name: string) => samples.find(s => s.name === name)?.id;
   const { groups, readsSample, samples: shown, ...rest } = v;
+  // none of the view's samples loaded: the view starts as a new one does rather than empty
+  const shownIds = shown?.map(idOf).filter((id): id is number => id != null);
   return {
     ...rest,
     readsSample: readsSample ? idOf(readsSample) ?? null : null,
-    ...(shown ? { shownSamples: shown.map(idOf).filter((id): id is number => id != null) } : {}),
+    ...(shown && shownIds && (shownIds.length || !shown.length) ? { shownSamples: shownIds } : {}),
     groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
     ...(v.panelOrder ? { panelOrder: v.panelOrder.map(k => (k.startsWith('s:') ? (idOf(k.slice(2)) != null ? `s:${idOf(k.slice(2))}` : null) : k)).filter((k): k is string => !!k) } : {}),
   };
