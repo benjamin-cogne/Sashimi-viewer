@@ -158,7 +158,13 @@ export function readJunctions(r: AlignedRead, visit: (k: number, be: number, ns:
     if (ns <= be) continue;
     while (d < r.d.length && r.d[d][0] < be) d++;
     if (d < r.d.length && r.d[d][0] === be && r.d[d][1] === ns) continue;
-    visit(k, be, ns);
+    // a deletion next to the intron (…M D N… or …N D M…) is not part of it: the intron is the CIGAR's N
+    let s = be, e = ns;
+    for (let j = d; j < r.d.length && r.d[j][0] < ns; j++) {
+      if (r.d[j][0] === s && r.d[j][1] < e) s = r.d[j][1];
+      else if (r.d[j][1] === e && r.d[j][0] > s) e = r.d[j][0];
+    }
+    visit(k, s, e);
   }
 }
 
@@ -468,11 +474,11 @@ export function collapseReads(reads: AlignedRead[], start: number, end: number, 
       readAlleles(r, sites, sitePos, minBq, calls);
       const rb = r.b.map(b => [b[0], b[1]] as [number, number]);
       readJunctions(r, (k, be, ns) => {
-        const j = snap?.get(jKey(be, ns)) ?? [be, ns];
-        chain.set(jKey(j[0], j[1]), j);
+        const j = snap?.get(jKey(be, ns));
+        chain.set(j ? jKey(j[0], j[1]) : jKey(be, ns), j ?? [be, ns]);
         // the blocks follow the junction's snapped ends (kept non-empty)
-        if (j[0] > rb[k][0]) rb[k][1] = j[0];
-        if (j[1] < rb[k + 1][1]) rb[k + 1][0] = j[1];
+        if (j && j[0] > rb[k][0]) rb[k][1] = j[0];
+        if (j && j[1] < rb[k + 1][1]) rb[k + 1][0] = j[1];
       });
       blocks.push(...rb);
     }

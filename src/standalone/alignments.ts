@@ -118,7 +118,7 @@ export function encodeRead(r: RawRead, ref: string | null, refStart: number): Al
 export function cigarOfRead(r: AlignedRead): string {
   const ins = [...r.i].sort((a, b) => a[0] - b[0]);
   const used = new Uint8Array(ins.length);
-  const dels = new Set(r.d.map(d => d[0]));
+  let di = 0;   // deletions, in reference order as the blocks
   let out = (r.h?.[0] ? `${r.h[0]}H` : '') + (r.c[0] ? `${r.c[0]}S` : '');
   for (let k = 0; k < r.b.length; k++) {
     const [bs, be] = r.b[k];
@@ -130,7 +130,18 @@ export function cigarOfRead(r: AlignedRead): string {
       out += `${il}I`; p = ip; used[j] = 1;
     }
     if (be > p) out += `${be - p}M`;
-    if (k + 1 < r.b.length) { const gap = r.b[k + 1][0] - be; if (gap > 0) out += `${gap}${dels.has(be) ? 'D' : 'N'}`; }
+    if (k + 1 < r.b.length) {
+      // the gap to the next block: its deletions, the rest an intron (a deletion next to an intron is not part of it)
+      const next = r.b[k + 1][0];
+      let q = be;
+      for (; di < r.d.length && r.d[di][0] < next; di++) {
+        const [ds, de] = r.d[di];
+        if (ds < q || de > next) continue;
+        if (ds > q) out += `${ds - q}N`;
+        out += `${de - ds}D`; q = de;
+      }
+      if (next > q) out += `${next - q}N`;
+    }
   }
   if (r.c[1]) out += `${r.c[1]}S`;
   if (r.h?.[1]) out += `${r.h[1]}H`;

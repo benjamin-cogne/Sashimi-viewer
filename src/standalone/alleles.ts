@@ -31,13 +31,28 @@ export const MIN_ALT = 3, MIN_BQ = 20;
  * Quality evidence of each call, for the variants track: of the reads carrying an alternate allele, how many are on the
  * + strand, have a mapping quality under LOW_MQ, place it within END_BP of their alignment's ends, and (SNVs) how many
  * of them carried it with a base quality under MIN_BQ (counted in the allele fraction all the same). Kept per (position, allele)
- * as one number, four 13-bit counters (saturating), in a Map: only positions where an alternate base was seen take
- * room. The reference side of each comparison is counted over the blocks, like the depth: + strand, low mapping
+ * as one number, four 13-bit counters, in a Map (QualCounts): only positions where an alternate base was seen take
+ * room; a counter past 8191 (a deep amplicon) goes on in the map's overflow. The reference side of each comparison is counted over the blocks, like the depth: + strand, low mapping
  * quality and near-end depth.
  */
 export const LOW_MQ = 20, END_BP = 10;
 const QF = 8192, Q_FWD = 1, Q_LMQ = QF, Q_END = QF * QF, Q_LBQ = QF * QF * QF;
 const qField = (v: number, unit: number) => Math.floor(v / unit) % QF;
+const Q_UNITS = [Q_FWD, Q_LMQ, Q_END, Q_LBQ];
+/** The four counters of a packed value: + strand, low MAPQ, near an end, low base quality. */
+const qFields = (v: number): number[] => Q_UNITS.map(u => qField(v, u));
+/** Quality counters by key, packed (above); the counts past a packed counter's range in `over`, by key and counter. */
+class QualCounts extends Map<number, number> {
+  over = new Map<number, number[]>();
+  /** the four counters of a key, null when it has none */
+  fields(key: number): number[] | null {
+    const v = this.get(key);
+    if (v == null) return null;
+    const f = qFields(v), o = this.over.get(key);
+    if (o) for (let i = 0; i < 4; i++) f[i] += o[i];
+    return f;
+  }
+}
 /**
  * The flags of the first two alternate calls seen at a (position, base), 16 bits per position and base, in chunks:
  * most mismatches of a noisy long-read library are isolated errors, and a Map entry for each would take far more room
@@ -53,10 +68,15 @@ class FirstFlags {
   get(pos: number): number { return this.chunks.get(pos >> 12)?.[pos & 4095] ?? 0; }
   set(pos: number, v: number): void { let a = this.chunks.get(pos >> 12); if (!a) this.chunks.set(pos >> 12, a = new Uint16Array(4096)); a[pos & 4095] = v; }
 }
-const qBump = (m: Map<number, number>, key: number, units: number[]) => {
+const qBump = (m: QualCounts, key: number, units: number[]) => {
   if (!units.length && !m.has(key)) return;
   let v = m.get(key) ?? 0;
-  for (const u of units) if (qField(v, u) < QF - 1) v += u;
+  for (const u of units) {
+    if (qField(v, u) < QF - 1) { v += u; continue; }
+    let o = m.over.get(key);
+    if (!o) m.over.set(key, o = [0, 0, 0, 0]);
+    o[Q_UNITS.indexOf(u)]++;
+  }
   m.set(key, v);
 };
 const KEY = 8_388_608;          // position × KEY + length, for insertions and deletions
@@ -159,10 +179,10 @@ class AlleleCounts {
   ins = new Map<number, number>();
   del = new Map<number, number>();
   /** quality evidence of the alternate calls: SNVs by position × 8 + base index (5: other codes), from their second call; indels by their key */
-  snvQ = new Map<number, number>();
+  snvQ = new QualCounts();
   first = [new FirstFlags(), new FirstFlags(), new FirstFlags(), new FirstFlags(), new FirstFlags()];
-  insQ = new Map<number, number>();
-  delQ = new Map<number, number>();
+  insQ = new QualCounts();
+  delQ = new QualCounts();
   /** blocks of + strand reads, of reads with a mapping quality under LOW_MQ, and the END_BP at each end of every alignment */
   FS = new Hist(); FE = new Hist();
   LS = new Hist(); LE = new Hist();
@@ -420,26 +440,28 @@ export function siteHaplotypesOf(per: { ps: number | null; hp: number; depth: nu
 function addSiteQuality(sites: VariantSite[], parts: [AlleleCounts, number][], dense: (s: (c: AlleleCounts) => Hist, e: (c: AlleleCounts) => Hist) => Int32Array,
   depth: Int32Array, start: number, ref: RefWindow | null): void {
   const fwdD = dense(c => c.FS, c => c.FE), lmqD = dense(c => c.LS, c => c.LE), endD = dense(c => c.NS, c => c.NE);
-  const qOf = (pick: (c: AlleleCounts) => Map<number, number>, key: number) => { let v = 0; for (const [c, sign] of parts) v += sign * (pick(c).get(key) ?? 0); return v; };
+  // each layer's four counters, added with its sign (the layers of the MAPQ buckets under the threshold taken away)
+  const add = (to: number[], f: number[] | null, sign: number) => { if (f) for (let i = 0; i < 4; i++) to[i] += sign * f[i]; };
+  const qOf = (pick: (c: AlleleCounts) => QualCounts, key: number) => { const v = [0, 0, 0, 0]; for (const [c, sign] of parts) add(v, pick(c).fields(key), sign); return v; };
   /** an SNV's evidence: each layer's entry, or the one or two calls it still holds as flags (a site's calls can be split between layers) */
   const snvOf = (pos: number, bi: number | undefined) => {
-    let v = 0;
+    const v = [0, 0, 0, 0];
     for (const [c, sign] of parts) {
-      const e = c.snvQ.get(pos * 8 + (bi ?? 5));
-      if (e != null) { v += sign * e; continue; }
+      const e = c.snvQ.fields(pos * 8 + (bi ?? 5));
+      if (e) { add(v, e, sign); continue; }
       if (bi === undefined) continue;
       const f = c.first[bi].get(pos);
-      for (const [set, fl] of [[FIRST_SET, f & 15], [SECOND_SET, (f >> 4) & 15]]) if (f & set) v += sign * flagUnits(fl).reduce((a, x) => a + x, 0);
+      for (const [set, fl] of [[FIRST_SET, f & 15], [SECOND_SET, (f >> 4) & 15]]) if (f & set) add(v, qFields(flagUnits(fl).reduce((a, x) => a + x, 0)), sign);
     }
     return v;
   };
   const share = (a: number, b: number) => (b > 0 ? Math.max(0, Math.min(1, a / b)) : null);
   for (const s of sites) {
     const i = s.pos - start, n = s.alt_count;
-    let v: number;
+    let v: number[];
     if (s.kind === 'snv') v = snvOf(s.pos, BASE_INDEX[s.alt.charCodeAt(0)]);
     else { const key = s.pos * KEY + Math.min(s.length, KEY - 1); v = s.kind === 'ins' ? qOf(c => c.insQ, key) : qOf(c => c.delQ, key); }
-    const f = qField(v, Q_FWD), l = qField(v, Q_LMQ), e = qField(v, Q_END), lb = qField(v, Q_LBQ);
+    const [f, l, e, lb] = v;
     // the other reads over the position: its blocks, less the alternate reads when they are among them (SNV, insertion)
     const inBlocks = s.kind !== 'del', bd = depth[i] - (inBlocks ? n : 0);
     s.q = {

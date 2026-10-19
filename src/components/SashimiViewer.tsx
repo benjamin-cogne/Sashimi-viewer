@@ -936,6 +936,14 @@ function methylTicksIn(t: { pos: Int32Array; pre: [Int32Array, Int32Array, Int32
   for (let c = 0; c < 3; c++) n[c] += t.pre[c][j] - t.pre[c][i];
 }
 
+/**
+ * The deletion-type arcs of split reads (and clipped reads placed by realignment): the source merges them with the CIGAR
+ * deletions of the same span (`deletions`, by their sources); `splits` holds them in evidence gathered before that.
+ */
+function deletionSplits(sv: StructuralEvidence): SvArc[] {
+  return [...sv.splits, ...sv.deletions.filter(d => Object.entries(d.sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0))];
+}
+
 /** haplotypes 1, 2 (and DRAGEN's higher copy labels): the chip of a consensus row, the band of a group of reads */
 const HAP_COLORS = ['#0369a1', '#be185d', '#4d7c0f', '#92400e'];
 /**
@@ -1940,7 +1948,7 @@ export default function SashimiViewer({
         if (lr && !lr.known && !farPending.current.has(k!) && !want.includes(lr.farPos)) want.push(lr.farPos);
       }
       // the ends of an RNA track's structural arcs outside the genes of the view (fusion partners)
-      if (svHints && t.structural) for (const j of [...t.structural.splits, ...(t.structural.duplications ?? []), ...(t.structural.inversions ?? [])]) {
+      if (svHints && t.structural) for (const j of [...deletionSplits(t.structural), ...(t.structural.duplications ?? []), ...(t.structural.inversions ?? [])]) {
         if (j.count < minJunctionCount) continue;
         for (const p of [j.start, j.end]) {
           const k = `${currentChrom}:${p}`;
@@ -4197,7 +4205,7 @@ export default function SashimiViewer({
       if (!dnaTrack && !track.gtex && track.structural && svHints) {
         const sv = track.structural;
         const approx = track.sampled ? '≈' : '';
-        const cands = ([['split', sv.splits], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []]] as const)
+        const cands = ([['split', deletionSplits(sv)], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []]] as const)
           .flatMap(([kind, list]) => list.map(j => ({ j, kind, f: j.count >= minJunctionCount ? fusionOf(j, kind) : null })))
           .filter(x => x.f && x.f.end > viewStart && x.f.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(x.j)}`));
         const fLevels = layerJunctions(cands.map(x => ({ start: x.f!.start, end: x.f!.end, count: x.j.count })));

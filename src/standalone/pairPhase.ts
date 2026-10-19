@@ -34,6 +34,7 @@ import { alleleAt, HET_MAX, HET_MIN, type Allele } from './phasing';
 import { callSites, inBlocks, jKey, junctionSnap, readJunctions } from './collapse';
 import { siteHaplotypesOf } from './alleles';
 import { sitePhase, type SitePhase } from '../components/sashimi/sitePhase';
+import { isLongRead } from './readsWindow';
 
 export const MIN_FRAGMENTS = 3, MAX_AGAINST = 0.2, MIN_BQ = 20, EPS = 0.01;
 /** Informative fragments under which the reads disagreeing among themselves leave the verdict to the haplotags. */
@@ -435,9 +436,16 @@ export function junctionUse(r: AlignedRead, s: number, e: number, snap?: Map<num
   return over(s) || over(e) ? 0 : -1;
 }
 
+/**
+ * The junctions of the reads counted with the much more common one a few bases away, as the arcs count them: for long
+ * reads only, whose splice sites jitter; a short-read junction a few bases off another is its own arc (a cryptic site,
+ * a NAGNAG acceptor) and its own target.
+ */
+const snapOf = (reads: AlignedRead[]) => (isLongRead(reads) ? junctionSnap(reads) : new Map<number, [number, number]>());
+
 /** Reads over the junction's splice sites: using it, passing them otherwise (each read once). */
 export function junctionReads(reads: AlignedRead[], s: number, e: number): { uses: number; other: number } {
-  const snap = junctionSnap(reads);
+  const snap = snapOf(reads);
   let uses = 0, other = 0;
   for (const r of reads) { const u = junctionUse(r, s, e, snap); if (u === 1) uses++; else if (u === 0) other++; }
   return { uses, other };
@@ -485,7 +493,7 @@ export function phaseJunction(A: VariantSite, J: { start: number; end: number },
   const table: [number, number, number, number] = [0, 0, 0, 0];
   const links: Record<LinkKind, number> = { read: 0, spliced: 0, pair: 0, split: 0 };
   const fragments: PairFragment[] = [];
-  const snap = junctionSnap(readsJ);
+  const snap = snapOf(readsJ);
   let unknown = 0;
   const atJ = byName(readsJ);
   for (const [name, fa] of byName(readsA)) {
