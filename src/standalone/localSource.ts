@@ -16,7 +16,7 @@ import type { Breakpoint, RescuedClips } from '../components/sashimi/types';
 import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, clipEnds, cramCigar, cramMismatches, detectStrandness, encodeRead, exonDepth, hasRealignableClips, hasRescuableClips, keepFlags, keepFlagsWith, longestPlaceableInsertion, rescueClipEnds, strandKeeper, structuralEvidence, type RawRead, type StrandnessCall } from './alignments';
 import { CoverageState, Layer, mapqThreshold, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
-import { MethylCounts, MethylState, countRead, cpgSites, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
+import { MethylCounts, MethylState, countRead, cpgSites, methylBlocks, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
 import { arcReadFromCigar, supportsArc } from './arcSupport';
 import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
@@ -732,8 +732,9 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /**
-   * The methylation counting itself (methylation.ts): grows the sample's state over [start, end), each tile's reads
-   * counted against the CpGs of the reference under them, then reads the window back with the filter threshold.
+   * The methylation counting itself (methylation.ts): grows the sample's state over the whole blocks of [start, end)
+   * (methylBlocks: each block's confidence threshold needs all its calls), each tile's reads counted against the CpGs of
+   * the reference under them, then reads the window back with the blocks' thresholds.
    */
   countMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
     const k = this.providerOf(sampleId);
@@ -744,7 +745,8 @@ export class LocalDataSource implements SashimiDataSource {
       const loc = await this.locate(sampleId, chrom);
       if (!loc) return methylWindow([], start, end, null, start);
       const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-      const st = this.methylState(sampleId, loc.name, start, end);
+      const [bs, be] = methylBlocks(start, end);
+      const st = this.methylState(sampleId, loc.name, bs, be);
       const scratch = { a: new Uint8Array(4096) }, mods = newModScratch();
       let cpgs: Int32Array = new Int32Array(0);
       // the CpGs of the reference under the reads of the tile about to be counted, before the (synchronous) counting
@@ -775,13 +777,13 @@ export class LocalDataSource implements SashimiDataSource {
         const t = view.hap(r);
         countRead(layer, view.start(r), ops, scratch.a, n, (view.flags(r) & 16) !== 0, m.mm, m.ml, cpgs, t.hp ?? 0, mods, t.ps ?? null);
       };
-      const span = Math.max(1, end - start);
-      const progress = () => opts?.onProgress?.(Math.min(1, Math.max(0, Math.min(end, st.pe) - Math.max(start, st.ps)) / span));
-      await this.fillStretch(sampleId, st, loc, start, end, () => new MethylCounts(), count, signal, progress, prepare);
+      const span = Math.max(1, be - bs);
+      const progress = () => opts?.onProgress?.(Math.min(1, Math.max(0, Math.min(be, st.pe) - Math.max(bs, st.ps)) / span));
+      await this.fillStretch(sampleId, st, loc, bs, be, () => new MethylCounts(), count, signal, progress, prepare);
       progress();
-      const ref = await this.getReferenceSeq(chrom, start, end + 1);
+      const ref = await this.getReferenceSeq(chrom, bs, be + 1);
       throwIfAborted(signal);
-      return methylWindow([st.owned, st.spill], start, end, ref, start);
+      return methylWindow([st.owned, st.spill], start, end, ref, bs);
     });
   }
 

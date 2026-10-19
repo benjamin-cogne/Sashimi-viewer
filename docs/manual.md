@@ -1152,9 +1152,16 @@ reference tool; `pb-CpG-tools` for PacBio does the same per haplotype):
   combined: a − strand read's call, on the G of the CpG, is counted at the C of the + strand;
 - a call is **methylated when 5mC is the likelier state**. 5hmC, when called, is not counted as 5mC:
   its probability is set aside and the other two renormalised (modkit's *traditional* preset);
-- calls whose confidence is below the **10th percentile** of the window's calls are **filtered
-  out**, as modkit does by default. The threshold and the calls left out are in the header's
-  tooltip. Confidences are kept in 16 bins that narrow towards 1 (from 0.5, 0.65, 0.75 … up to
+- calls whose confidence is below the **10th percentile** of the calls are **filtered out**, as
+  modkit does by default. modkit estimates one threshold per file from a sample of its reads; here
+  it is estimated per **100 kb block** of the chromosome (a fixed grid from its start), from every
+  call at the block's CpGs. The counting therefore covers whole blocks, up to one more block on each
+  side of the view. A CpG's value then depends only on its own reads and its block, never on the
+  zoom, on what was viewed before, on the layer being turned off and on, or on the source (BAM,
+  CRAM, .sashimi). Earlier versions took the percentile over everything counted so far for the
+  sample. A view could then read slightly different fractions and haplotype differences after
+  zooming out and back in than after the layer was turned off and on. The threshold (one per
+  block, as a range when they differ) and the calls left out are in the header's tooltip. Confidences are kept in 16 bins that narrow towards 1 (from 0.5, 0.65, 0.75 … up to
   0.992, 0.9945, 0.996, 0.997), since current basecallers put most calls above 0.95. Near 1 a bin
   is about one ML step (1/256) wide. The filter drops the bins wholly below the percentile, so it
   removes up to 10 % of the calls: 7.0 % on ONT HG002 (CFTR, 200 kb). Earlier versions used
@@ -1167,7 +1174,9 @@ reference tool; `pb-CpG-tools` for PacBio does the same per haplotype):
 *mosdepth*, often cited for long-read depth, has no methylation mode; its role here is the coverage
 track. The counting runs **in the background** (the Web Worker of the variant scans): the page never
 waits for it. The counts are kept per sample over a window of the view plus half of it on each
-side, so panning and zooming inside it cost nothing new. Drawing is computed per pixel, not per
+side (rounded out to whole 100 kb blocks), so panning and zooming inside it cost nothing new. The
+CpG islands are found over that whole stretch, then those overlapping the view kept, so an island
+at the edge of the window is never cut by it. Drawing is computed per pixel, not per
 read or CpG, so it takes the same time at 1 kb or at 2 Mb. It is counted for views up to 2 Mb
 (wider, the panel asks to zoom in) and needs the reference sequence.
 

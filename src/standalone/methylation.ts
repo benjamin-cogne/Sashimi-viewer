@@ -14,13 +14,18 @@
  * - **5mC against unmodified C, 5hmC set aside**: the 5hmC probability is shared out between the two others (their
  *   probabilities renormalised), then the call is the likelier state and its probability the call's confidence.
  * - **Low-confidence calls filtered**: calls below a threshold estimated from the data, the 10th percentile of the
- *   sample's call confidences (modkit's default filter percentile), are counted apart and left out of the fractions.
- *   The confidences are binned finer towards 1 (CONF_BINS, confBin): current basecallers put most calls above 0.95, where
- *   bins of equal width could not place the percentile (on ONT HG002, 97 % of the calls fell in the top 1/32 and only
- *   2.7 % were filtered instead of 10 %).
+ *   call confidences (modkit's default filter percentile), are counted apart and left out of the fractions. modkit
+ *   estimates one threshold per file from a sample of its reads; here it is estimated per block of METHYL_BLOCK_BP of the
+ *   chromosome (a fixed grid), from every call at the block's CpGs. A CpG's value thus depends on its reads and its block
+ *   alone: the same whatever was counted before, the zoom, the window asked for or the source (BAM, CRAM, container).
+ *   (Estimated from whatever had been counted, it moved with the navigation: a window read again after zooming out and in,
+ *   or after the layer was turned off and on, could get another threshold and other fractions.) The confidences are binned
+ *   finer towards 1 (CONF_BINS, confBin): current basecallers put most calls above 0.95, where bins of equal width could
+ *   not place the percentile (on ONT HG002, 97 % of the calls fell in the top 1/32 and only 2.7 % were filtered instead
+ *   of 10 %).
  *
- * Counts are kept per CpG, per haplotag (untagged, HP 1, HP 2) and per confidence bin, so the threshold can be applied
- * when a window is read back, from whatever has been counted.
+ * Counts are kept per CpG, per haplotag (untagged, HP 1, HP 2) and per confidence bin, and the confidences per block, so
+ * the thresholds are applied when a window is read back. A source counts whole blocks (methylBlocks) for a window.
  *
  * Haplotags only mean something within their phase set (PS): HP 1 of one set and HP 1 of the next one need not be the
  * same chromosome copy, and where the reads of two sets overlap (around a set's ends, tens of kb with long reads) a CpG
@@ -37,6 +42,17 @@ export const CONF_BINS = 16;
 /** The lower edge of a confidence bin. */
 export const confBinLow = (bin: number) => 1 - Math.pow(2, -(1 + bin / 2));
 const HAPS = 3;                         // 0 untagged (or HP > 2), 1, 2
+/**
+ * The grid the confidence threshold is estimated on: blocks of this many bases from the chromosome's start. 100 kb hold
+ * tens of thousands of calls at 30× (about 1 CpG per 100 bp), enough to place the percentile, and cost a source at most
+ * one block on each side of a window to count.
+ */
+export const METHYL_BLOCK_BP = 100_000;
+export const methylBlock = (pos: number) => Math.floor(pos / METHYL_BLOCK_BP);
+/** The span of the whole blocks over [start, end): what a source counts for that window. */
+export function methylBlocks(start: number, end: number): [number, number] {
+  return [methylBlock(start) * METHYL_BLOCK_BP, (methylBlock(Math.max(start, end - 1)) + 1) * METHYL_BLOCK_BP];
+}
 /** Share of the sample's calls the threshold filters: its lowest-confidence 10 %, as modkit does by default. */
 export const FILTER_PERCENTILE = 0.1;
 const C = 67, G = 71;
@@ -123,10 +139,11 @@ export class MethylCounts {
   sites = new Map<number, CpgCounts>();
   /** the tagged calls (HP 1, 2) again, per CpG and phase set: [hap 1, 2][state][bin] */
   bySet = new Map<number, Map<number, Uint16Array>>();
-  hist = new Float64Array(CONF_BINS);
+  /** the call confidences by block of the CpG (methylBlock): each block's threshold */
+  hists = new Map<number, Float64Array>();
   calls = 0;
   private setArrays = 0;
-  get bytes(): number { return this.sites.size * (HAPS * 2 * CONF_BINS * 2 + 48) + this.bySet.size * 64 + this.setArrays * (4 * CONF_BINS * 2 + 32); }
+  get bytes(): number { return this.sites.size * (HAPS * 2 * CONF_BINS * 2 + 48) + this.bySet.size * 64 + this.setArrays * (4 * CONF_BINS * 2 + 32) + this.hists.size * (CONF_BINS * 8 + 48); }
   /** `ps`: the read's phase set (tagged reads; null or undefined when it has none) */
   add(pos: number, hap: number, mod: boolean, conf: number, ps?: number | null): void {
     let c = this.sites.get(pos);
@@ -142,7 +159,10 @@ export class MethylCounts {
       const j = idx(hap - 1, mod ? 1 : 0, b);
       if (a[j] < 65535) a[j]++;
     }
-    this.hist[b]++; this.calls++;
+    const k = methylBlock(pos);
+    let h = this.hists.get(k);
+    if (!h) this.hists.set(k, h = new Float64Array(CONF_BINS));
+    h[b]++; this.calls++;
   }
 }
 
@@ -220,7 +240,11 @@ export interface MethylWindow {
   total: [Uint16Array, Uint16Array, Uint16Array];
   /** each CpG's phase set: the PS holding most of its tagged calls; NaN when none, -1 for reads tagged without PS */
   ps: Float64Array;
-  /** confidence threshold applied (the lower edge of its bin), and the calls it left out of the window */
+  /**
+   * confidence threshold of each block over the window (the lower edge of its bin; see METHYL_BLOCK_BP), `threshold` the
+   * lowest of them; the calls they left out of the window and the calls kept
+   */
+  thresholds: { start: number; end: number; threshold: number }[];
   threshold: number; filtered: number; calls: number;
   /** CpG islands of the reference over the window (Gardiner-Garden & Frommer 1987) */
   islands: [number, number][];
@@ -240,11 +264,31 @@ export function thresholdBin(hist: Float64Array): number {
   return 0;
 }
 
-/** Reads a window back from counts (layers each holding reads once), applying the threshold of their combined histogram. */
+/** The confidence threshold at a position of a window read back: its block's. */
+export function thresholdAt(w: Pick<MethylWindow, 'thresholds' | 'threshold'>, pos: number): number {
+  const t = w.thresholds;
+  let lo = 0, hi = t.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (t[mid].end <= pos) lo = mid + 1; else hi = mid; }
+  return lo < t.length && t[lo].start <= pos ? t[lo].threshold : w.threshold;
+}
+
+/**
+ * Reads a window back from counts (layers each holding reads once), each CpG's calls filtered by its block's threshold.
+ * The layers must hold every read over the blocks of [start, end) (methylBlocks), or those blocks' thresholds are those
+ * of part of their calls. `refSeq` (from `refStart`) may run past the window: the CpG islands are found over all of it,
+ * then those overlapping the window kept, so an island at the window's edge is not cut by it.
+ */
 export function methylWindow(layers: MethylCounts[], start: number, end: number, refSeq: string | null, refStart: number): MethylWindow {
-  const hist = new Float64Array(CONF_BINS);
-  for (const l of layers) for (let b = 0; b < CONF_BINS; b++) hist[b] += l.hist[b];
-  const tb = thresholdBin(hist);
+  const tbOf = new Map<number, number>();
+  const blockTb = (k: number) => {
+    let tb = tbOf.get(k);
+    if (tb == null) {
+      const hist = new Float64Array(CONF_BINS);
+      for (const l of layers) { const h = l.hists.get(k); if (h) for (let b = 0; b < CONF_BINS; b++) hist[b] += h[b]; }
+      tbOf.set(k, tb = thresholdBin(hist));
+    }
+    return tb;
+  };
   const merged = new Map<number, Uint16Array>();
   for (const l of layers) for (const [p, c] of l.sites) {
     if (p < start || p >= end) continue;
@@ -257,7 +301,7 @@ export function methylWindow(layers: MethylCounts[], start: number, end: number,
   const ps = new Float64Array(pos.length).fill(NaN);
   let filtered = 0, calls = 0;
   pos.forEach((p, i) => {
-    const c = merged.get(p)!;
+    const c = merged.get(p)!, tb = blockTb(methylBlock(p));
     for (let h = 0; h < HAPS; h++) for (let st = 0; st < 2; st++) for (let b = 0; b < CONF_BINS; b++) {
       const x = c[idx(h, st, b)];
       if (!x) continue;
@@ -288,7 +332,10 @@ export function methylWindow(layers: MethylCounts[], start: number, end: number,
   });
   let cpgs = 0;
   if (refSeq) for (let i = Math.max(0, start - refStart); i + 1 < refSeq.length && refStart + i < end; i++) if ((refSeq.charCodeAt(i) & 0xdf) === C && (refSeq.charCodeAt(i + 1) & 0xdf) === G) cpgs++;
-  return { start, end, pos, mod, total, ps, threshold: confBinLow(tb), filtered, calls, islands: refSeq ? cpgIslands(refSeq, refStart, start, end) : [], cpgs };
+  const thresholds: MethylWindow['thresholds'] = [];
+  if (end > start) for (let k = methylBlock(start); k <= methylBlock(end - 1); k++) thresholds.push({ start: k * METHYL_BLOCK_BP, end: (k + 1) * METHYL_BLOCK_BP, threshold: confBinLow(blockTb(k)) });
+  const islands = refSeq ? cpgIslands(refSeq, refStart, refStart, refStart + refSeq.length).filter(([a, b]) => b > start && a < end) : [];
+  return { start, end, pos, mod, total, ps, thresholds, threshold: thresholds.length ? Math.min(...thresholds.map(t => t.threshold)) : confBinLow(0), filtered, calls, islands, cpgs };
 }
 
 /**
