@@ -74,8 +74,9 @@ const MAX_READS_REGION_BP = READS_REGION_MAX_BP;
 // ---------------- Deep regions ----------------
 // A very deep library (targeted RNA-seq, a highly expressed gene) can hold millions of records over one gene,
 // and decoding them all froze the page. Requests are therefore budgeted: the window is sized from the index
-// before anything is decoded, records are scanned tile by tile with only the fields the filter needs, and past
-// a cap every k-th read is kept (k = 2, 4, 8…) with the counts scaled back by k.
+// before anything is decoded and records are scanned tile by tile with only the fields the filter needs. Coverage,
+// junctions, variant sites and methylation count every read; the reads track and the exon-usage scans keep, past a
+// cap, every k-th read (k = 2, 4, 8…).
 /** Reads decoded per exon for the exon-usage statistics (fractions and medians only need a sample). */
 const EXON_USAGE_MAX_READS = 100_000;
 /** widest window whose reference is fetched from the web APIs to place clipped sequences (a local FASTA has no limit) */
