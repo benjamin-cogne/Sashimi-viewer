@@ -180,7 +180,10 @@ async function fetchChunk(build: GenomeBuild, chrom: string, idx: number): Promi
   if (!chunkCache.has(key)) {
     const bare = chrom.startsWith('chr') ? chrom.slice(3) : chrom;
     const url = `${HOSTS[build]}/sequence/region/human/${bare}:${idx * CHUNK + 1}..${(idx + 1) * CHUNK}:1?content-type=text/plain`;
-    chunkCache.set(key, fetch(url, { headers: { Accept: 'text/plain' } }).then(async r => (r.ok ? (await r.text()).trim().toUpperCase() : null)).catch(() => null));
+    // a chunk the API does not have (4xx) stays unavailable; a failed request (network, 429, 5xx) is asked again next time
+    const retry = () => { chunkCache.delete(key); return null; };
+    chunkCache.set(key, fetch(url, { headers: { Accept: 'text/plain' } })
+      .then(async r => (r.ok ? (await r.text()).trim().toUpperCase() : r.status === 429 || r.status >= 500 ? retry() : null)).catch(retry));
   }
   return chunkCache.get(key)!;
 }

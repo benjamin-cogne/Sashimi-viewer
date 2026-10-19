@@ -337,6 +337,10 @@ export interface VariantScanner {
   collapse?(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number, minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse>;
 }
 
+/** The error of a count that needs the reference and could not get it (no FASTA, and the UCSC / Ensembl APIs failed). */
+const referenceMissing = (chrom: string, lo: number, hi: number) =>
+  `no reference sequence for ${chrom}:${(lo + 1).toLocaleString('en-US')}-${hi.toLocaleString('en-US')} (add an indexed FASTA, or retry once the Ensembl API answers)`;
+
 export class LocalDataSource implements SashimiDataSource {
   private samples = new Map<number, LocalSample>();
   private opened = new Map<number, Promise<Opened>>();
@@ -772,8 +776,10 @@ export class LocalDataSource implements SashimiDataSource {
           for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) e += ops[k] >>> 4; }
           if (e > hi) hi = e;
         }
-        const seq = hi > lo ? await this.getReferenceSeq(chrom, lo, hi + 1) : null;
-        cpgs = seq ? cpgSites(lo, seq) : new Int32Array(0);
+        // from the base before the first read: a − strand read starting on the G of a CpG holds its call
+        const seq = hi > lo ? await this.getReferenceSeq(chrom, Math.max(0, lo - 1), hi + 1) : '';
+        if (seq == null) throw new Error(referenceMissing(chrom, lo, hi));
+        cpgs = seq ? cpgSites(Math.max(0, lo - 1), seq) : new Int32Array(0);
       };
       const count = (layer: MethylCounts, r: any) => {
         // primary alignments only, as modkit pileup counts (a split read's supplementary parts are left out)
@@ -823,7 +829,11 @@ export class LocalDataSource implements SashimiDataSource {
           for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 2 || op === 3 || op === 7 || op === 8) e += ops[k] >>> 4; }
           if (e > hi) hi = e;
         }
-        ref = hi > lo ? refWindow(lo, await this.getReferenceSeq(chrom, lo, hi)) : null;
+        if (hi <= lo) { ref = null; return; }
+        // no reference, no mismatch: the tile is left uncounted (a later request counts it) rather than counted without its SNVs
+        const seq = await this.getReferenceSeq(chrom, lo, hi);
+        if (seq == null) throw new Error(referenceMissing(chrom, lo, hi));
+        ref = refWindow(lo, seq);
       };
       const count = (layer: AlleleLayer, r: any) => {
         const flags = view.flags(r);
