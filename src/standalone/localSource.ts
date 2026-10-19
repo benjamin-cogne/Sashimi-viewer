@@ -294,7 +294,7 @@ function tagNumber(v: unknown): number | null {
 /** Long reads (ONT, PacBio): the median aligned length of the window's reads is above 1 kb. */
 /** Adds the pair fields of a paired, mate-mapped record to its encoded read: mate start, template length, mate chromosome when it differs. */
 /**
- * The CpG calls of each read (`me`: position, P(5mC) × 255, flat), for the methylation colours of the reads track; the
+ * The CpG calls of each read (`me`: position, P(5mC), flat), for the methylation colours of the reads track; the
  * same rules as the counting (reference CpGs only, both strands on the C of the + strand, MN / hard-clip check).
  */
 function readMethylation(reads: AlignedRead[], raw: RawRead[], cpgs: Int32Array): void {
@@ -308,7 +308,7 @@ function readMethylation(reads: AlignedRead[], raw: RawRead[], cpgs: Int32Array)
     if (codes.length < n) codes = new Uint8Array(n * 2);
     for (let k = 0; k < n; k++) codes[k] = r.seq.charCodeAt(k);
     const me: number[] = [];
-    visitReadCalls(r.start, ops, codes, n, (r.flags & 16) !== 0, m.mm, m.ml, cpgs, sc, (cpg, mod, conf) => { me.push(cpg, Math.round((mod ? conf : 1 - conf) * 255)); });
+    visitReadCalls(r.start, ops, codes, n, (r.flags & 16) !== 0, m.mm, m.ml, cpgs, sc, (cpg, mod, conf) => { me.push(cpg, mod ? conf : 1 - conf); });
     if (me.length) reads[i].me = me;
   });
 }

@@ -208,7 +208,7 @@ export interface AlignedRead {
    * starting at `pb` (0-based); absent when the read's fragment covers no phased site or matches both haplotypes alike
    */
   ph?: 1 | 2; pb?: number;
-  /** CpG calls of a long read with base-modification tags, when asked for: position of the CpG's C, P(5mC) × 255, flat */
+  /** CpG calls of a long read with base-modification tags, when asked for: position of the CpG's C, P(5mC), flat */
   me?: number[];
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */

@@ -585,7 +585,7 @@ function decodeHapBlock(bytes: Uint8Array, reads: AlignedRead[]) {
 }
 
 /**
- * A block's CpG calls (`me`: position of the CpG's C, P(5mC) × 255, flat), read by read: their number, then each call's
+ * A block's CpG calls (`me`: position of the CpG's C, P(5mC), flat; stored × 255 as a byte), read by read: their number, then each call's
  * position (the first from two bases before the read's start, the others from the previous call; the calls are in
  * reference order) and its probability byte.
  */
@@ -595,7 +595,7 @@ function encodeCpgBlock(reads: AlignedRead[]): Uint8Array {
     const me = r.me ?? [];
     w.u(me.length / 2);
     let prev = r.s - 2;
-    for (let k = 0; k < me.length; k += 2) { w.u(Math.max(0, me[k] - prev)); prev = me[k]; w.u(me[k + 1]); }
+    for (let k = 0; k < me.length; k += 2) { w.u(Math.max(0, me[k] - prev)); prev = me[k]; w.u(Math.round(me[k + 1] * 255)); }
   }
   return w.done();
 }
@@ -606,7 +606,7 @@ function decodeCpgBlock(bytes: Uint8Array, reads: AlignedRead[]) {
     if (!n) continue;
     const me: number[] = [];
     let prev = r.s - 2;
-    for (let k = 0; k < n; k++) { prev += rd.u(); me.push(prev, rd.u()); }
+    for (let k = 0; k < n; k++) { prev += rd.u(); me.push(prev, rd.u() / 255); }
     r.me = me;
   }
 }

@@ -13,6 +13,7 @@ import { buildSession, defaultSessionName, matchSession, parseSession, viewerSet
 import { FOLDER_MAX_FILES, fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
 import { LocalDataSource, METHYL_MAX_BP, type LocalSample } from './localSource';
 import { READS_PHASE_CAP } from './readsWindow';
+import { exportedCall, thresholdAt, type MethylWindow } from './methylation';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeMethyl, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2, type EmbeddedPhase, type EncodedMethyl } from './embedded';
 import type { GenomeBuild } from './ensembl';
@@ -663,6 +664,23 @@ function App() {
           try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.minMapq); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
         }
         for (const [sid, c] of raw) coverage[String(sid)] = await encodeCoverageV2(c, { start: ws, end: we });
+        // CpG methylation of each long-read DNA sample when the view shows it: the counts over the window (2 Mb at most,
+        // around the view), read back by the exported page as the live one reads its own
+        let methylation: Record<string, EncodedMethyl> | undefined;
+        const methylWindows = new Map<number, MethylWindow>();
+        if (st.methylation && ds.getMethylation && span <= METHYL_MAX_BP) {
+          const extra = Math.max(0, Math.floor((METHYL_MAX_BP - span) / 2));
+          const ms = Math.max(ws, vs - extra), me = Math.min(we, ve + extra);
+          for (const smp of dnaSamples) {
+            setNotes([`Exporting ${t.label}: methylation of ${smp.name}…`]);
+            progress(`${t.label}: methylation of ${smp.name}`);
+            try {
+              const w = await ds.getMethylation(smp.id, st.gene.chrom, ms, me);
+              if (w.calls || w.filtered) { (methylation ??= {})[String(smp.id)] = encodeMethyl(w); methylWindows.set(smp.id, w); }
+            } catch (e: any) { skipped.push(`${t.label} / methylation of ${smp.name}: ${e?.message || e}`); }
+            done++;
+          }
+        }
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
         let phase: Record<string, EmbeddedPhase> | undefined;
@@ -697,27 +715,14 @@ function App() {
                     (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase, total: ph.total };
                   }
                 }
+                // each CpG call kept as a byte on the side of its block's threshold it is on here (exportedCall)
+                const mw = methylWindows.get(smp.id);
+                if (mw) r.reads = r.reads.map(x => (x.me ? { ...x, me: x.me.map((v, i, a) => (i & 1 ? exportedCall(v, thresholdAt(mw, a[i - 1])) : v)) } : x));
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
               done++;
             }
-          }
-        }
-        // CpG methylation of each long-read DNA sample when the view shows it: the counts over the window (2 Mb at most,
-        // around the view), read back by the exported page as the live one reads its own
-        let methylation: Record<string, EncodedMethyl> | undefined;
-        if (st.methylation && ds.getMethylation && span <= METHYL_MAX_BP) {
-          const extra = Math.max(0, Math.floor((METHYL_MAX_BP - span) / 2));
-          const ms = Math.max(ws, vs - extra), me = Math.min(we, ve + extra);
-          for (const smp of dnaSamples) {
-            setNotes([`Exporting ${t.label}: methylation of ${smp.name}…`]);
-            progress(`${t.label}: methylation of ${smp.name}`);
-            try {
-              const w = await ds.getMethylation(smp.id, st.gene.chrom, ms, me);
-              if (w.calls || w.filtered) (methylation ??= {})[String(smp.id)] = encodeMethyl(w);
-            } catch (e: any) { skipped.push(`${t.label} / methylation of ${smp.name}: ${e?.message || e}`); }
-            done++;
           }
         }
         evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });

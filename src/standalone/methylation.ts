@@ -179,7 +179,7 @@ export function countRead(out: MethylCounts, start: number, ops: ArrayLike<numbe
 /**
  * One CpG call a source holds in its own form rather than as MM / ML tags: `pm` / `ph` the 5mC / 5hmC probabilities at
  * the C of the CpG `cpg`. Counted into `out` (when given) exactly as countRead counts a call, and returned as the
- * read's P(5mC) against unmodified, 5hmC set aside (what a read's `me` holds, × 255); null when there is no call.
+ * read's P(5mC) against unmodified, 5hmC set aside (what a read's `me` holds); null when there is no call.
  */
 export function addCall(out: MethylCounts | null, cpg: number, hap: number, pm: number, ph: number, ps?: number | null): number | null {
   const call = callOf(pm, ph);
@@ -242,7 +242,7 @@ export interface MethylWindow {
   ps: Float64Array;
   /**
    * confidence threshold of each block over the window (the lower edge of its bin; see METHYL_BLOCK_BP), `threshold` the
-   * lowest of them; the calls they left out of the window and the calls kept
+   * lowest of them; the calls they left out of the window and all its calls, those left out included
    */
   thresholds: { start: number; end: number; threshold: number }[];
   threshold: number; filtered: number; calls: number;
@@ -262,6 +262,29 @@ export function thresholdBin(hist: Float64Array): number {
   let acc = 0;
   for (let b = 0; b < hist.length; b++) { acc += hist[b]; if (acc >= total * FILTER_PERCENTILE) return b; }
   return 0;
+}
+
+/**
+ * How the reads track draws a read's call (`me`: its P(5mC)) against the confidence threshold `thr` of its block: 2 below
+ * it, 0 methylated, 1 unmethylated. Compared by confidence bin, as the counts compare it, so that a call the panel keeps
+ * is never drawn as filtered, nor the reverse.
+ */
+export function callClass(p: number, thr: number): 0 | 1 | 2 {
+  return confBin(Math.max(p, 1 - p)) < confBin(thr) ? 2 : p > 0.5 ? 0 : 1;
+}
+
+/**
+ * A read's call as an exported page keeps it, a byte (P(5mC) × 255, returned as the probability it stands for): the
+ * nearest byte that falls on the same side of the threshold `thr` as `p` does. Near 1 a byte holds less than a bin, and
+ * rounded plainly a passing call would read back as filtered.
+ */
+export function exportedCall(p: number, thr: number): number {
+  const keep = callClass(p, thr);
+  let q = Math.round(p * 255);
+  // a call kept moves towards certainty, a call filtered towards 0.5
+  const dir = (p > 0.5 ? 1 : -1) * (keep === 2 ? -1 : 1);
+  while (q > 0 && q < 255 && callClass(q / 255, thr) !== keep) q += dir;
+  return q / 255;
 }
 
 /** The confidence threshold at a position of a window read back: its block's. */

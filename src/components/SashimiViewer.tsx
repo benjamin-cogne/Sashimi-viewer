@@ -6,7 +6,7 @@ import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, Boundary
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, binomialHalf, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence, type SiteObs } from './sashimi/siteQuality';
 import { PHASE_HI, PHASE_LO, PHASE_MIN_DEPTH, sitePhase } from './sashimi/sitePhase';
-import { METHYL_BLOCK_BP, thresholdAt, type MethylWindow } from '../standalone/methylation';
+import { METHYL_BLOCK_BP, callClass, thresholdAt, type MethylWindow } from '../standalone/methylation';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn, type CoveragePaths,
@@ -761,8 +761,11 @@ interface MethylDraw {
   delta?: { ps: number; up: string; down: string }[];
   asm: { x0: number; x1: number; delta: number; cpgs: number; start: number; end: number }[];
   islands: { x0: number; x1: number; start: number; end: number }[];
-  /** CpGs, calls and 5mC fraction of the view per lane (3 = all reads) */
-  summary: { cpgs: number; frac: number[]; calls: number[] };
+  /**
+   * CpGs, calls and 5mC fraction of the view per lane (3 = all reads); the phase sets of its CpGs holding tagged calls
+   * (`sets`), and the set when there is one (`ps`, NaN: tagged without PS)
+   */
+  summary: { cpgs: number; frac: number[]; calls: number[]; sets: number; ps: number };
 }
 function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: number, islandsOnly: boolean): MethylDraw | null {
   const S = methylSource(e, islandsOnly), w = e.w;
@@ -803,7 +806,14 @@ function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: nu
   const frac: number[] = [], calls: number[] = [];
   const i0 = methylLower(P.pos, viewStart), i1 = methylLower(P.pos, viewEnd);
   for (let lane = 0; lane < 4; lane++) { const [m, t] = methylSumIdx(P, lane, i0, i1); frac.push(t ? m / t : NaN); calls.push(t); }
-  return { ribbon, phasedRuns, phasedShare: cols.length ? cols.filter(c => c.phased).length / cols.length : 0, setRuns, delta, asm, islands, summary: { cpgs: i1 - i0, frac, calls } };
+  // the sets of the view's CpGs, phased stretch or not: HP 1 and HP 2 summed over two sets are not the same copies
+  const sets = new Set<string>();
+  let ps = NaN;
+  for (let i = i0; i < i1; i++) {
+    if (P.total[1][i + 1] - P.total[1][i] + P.total[2][i + 1] - P.total[2][i] <= 0) continue;
+    if (!sets.has(String(P.ps[i]))) { sets.add(String(P.ps[i])); ps = P.ps[i]; }
+  }
+  return { ribbon, phasedRuns, phasedShare: cols.length ? cols.filter(c => c.phased).length / cols.length : 0, setRuns, delta, asm, islands, summary: { cpgs: i1 - i0, frac, calls, sets: sets.size, ps } };
 }
 /**
  * Stretches where the two haplotypes are methylated differently: runs of METHYL_ASM_CPGS consecutive CpGs covered on
@@ -890,7 +900,8 @@ const methylPanelH = (e: MethylEntry | undefined, diffRow = false): number => ME
  * middle of each CpG in bases from the read's start: built once per read, threshold and row height, then moved by
  * transforms only. Kept on the read object, so they go with the reads.
  */
-const methylTickCache = new WeakMap<AlignedRead, { thr: string; h: number; mod: string; unmod: string; low: string; runs: [string, string, string]; n: [number, number, number] }>();
+/** a read's ticks, and its calls' positions with running counts per class (`pre[cls][k]`: calls of the class before call k) */
+const methylTickCache = new WeakMap<AlignedRead, { thr: string; h: number; mod: string; unmod: string; low: string; runs: [string, string, string]; pos: Int32Array; pre: [Int32Array, Int32Array, Int32Array] }>();
 /**
  * Wide views (under METHYL_TICK_FINE_PX_PER_BP pixels per base) draw a read's calls coarser: consecutive calls of one class
  * within METHYL_RUN_GAP_BP of each other as one rectangle. A 120× window then rasterises a few thousand shapes instead
@@ -901,19 +912,28 @@ const METHYL_TICK_READS_BUDGET = 400, METHYL_SETTLE_MS = 200;
 function methylReadTicks(r: AlignedRead, thrAt: (pos: number) => number, thr: string, h: number) {
   const c = methylTickCache.get(r);
   if (c && c.thr === thr && c.h === h) return c;
-  const parts: string[][] = [[], [], []], runs: string[][] = [[], [], []], n: [number, number, number] = [0, 0, 0], me = r.me ?? [];
+  const parts: string[][] = [[], [], []], runs: string[][] = [[], [], []], me = r.me ?? [];
+  const m = me.length >> 1, at = new Int32Array(m), pre: [Int32Array, Int32Array, Int32Array] = [new Int32Array(m + 1), new Int32Array(m + 1), new Int32Array(m + 1)];
   let run: { cls: number; a: number; b: number } | null = null;
   const flush = () => { if (run) { const w = run.b - run.a; runs[run.cls].push(`M${run.a - r.s},0h${w}v${h}h${-w}z`); run = null; } };
   for (let k = 0; k < me.length; k += 2) {
-    const pos = me[k], p = me[k + 1] / 255, conf = Math.max(p, 1 - p), cls = conf < thrAt(pos) ? 2 : p > 0.5 ? 0 : 1;
-    parts[cls].push(`M${pos + 1 - r.s},0v${h}`); n[cls]++;
+    const pos = me[k], cls = callClass(me[k + 1], thrAt(pos)), j = k >> 1;
+    parts[cls].push(`M${pos + 1 - r.s},0v${h}`);
+    at[j] = pos;
+    for (let c = 0; c < 3; c++) pre[c][j + 1] = pre[c][j] + (c === cls ? 1 : 0);
     if (run && run.cls === cls && pos - run.b <= METHYL_RUN_GAP_BP) run.b = pos + 2;
     else { flush(); run = { cls, a: pos, b: pos + 2 }; }
   }
   flush();
-  const out = { thr, h, mod: parts[0].join(''), unmod: parts[1].join(''), low: parts[2].join(''), runs: runs.map(x => x.join('')) as [string, string, string], n };
+  const out = { thr, h, mod: parts[0].join(''), unmod: parts[1].join(''), low: parts[2].join(''), runs: runs.map(x => x.join('')) as [string, string, string], pos: at, pre };
   methylTickCache.set(r, out);
   return out;
+}
+/** Adds to `n` the calls of a read's ticks (methylReadTicks) at CpGs in [a, b), by class. */
+function methylTicksIn(t: { pos: Int32Array; pre: [Int32Array, Int32Array, Int32Array] }, a: number, b: number, n: number[]) {
+  const lower = (x: number) => { let lo = 0, hi = t.pos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (t.pos[mid] < x) lo = mid + 1; else hi = mid; } return lo; };
+  const i = lower(a), j = lower(b);
+  for (let c = 0; c < 3; c++) n[c] += t.pre[c][j] - t.pre[c][i];
 }
 
 /** haplotypes 1, 2 (and DRAGEN's higher copy labels): the chip of a consensus row, the band of a group of reads */
@@ -3534,7 +3554,7 @@ export default function SashimiViewer({
         const t0 = readsTop + row * (rowH + 1);
         if (linearAxis) {
           const c = methylReadTicks(r, methylThrAt, methylThrKey, rowH);
-          meN[0] += c.n[0]; meN[1] += c.n[1]; meN[2] += c.n[2];
+          methylTicksIn(c, viewStart, viewEnd, meN);   // the calls in the view, as the panel counts them
           // two nodes per read at most (the page's cost grows with its nodes): calls below the confidence threshold are
           // left uncoloured, the read's own grey reading as "no confident call"
           const [dm, du] = tickFine ? [c.mod, c.unmod] : c.runs, at = `translate(${r.s - tickOrigin},${t0})`, key = r.n + r.s + r.f;
@@ -3548,9 +3568,9 @@ export default function SashimiViewer({
             const pos = me[k];
             if (pos < viewStart - 2 || pos >= viewEnd) continue;
             const xa = scale.x(pos), xb = scale.x(pos + 2), mid = (xa + xb) / 2, w = Math.max(1.5, Math.abs(xb - xa) - 0.5);
-            const p: number = me[k + 1] / 255, conf = Math.max(p, 1 - p), cls = conf < methylThrAt(pos) ? 2 : p > 0.5 ? 0 : 1;
+            const cls = callClass(me[k + 1], methylThrAt(pos));
             (cls === 2 ? meLow : cls === 0 ? meMod : meUnmod).push(`M${(mid - w / 2).toFixed(1)},${t0}h${w.toFixed(1)}v${hh}h${(-w).toFixed(1)}z`);
-            meN[cls]++;
+            if (pos >= viewStart) meN[cls]++;
           }
         }
       }
@@ -5152,14 +5172,14 @@ export default function SashimiViewer({
     else {
       const s = draw!.summary, w = e.w!;
       // HP 1 / HP 2 over the view only within one phase set: over several, the haplotypes are not the same copies
-      const nSets = new Set(draw!.setRuns.map(r => String(r.ps))).size;
+      const nSets = s.sets;
       const lanes = e.prefix?.tagged
-        ? `${nSets <= 1 ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''}${nSets === 1 && draw!.setRuns[0].ps >= 0 ? ` · PS ${draw!.setRuns[0].ps.toLocaleString('en-US')}` : ''}` : `${nSets} phase sets · 5mC ${pct(s.frac[3])}`} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view`
+        ? `${nSets <= 1 ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''}${nSets === 1 && s.ps >= 0 ? ` · PS ${s.ps.toLocaleString('en-US')}` : ''}` : `${nSets} phase sets · 5mC ${pct(s.frac[3])}`} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view`
         : `5mC ${pct(s.frac[3])}`;
       status = {
         text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString('en-US')} CpG · ${Math.round(s.calls[3]).toLocaleString('en-US')} calls${w.note ? ' · ≈ see note' : ''}${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
         color: INK.muted,
-        title: `${w.note ? `${w.note}\n\n` : ''}5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${methylThrText(w)} (the 10th percentile of the calls, as modkit does, estimated per ${formatBp(METHYL_BLOCK_BP)} block of the chromosome so that a CpG's value never depends on the zoom or on what was viewed before) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where each haplotype is ${METHYL_PHASED_DEPTH} reads deep or more over the pixel's CpGs (${METHYL_PHASED_DEPTH} calls per CpG), the less covered one holding at least ${METHYL_PHASED_BALANCE * 100} % of the tagged calls, whatever the share of untagged reads, and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
+        title: `${w.note ? `${w.note}\n\n` : ''}5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${methylThrText(w)} (the 10th percentile of the calls, as modkit does, estimated per ${formatBp(METHYL_BLOCK_BP)} block of the chromosome so that a CpG's value never depends on the zoom or on what was viewed before) are left out: ${w.filtered.toLocaleString('en-US')} of ${w.calls.toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where each haplotype is ${METHYL_PHASED_DEPTH} reads deep or more over the pixel's CpGs (${METHYL_PHASED_DEPTH} calls per CpG), the less covered one holding at least ${METHYL_PHASED_BALANCE * 100} % of the tagged calls, whatever the share of untagged reads, and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
       };
     }
     // the island tags: placed from the largest difference down, each where it does not cover one already placed
