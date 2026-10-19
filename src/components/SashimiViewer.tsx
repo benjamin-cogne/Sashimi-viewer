@@ -615,12 +615,16 @@ const methylSum = (P: MethylPrefix, lane: number, a: number, b: number): [number
  */
 const METHYL_SMOOTH_CPGS = 6, METHYL_SMOOTH_MAX_BP = 1000;
 /**
- * A column is drawn split into the two haplotypes when both carry a fair share of its calls (each at least
- * METHYL_PHASED_SHARE of all, together at least METHYL_TAGGED_SHARE, each METHYL_MIN_CALLS or more); elsewhere, where the
- * reads are not phased (no heterozygous variant to tag them by, a homozygous or hemizygous stretch), the two lanes join
- * into one of all reads. Phased stretches narrower than METHYL_PHASED_MIN_PX are joined too.
+ * A column is drawn split into the two haplotypes when each is deep enough to read on its own: at least
+ * METHYL_PHASED_DEPTH calls per CpG of the column (about as many reads), the less covered one holding at least
+ * METHYL_PHASED_BALANCE of the tagged calls (a copy missing, a deletion or loss of heterozygosity, is not drawn split).
+ * The untagged reads beside them do not count against it: a phasing tool tags reads by their alleles, not by their
+ * methylation, so the tagged ones are a fair sample of each copy whatever their share (a file tagged over 40 % of its
+ * reads splits where both copies are covered). Elsewhere, where the reads are not phased (no heterozygous variant to tag
+ * them by, a homozygous or hemizygous stretch, a gap between phase sets), the two lanes join into one of all reads.
+ * Phased stretches narrower than METHYL_PHASED_MIN_PX are joined too.
  */
-const METHYL_PHASED_SHARE = 0.2, METHYL_TAGGED_SHARE = 0.6, METHYL_PHASED_MIN_PX = 4;
+const METHYL_PHASED_DEPTH = 3, METHYL_PHASED_BALANCE = 0.25, METHYL_PHASED_MIN_PX = 4;
 interface MethylCol { x: number; a: number; b: number; phased: boolean; f: number[]; t: number[]; /** the phase-set stretch its HP 1 / HP 2 come from, and its PS (NaN: none) */ run: number; ps: number }
 /** Modified and all calls of a lane over the CpGs of indices [i, j). */
 const methylSumIdx = (P: MethylPrefix, lane: number, i: number, j: number): [number, number] => [P.mod[lane][j] - P.mod[lane][i], P.total[lane][j] - P.total[lane][i]];
@@ -707,7 +711,8 @@ function methylCol(S: MethylSource, scale: { invert(px: number): number }, x: nu
     t[0] = t0 + to; f[0] = t[0] ? (m0 + mo) / t[0] : NaN;
   }
   for (let i = a; i < b; i++) if (P.run[i] === run && !Number.isNaN(P.ps[i])) { ps = P.ps[i]; break; }
-  const phased = P.tagged && t[1] >= METHYL_MIN_CALLS && t[2] >= METHYL_MIN_CALLS && t[1] >= METHYL_PHASED_SHARE * t[3] && t[2] >= METHYL_PHASED_SHARE * t[3] && t[1] + t[2] >= METHYL_TAGGED_SHARE * t[3];
+  const cpgs = b - a;
+  const phased = P.tagged && t[1] >= METHYL_PHASED_DEPTH * cpgs && t[2] >= METHYL_PHASED_DEPTH * cpgs && Math.min(t[1], t[2]) >= METHYL_PHASED_BALANCE * (t[1] + t[2]);
   return { x, a, b, phased, f, t, run, ps };
 }
 function methylCols(S: MethylSource, scale: Scale): MethylCol[] {
@@ -5150,7 +5155,7 @@ export default function SashimiViewer({
       status = {
         text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString('en-US')} CpG · ${Math.round(s.calls[3]).toLocaleString('en-US')} calls${w.note ? ' · ≈ see note' : ''}${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
         color: INK.muted,
-        title: `${w.note ? `${w.note}\n\n` : ''}5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${methylThrText(w)} (the 10th percentile of the calls, as modkit does, estimated per ${formatBp(METHYL_BLOCK_BP)} block of the chromosome so that a CpG's value never depends on the zoom or on what was viewed before) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where both haplotypes carry a fair share of the calls (each ≥ ${METHYL_PHASED_SHARE * 100} %, tagged ≥ ${METHYL_TAGGED_SHARE * 100} %), and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
+        title: `${w.note ? `${w.note}\n\n` : ''}5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${methylThrText(w)} (the 10th percentile of the calls, as modkit does, estimated per ${formatBp(METHYL_BLOCK_BP)} block of the chromosome so that a CpG's value never depends on the zoom or on what was viewed before) are left out: ${w.filtered.toLocaleString('en-US')} of ${(w.calls + w.filtered).toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls + w.filtered))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where each haplotype is ${METHYL_PHASED_DEPTH} reads deep or more over the pixel's CpGs (${METHYL_PHASED_DEPTH} calls per CpG), the less covered one holding at least ${METHYL_PHASED_BALANCE * 100} % of the tagged calls, whatever the share of untagged reads, and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
       };
     }
     // the island tags: placed from the largest difference down, each where it does not cover one already placed

@@ -1116,9 +1116,17 @@ DNA track is open. Each long-read DNA track then gets a panel under its coverage
   Where the reads are **phased** it splits in two, HP 1 on top and HP 2 below; where they are not,
   it joins into one band of **all reads**. A thin vertical line marks each split and join. Unphased
   stretches include regions with no heterozygous variant to tag the reads by, homozygous or
-  hemizygous stretches, and the gaps between phase sets. A pixel is split when both haplotypes carry a
-  fair share of its calls: each at least 20 % of them, the tagged reads together at least 60 %, and
-  each haplotype 3 calls or more. Split stretches narrower than 4 pixels are joined.
+  hemizygous stretches, and the gaps between phase sets. A pixel is split when **each haplotype is
+  3 reads deep or more** over its CpGs (3 calls per CpG), the less covered one holding at least
+  **25 % of the tagged calls**. The second condition keeps a missing copy (a deletion, loss of
+  heterozygosity) from being drawn split. The untagged reads beside them do not count against the
+  split: a phasing tool such as WhatsHap tags reads by their alleles, not their methylation, so the
+  tagged reads are a fair sample of each copy whatever their share. Earlier versions also asked the
+  tagged reads to hold 60 % of the calls, each haplotype 20 %: a file tagged over 40 % of its reads
+  (WhatsHap leaves a read untagged when it holds no phased variant, or too few to decide) then stayed
+  unsplit where both copies were well covered. On a haplotagged ONT sample at *UBE3A*, the share of
+  a 90 kb view drawn split went from 31 to 52 %; the rest is a gap between phase sets where no read
+  is tagged, which no threshold can split. Split stretches narrower than 4 pixels are joined.
   A file without haplotags gives one band all along;
 - **within one phase set at a time.** HP 1 and HP 2 are the phasing tool's numbers within a phase
   set, so the calls are also counted per set. Each CpG takes the set holding most of its tagged
