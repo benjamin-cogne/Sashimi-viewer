@@ -20,6 +20,16 @@ ignores it. Version 3 of the export writes
 the streams of columnar version 4 (below), version 4 of the export those of columnar version 5, and
 both read every earlier one.
 
+Each view also says which alignments its counts hold: `minMapq` (the minimum MAPQ, 0 for all; pages
+written before it hold `uniqueOnly: true`, read as MAPQ ≥ 30) and `secondary: true` when the secondary
+alignments were counted. The coverage and junctions answer only a request with the same filters; the
+reads, which keep their MAPQ and flags, also answer a stricter one, filtered by the reader. A view
+exported with its CpG methylation holds `methylation[sampleId]` (`EncodedMethyl`: the CpG positions as
+differences, the counts per haplotag lane, each CpG's phase set, the confidence thresholds per block),
+and a view whose reads were grouped by the page's phasing holds `phase[sampleId]`: the phasing (`result`),
+the window and thresholds it was computed with, and `total`, the reads of that window before the page
+sampled them; the reads over that window are the page's own sample of them, each with its haplotype (3.9).
+
 ## 1. Primitives
 
 - **Byte order**: little-endian for the one fixed-width integer (the directory length).
@@ -292,6 +302,10 @@ per read:  varint  ph     1 or 2; 0 = not phased, nothing follows
            varint  pb     start (0-based) of the read's phase block
 ```
 
+The reader names the reads of a stream by their index and gives the two reads of a pair linked in §3.2
+one name, so that the pages joining mates by name (pair phasing) join them as in the file; the names of
+two streams never meet.
+
 ### 3.7 `reference` section
 
 ```
@@ -345,7 +359,7 @@ idle moments.
 
 ## 6. Extending the format
 
-Add a section with a new name, and give it the next code in the list (13); never change the
+Add a section with a new name, and give it the next code in the list (15); never change the
 meaning of an existing one. A field that
 concerns every read (names, base qualities, full sequence, tags) becomes a per-block section
 next to `core` and `pairs`, with one entry per read in block order, so the reader can decode it

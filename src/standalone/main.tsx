@@ -671,12 +671,14 @@ function App() {
           if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
           else {
             const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
-            const rs = Math.max(0, vs - half), re = ve + half;
-            reads = {};
-            // as the view asks for them: grouped by the page's phasing, phased over every read of the window (as the page
-            // does, up to READS_PHASE_CAP) before they are thinned to the export's cap, the phasing kept with them; long
-            // reads with their CpG calls while Methylation is on
+            // as the view asks for them: grouped by the page's phasing, the reads the page phases (the view and a quarter
+            // of it on each side, up to READS_PHASE_CAP of them) exported as they are, each with its haplotype, and the
+            // phasing kept with them; the export's own window and cap past them; long reads with their CpG calls while
+            // Methylation is on
             const phased = st.readsGroup === 'phase' && !st.collapseReads;
+            const m = Math.floor(span * 0.25), pw = { start: Math.max(0, vs - m), end: ve + m };
+            const rs = Math.max(0, Math.min(vs - half, phased ? pw.start : Infinity)), re = Math.max(ve + half, phased ? pw.end : 0);
+            reads = {};
             const minVaf = Math.min(1, Math.max(0, st.minVafPct / 100)), longReadMinVaf = (st.longReadMinVafPct ?? 20) / 100;
             for (const smp of samples) {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
@@ -686,15 +688,13 @@ function App() {
                   secondary: !!st.secondary, methylation: !!st.methylation && smp.lib?.type === 'dna',
                 });
                 if (phased) {
-                  // phased over the window the view itself asks for (the view and a quarter of it on each side), so the
-                  // exported reads fall into the same haplotypes as on the page; each exported read takes its haplotype
-                  const m = Math.floor(span * 0.25), pw = { start: Math.max(rs, vs - m), end: Math.min(re, ve + m) };
+                  // the reads over the phased window are those the page phases (the same sample of them): the exported page
+                  // draws them as the live one, and the export's own reads only past that window
                   const ph = await ds.getReads(smp.id, st.gene.chrom, pw.start, pw.end, st.minMapq, READS_PHASE_CAP, 'reads', 1, minVaf,
-                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf });
+                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
                   if (ph.phase) {
-                    const of = new Map(ph.reads.filter(x => x.ph).map(x => [`${x.n}|${x.s}|${x.f}`, x]));
-                    for (const x of r.reads) { const y = of.get(`${x.n}|${x.s}|${x.f}`); if (y) { x.ph = y.ph; x.pb = y.pb; } }
-                    (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase };
+                    r.reads = [...r.reads.filter(x => x.e <= pw.start || x.s >= pw.end), ...ph.reads].sort((a, b) => a.s - b.s);
+                    (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase, total: ph.total };
                   }
                 }
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
@@ -720,7 +720,7 @@ function App() {
             done++;
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -903,7 +903,11 @@ function App() {
   const embeddedOpened = useRef(false);
   useEffect(() => {
     if (EMBEDDED && !embeddedOpened.current) {
-      embeddedOpened.current = true; applySession(EMBEDDED.session);
+      embeddedOpened.current = true;
+      // read as a session file is, so that the options of older pages are carried over ("unique only" as MAPQ ≥ 30)
+      let session = EMBEDDED.session;
+      try { session = parseSession(JSON.stringify(EMBEDDED.session)); } catch { /* kept as stored */ }
+      applySession(session);
       // the active view's blocks first, the others in idle moments: the page never waits for a decode
       if (ds instanceof EmbeddedDataSource) ds.prefetchAll(EMBEDDED.session.activeView ?? 0);
     }
