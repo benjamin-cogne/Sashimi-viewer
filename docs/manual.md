@@ -1602,7 +1602,7 @@ the pinned label to remove the highlight (the next search draws a new one).
 | `variant` | HGVS g. with an `NC_` accession (`NC_000017.11:g.43094464G>A`; the accession version sets the build), `chr17:g.43094464G>A`, a pseudo-VCF `17-43094464-G-A` or `chr17:43094464:G:A`, or a bare `chr17:43094464`. Several separated by commas. Deletions and duplications of 50 bp or more draw as bands. | one of `variant` / `locus` |
 | `locus` | Position or interval to show instead of a window derived from the variants (`chr17:43094464`, `chr17:43000000-43100000`). | |
 | `pad` | Flank in bp shown on each side of the variant, locus or band. | 100 |
-| `label` | Text drawn next to the marker, typically the c. or p. notation; one per variant, comma-separated. | the g. notation |
+| `label` | Text drawn next to the marker, typically the c. or p. notation; one per variant, comma-separated. A `+` before a digit or `*` is kept as written (`c.157+5G>A`); any other `+` reads as a space, as form-encoded links write it; `%2B` is always a plus. | the g. notation |
 | `gene` | Symbol used only when no RefSeq gene covers the window (deep intergenic positions). | inferred from the position |
 | `build` | `GRCh38` or `GRCh37` (`hg38` / `hg19` accepted). Only needed when no variant carries an accession; a notation that disagrees with it is flagged in the marker tooltip. | GRCh38 |
 | `reads` | `1` opens with the reads track already on (add it when the link targets a ±100 bp window and the alignments are wanted at once). By default the reads track stays off until *Reads* is switched on in the toolbar or the *reads* chip of a sample is clicked. | off |

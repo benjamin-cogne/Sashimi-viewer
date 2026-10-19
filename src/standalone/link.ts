@@ -12,6 +12,8 @@
  *             window should not be derived from the variants.
  *   pad       Flank in bp around a point variant or position (default 100).
  *   label     Text drawn next to the marker (c. / p. notation); one per variant, separated by commas.
+ *             A `+` before a digit or `*` is kept (`c.157+5G>A`, `c.*12`); any other `+` is a space, as a
+ *             form-encoded link writes it (`label=BRCA1+c.5266dupC`). `%2B` is always a plus.
  *   gene      Symbol used when no RefSeq gene covers the locus (fallback lookup).
  *   build     GRCh38 (default) or GRCh37; only needed when no variant carries an accession.
  *   reads     `1` opens with the reads track on (off by default).
@@ -40,10 +42,16 @@ export interface LinkRequest {
 const DEFAULT_PAD = 100;
 const MAX_PAD = 5_000_000;
 
+/**
+ * The parameters of a fragment or query string. URLSearchParams reads `+` as a space (form encoding), which turned the
+ * intronic offset of `c.157+5G>A`, typed as is in a link, into `c.157 5G>A`: a `+` before a digit or `*` (an HGVS offset,
+ * a 3′ UTR position) is kept as a plus.
+ */
+const params = (text: string) => new URLSearchParams(text.replace(/\+(?=[0-9*])/g, '%2B'));
 function readParams(hash: string, search: string): URLSearchParams {
   const h = hash.replace(/^#\/?/, '');
-  const p = new URLSearchParams(h.includes('=') ? h : '');
-  if (!p.has('variant') && !p.has('locus')) return new URLSearchParams(search.replace(/^\?/, ''));
+  const p = params(h.includes('=') ? h : '');
+  if (!p.has('variant') && !p.has('locus')) return params(search.replace(/^\?/, ''));
   return p;
 }
 
