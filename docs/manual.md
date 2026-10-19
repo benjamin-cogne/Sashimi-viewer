@@ -409,9 +409,17 @@ Plots export as **SVG** (vector, publication-ready) for reports.
 ## RNA-seq and genomic DNA
 
 Each sample is either **RNA-seq** or **genomic DNA** (exome, genome, long reads), and the viewer
-decides which from the file itself: the aligner named in the header (`@PG` lines: STAR, HISAT2,
-TopHat, `minimap2 -ax splice`, DRAGEN RNA mean RNA; BWA, bowtie2, minimap2 genome presets, Isaac,
-pbmm2, DRAGEN mean DNA), then the reads of the first gene opened, which have the last word: at a
+decides which from the file itself, in this order:
+- **the aligner in the header** (`@PG` lines). STAR, HISAT2, TopHat, `minimap2 -ax splice` and DRAGEN
+  run with `--enable-rna true` mean RNA. BWA, bowtie2, minimap2 genome presets, Isaac, pbmm2 and other
+  DRAGEN runs mean DNA. A DRAGEN *Hash Table Build* line is ignored: it says how the reference index
+  was built (its RNA, HLA and methylation tables), not how the reads were aligned;
+- **an Oxford Nanopore basecalling model** when no aligner decides. dorado writes it in the read group
+  (`@RG … DS:basecall_model=…`): `rna002` / `rna004` mean direct RNA, `dna_r9` / `dna_r10` DNA. A cDNA
+  run is basecalled with a DNA model; its spliced aligner, or its reads, tell it apart;
+- **a file aligned by MinKNOW** (`PN:minknow`) that names neither is taken as DNA, MinKNOW's usual
+  alignment;
+- then **the reads of the first gene opened**, which have the last word: at a
 multi-exon gene with at least 200 reads, 2 % or more of them spliced (a CIGAR `N` gap) means
 RNA-seq, fewer than 0.2 % means DNA. The sample chip carries the verdict as an **RNA**, **DNA** or
 **?** badge whose tooltip gives the evidence; a click on the badge switches the type and the choice

@@ -39,20 +39,32 @@ type Opened =
  * Spliced aligners mean RNA-seq, genome aligners mean DNA; DRAGEN does both and says which on its command line.
  */
 export function classifyHeader(header: string): LibraryEvidence {
-  const pg = header.split('\n').filter(l => l.startsWith('@PG'));
+  const lines = header.split('\n');
+  // a DRAGEN hash-table build is how the reference index was made, not how this file was aligned: its options name the
+  // RNA, HLA and methylation tables it builds whatever the run (--ht-build-rna-hashtable=true on a genome alignment)
+  const pg = lines.filter(l => l.startsWith('@PG') && !/\tID:\s*Hash Table Build|--build-hash-table|--ht-reference/i.test(l));
   // one line per program call, so a pattern stays within its line: a merged long-read BAM can carry tens of thousands of
   // @PG lines (one per chunk), and a pattern free to run across all of them (minimap2 … splice) took minutes
   const text = [...new Set(pg.map(l => l.replace(/\t(?:ID|PP|VN):[^\t]*/g, '')))].join('\n').toLowerCase();
   const name = (re: RegExp) => re.test(text);
-  if (!pg.length) return { type: 'unknown', source: 'none', note: 'no @PG line in the header' };
-  if (name(/\bstar\b|starsolo|hisat2|hisat|tophat|\bsubjunc\b|gsnap|olego|mapsplice|crac\b/) || name(/minimap2[^\n]*(-ax? ?splice|-x ?splice)/) || name(/dragen[^\n]*(--enable-rna(?:\s+|=)true|rna)/))
+  if (name(/\bstar\b|starsolo|hisat2|hisat|tophat|\bsubjunc\b|gsnap|olego|mapsplice|crac\b/) || name(/minimap2[^\n]*(-ax? ?splice|-x ?splice)/) || name(/dragen[^\n]*--enable-rna(?:\s+|=)(?:true|1)\b/))
     return { type: 'rna', source: 'header', note: `spliced aligner in the header: ${pgName(pg)}` };
   if (name(/\bbwa\b|bwa-mem2|bwa mem|bowtie2|bowtie|minimap2|isaac|novoalign|ngmlr|winnowmap|pbmm2|dragen/))
     return { type: 'dna', source: 'header', note: `genome aligner in the header: ${pgName(pg)}` };
+  // Oxford Nanopore: the basecalling model (dorado writes it in the read group, DS:basecall_model=…, and on its command
+  // line): rna002 / rna004 are direct RNA, dna_r9 / dna_r10 DNA (a cDNA library is basecalled as DNA, and is told by a
+  // spliced aligner above, or by its reads)
+  const rg = lines.filter(l => l.startsWith('@RG')).join('\n').toLowerCase();
+  const model = /basecall_model=([^\s\t]+)/.exec(rg)?.[1] ?? /\b((?:rna00\d|dna_r\d+(?:\.\d+)*)[\w.@-]*)/.exec(text)?.[1];
+  if (model && /^rna00\d/.test(model)) return { type: 'rna', source: 'header', note: `direct RNA basecalling model in the header: ${model}` };
+  if (model && /^dna_r/.test(model)) return { type: 'dna', source: 'header', note: `DNA basecalling model in the header: ${model}` };
+  // aligned by MinKNOW without naming its aligner or model: MinKNOW aligns genomic runs; the reads correct it otherwise
+  if (name(/\bminknow\b|\bdorado\b|\bguppy\b/)) return { type: 'dna', source: 'header', note: `Oxford Nanopore run aligned by ${pgName(pg)}, no spliced aligner named: taken as DNA until the reads say otherwise` };
+  if (!pg.length) return { type: 'unknown', source: 'none', note: 'no @PG line in the header' };
   return { type: 'unknown', source: 'none', note: `aligner not recognised: ${pgName(pg)}` };
 }
 const pgName = (pg: string[]): string => {
-  const names = pg.map(l => /\tPN:([^\t]+)/.exec(l)?.[1] ?? /\tID:([^\t]+)/.exec(l)?.[1] ?? '').filter(Boolean);
+  const names = pg.map(l => (/\tPN:([^\t]+)/.exec(l)?.[1] ?? /\tID:([^\t]+)/.exec(l)?.[1] ?? '').trim()).filter(Boolean);
   return [...new Set(names)].slice(0, 3).join(', ') || 'unnamed program';
 };
 
