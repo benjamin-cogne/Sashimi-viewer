@@ -283,7 +283,7 @@ export class EmbeddedDataSource extends LocalDataSource {
     let p = this.readsCache.get(key);
     if (!p) {
       const r = this.payload.views[vi].reads![String(sid)];
-      p = (isBin(r) ? decodeReadsColumns(fromBase64(r.bin)) : Promise.resolve(r as EncodedReads)).then(rp => { nameEmbeddedReads(rp.reads, vi); return rp; });
+      p = (isBin(r) ? decodeReadsColumns(fromBase64(r.bin)) : Promise.resolve(r as EncodedReads)).then(rp => { nameEmbeddedReads(rp.reads, vi, isBin(r)); return rp; });
       p.catch(() => this.readsCache.delete(key));
       this.readsCache.set(key, p);
     }
@@ -475,9 +475,10 @@ const filterText = (q: number, secondary: boolean) => `${q ? `MAPQ ≥ ${q}` : '
 /**
  * Names for the reads of one exported stream: the stream numbers them, and the two mates of a pair (linked by `mk`, the
  * window start and the lower stream index) take one name, as in the file, so that pair phasing joins them; the view's
- * number keeps two streams apart.
+ * number keeps two streams apart. The JSON reads of version 1 pages keep their numbers (one per name), the view's before.
  */
-function nameEmbeddedReads(reads: AlignedRead[], vi: number): void {
+function nameEmbeddedReads(reads: AlignedRead[], vi: number, columnar: boolean): void {
+  if (!columnar) { for (const r of reads) r.n = `read ${vi + 1}.${r.n}`; return; }
   reads.forEach((r, k) => {
     const own = /^read (\d+)$/.exec(r.n);
     const i = r.mk ? Number(r.mk.slice(r.mk.indexOf(':') + 1)) : own ? Number(own[1]) - 1 : k;
