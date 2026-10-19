@@ -31,16 +31,8 @@ import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
 const VERSION = __APP_VERSION__;
-/** short version for the badge: v1.1 */
+/** short version for the badge: v1.2 */
 const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
-/**
- * Structural-variant hints on DNA tracks (arcs, pills, panel): shown by default on the dev branch, whatever the build
- * (the dev page, a page built locally); ?sv=0 on the URL hides them, ?sv=1 shows them. The release hides them until
- * they mature: set SV_HINTS_DEFAULT to false when dev is merged into main for a release.
- */
-const SV_HINTS_DEFAULT = true;
-const svParam = new URLSearchParams(location.search).get('sv');
-const SV_HINTS = svParam === '1' || (svParam !== '0' && SV_HINTS_DEFAULT);
 const DEV = import.meta.env.VITE_DEV_MODE === '1'
   ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
   : null;
@@ -685,7 +677,7 @@ function App() {
           try {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
-            const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' && SV_HINTS ? 'rna' as const : false;
+            const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' ? 'rna' as const : false;
             raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
               // a stranded sample of a view showing the strands keeps them split in the page
               strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
@@ -1247,7 +1239,7 @@ function App() {
       ) : (
         <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
           <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} svHints={SV_HINTS} liftover={liftover} build={build}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} liftover={liftover} build={build}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}
@@ -1327,7 +1319,7 @@ function App() {
               <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views wider than their reads window (100 kb unless set otherwise, next to the Reads switch) have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Reads per sample in that window</legend>
-                {([['shown', 'as displayed: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (
+                {([['shown', 'standard: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (
                   <label key={v} className="flex items-center gap-2"><input type="radio" name="readsCap" checked={exportDialog.readsCap === v} onChange={() => setExportDialog({ ...exportDialog, readsCap: v })} disabled={!viewsWithReads} />{label}</label>
                 ))}
               </fieldset>

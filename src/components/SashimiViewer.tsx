@@ -81,7 +81,7 @@ interface SashimiViewerProps {
   knownVariantsVersion?: number;
   /** Library type of each sample (RNA-seq or genomic DNA), by sample id: DNA tracks show no junction arcs and no usage. */
   sampleTypes?: Record<number, LibraryType>;
-  /** structural-variant hints on DNA tracks (arcs, pills, panel): computed and drawn only when true (development builds, ?sv=1) */
+  /** structural evidence (DNA tracks: arcs, pills, panel; RNA tracks: fusion junctions): computed and drawn unless false */
   svHints?: boolean;
   /** Orientation of each RNA sample's library (reverse, forward, unstranded), by sample id: the Strands option splits the stranded ones. */
   sampleStrands?: Record<number, LibraryStrand | undefined>;
@@ -290,7 +290,7 @@ interface TrackData {
    * the baseline. Set on the tracks derived for display, never on the loaded ones.
    */
   anti?: { coverage: CoverageRun[]; junctions: JunctionArc[] };
-  /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
+  /** GTEx tissue track (median junction reads, exon usage from them); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
   group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number>; /** the group's colour (chosen or from the palette) */ color: string; /** every member is a DNA sample */ dna: boolean };
@@ -1137,7 +1137,7 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = false, liftover = null, build = 'GRCh38',
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = true, liftover = null, build = 'GRCh38',
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
   // the ruler grows by a line when the other build's coordinates are shown
@@ -1286,7 +1286,7 @@ export default function SashimiViewer({
     setPickerSide(r.left + width + 16 > window.innerWidth ? 'right' : 'left');
     toggle(p => !p);
   };
-  // ---- GTEx tissue tracks (median junction reads + exon reads-per-base), chosen from the GTEx tissue list ----
+  // ---- GTEx tissue tracks (median junction reads, exon usage from them), chosen from the GTEx tissue list ----
   const [gtexTracks, setGtexTracks] = useState<TrackData[]>([]);
   const [gtexTissues, setGtexTissues] = useState<GtexTissue[] | null>(null);
   const [gtexError, setGtexError] = useState<string | undefined>();
@@ -6520,7 +6520,7 @@ export default function SashimiViewer({
               </Popover>
             )}
             <Popover width={288} open={showGtexPicker} onOpenChange={setShowGtexPicker} flush label="Add a GTEx tissue"
-              title="Add a GTEx tissue as a track: median junction read counts (arcs) and median exon reads per base (profile) over all samples of the tissue (GTEx v10, hg38)"
+              title="Add a GTEx tissue as a track: median junction read counts (arcs) over all samples of the tissue, and the usage of each exon (0–1) from those junctions (GTEx v10, v8 when v10 fails; hg38)"
               button={<><Icon name="globe" size={15} />GTEx</>}>
               {(() => {
                 const q = gtexSearch.trim().toLowerCase();
@@ -6709,7 +6709,7 @@ export default function SashimiViewer({
                 )}
                 {!showReads && coverageVariants && (
                   <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
-                    title="Minimum alternate-allele fraction for a variant site to be shown (bar in the variants track of a DNA sample). Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+                    title="Minimum alternate-allele fraction for a variant site to be shown (bar in the variants track of a DNA sample). Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
                 )}
               </Section>
           )}
@@ -6825,7 +6825,7 @@ export default function SashimiViewer({
               title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: RNA-seq, genomic DNA and long reads (ONT, PacBio) alike. A rarer change (an RNA-editing site edited in a few reads, a subclonal variant) then shows only with Min VAF lowered, or with Consensus off. Off: every mismatch and indel of every read." />
             <span className="flex flex-wrap items-center gap-2 ml-auto">
               <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
-                title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+                title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
               {anyLongReads && (
                 <Stepper label="long reads" unit="%" value={longReadMinVafPct} onChange={v => setLongReadMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF (long)"
                   title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it)." />

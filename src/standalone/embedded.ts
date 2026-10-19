@@ -5,10 +5,12 @@
  * "Export HTML" writes a copy of this very page with a JSON payload in a `<script type="application/json">`
  * tag: per view, the gene models (reference transcript, every transcript, neighbouring genes) and, per
  * sample, the coverage, junctions and boundary-spanning counts of the window already fetched around the
- * view (view plus margins). When the page starts with such a payload, an EmbeddedDataSource serves those
- * regions from memory: the reader switches views, zooms and pans inside the exported windows; anything
- * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
- * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
+ * view (view plus margins), with the view's filters; the reads of views shown with their reads track, the CpG
+ * methylation of views shown with it, and the page's phasing of views grouped by it. When the page starts with such
+ * a payload, an EmbeddedDataSource serves those regions from memory: the reader switches views, zooms and pans inside
+ * the exported windows; anything else (another gene, a window or a filter not exported, exon-usage statistics) needs
+ * the original files, which the reader can still add. Gene lookups, common SNPs and GTEx go to the network as usual
+ * when it is available.
  */
 import { addSiteHaplotypesFromReads } from './haplotypes';
 import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
