@@ -661,9 +661,9 @@ also formed its own consensus group and was flagged as used by that haplotype on
 rule would have merged it. The known limit: a real site used by fewer than 1 in 20 of its
 neighbour's reads is merged into it. Short reads (STAR, HISAT2 place junctions to the base) are
 never merged.
-Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On DNA
-tracks the reads carry no exon–intron boundary outline (that teal mark is an intron-retention
-device for RNA).
+Deletions of 50 bp or more inside reads remain structural evidence whatever the setting. On RNA
+tracks a read running unspliced through an exon–intron boundary says so in its tooltip (it counts
+for intron retention); reads are not outlined for it, the *IR* pills give the retention.
 
 **Haplotypes (phasing).** *Collapsed* with *haplotypes: 2 phased* shows the **consensus of each of the
 two haplotypes**: one row per haplotype and phase set, drawn like a read. Grey marks the stretches

@@ -3505,7 +3505,8 @@ export default function SashimiViewer({
     const showLetters = rowH >= 9;
     const readsTop = bodyTop + 2;
 
-    // no exon–intron boundary outline on a DNA track (every read crosses boundaries there); long reads get their noise filters
+    // the reads through an exon–intron boundary are named in their tooltip on RNA tracks only (every read crosses one on a DNA
+    // track); they are not outlined, the IR pills give the retention; long reads get their noise filters
     const modelBoundaries = isDnaSample(sid) ? undefined : boundariesOf(tx);
     const longReads = !!current.long_reads;
     const indelMin = longReads ? minIndelBp : 1;
@@ -3514,7 +3515,6 @@ export default function SashimiViewer({
     const snvSites = new Set(current.sites.filter(s => s.kind === 'snv').map(s => `${s.pos}\t${s.alt}`));
     const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
     const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
-    const nSpan = visible.filter((r, i) => rows[i] >= 0 && readSpansBoundary(r, modelBoundaries)).length;
     // CpG calls of the reads (Methylation on, narrow view). On a linear axis each read's ticks are built once, relative to
     // its start (methylReadTicks), and the layer is placed by one transform: a pan or zoom frame then changes two
     // attributes instead of rebuilding and re-parsing tens of thousands of rectangles
@@ -3637,7 +3637,6 @@ export default function SashimiViewer({
         } else {
           parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} {...body} />);
         }
-        if (spans) parts.push(<rect key={`s${k}`} x={left} y={top} width={w} height={rowH} fill="none" stroke={RETENTION_COLOR} strokeWidth={1.2} />);
         if (k + 1 < r.b.length) {
           const gs = be, ge = r.b[k + 1][0];
           const isDel = r.d.some(dd => dd[0] === gs);
@@ -3736,7 +3735,6 @@ export default function SashimiViewer({
       (strandSplit ? (() => { const a = groupRows.filter(g => g.anti).reduce((n, g) => n + g.reads, 0); return ` · ${a.toLocaleString('en-US')} on the opposite strand (violet, packed last${grouped ? `, grouped by ${byPhase ? 'read-based phasing' : 'haplotag'} within each strand` : ''})`; })() : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
       (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
-      (modelBoundaries ? ` · ${nSpan.toLocaleString('en-US')} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
       (consensus ? " · mismatches and indels at called sites only (Consensus)" : longReads ? " · long reads: every mismatch and indel" : "") +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString('en-US')} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString('en-US')} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => {
