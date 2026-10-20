@@ -91,8 +91,9 @@ lavender) · *Pairs* · *Clipped* · *Inserted* · *Consensus* · *min VAF* (10 
 median aligned length exceeds 1 kb).
 
 **Panels** under the ruler (gene model, sequence strip, known variants, SNPs, transcripts, tracks) move by their
-grip ⋮⋮; double-click a grip to restore the order. The **sequence strip** under the gene model shows bases, then the
-CDS amino acids (start green, stop red), once for all tracks.
+grip ⋮⋮; double-click a grip to restore the order. The **sequence strip** under the gene model shows the bases and,
+for every coding gene in view (the gene and its neighbours, one row each, named in the margin), its amino acids in
+its own frame (start green, stop red), once for all tracks.
 
 ## RNA-seq
 
@@ -107,7 +108,7 @@ to the right (unlike IGV), with a red *antisense gene* warning. A page of DNA sa
 | Purple arcs | Pseudo-exon (cryptic exon ≤ 500 bp) |
 | Teal **IR** pill | Intron retention (*Usage*) |
 | Dashed fuchsia arc | Long-range junction, one end outside the gene (read-through, fusion after a deletion); shown from its reads whatever *min* % |
-| Solid fuchsia arc · `→ chr` | Fusion junction from split and clipped reads (inversion, duplication-type, deletion-type between genes) · partner on another chromosome |
+| Solid fuchsia arc · `→ chr` | Fusion junction from split and clipped reads (inversion, duplication-type, deletion-type between genes), with its reading frame · partner on another chromosome |
 | Violet, under the baseline | Opposite strand (*Strands*) |
 | Red frameshift sign on an exon | Coding length not a multiple of 3: skipping it alone shifts the frame |
 
@@ -117,6 +118,13 @@ Buttons: **Supporting reads** (the reads track on that arc's reads and mates, up
 in percentages), **A− / A+** (label size) and **🎬 Cartoon** (experimental): pre-mRNA, mRNA and protein with
 UniProt/Pfam domains and the **NMD verdict** (a stop > 55 nt before the last exon junction is degraded; in the last
 exon, within 55 nt of the last junction, or within 150 nt of the start codon it escapes), as SVG/PNG.
+
+**Click a fusion arc** (*GENEA exon 2 → GENEB exon 2*): the supporting reads per sample and the **reading frame**. From
+the two partners' coding sequences it reads **in frame** (the 3′ partner's protein follows) or **frameshift**, or says
+the junction lies in a UTR. The fused sequence is then translated across the junction from the reference: the peptide
+on each side (`…QKLR[G]|VSCQ…`, the codon across the junction in brackets) and where the protein ends. That shows
+whether an in-frame fusion carries the 3′ partner's protein to its own stop, or stops early (in its 5′ UTR, at the
+junction codon). Both partners' models must be loaded: pan over the partner gene if the popover asks.
 
 **% usage.** In *Usage*, an arc's label is its share of the reads competing at its intron, so one intron's labels sum
 to 100 %: canonical, alternative 5′/3′ site, pseudo-exon (A + B)/2, skipping (2·S over the two introns), retention

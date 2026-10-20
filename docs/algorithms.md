@@ -173,6 +173,20 @@ only when it joins two genes (inside one gene it is splicing). The 1 kb floor re
 chimeras, which read as tiny inversions. Clipped bases are searched up to 1 Mb on each side of the window with a FASTA,
 500 kb in all through the web APIs.
 
+**Reading frame across a fusion junction** (`src/components/sashimi/fusionFrame.ts`), when a donor of one gene joins an
+acceptor of another and both models are in view (the queried gene, its neighbours, the gene looked up at the far end):
+
+- *From the models*: *a*, the coding bases the 5′ partner keeps from its start codon to the junction; *b*, the
+  junction's place in the 3′ partner's CDS, 0-based (negative in its 5′ UTR). The 3′ partner's protein follows **in
+  frame** when *a* ≡ *b* (mod 3), the rule fusion callers apply; otherwise **frameshift**. A junction before the 5′
+  partner's start codon, after its stop codon, or after the 3′ partner's stop codon is named as such (no fusion protein
+  from the 5′ partner, its whole protein, its protein running into the 3′ UTR).
+- *From the bases*: the fused transcript (the 5′ partner's last 10 codons, then up to 6 kb of the 3′ partner's
+  transcript, exon by exon from the reference) is translated in the 5′ partner's frame to its first stop codon. The
+  popover gives the peptide either side of the junction, with the codon across it in brackets, and the codons to the
+  stop. For an in-frame junction the stop must be the 3′ partner's own stop codon for its protein to be carried; a
+  stop in its 5′ UTR before its start codon, or a junction codon that is itself a stop, ends the protein earlier.
+
 ### 4.2 Intron retention
 
 For a retained intron (IR pill), per sample:
