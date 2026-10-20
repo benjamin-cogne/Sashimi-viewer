@@ -1246,14 +1246,17 @@ export interface CodonBox {
  */
 export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from: number, to: number): CodonBox[] {
   if (tx.cdsStart == null || tx.cdsEnd == null) return [];
-  const L = txLayout(tx);
+  const L = layoutCached(tx);
   if (L.tCdsStart == null || L.tCdsEnd == null) return [];
-  const plus = tx.strand > 0;
-  // transcript coordinate → genomic position
+  const plus = L.plus, order = L.order;
+  // transcript coordinate → genomic position: a binary search over the exons in transcription order (tStart ascending)
   const genomicOf = (t: number): number | null => {
-    for (const e of L.order) {
-      const len = e.end - e.start;
-      if (t >= e.tStart && t < e.tStart + len) return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
+    let lo = 0, hi = order.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1, e = order[mid], len = e.end - e.start;
+      if (t < e.tStart) hi = mid - 1;
+      else if (t >= e.tStart + len) lo = mid + 1;
+      else return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
     }
     return null;
   };
@@ -1262,10 +1265,22 @@ export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from:
     const b = ref[g - refStart].toUpperCase();
     return plus ? b : (COMPLEMENT[b] ?? 'N');
   };
-  const out: CodonBox[] = [];
   const cs = L.tCdsStart, ce = L.tCdsEnd;
   const nCodons = Math.floor((ce - cs + 1) / 3);
-  for (let c = 0; c < nCodons; c++) {
+  // the transcript coordinates of the exonic bases in [from, to): only the codons over them are visited, not the whole
+  // CDS (35,000 codons for TTN, at every frame of a pan)
+  let tLo = Infinity, tHi = -Infinity;
+  for (const e of order) {
+    const a = Math.max(e.start, from), b = Math.min(e.end, to);
+    if (b <= a) continue;
+    const t1 = e.tStart + (plus ? a - e.start : e.end - 1 - (b - 1)), t2 = e.tStart + (plus ? b - 1 - e.start : e.end - 1 - a);
+    if (t1 < tLo) tLo = t1;
+    if (t2 > tHi) tHi = t2;
+  }
+  const out: CodonBox[] = [];
+  if (tLo > tHi) return out;
+  const c0 = Math.max(0, Math.floor((tLo - cs) / 3)), c1 = Math.min(nCodons - 1, Math.floor((tHi - cs) / 3));
+  for (let c = c0; c <= c1; c++) {
     const gs = [0, 1, 2].map(k => genomicOf(cs + 3 * c + k));
     if (gs.some(g => g == null)) continue;
     const g3 = gs as number[];
@@ -1280,6 +1295,14 @@ export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from:
     out.push({ index: c + 1, aa: translateCodon(bs.join('')), segments });
   }
   return out;
+}
+
+/** txLayout of a model, kept with it (a model object is not changed once built). */
+const layoutCache = new WeakMap<TxModel, TxLayout>();
+function layoutCached(tx: TxModel): TxLayout {
+  let L = layoutCache.get(tx);
+  if (!L) layoutCache.set(tx, L = txLayout(tx));
+  return L;
 }
 
 // ======================== Depth-based exon usage ========================

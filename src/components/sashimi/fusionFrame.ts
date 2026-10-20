@@ -41,8 +41,14 @@ export interface FusionFrame {
 
 interface Layout { tOf: (pos: number) => number | null; posOf: (t: number) => number | null; cdsStart: number | null; cdsEnd: number | null; length: number; plus: boolean }
 
-/** Transcript coordinates (1-based, 5′→3′) of a model: exonic positions only. */
+const layouts = new WeakMap<TxModel, Layout>();
+/** Transcript coordinates (1-based, 5′→3′) of a model: exonic positions only (kept with the model, which does not change). */
 export function layoutOf(m: TxModel): Layout {
+  let L = layouts.get(m);
+  if (!L) layouts.set(m, L = buildLayout(m));
+  return L;
+}
+function buildLayout(m: TxModel): Layout {
   const plus = m.strand > 0;
   const order = (plus ? [...m.exons] : [...m.exons].reverse()).map(e => ({ start: e.start, end: e.end, t: 0 }));
   let t = 1;
