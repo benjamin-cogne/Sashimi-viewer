@@ -108,7 +108,8 @@ to the right (unlike IGV), with a red *antisense gene* warning. A page of DNA sa
 | Purple arcs | Pseudo-exon (cryptic exon ≤ 500 bp) |
 | Teal **IR** pill | Intron retention (*Usage*) |
 | Dashed fuchsia arc | Long-range junction, one end outside the gene (read-through, fusion after a deletion); shown from its reads whatever *min* % |
-| Solid fuchsia arc · `→ chr` | Fusion junction from split and clipped reads (inversion, duplication-type, deletion-type between genes), with its reading frame · partner on another chromosome |
+| Solid fuchsia arc | Fusion junction from split and clipped reads (inversion, duplication-type, deletion-type between genes), with its reading frame |
+| Fuchsia stem leaving by the top · `chr12 · ETV6 · 17` | Fusion junction with another chromosome (translocation): split reads leaving here, the partner gene and the reads at its tip; click for the frame and the cartoon |
 | Violet, under the baseline | Opposite strand (*Strands*) |
 | Red frameshift sign on an exon | Coding length not a multiple of 3: skipping it alone shifts the frame |
 
@@ -119,7 +120,7 @@ in percentages), **A− / A+** (label size) and **🎬 Cartoon** (experimental):
 UniProt/Pfam domains and the **NMD verdict** (a stop > 55 nt before the last exon junction is degraded; in the last
 exon, within 55 nt of the last junction, or within 150 nt of the start codon it escapes), as SVG/PNG.
 
-**Click a fusion arc** (*GENEA exon 2 → GENEB exon 2*), or a dashed long-range arc whose two ends lie on exons of two
+**Click a fusion arc** (*GENEA exon 2 → GENEB exon 2*), a stem to another chromosome, or a dashed long-range arc whose two ends lie on exons of two
 genes on one strand (a read-through such as *GLE1 exon 12 → SPTAN1 exon 2*): the supporting reads per sample, the fusion
 transcript in HGVS notation (`NM_…:r.-87_1776::NM_…:r.-3_*328`) and the **reading frame**. From the two partners' coding
 sequences it reads **in frame** (the 3′ partner's protein follows) or **frameshift**, or says the junction lies in a

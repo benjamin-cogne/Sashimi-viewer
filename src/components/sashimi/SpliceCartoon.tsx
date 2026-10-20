@@ -415,7 +415,10 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     const mid = (xa + xb) / 2;
     // loop: teardrop from xa to xb rising by h; after the cut it detaches and floats away
     const d = `M${xa},${y} C${xa + gapNow * 0.05},${y - h} ${xb - gapNow * 0.05},${y - h} ${xb},${y}`;
-    const removedHere = removed.filter(r => r.start >= placed[i - 1].end && r.end <= placed[i].start || (!plus && r.start >= placed[i].end && r.end <= placed[i - 1].start));
+    // exons spliced out between two blocks of one chromosome and strand (not across a translocation or an inversion)
+    const sameAs = (b: Block) => b.chrom === placed[i].chrom && b.chrom === placed[i - 1].chrom && (b.strand ?? tx.strand) === (placed[i].strand ?? tx.strand) && (b.strand ?? tx.strand) === (placed[i - 1].strand ?? tx.strand);
+    const fwdHere = (placed[i].strand ?? tx.strand) > 0;
+    const removedHere = removed.filter(r => sameAs(r) && (fwdHere ? r.start >= placed[i - 1].end && r.end <= placed[i].start : r.start >= placed[i].end && r.end <= placed[i - 1].start));
     introns.push(
       <g key={`in${i}`} opacity={(1 - cut) * appear} transform={`translate(0, ${-40 * cut})`}>
         <path d={d} fill="none" stroke={C.intron} strokeWidth={2} strokeLinecap="round" />
@@ -449,9 +452,10 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     // portions: coding at full height, UTR at half height
     const parts: JSX.Element[] = [];
     if (p.cds && !isCryptic && !isExt) {
-      const gs = plus ? p.start : p.end, ge = plus ? p.end : p.start;   // transcription order
+      const bplus = (p.strand ?? tx.strand) > 0;
+      const gs = bplus ? p.start : p.end, ge = bplus ? p.end : p.start;   // transcription order
       const f = (g: number) => (Math.abs(g - gs) / p.len) * p.w;
-      const c0 = plus ? f(p.cds[0]) : f(p.cds[1]), c1 = plus ? f(p.cds[1]) : f(p.cds[0]);
+      const c0 = bplus ? f(p.cds[0]) : f(p.cds[1]), c1 = bplus ? f(p.cds[1]) : f(p.cds[0]);
       const lo = Math.min(c0, c1), hi = Math.max(c0, c1);
       if (lo > 0.5) parts.push(<rect key="u5" x={x} y={y - UTR_H / 2} width={lo} height={UTR_H} rx={3} fill={C.utr} />);
       parts.push(<rect key="c" x={x + lo} y={y - EXON_H / 2} width={Math.max(1, hi - lo)} height={EXON_H} rx={4} fill={fill} />);
@@ -465,11 +469,12 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     // cryptic pieces are invisible in the pre-mRNA (they are intron) and materialise as the loop forms
     const vis = isCryptic || isExt ? Math.max(0.12, loop) : 1;
     const labelTxt = isCryptic ? 'cryptic' : isExt ? `+${p.len}` : p.rank != null ? String(p.rank) : '';
-    const first = plus ? p.start : p.end - 1, lastB = plus ? p.end - 1 : p.start;
+    const fwd = (p.strand ?? tx.strand) > 0;
+    const first = fwd ? p.start : p.end - 1, lastB = fwd ? p.end - 1 : p.start;
     const lines = isCryptic
-      ? [`Cryptic exon · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)} (intronic offsets)`]
-      : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`]
-      : [`${exonName}${affected ? ' · affected' : ''} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
+      ? [`Cryptic exon · ${p.len} nt`, `${p.chrom ?? tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)} (intronic offsets)`]
+      : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${p.chrom ?? tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`]
+      : [`${exonName}${affected ? ' · affected' : ''} · ${p.len} nt`, `${p.chrom ?? tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
     const isSel = explore && selected != null && p.rank === selected && !isCryptic && !isExt;
     return (
       <g key={`b${i}`} opacity={appear * vis * (1 - dissolve * 0.85)} filter="url(#sc-shadow)" {...hov(lines)}

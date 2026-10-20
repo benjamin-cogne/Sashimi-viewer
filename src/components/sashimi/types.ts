@@ -88,7 +88,13 @@ export interface RealignedClip {
   arc: { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' };
 }
 /** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
-export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
+export interface ElsewhereLink {
+  kind: 'split' | 'pair'; pos: number; chrom: string; count: number;
+  /** split reads: where they continue on `chrom` (0-based boundary, as `pos`: the end of the part left or the start of the part entered), the most frequent */
+  farPos?: number;
+  /** the reads at `farPos` among `count` (unscaled) */
+  farCount?: number;
+}
 /**
  * Structural evidence of a genomic window (DNA libraries), 0-based half-open positions, counts scaled like
  * the junctions when the window was sampled.

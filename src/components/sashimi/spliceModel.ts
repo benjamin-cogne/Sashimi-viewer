@@ -29,6 +29,9 @@ export interface Block {
   gene?: string;
   /** its coding part [start, end), when it is not the one of the model drawn (the 3′ partner's exons of a fusion) */
   cds?: [number, number] | null;
+  /** its chromosome and strand, when they are not the model's (a fusion's 3′ partner on another chromosome or strand) */
+  chrom?: string;
+  strand?: 1 | -1;
 }
 
 export type EventKind = 'canonical' | 'skip' | 'cryptic_exon' | 'exonic_site' | 'intronic_site' | 'fusion' | 'unsupported';
@@ -126,35 +129,38 @@ export interface Isoform {
 }
 
 /**
- * `seqAt(start, end)` returns the + strand reference of a genomic window. The blocks are put in transcription order,
- * unless `inOrder` says they already are (a fusion transcript, whose 3′ partner may lie upstream of the 5′ one).
+ * `seqAt(start, end, chrom)` returns the + strand reference of a genomic window (`chrom` is given for the blocks that
+ * carry their own). The blocks are put in transcription order, unless `inOrder` says they already are (a fusion
+ * transcript, whose 3′ partner may lie upstream of the 5′ one, on the other strand or on another chromosome).
  */
-export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' | 'cdsStart' | 'cdsEnd'>, seqAt: (start: number, end: number) => string, inOrder = false): Isoform {
+export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' | 'cdsStart' | 'cdsEnd'> & { chrom?: string }, seqAt: (start: number, end: number, chrom?: string) => string, inOrder = false): Isoform {
   const plus = tx.strand > 0;
+  const fwd = (b: Block) => (b.strand ?? tx.strand) > 0;
   const ordered = inOrder ? blocksGenomic : plus ? [...blocksGenomic].sort((a, b) => a.start - b.start) : [...blocksGenomic].sort((a, b) => b.start - a.start);
   const blocks: Block[] = ordered.map((b, i) => {
     const prev = ordered[i - 1];
-    const joins = prev ? (plus ? prev.end === b.start : prev.start === b.end) : false;
+    const joins = prev && prev.chrom === b.chrom && fwd(prev) === fwd(b) ? (fwd(b) ? prev.end === b.start : prev.start === b.end) : false;
     return { ...b, joinsPrev: joins };
   });
-  const parts = blocks.map(b => { const s = seqAt(b.start, b.end).toUpperCase(); return plus ? s : revComp(s); });
+  const parts = blocks.map(b => { const s = seqAt(b.start, b.end, b.chrom).toUpperCase(); return fwd(b) ? s : revComp(s); });
   const blockStart: number[] = [];
   let acc = 0;
   for (const p of parts) { blockStart.push(acc); acc += p.length; }
   const mrna = parts.join('');
   const junctions = blocks.map((b, i) => (i > 0 && !b.joinsPrev ? blockStart[i] : -1)).filter(x => x >= 0);
-  // transcript index of a genomic base
+  // transcript index of a genomic base (on `tx.chrom` when the blocks carry chromosomes)
   const toMrna = (g: number): number | null => {
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
-      if (g >= b.start && g < b.end) return blockStart[i] + (plus ? g - b.start : b.end - 1 - g);
+      if (b.chrom != null && tx.chrom != null && b.chrom !== tx.chrom) continue;
+      if (g >= b.start && g < b.end) return blockStart[i] + (fwd(b) ? g - b.start : b.end - 1 - g);
     }
     return null;
   };
   const toGenomic = (m: number): number | null => {
     for (let i = 0; i < blocks.length; i++) {
       const len = blocks[i].end - blocks[i].start;
-      if (m >= blockStart[i] && m < blockStart[i] + len) return plus ? blocks[i].start + (m - blockStart[i]) : blocks[i].end - 1 - (m - blockStart[i]);
+      if (m >= blockStart[i] && m < blockStart[i] + len) return fwd(blocks[i]) ? blocks[i].start + (m - blockStart[i]) : blocks[i].end - 1 - (m - blockStart[i]);
     }
     return null;
   };
@@ -385,7 +391,7 @@ const cdsPart = (start: number, end: number, m: TxModel): [number, number] | nul
 function txBlocks(m: TxModel): Block[] {
   const plus = m.strand > 0;
   return [...m.exons].sort((a, b) => (plus ? a.start - b.start : b.start - a.start))
-    .map(e => ({ start: e.start, end: e.end, kind: 'exon' as const, rank: e.rank, gene: m.geneName, cds: cdsPart(e.start, e.end, m) }));
+    .map(e => ({ start: e.start, end: e.end, kind: 'exon' as const, rank: e.rank, gene: m.geneName, cds: cdsPart(e.start, e.end, m), chrom: m.chrom, strand: m.strand }));
 }
 
 /**
@@ -393,23 +399,26 @@ function txBlocks(m: TxModel): Block[] {
  * acceptor (the two partners on one strand; the ends are exon boundaries, as `fusionFrame` takes them).
  */
 export function fusionBlocks(five: FusionEnd, three: FusionEnd): Block[] {
-  const plus = five.model.strand > 0;
+  // each partner on its own strand (and chromosome): an inversion or a translocation joins them all the same
+  const pa = five.model.strand > 0, pb = three.model.strand > 0;
   const clip = (b: Block, start: number, end: number, m: TxModel): Block => ({ ...b, start, end, cds: cdsPart(start, end, m) });
-  const a = txBlocks(five.model).filter(b => (plus ? b.start < five.pos : b.end > five.pos))
-    .map(b => (plus ? clip(b, b.start, Math.min(b.end, five.pos), five.model) : clip(b, Math.max(b.start, five.pos), b.end, five.model)));
-  const c = txBlocks(three.model).filter(b => (plus ? b.end > three.pos : b.start < three.pos))
-    .map(b => (plus ? clip(b, Math.max(b.start, three.pos), b.end, three.model) : clip(b, b.start, Math.min(b.end, three.pos), three.model)));
+  const a = txBlocks(five.model).filter(b => (pa ? b.start < five.pos : b.end > five.pos))
+    .map(b => (pa ? clip(b, b.start, Math.min(b.end, five.pos), five.model) : clip(b, Math.max(b.start, five.pos), b.end, five.model)));
+  const c = txBlocks(three.model).filter(b => (pb ? b.end > three.pos : b.start < three.pos))
+    .map(b => (pb ? clip(b, Math.max(b.start, three.pos), b.end, three.model) : clip(b, b.start, Math.min(b.end, three.pos), three.model)));
   return [...a, ...c];
 }
 
-/** Genomic windows whose sequence a fusion story needs: every exon of the two partners. */
-export function fusionWindows(five: FusionEnd, three: FusionEnd, mergeGap = 5000): [number, number][] {
-  return blockWindows([...five.model.exons, ...three.model.exons], mergeGap);
+/** Genomic windows whose sequence a fusion story needs: every exon of the two partners, on each one's chromosome. */
+export function fusionWindows(five: FusionEnd, three: FusionEnd, mergeGap = 5000): { chrom: string; start: number; end: number }[] {
+  const A = five.model, B = three.model;
+  if (A.chrom !== B.chrom) return [...blockWindows(A.exons, mergeGap).map(([start, end]) => ({ chrom: A.chrom, start, end })), ...blockWindows(B.exons, mergeGap).map(([start, end]) => ({ chrom: B.chrom, start, end }))];
+  return blockWindows([...A.exons, ...B.exons], mergeGap).map(([start, end]) => ({ chrom: A.chrom, start, end }));
 }
 
-/** A fusion story can be told when both ends are on their partner's exons, one strand, and a start codon is kept. */
+/** A fusion story can be told when both ends are on their partner's exons and a start codon is kept. */
 export function fusionStoryPossible(five: FusionEnd, three: FusionEnd): boolean {
-  if (five.model.strand !== three.model.strand || five.model.geneName === three.model.geneName) return false;
+  if (five.model.geneName === three.model.geneName) return false;
   const f = fusionFrame(five, three);
   return f.aBases != null || f.verdict === 'five-utr';
 }
@@ -425,29 +434,32 @@ const mod3 = (n: number) => ((n % 3) + 3) % 3;
  * exon junction is degraded. The 5′ partner's domains are kept up to the junction; the 3′ partner's are carried when
  * they lie after it and the fusion is read in their frame.
  */
-export function fusionStory(five: FusionEnd, three: FusionEnd, seqAt: (s: number, e: number) => string, featuresFive: ProteinDomain[], featuresThree: ProteinDomain[]): SpliceStory {
-  const A = five.model, B = three.model, plus = A.strand > 0, gA = A.geneName, gB = B.geneName;
+export function fusionStory(five: FusionEnd, three: FusionEnd, seqAt: (s: number, e: number, chrom?: string) => string, featuresFive: ProteinDomain[], featuresThree: ProteinDomain[]): SpliceStory {
+  const A = five.model, B = three.model, gA = A.geneName, gB = B.geneName;
+  const plusOf = (m: TxModel) => m.strand > 0;
   const frame = fusionFrame(five, three);
   const canonBlocks = txBlocks(A), blocks = fusionBlocks(five, three);
   const nA = blocks.filter(b => b.gene === gA).length;
   const canonical = buildIsoform(canonBlocks, A, seqAt, true);
   const partner = buildIsoform(txBlocks(B), B, seqAt, true);
-  const startOf = (m: TxModel) => (m.cdsStart != null && m.cdsEnd != null ? (plus ? m.cdsStart : m.cdsEnd - 1) : null);
+  const startOf = (m: TxModel) => (m.cdsStart != null && m.cdsEnd != null ? (plusOf(m) ? m.cdsStart : m.cdsEnd - 1) : null);
   const holds = (g: number | null, from: number, to: number) => g != null && blocks.slice(from, to).some(b => g >= b.start && g < b.end);
   const sA = startOf(A), sB = startOf(B);
   const startFrom = holds(sA, 0, nA) ? 'five' as const : holds(sB, nA, blocks.length) ? 'three' as const : null;
-  const startG = startFrom === 'five' ? sA : startFrom === 'three' ? sB : null;
-  const aberrant = buildIsoform(blocks, { strand: A.strand, cdsStart: startG, cdsEnd: startG != null ? startG + 1 : null }, seqAt, true);
-  // the stop codon is premature unless it is the 3′ partner's own (its first base, as Isoform.stopGenomic)
-  const ownStop = B.cdsStart != null && B.cdsEnd != null ? (plus ? B.cdsEnd - 3 : B.cdsStart + 2) : null;
-  const v = nmdVerdict(aberrant, { stopGenomic: ownStop } as Isoform);
+  const startM = startFrom === 'five' ? A : B, startG = startFrom === 'five' ? sA : startFrom === 'three' ? sB : null;
+  const aberrant = buildIsoform(blocks, { strand: startM.strand, chrom: startM.chrom, cdsStart: startG, cdsEnd: startG != null ? startG + 1 : null }, seqAt, true);
+  // the stop codon is premature unless it is the 3′ partner's own (its first base, as Isoform.stopGenomic), reached in
+  // the 3′ partner's part of the transcript (the 5′ one may lie on another chromosome, at the same coordinates)
+  const ownStop = B.cdsStart != null && B.cdsEnd != null ? (plusOf(B) ? B.cdsEnd - 3 : B.cdsStart + 2) : null;
+  const stopInB = aberrant.stopIndex != null && nA < blocks.length && aberrant.stopIndex >= aberrant.blockStart[nA];
+  const v = nmdVerdict({ ...aberrant, stopGenomic: stopInB ? aberrant.stopGenomic : null }, { stopGenomic: ownStop } as Isoform);
   const pa = canonical.protein, pf = aberrant.protein;
   let prefix = 0;
   if (startFrom === 'five') while (prefix < pa.length && prefix < pf.length && pa[prefix] === pf[prefix]) prefix++;
 
   // the 3′ partner's residues the fusion carries in their own frame: its coding base `bOff` sits at the junction
   let partnerResidues: [number, number] | null = null, partnerFrom: number | null = null, shift: number | null = null;
-  const LB = layoutOf(B), tb = LB.tOf(plus ? three.pos : three.pos - 1);
+  const LB = layoutOf(B), tb = LB.tOf(plusOf(B) ? three.pos : three.pos - 1);
   if (aberrant.cdsStart != null && tb != null && LB.cdsStart != null && nA < blocks.length) {
     const bOff = tb - LB.cdsStart;
     const d = aberrant.blockStart[nA] - bOff - aberrant.cdsStart;   // fused coding base of the 3′ partner's first one

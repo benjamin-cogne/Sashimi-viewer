@@ -173,6 +173,13 @@ only when it joins two genes (inside one gene it is splicing). The 1 kb floor re
 chimeras, which read as tiny inversions. Clipped bases are searched up to 1 Mb on each side of the window with a FASTA,
 500 kb in all through the web APIs.
 
+**Fusion junctions with another chromosome** (translocations): split reads whose supplementary part (SA tag) lies on
+another chromosome are counted where they leave or enter the window's chromosome, and the far position kept is the
+one most of them reach (where the read enters or leaves its part there). The end here is snapped to the exon
+boundaries of the genes of the view, the far end to those of the genes looked up at that position, as above; the
+partner whose end is a donor is the 5′ one. Drawn as a stem from the breakpoint leaving by the top of the track, its
+label the partner chromosome, gene and reads.
+
 **Reading frame across a fusion junction** (`src/components/sashimi/fusionFrame.ts`), when a donor of one gene joins an
 acceptor of another and both models are in view (the queried gene, its neighbours, the gene looked up at the far end).
 This applies to the structural fusion arcs and to the long-range spliced junctions (CIGAR `N`) whose two ends lie on
@@ -193,7 +200,7 @@ last base (`NM_…:r.-87_1776::NM_…:r.-3_*328`, after the HGVS recommendations
   stop in its 5′ UTR before its start codon, or a junction codon that is itself a stop, ends the protein earlier.
 
 **Fusion cartoon** (`spliceModel.ts`, `fusionStory`): the fused transcript is assembled in transcription order, the 5′
-partner's exons up to its donor, then the 3′ partner's from its acceptor, and translated from the 5′ partner's start
+partner's exons up to its donor, then the 3′ partner's from its acceptor, each read on its own chromosome and strand, and translated from the 5′ partner's start
 codon (from the 3′ partner's when the junction lies in the 5′ partner's 5′ UTR and its start codon is kept: a promoter
 swap). The stop codon reached is premature unless it is the 3′ partner's own, so the NMD rules of §4.3 apply to the
 fused transcript and its exon junctions, the fusion junction included: an in-frame fusion read to the 3′ partner's stop
@@ -201,8 +208,8 @@ is an **in-frame fusion protein** (no PTC); a frameshift's stop more than 55 nt 
 The 3′ partner's residues are counted as carried only where the fused protein matches its own translation, residue for
 residue. Domains (UniProt, else Pfam) of the 5′ partner are intact, disrupted or lost by the junction's residue; those
 of the 3′ partner are mapped onto the fusion protein by the frame offset, and lost when the fusion is read out of their
-frame. Tested on synthetic partners on both strands (44 junctions, every one checked against a translation of the
-fused sequence built independently): in frame and carried, promoter swap, in frame with a stop in the 3′ partner's
+frame. Tested on synthetic partners on both strands (44 junctions on one chromosome, and 60 between two chromosomes with the
+four strand combinations, every one checked against a translation of the fused sequence built independently): in frame and carried, promoter swap, in frame with a stop in the 3′ partner's
 5′ UTR, frameshifts degraded or escaping.
 
 ### 4.2 Intron retention

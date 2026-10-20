@@ -575,7 +575,14 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     j.count += n; j.src[src] = (j.src[src] ?? 0) + n;
     if (name) j.names.add(name); else j.anon += n;
   };
-  const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
+  // where the split reads continue on the other chromosome, per link: the most frequent position is kept
+  const farVotes = new Map<ElsewhereLink, Map<number, number>>();
+  const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string, at?: number) => {
+    const k = `${kind}${target}@${pos}`;
+    let x = m.get(k);
+    if (x) x.count++; else m.set(k, x = { kind, pos, chrom: target, count: 1 });
+    if (at != null) { let v = farVotes.get(x); if (!v) farVotes.set(x, v = new Map()); v.set(at, (v.get(at) ?? 0) + 1); }
+  };
   const r5 = (x: number) => Math.round(x / 5) * 5;
   const inWindow = (a: number, b: number) => b > start && a < end;
   let median = insertMedian;
@@ -725,7 +732,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     const bIn = b.rev ? b.end : b.start;           // where it enters part b
     const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
     if (!aHere && !bHere) return null;
-    if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); return null; }
+    if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom, bIn); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom, aOut); return null; }
     const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
     if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n, src === 'split' ? (a.rev ? '-/+' : '+/-') : src, name); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
     const refGap = a.rev ? a.start - b.end : b.start - a.end;
@@ -875,7 +882,12 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   return {
     deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant,
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
-    elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    elsewhere: [...elsewhere.values()].map(x => {
+      const v = farVotes.get(x);
+      if (!v) return { ...x, count: x.count * rate };
+      const [farPos, farCount] = [...v.entries()].reduce((best, e) => (e[1] > best[1] ? e : best));
+      return { ...x, count: x.count * rate, farPos, farCount };
+    }).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     realigned: realigned.length ? realigned.sort((a, b) => a.pos - b.pos) : undefined,
     rescued: rescued.length ? rescued.sort((a, b) => a.start - b.start || a.end - b.end) : undefined,

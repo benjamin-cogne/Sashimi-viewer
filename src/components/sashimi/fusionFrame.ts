@@ -114,7 +114,7 @@ export function fusionHgvs(five: FusionEnd, three: FusionEnd): string {
 }
 
 /** The transcript bases [from, to] (1-based, inclusive) of a model, from its genomic bases. */
-export async function transcriptBases(m: TxModel, from: number, to: number, getRef: (start: number, end: number) => Promise<string | null>): Promise<string | null> {
+export async function transcriptBases(m: TxModel, from: number, to: number, getRef: (start: number, end: number, chrom: string) => Promise<string | null>): Promise<string | null> {
   const L = layoutOf(m);
   from = Math.max(1, from); to = Math.min(L.length, to);
   if (to < from) return '';
@@ -126,7 +126,7 @@ export async function transcriptBases(m: TxModel, from: number, to: number, getR
   for (const e of parts) {
     const a = Math.max(e.start, lo), b = Math.min(e.end, hi);
     if (b <= a) continue;
-    const s = await getRef(a, b);
+    const s = await getRef(a, b, m.chrom);
     if (s == null || s.length !== b - a) return null;
     out += L.plus ? s.toUpperCase() : revcomp(s.toUpperCase());
   }
@@ -156,7 +156,7 @@ export interface FusionPeptide {
  * in that frame for up to `afterBases` bases, to the first stop codon; for an in-frame fusion, whether that stop is the
  * 3′ partner's own (its protein carried to its end) or a premature one (in its 5′ UTR, or the junction codon).
  */
-export async function fusionPeptide(five: FusionEnd, three: FusionEnd, frame: FusionFrame, getRef: (start: number, end: number) => Promise<string | null>,
+export async function fusionPeptide(five: FusionEnd, three: FusionEnd, frame: FusionFrame, getRef: (start: number, end: number, chrom: string) => Promise<string | null>,
   beforeCodons = 10, afterBases = 6000): Promise<FusionPeptide | null> {
   if (frame.aBases == null) return null;
   const A = layoutOf(five.model), B = layoutOf(three.model);

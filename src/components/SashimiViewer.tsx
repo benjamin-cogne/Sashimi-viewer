@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
-import type { LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
+import type { ElsewhereLink, LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
 import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
@@ -1112,6 +1112,20 @@ function toNeighbourModel(g: GeneModel, chrom: string): TxModel & { geneId: stri
   };
 }
 
+/** One end of a fusion junction, snapped to the nearest exon boundary of the models within FUSION_SNAP_BP. */
+type FusionEndAt = { pos: number; gene: string; exon: number | null; role: 'donor' | 'acceptor' | null; strand: number | null; snapped: boolean; model: TxModel | null };
+function fusionEndAt(p: number, models: TxModel[]): FusionEndAt {
+  let best: FusionEndAt | null = null, bestD = FUSION_SNAP_BP + 1;
+  for (const m of models) for (const e of m.exons) for (const [b, side] of [[e.start, 'start'], [e.end, 'end']] as const) {
+    const dist = Math.abs(b - p);
+    if (dist < bestD) { bestD = dist; best = { pos: b, gene: m.geneName, exon: e.rank, role: (m.strand > 0) === (side === 'end') ? 'donor' : 'acceptor', strand: m.strand, snapped: true, model: m }; }
+  }
+  if (best) return best;
+  // inside a gene: its whole span (a neighbour's other transcripts included), not only the model drawn
+  const inside = models.find(m => p >= ((m as { geneStart?: number }).geneStart ?? m.start) && p < ((m as { geneEnd?: number }).geneEnd ?? m.end));
+  return { pos: p, gene: inside?.geneName ?? '', exon: null, role: null, strand: inside?.strand ?? null, snapped: false, model: null };
+}
+
 const frameLabel = (f: FrameInfo) => f.frame === 'in' ? 'in frame' : f.frame === 'out' ? 'out of frame' : f.frame === 'utr' ? 'UTR only' : 'unknown';
 
 /**
@@ -1317,6 +1331,8 @@ export default function SashimiViewer({
     | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number; /** a fusion junction of an RNA track */ fusion?: boolean }
     /** a junction of the opposite strand of a stranded sample, drawn under the baseline */
     | { kind: 'anti'; key: string; j: JunctionArc; x: number; y: number }
+    /** split reads of an RNA track continuing on another chromosome (a translocation's fusion junction); `j` marks the breakpoint here */
+    | { kind: 'trans'; key: string; j: JunctionArc; e: ElsewhereLink; x: number; y: number }
     | { kind: 'exon'; exon: { start: number; end: number; rank: number }; x: number; y: number }
     /** an intron retention pill (usage mode): the intron [start, end) of the model */
     | { kind: 'retention'; key: string; start: number; end: number; fromExon: number; toExon: number; x: number; y: number }
@@ -1664,19 +1680,20 @@ export default function SashimiViewer({
     const others = tracks.flatMap(t => t.junctions);
     setCartoonState({ story: null, loading: 'fetching the reference sequence…' });
     (async () => {
-      const windows = fusion ? fusionWindows(fusion.five, fusion.three) : storyWindows(spliceEvent(j, model, others));
-      const seqs = await Promise.all(windows.map(([a, b]) => ds.getReference(currentChrom, a, b)));
+      // per chromosome: a translocation's partners lie on two
+      const windows = fusion ? fusionWindows(fusion.five, fusion.three) : storyWindows(spliceEvent(j, model, others)).map(([start, end]) => ({ chrom: currentChrom, start, end }));
+      const seqs = await Promise.all(windows.map(w => ds.getReference(w.chrom, w.start, w.end)));
       if (cancelled) return;
       if (seqs.some(x => x == null)) { setCartoonState({ story: null, loading: null, error: 'No reference sequence available for this gene (set REFERENCE_FASTA or allow access to the UCSC / Ensembl APIs).' }); return; }
-      const seqAt = (a: number, b: number): string => {
-        for (let i = 0; i < windows.length; i++) if (a >= windows[i][0] && b <= windows[i][1]) return seqs[i]!.slice(a - windows[i][0], b - windows[i][0]);
+      const seqAt = (a: number, b: number, chrom = currentChrom): string => {
+        for (let i = 0; i < windows.length; i++) { const w = windows[i]; if (w.chrom === chrom && a >= w.start && b <= w.end) return seqs[i]!.slice(a - w.start, b - w.start); }
         return 'N'.repeat(b - a);
       };
       setCartoonState({ story: null, loading: 'fetching protein domains…' });
       const domainsOf = async (m: TxModel): Promise<import('./sashimi/types').ProteinDomain[]> => {
         if (m.cdsStart == null || m.cdsEnd == null) return [];
         try {
-          return await ds.getProteinDomains({ transcriptId: m.transcriptId, translationId: m.translationId, chrom: currentChrom, strand: m.strand, exons: m.exons, cdsStart: m.cdsStart, cdsEnd: m.cdsEnd });
+          return await ds.getProteinDomains({ transcriptId: m.transcriptId, translationId: m.translationId, chrom: m.chrom || currentChrom, strand: m.strand, exons: m.exons, cdsStart: m.cdsStart, cdsEnd: m.cdsEnd });
         } catch { return []; }
       };
       const [features, partnerFeatures] = await Promise.all([domainsOf(fusion ? fusion.five.model : model), fusion ? domainsOf(fusion.three.model) : Promise.resolve([])]);
@@ -1803,24 +1820,12 @@ export default function SashimiViewer({
   const fusionOf = useCallback((j: SvArc, kind: 'split' | 'duplication' | 'inversion') => {
     const models: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
     for (const p of [j.start, j.end]) for (const m of farGenes.get(`${currentChrom}:${p}`) ?? []) if (!models.some(x => x.geneName === m.geneName)) models.push(m);
-    type End = { pos: number; gene: string; exon: number | null; role: 'donor' | 'acceptor' | null; strand: number | null; snapped: boolean; model: TxModel | null };
-    const endOf = (p: number): End => {
-      let best: End | null = null, bestD = FUSION_SNAP_BP + 1;
-      for (const m of models) for (const e of m.exons) for (const [b, side] of [[e.start, 'start'], [e.end, 'end']] as const) {
-        const dist = Math.abs(b - p);
-        if (dist < bestD) { bestD = dist; best = { pos: b, gene: m.geneName, exon: e.rank, role: (m.strand > 0) === (side === 'end') ? 'donor' : 'acceptor', strand: m.strand, snapped: true, model: m }; }
-      }
-      if (best) return best;
-      // inside a gene: its whole span (a neighbour's other transcripts included), not only the model drawn
-      const inside = models.find(m => p >= ((m as Partial<NeighbourModel>).geneStart ?? m.start) && p < ((m as Partial<NeighbourModel>).geneEnd ?? m.end));
-      return { pos: p, gene: inside?.geneName ?? '', exon: null, role: null, strand: inside?.strand ?? null, snapped: false, model: null };
-    };
-    const a = endOf(j.start), b = endOf(j.end);
+    const a = fusionEndAt(j.start, models), b = fusionEndAt(j.end, models);
     if (kind === 'split' && a.gene === b.gene) return null;
     // a fusion junction joins parts far apart, and at least one of its ends is a splice site of the model
     if (Math.abs(b.pos - a.pos) < FUSION_MIN_BP || !(a.snapped || b.snapped)) return null;
     const known = (p: number) => (p >= viewStart && p < viewEnd) || farGenes.has(`${currentChrom}:${p}`);
-    const name = (e: End) => e.gene
+    const name = (e: FusionEndAt) => e.gene
       ? `${e.gene}${e.exon != null ? ` exon ${e.exon}` : ' (off its exons)'}`
       : `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')}${known(e.pos) ? ' (no gene)' : ''}`;
     const rightFirst = b.role === 'donor' || a.role === 'acceptor';
@@ -1836,6 +1841,30 @@ export default function SashimiViewer({
       oriented: first.role === 'donor' || second.role === 'acceptor', frame,
       five: frame ? { model: first.model!, pos: first.pos } : null, three: frame ? { model: second.model!, pos: second.pos } : null };
   }, [tx, neighbours, farGenes, currentChrom, viewStart, viewEnd]);
+  /**
+   * Split reads of an RNA track continuing on another chromosome, read as a fusion junction (a translocation): the end
+   * here snapped on the genes of the view, the far end (where most of the reads continue) on the genes looked up there,
+   * and named as fusionOf names them, the partner whose end is a donor first. Null without the far position (a page
+   * exported before it was kept).
+   */
+  const transOf = useCallback((e: ElsewhereLink) => {
+    if (e.kind !== 'split' || e.farPos == null) return null;
+    const here: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
+    const there = farGenes.get(`${e.chrom}:${e.farPos}`);
+    const a = fusionEndAt(e.pos, here), b = fusionEndAt(e.farPos, there ?? []);
+    const where = (x: FusionEndAt, chrom: string) => `${chrom}:${(x.pos + 1).toLocaleString('en-US')}`;
+    const nameA = a.gene ? `${a.gene}${a.exon != null ? ` exon ${a.exon}` : ' (off its exons)'}` : `${where(a, currentChrom)} (no gene)`;
+    const nameB = b.gene ? `${b.gene}${b.exon != null ? ` exon ${b.exon}` : ' (off its exons)'}` : there ? `${where(b, e.chrom)} (no gene)` : `${where(b, e.chrom)} (looking up the gene there…)`;
+    const farFirst = b.role === 'donor' || a.role === 'acceptor';
+    const [first, second] = farFirst ? [b, a] : [a, b];
+    const frame = first.role === 'donor' && second.role === 'acceptor' && first.model && second.model && first.gene !== second.gene
+      ? fusionFrame({ model: first.model, pos: first.pos }, { model: second.model, pos: second.pos }) : null;
+    return {
+      label: farFirst ? `${nameB} (${e.chrom}) → ${nameA}` : `${nameA} → ${nameB} (${e.chrom})`,
+      partner: b.gene || null, partnerChrom: e.chrom, here: a, far: b, oriented: first.role === 'donor' || second.role === 'acceptor', frame,
+      five: frame ? { model: first.model!, pos: first.pos } : null, three: frame ? { model: second.model!, pos: second.pos } : null,
+    };
+  }, [tx, neighbours, farGenes, currentChrom]);
 
   // ---- Coverage loading (with margin, stale-response protection) ----
   const viewRef = useRef<{ chrom: string; start: number; end: number; minMapq: number; secondary: boolean; strands?: boolean }>({ chrom: currentChrom, start: viewStart, end: viewEnd, minMapq, secondary: showSecondary });
@@ -1961,6 +1990,8 @@ export default function SashimiViewer({
   useEffect(() => {
     if (!tx) return;
     const want: number[] = [];
+    // the far ends of split reads continuing on another chromosome (translocation partners), "chrom:pos"
+    const wantFar: string[] = [];
     for (const t of tracks) {
       if (t.gtex || isDnaTrack(t)) continue;
       for (const j of t.junctions) {
@@ -1968,6 +1999,11 @@ export default function SashimiViewer({
         const lr = longRangeOf(j);
         const k = lr && `${currentChrom}:${lr.farPos}`;
         if (lr && !lr.known && !farPending.current.has(k!) && !want.includes(lr.farPos)) want.push(lr.farPos);
+      }
+      if (svHints && t.structural) for (const e of t.structural.elsewhere) {
+        if (e.kind !== 'split' || e.farPos == null || e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
+        const k = `${e.chrom}:${e.farPos}`;
+        if (!farGenes.has(k) && !farPending.current.has(k) && !wantFar.includes(k)) wantFar.push(k);
       }
       // the ends of an RNA track's structural arcs outside the genes of the view (fusion partners)
       if (svHints && t.structural) for (const j of [...deletionSplits(t.structural), ...(t.structural.duplications ?? []), ...(t.structural.inversions ?? [])]) {
@@ -1979,8 +2015,9 @@ export default function SashimiViewer({
         }
       }
     }
-    for (const pos of want.slice(0, 20)) {
-      const k = `${currentChrom}:${pos}`, chrom = currentChrom;
+    const jobs = [...want.map(pos => ({ chrom: currentChrom, pos })), ...wantFar.map(k => { const i = k.lastIndexOf(':'); return { chrom: k.slice(0, i), pos: +k.slice(i + 1) }; })];
+    for (const { chrom, pos } of jobs.slice(0, 20)) {
+      const k = `${chrom}:${pos}`;
       farPending.current.add(k);
       ds.getRegionGenes(chrom, Math.max(1, pos + 1 - FUSION_SNAP_BP), pos + 1 + FUSION_SNAP_BP, currentGeneName)
         .then(list => list.map(g => toNeighbourModel(g, chrom)), () => [])
@@ -3940,6 +3977,8 @@ export default function SashimiViewer({
     paths: CoveragePaths; arcs: ArcRender[]; height: number;
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
+    /** Split reads continuing on another chromosome (RNA): a stem from the breakpoint leaving by the top of the track. */
+    exits: { x: number; e: ElsewhereLink; key: string; label: string; title: string; dir: 1 | -1 }[];
     /** Intron-retention pills on the baseline (usage mode). */
     retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void; hint?: string }[];
     /** variant sites drawn in the strip and as allele bars: from the reads track, or from the "variants" chip scan of a DNA track (none when the Variants toggle is off) */
@@ -4398,13 +4437,21 @@ export default function SashimiViewer({
             title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
+      const exits: TrackLayout['exits'] = [];
       if (!dnaTrack && !track.gtex && track.structural && svHints) {
         const approx = track.sampled ? '≈' : '';
-        // split alignments on another chromosome (interchromosomal fusion partners), as on DNA tracks
+        // split reads continuing on another chromosome (an interchromosomal fusion partner): a stem leaving by the top
         for (const e of track.structural.elsewhere) {
           if (e.kind !== 'split' || e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
-          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString('en-US')}`, deltas: [], color: LONG_RANGE_COLOR,
-            title: `split alignments on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads at ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (an interchromosomal fusion partner?)\nevidence, not a call: open the reads to check it` });
+          const tr = transOf(e);
+          const n = `${approx}${e.count.toLocaleString('en-US')}`;
+          // leaning away from the exon the junction leaves or enters, as an arc would
+          const exonLeft = tr?.here.role ? (tr.here.role === 'donor') === ((tr.here.strand ?? 1) > 0) : true;
+          const dir = ((exonLeft ? 1 : -1) * (reverse ? -1 : 1)) as 1 | -1;
+          exits.push({ x: scale.x(e.pos), e, key: `trans:${e.chrom}:${e.pos}`, dir,
+            label: `${e.chrom}${tr?.partner ? ` · ${tr.partner}` : ''} · ${n}`,
+            title: `${tr ? `${tr.label}\n` : ''}${n} split read${e.count === 1 ? '' : 's'} continuing on ${e.chrom}${e.farPos != null ? ` at ${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}${e.farCount != null && e.farCount < e.count ? ` (${e.farCount} of them there exactly)` : ''}` : ''} from ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')}: an interchromosomal fusion junction?` +
+              `${tr?.frame ? `\nreading frame: ${tr.frame.text}` : ''}\nclick for the partners, the reading frame and the fusion cartoon` });
         }
       }
       const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
@@ -4414,7 +4461,7 @@ export default function SashimiViewer({
       const hideCov = !showCoverage && dnaTrack && !track.gtex;
       const covH = hideCov ? 0 : COVERAGE_H, jH = hideCov ? TRACK_LABEL_H : juncH;
       const height = jH + covH + mirror + variants + methyl;
-      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow, mirror, antiPaths });
+      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, exits: hideCov ? [] : exits, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow, mirror, antiPaths });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
     };
@@ -4427,7 +4474,7 @@ export default function SashimiViewer({
       if (e) place(e.t, e.idx);
     }
     return { layouts: out, annotY };
-  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, transOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -4545,6 +4592,18 @@ export default function SashimiViewer({
     if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
     if (anyRna && layouts.some(L => L.arcs.some(a => a.fusion))) line(LONG_RANGE_COLOR, false, 'fusion junction: split or clipped reads placed across genes (inversion, duplication-type, or joining two genes)', 'l2d');
     if (anyRna && layouts.some(L => L.arcs.some(a => a.longRange))) line(LONG_RANGE_COLOR, true, 'long-range junction: leaves the gene (read-through or fusion?), shown from Min reads', 'l2c');
+    if (anyRna && layouts.some(L => L.exits.length)) {
+      const label = 'fusion junction with another chromosome: split reads leaving here (partner · reads); click for the frame and the cartoon';
+      items.push({
+        w: 30 + label.length * 5.3 + 14, el: (
+          <g key="ltrans">
+            <path d={`M2,${y + 6} C2,${y} 10,${y - 2} 12,${y - 6}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.8} strokeLinecap="round" />
+            <path d={`M9,${y - 4} L12,${y - 7} L15,${y - 4}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.3} strokeLinecap="round" />
+            <text x={28} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{label}</text>
+          </g>
+        ),
+      });
+    }
     if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     if (anyRna && showUsage && includeRetention) items.push({
       w: 38 + 'intron retention: unspliced reads through both boundaries, share of the intron\'s reads'.length * 5.3 + 14, el: (
@@ -5547,6 +5606,37 @@ export default function SashimiViewer({
               </g>
             );
           })}
+          {/* Split reads continuing on another chromosome: a thin stem from the breakpoint, leaving by the top of the track,
+              the partner and the reads at its end (labels of close stems stacked on up to three lanes) */}
+          {(() => {
+            const lanes: [number, number][][] = [[], [], []];
+            return [...L.exits].sort((a, b) => a.x - b.x).map(ex => {
+              const w = ex.label.length * 5.6 + 12, x2 = ex.x + ex.dir * 14;
+              const box: [number, number] = ex.dir > 0 ? [x2 - 2, x2 + w] : [x2 - w, x2 + 2];
+              let lane = lanes.findIndex(l => l.every(([a, b]) => box[1] < a - 3 || box[0] > b + 3));
+              if (lane < 0) lane = lanes.length - 1;
+              lanes[lane].push(box);
+              const yTop = yOff + TRACK_LABEL_H + L.strip + 2 + lane * 13;   // under the sample label
+              const d = `M${ex.x},${baseline} C${ex.x},${yTop + (baseline - yTop) * 0.45} ${x2},${yTop + 18} ${x2},${yTop + 4}`;
+              const sw = 1.2 + Math.min(2.2, Math.log10(Math.max(1, ex.e.count)));
+              const open = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                const p = svgPoint(e);
+                setPopover(prev => (prev?.kind === 'trans' && prev.key === ex.key ? null : { kind: 'trans', key: ex.key, e: ex.e, j: { start: ex.e.pos, end: ex.e.pos + 1, count: ex.e.count } as JunctionArc, x: p.x, y: p.y }));
+              };
+              return (
+                <g key={ex.key} style={{ cursor: 'pointer' }} onClick={open} onMouseDown={e => e.stopPropagation()} className="group">
+                  <title>{ex.title}</title>
+                  <path d={d} fill="none" stroke="transparent" strokeWidth={12} />
+                  <path d={d} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={sw} strokeLinecap="round" opacity={0.9} className="group-hover:opacity-100" />
+                  <path d={`M${x2 - 3.5},${yTop + 7} L${x2},${yTop + 2.5} L${x2 + 3.5},${yTop + 7}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
+                  <circle cx={ex.x} cy={baseline} r={2.2} fill={LONG_RANGE_COLOR} />
+                  <text x={ex.dir > 0 ? x2 + 6 : x2 - 6} y={yTop + 6.5} textAnchor={ex.dir > 0 ? 'start' : 'end'} fill={LONG_RANGE_COLOR} fontSize={9.5} fontWeight={700}
+                    stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{ex.label}</text>
+                </g>
+              );
+            });
+          })()}
         </g>
 
         {L.variants > 0 && renderVariantTrack(L, baseline, clipId)}
@@ -6137,15 +6227,19 @@ export default function SashimiViewer({
       const lr = longRangeOf(popover.j), ends = lr ? longRangeEnds(popover.j, lr) : null;
       return ends ? { ...ends, frame: fusionFrame(ends.five, ends.three) } : null;
     }
+    if (popover?.kind === 'trans') {
+      const tr = transOf(popover.e);
+      return tr?.frame && tr.five && tr.three ? { five: tr.five, three: tr.three, frame: tr.frame } : null;
+    }
     return null;
-  }, [popover, fusionOf, longRangeOf, longRangeEnds]);
+  }, [popover, fusionOf, longRangeOf, longRangeEnds, transOf]);
   useEffect(() => {
     const fz = popoverFusion;
     if (!popover || popover.kind === 'exon' || popover.kind === 'retention' || !fz || fz.frame.aBases == null) return;
     const key = popover.key;
     if (fusionPep?.key === key) return;
     setFusionPep({ key });
-    fusionPeptide(fz.five, fz.three, fz.frame, (a, b) => ds.getReference(currentChrom, a, b))
+    fusionPeptide(fz.five, fz.three, fz.frame, (a, b, chrom) => ds.getReference(chrom, a, b))
       .then(pep => setFusionPep(prev => (prev?.key === key ? { key, pep } : prev)))
       .catch(e => setFusionPep(prev => (prev?.key === key ? { key, error: e?.message || String(e) } : prev)));
   }, [popover, popoverFusion, currentChrom]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -6160,9 +6254,9 @@ export default function SashimiViewer({
     } else if (fz.frame.aBases != null) lines.push(pep?.error ? `translation: the partners' bases could not be read (${pep.error})` : pep && pep.pep === null ? 'translation: the partners\' bases are not available' : 'translation: reading the partners\' bases…');
     return lines;
   };
-  const fusionCartoon = (fz: typeof popoverFusion, j: JunctionArc) => (fz && fusionStoryPossible(fz.five, fz.three)
-    ? { j, model: fz.five.model, label: `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`, fusion: { five: fz.five, three: fz.three } } : null);
-  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string; fusion?: { five: FusionEnd; three: FusionEnd } } | null } | null => {
+  const fusionCartoon = (fz: typeof popoverFusion, j: JunctionArc, label?: string, sampleId?: number) => (fz && fusionStoryPossible(fz.five, fz.three)
+    ? { j, model: fz.five.model, label: label ?? `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`, fusion: { five: fz.five, three: fz.three }, sampleId } : null);
+  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string; fusion?: { five: FusionEnd; three: FusionEnd }; sampleId?: number } | null } | null => {
     if (!popover) return null;
     const pct = (v: number | null | undefined, d = 0) => (v == null || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(d)}%`);
     const num = (v: number | null | undefined, d = 1) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
@@ -6196,6 +6290,31 @@ export default function SashimiViewer({
     };
     const exonIdx = (rank: number) => tx ? tx.exons.findIndex(e => e.rank === rank) : -1;
 
+    if (popover.kind === 'trans') {
+      const { e, j } = popover;
+      const tr = transOf(e);
+      const near = (x: ElsewhereLink) => x.kind === 'split' && x.chrom === e.chrom && Math.abs(x.pos - e.pos) <= FUSION_SNAP_BP;
+      const rows = displayTracks.filter(t => t.structural && !isDnaTrack(t)).map(t => {
+        const mine = t.structural!.elsewhere.filter(near);
+        const n = mine.reduce((a, x) => a + x.count, 0);
+        const at = mine.filter(x => x.farPos != null && e.farPos != null && Math.abs(x.farPos - e.farPos) <= FUSION_SNAP_BP).reduce((a, x) => a + (x.farCount ?? 0), 0);
+        return [t.sampleName, n ? `${t.sampled ? '≈' : ''}${n.toLocaleString('en-US')}` : '0', e.farPos != null ? at.toLocaleString('en-US') : '—'];
+      });
+      const lines = ['translocation-type junction: split reads (SA tag) whose other part aligns on another chromosome, a fusion transcript of two genes?'];
+      if (tr && popoverFusion) lines.push(...fusionLines(popoverFusion, popover.key));
+      else if (e.farPos == null) lines.push('the far position is not known (a page exported before it was kept): no partner, no reading frame');
+      else if (tr && !tr.partner && !farGenes.has(`${e.chrom}:${e.farPos}`)) lines.push(`looking up the gene at ${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}…`);
+      else lines.push(tr?.oriented ? 'reading frame: needs a donor of one gene joined to an acceptor of the other, both on exon boundaries' : 'reading frame: unknown, no end of the junction on a splice site');
+      const sid = tracks.find(t => t.structural?.elsewhere.some(near))?.sampleId;
+      return {
+        title: `Fusion junction? ${tr?.label ?? `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} → ${e.chrom}`}`,
+        subtitle: `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} ↔ ${e.farPos != null ? `${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}` : e.chrom} · between chromosomes`,
+        cartoon: fusionCartoon(popoverFusion, j, `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} ↔ ${e.chrom}:${((e.farPos ?? 0) + 1).toLocaleString('en-US')}`, sid), hgvs: lines,
+        tables: [{ head: ['sample', 'split reads here to ' + e.chrom, 'of which at the same far position'], rows }],
+        strip: null,
+        note: `Split reads: primary alignments here whose supplementary part (SA tag) lies on ${e.chrom}, counted where they leave or enter this chromosome; the far position is the one most of them reach. Each end is named after the exon boundary within ${FUSION_SNAP_BP} bp of the genes there (the far genes looked up from the UCSC / Ensembl APIs), and the partner whose end is a splice donor comes first (5′). Evidence, not a call: a translocation, or a chimera of the library preparation; check that both partners' ends are splice sites and that the comparison samples do not carry it.`,
+      };
+    }
     if (popover.kind === 'structural') {
       const { j, sv } = popover;
       const rows = displayTracks.filter(t => t.structural).map(t => {
@@ -7393,10 +7512,10 @@ export default function SashimiViewer({
               </div>
               <div className="flex items-center gap-2">
                 {popoverContent.cartoon && (
-                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
+                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, si) % TRACK_COLORS.length], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
                 )}
-                {popover.kind !== 'exon' && popover.kind !== 'retention' && (() => {
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (() => {
                   const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;
                   return (
                     <span className="flex items-center gap-1" title="Size of this junction's label, on every track (saved with the session)">
@@ -7407,11 +7526,11 @@ export default function SashimiViewer({
                     </span>
                   );
                 })()}
-                {popover.kind !== 'exon' && (
+                {popover.kind !== 'exon' && popover.kind !== 'trans' && (
                   <button onClick={() => { showSupporting(popover); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px] font-medium`}
                     title={popover.kind === 'retention' ? `Reads track: only the reads unspliced through either boundary of this intron (at least ${SPAN_EXON_ANCHOR} exon and ${SPAN_INTRON_ANCHOR} intron bases), with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.` : `Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : popover.kind === 'anti' ? ' (on a sample whose strands are shown, its reads of the opposite strand only)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
                 )}
-                {popover.kind !== 'exon' && popover.kind !== 'retention' && (
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (
                   <button onClick={() => { hideArc(popover.j, popover.kind === 'anti'); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
                     title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
                 )}
