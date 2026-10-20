@@ -11,7 +11,7 @@ import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
   buildCoveragePaths, depthAt, maxDepthIn, type CoveragePaths,
   parseCdna, cdnaGenomicRange, parseExonQuery, exonGenomicRange,
-  classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
+  classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX, arcPathIn,
   niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus, exonPhases,
   usageIntervals, referenceExons, exonUsage, usageCohort, usageZ, exonSiteUsage,
   type TxModel, type Scale, type VirtualAxis, type JunctionInfo, type FrameInfo,
@@ -318,6 +318,8 @@ const MIRROR_MIN_H = 14;
 const MIRROR_PAD = 6;
 /** Junctions leaving the queried gene (read-through or fusion transcripts): drawn from their reads, whatever their usage share. */
 const LONG_RANGE_COLOR = '#c026d3';
+/** an arc is drawn over the plot and this far past its edges (clipped there), not over its whole length */
+const ARC_EDGE_PX = 40;
 /** Fusion junctions of an RNA track from split reads and clipped reads placed by realignment (an end within this many bases of an exon boundary is drawn on it). */
 const FUSION_SNAP_BP = 5;
 /**
@@ -5458,8 +5460,8 @@ export default function SashimiViewer({
                 setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y, fusion: !!a.fusion } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
               <title>{a.title}</title>
-              <path d={a.geom.d} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
-              <path d={a.geom.d} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
+              <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
+              <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
                 strokeDasharray={a.dashed ? '5 3.5' : undefined} opacity={0.92} />
             </g>
           ))}

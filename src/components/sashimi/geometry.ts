@@ -569,6 +569,42 @@ export function arcGeom(x1: number, y1: number, x2: number, y2: number, apexHeig
   return { x1, y1, x2, y2, cy, d: `M${f(x1)},${f(y1)}C${f(x1)},${f(cy)} ${f(x2)},${f(cy)} ${f(x2)},${f(y2)}` };
 }
 
+/** The arc's parameter t at pixel x (bisection on the monotone x(t)), clamped to [0, 1]. */
+function arcTAtX(g: ArcGeom, x: number): number {
+  const { x1, x2 } = g;
+  if (x2 === x1) return 0;
+  const inc = x2 > x1;
+  if (inc ? x <= x1 : x >= x1) return 0;
+  if (inc ? x >= x2 : x <= x2) return 1;
+  let lo = 0, hi = 1;
+  const xt = (t: number) => x1 * (1 - t) * (1 - t) * (1 + 2 * t) + x2 * t * t * (3 - 2 * t);
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if ((xt(mid) < x) === inc) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * The part of an arc over the pixels [xLo, xHi], as a path: the whole arc when it lies inside, else the cubic cut at the
+ * two edges (de Casteljau). Zoomed in on one end of a long arc (a read-through 100 kb away at a few pixels per base)
+ * the whole curve is millions of pixels long, and a dashed one millions of dashes, drawn again at every frame.
+ */
+export function arcPathIn(g: ArcGeom, xLo: number, xHi: number): string {
+  const lo = Math.min(g.x1, g.x2), hi = Math.max(g.x1, g.x2);
+  if (lo >= xLo && hi <= xHi) return g.d;
+  const ta = arcTAtX(g, g.x2 > g.x1 ? xLo : xHi), tb = arcTAtX(g, g.x2 > g.x1 ? xHi : xLo);
+  if (tb <= ta) return '';
+  // control points P0..P3, the sub-curve over [ta, tb]
+  const P = [[g.x1, g.y1], [g.x1, g.cy], [g.x2, g.cy], [g.x2, g.y2]];
+  const at = (t: number) => { const u = 1 - t; return [0, 1].map(k => u * u * u * P[0][k] + 3 * u * u * t * P[1][k] + 3 * u * t * t * P[2][k] + t * t * t * P[3][k]); };
+  const d1 = (t: number) => { const u = 1 - t; return [0, 1].map(k => 3 * u * u * (P[1][k] - P[0][k]) + 6 * u * t * (P[2][k] - P[1][k]) + 3 * t * t * (P[3][k] - P[2][k])); };
+  const a = at(ta), b = at(tb), da = d1(ta), db = d1(tb), h = (tb - ta) / 3;
+  const c1 = [a[0] + h * da[0], a[1] + h * da[1]], c2 = [b[0] - h * db[0], b[1] - h * db[1]];
+  const f = (n: number) => n.toFixed(1);
+  return `M${f(a[0])},${f(a[1])}C${f(c1[0])},${f(c1[1])} ${f(c2[0])},${f(c2[1])} ${f(b[0])},${f(b[1])}`;
+}
+
 /** y of the arc at pixel x (bisection on the monotone x(t)). */
 export function arcYAtX(g: ArcGeom, x: number): number {
   const { x1, y1, x2, y2, cy } = g;
