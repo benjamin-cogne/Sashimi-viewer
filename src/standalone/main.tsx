@@ -1339,8 +1339,6 @@ function App() {
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
         <span>·</span>
-        <span>made with Claude Opus 5 and Fable 5.1</span>
-        <span>·</span>
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>
         <span>CC BY-NC 4.0</span>
