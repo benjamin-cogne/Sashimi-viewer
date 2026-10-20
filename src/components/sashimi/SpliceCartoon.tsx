@@ -38,6 +38,15 @@ const C = {
   partner: '#0f766e', partnerChain: '#99f6e4',
 };
 const DOMAIN_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7', '#008300', '#eb6834'];
+/** One colour per domain name (and gene), so the repeats of a run share it. */
+function domainColors(domains: DomainStatus[]): string[] {
+  const idx = new Map<string, number>();
+  return domains.map(d => {
+    const key = `${d.gene ?? ''}|${d.domain.description || d.domain.id}`;
+    if (!idx.has(key)) idx.set(key, idx.size);
+    return DOMAIN_COLORS[idx.get(key)! % DOMAIN_COLORS.length];
+  });
+}
 
 // ======================== Layout ========================
 
@@ -539,8 +548,10 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
         {...hov([`${fz.three.geneName} p.${fz.partnerFrom}–${fz.partnerLength}`, `fusion residues ${fz.partnerResidues[0] + 1}–${fz.partnerResidues[1]}, in ${fz.three.geneName}'s frame`])} />);
     }
     // domains: canonical coordinates; on the observed row map through the diff
+    const labels = domainLabels(story.domains, isObserved, diff, aaPx, chainX0), colors = domainColors(story.domains);
     story.domains.forEach((ds, di) => {
-      const colr = DOMAIN_COLORS[di % DOMAIN_COLORS.length];
+      const colr = colors[di];
+      const lab = labels.get(di);
       const segs = domainSegments(ds, isObserved, diff);
       segs.forEach((sg, k) => {
         const a = Math.min(sg[0], shown), b = Math.min(sg[1], shown);
@@ -551,7 +562,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
           <g key={`d${di}-${k}`} opacity={1 - dissolve} {...hov([`${ds.domain.description || ds.domain.id}`, `${ds.gene ? `${ds.gene} ` : ''}${ds.domain.type} ${ds.domain.id} · aa ${ds.domain.start}–${ds.domain.end}`, isObserved ? `${ds.state}: ${ds.note}` : fz ? `${tx.geneName} protein` : 'MANE protein'])}>
             <title>{`${ds.domain.description || ds.domain.id} · aa ${ds.domain.start}–${ds.domain.end}${isObserved ? ` · ${ds.state}: ${ds.note}` : ''}`}</title>
             <rect x={chainX0 + a * aaPx} y={yP - 9} width={w} height={18} rx={6} fill={state === 'lost' ? 'url(#sc-hatch-lost)' : colr} opacity={state === 'disrupted' ? 0.55 : 0.95} stroke={state === 'intact' ? 'none' : C.lost} strokeWidth={1.2} strokeDasharray={state === 'disrupted' ? '3 2' : undefined} />
-            {k === 0 && w > 28 && <text x={chainX0 + a * aaPx + 4} y={yP - 13} fontSize={9} fill={colr} fontWeight={600}>{(ds.domain.description || ds.domain.id).slice(0, 26)}</text>}
+            {k === 0 && lab && <text x={lab.x} y={yP - LABEL_LANES[lab.lane]} fontSize={9} fill={colr} fontWeight={600}>{lab.text}</text>}
           </g>,
         );
       });
@@ -594,6 +605,45 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       {degraded && (dissolve > 0.6 || explore) && <text x={X0} y={y - 32} fontSize={12} fontWeight={700} fill={C.lost} opacity={explore ? 1 : (dissolve - 0.6) / 0.4}>⛔ transcript degraded by NMD</text>}
     </g>
   );
+}
+
+const LABEL_CHAR_PX = 5.4, LABEL_MAX_CHARS = 28;
+/** Heights of the two label lanes above a protein chain. */
+const LABEL_LANES = [13, 24];
+
+/**
+ * Domain labels of one protein row, placed so that none overlaps another. Runs of domains of one name (repeats) get
+ * one label, `name ×n`. In x order, each label takes the lane whose previous label ends first; it is then shortened
+ * (…) to end before the next label of its lane, and left out under three characters (the domain keeps its tooltip and
+ * its line in the list). Laid out on the whole protein, so the labels do not move while the chain grows.
+ */
+function domainLabels(domains: DomainStatus[], observed: boolean, diff: SpliceStory['diff'], aaPx: number, x0: number): Map<number, { text: string; lane: number; x: number }> {
+  const items = domains.map((ds, di) => ({ di, seg: domainSegments(ds, observed, diff)[0], name: ds.domain.description || ds.domain.id }))
+    .filter((it): it is { di: number; seg: [number, number]; name: string } => !!it.seg && it.seg[1] > it.seg[0])
+    .sort((a, b) => a.seg[0] - b.seg[0]);
+  // repeats: one label for each run of one name
+  const runs: { di: number; x: number; name: string; n: number }[] = [];
+  for (const it of items) {
+    const last = runs[runs.length - 1];
+    if (last && last.name === it.name) { last.n++; continue; }
+    runs.push({ di: it.di, x: x0 + it.seg[0] * aaPx + 2, name: it.name, n: 1 });
+  }
+  const want = (r: typeof runs[number]) => { const t = r.n > 1 ? `${r.name} ×${r.n}` : r.name; return t.length > LABEL_MAX_CHARS ? `${t.slice(0, LABEL_MAX_CHARS - 1)}…` : t; };
+  const ends = LABEL_LANES.map(() => -Infinity), lanes: number[] = [];
+  for (const r of runs) {
+    const lane = ends[0] <= ends[1] ? 0 : 1;
+    lanes.push(lane);
+    ends[lane] = r.x + want(r).length * LABEL_CHAR_PX;
+  }
+  const out = new Map<number, { text: string; lane: number; x: number }>();
+  runs.forEach((r, i) => {
+    let next = Infinity;
+    for (let k = i + 1; k < runs.length; k++) if (lanes[k] === lanes[i]) { next = runs[k].x; break; }
+    const full = want(r), room = Math.floor((next - r.x - 6) / LABEL_CHAR_PX);
+    const text = full.length <= room ? full : room >= 3 ? `${full.slice(0, room - 1)}…` : null;
+    if (text) out.set(r.di, { text, lane: lanes[i], x: r.x });
+  });
+  return out;
 }
 
 /** Amino-acid ranges (0-based half-open, in the row's own protein coordinates) drawn for a domain. */
@@ -672,7 +722,20 @@ function Legend({ story, color }: { story: SpliceStory; color: string }) {
 
 // ======================== Amino-acid strip and domain list ========================
 
+/** Consecutive domains of one gene, name and state listed on one line (a run of repeats). */
+function domainRuns(domains: DomainStatus[]): { d: DomainStatus; i: number; n: number; end: number; all: DomainStatus[] }[] {
+  const out: { d: DomainStatus; i: number; n: number; end: number; all: DomainStatus[] }[] = [];
+  domains.forEach((d, i) => {
+    const last = out[out.length - 1];
+    if (last && last.d.gene === d.gene && last.d.state === d.state && (last.d.domain.description || last.d.domain.id) === (d.domain.description || d.domain.id)) {
+      last.n++; last.end = Math.max(last.end, d.domain.end); last.all.push(d);
+    } else out.push({ d, i, n: 1, end: d.domain.end, all: [d] });
+  });
+  return out;
+}
+
 function Details({ story }: { story: SpliceStory }) {
+  const colors = domainColors(story.domains);
   const { diff, canonical, aberrant, verdict } = story;
   const from = Math.max(0, diff.prefix - 15), to = diff.prefix + 30;
   const canon = canonical.protein, ab = aberrant.protein;
@@ -707,10 +770,10 @@ function Details({ story }: { story: SpliceStory }) {
         <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Protein domains (UniProt / Pfam via UCSC)</div>
         {story.domains.length === 0 && <div className="text-gray-400">no domain annotation</div>}
         <ul className="space-y-0.5">
-          {story.domains.map((d, i) => (
+          {domainRuns(story.domains).map(({ d, i, n, end, all }) => (
             <li key={i} className="flex items-center gap-2">
-              <span className="inline-block w-3 h-3 rounded-sm" style={{ background: DOMAIN_COLORS[i % DOMAIN_COLORS.length] }} />
-              <span className="flex-1 truncate" title={`${d.domain.id} · aa ${d.domain.start}–${d.domain.end} · ${d.note}`}>{d.gene && <span className="text-gray-500">{d.gene} · </span>}{d.domain.description || d.domain.id} <span className="text-gray-400">{d.domain.start}–{d.domain.end}</span></span>
+              <span className="inline-block w-3 h-3 rounded-sm" style={{ background: colors[i] }} />
+              <span className="flex-1 truncate" title={all.map(x => `${x.domain.id} · aa ${x.domain.start}–${x.domain.end} · ${x.note}`).join('\n')}>{d.gene && <span className="text-gray-500">{d.gene} · </span>}{d.domain.description || d.domain.id}{n > 1 ? ` ×${n}` : ''} <span className="text-gray-400">{d.domain.start}–{end}</span></span>
               <span className={`px-1.5 rounded-full text-[10px] font-semibold ${d.state === 'intact' ? 'bg-emerald-100 text-emerald-700' : d.state === 'lost' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`} title={d.note}>{d.state}</span>
             </li>
           ))}
