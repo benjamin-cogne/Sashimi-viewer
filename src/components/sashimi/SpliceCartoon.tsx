@@ -34,6 +34,8 @@ const C = {
   exon: '#334155', utr: '#94a3b8', intron: '#94a3b8', text: '#1f2937', muted: '#6b7280', faint: '#9ca3af',
   cryptic: '#b45309', lost: '#dc2626', ejc: '#7c3aed', ribosomeA: '#64748b', ribosomeB: '#94a3b8', upf1: '#dc2626',
   chain: '#cbd5e1', neo: '#f59e0b', ok: '#16a34a', bg: '#ffffff',
+  /** the 3′ partner's exons and residues in a fusion */
+  partner: '#0f766e', partnerChain: '#99f6e4',
 };
 const DOMAIN_COLORS = ['#2a78d6', '#1baf7a', '#eda100', '#e87ba4', '#4a3aa7', '#008300', '#eb6834'];
 
@@ -56,14 +58,14 @@ interface Placed extends Block {
 }
 
 /** Widths grow with the square root of the length so short exons stay visible and long ones do not dominate. */
-function widthOf(len: number, k: number) { return Math.max(14, Math.min(130, (10 + 3.4 * Math.sqrt(len)) * k)); }
+function widthOf(len: number, k: number, minW = 14) { return Math.max(minW, Math.min(130, (10 + 3.4 * Math.sqrt(len)) * k)); }
 
-function place(iso: Isoform, tx: TxModel, k: number, gapK: number): Placed[] {
+function place(iso: Isoform, tx: TxModel, k: number, gapK: number, minW = 14): Placed[] {
   let xPre = X0, xPost = X0;
   return iso.blocks.map((b, i) => {
-    const len = b.end - b.start, w = widthOf(len, k);
+    const len = b.end - b.start, w = widthOf(len, k, minW);
     if (i > 0 && !b.joinsPrev) xPre += GAP_PRE * gapK;
-    const cds = tx.cdsStart != null && tx.cdsEnd != null ? [Math.max(b.start, tx.cdsStart), Math.min(b.end, tx.cdsEnd)] as [number, number] : null;
+    const cds = b.cds !== undefined ? b.cds : tx.cdsStart != null && tx.cdsEnd != null ? [Math.max(b.start, tx.cdsStart), Math.min(b.end, tx.cdsEnd)] as [number, number] : null;
     const p: Placed = { ...b, w, xPre, xPost, len, cds: cds && cds[1] > cds[0] ? cds : null };
     xPre += w; xPost += w;
     return p;
@@ -71,14 +73,14 @@ function place(iso: Isoform, tx: TxModel, k: number, gapK: number): Placed[] {
 }
 
 /** Scale factor so that the widest pre-mRNA row fits the band. */
-function fitScale(isos: Isoform[]): { k: number; gapK: number } {
+function fitScale(isos: Isoform[]): { k: number; gapK: number; minW: number } {
   const need = Math.max(...isos.map(iso => {
     let x = 0;
     iso.blocks.forEach((b, i) => { if (i > 0 && !b.joinsPrev) x += GAP_PRE; x += widthOf(b.end - b.start, 1); });
     return x;
   }));
   const avail = X1 - X0;
-  if (need <= avail) return { k: 1, gapK: 1 };
+  if (need <= avail) return { k: 1, gapK: 1, minW: 14 };
   const gapK = Math.max(0.45, Math.min(1, avail / need));
   // shrink widths only as far as needed after the gaps were squeezed
   const needGapped = Math.max(...isos.map(iso => {
@@ -86,7 +88,17 @@ function fitScale(isos: Isoform[]): { k: number; gapK: number } {
     iso.blocks.forEach((b, i) => { if (i > 0 && !b.joinsPrev) x += GAP_PRE * gapK; x += widthOf(b.end - b.start, 1); });
     return x;
   }));
-  return { k: Math.min(1, avail / needGapped), gapK };
+  const k = Math.min(1, avail / needGapped);
+  // many exons (a fusion of two long genes): the minimum width and the gaps give way too, all by one factor
+  const needAt = (kk: number, gk: number, minW: number) => Math.max(...isos.map(iso => {
+    let x = 0;
+    iso.blocks.forEach((b, i) => { if (i > 0 && !b.joinsPrev) x += GAP_PRE * gk; x += widthOf(b.end - b.start, kk, minW); });
+    return x;
+  }));
+  if (needAt(k, gapK, 14) <= avail) return { k, gapK, minW: 14 };
+  let lo = 0.02, hi = 1;
+  for (let it = 0; it < 30; it++) { const f = (lo + hi) / 2; if (needAt(k * f, gapK * f, Math.max(2, 14 * f)) <= avail) lo = f; else hi = f; }
+  return { k: k * lo, gapK: gapK * lo, minW: Math.max(2, 14 * lo) };
 }
 
 // ======================== Component ========================
@@ -196,7 +208,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
     clone.setAttribute('width', String(VW)); clone.setAttribute('height', String(VH));
     const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `splicing_${tx.geneName}_${sampleName}.svg`; a.click();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${story?.fusion ? `fusion_${story.fusion.five.geneName}-${story.fusion.three.geneName}` : `splicing_${tx.geneName}`}_${sampleName}.svg`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   };
   const exportPng = async () => {
@@ -209,7 +221,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
     const c = document.createElement('canvas'); c.width = VW * 2; c.height = VH * 2;
     const g = c.getContext('2d')!; g.scale(2, 2); g.fillStyle = '#fff'; g.fillRect(0, 0, VW, VH); g.drawImage(img, 0, 0, VW, VH);
     URL.revokeObjectURL(url);
-    c.toBlob(b => { if (!b) return; const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `splicing_${tx.geneName}_${sampleName}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }, 'image/png');
+    c.toBlob(b => { if (!b) return; const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `${story?.fusion ? `fusion_${story.fusion.five.geneName}-${story.fusion.three.geneName}` : `splicing_${tx.geneName}`}_${sampleName}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }, 'image/png');
   };
   const chapters = [
     { label: 'pre-mRNA', at: 0 }, { label: 'splicing', at: T_PRE }, { label: 'mRNA', at: T_JOIN }, { label: 'translation', at: T_MRNA }, { label: 'outcome', at: T_TRANS },
@@ -217,8 +229,8 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
 
   const scene = useMemo(() => {
     if (!story) return null;
-    const { k, gapK } = fitScale([story.canonical, story.aberrant]);
-    const canon = place(story.canonical, tx, k, gapK), ab = place(story.aberrant, tx, k, gapK);
+    const { k, gapK, minW } = fitScale([story.canonical, story.aberrant]);
+    const canon = place(story.canonical, tx, k, gapK, minW), ab = place(story.aberrant, tx, k, gapK, minW);
     // the spliced mRNA stretches to fill the band (same factor for both rows so exon sizes stay comparable)
     const widest = Math.max(canon.reduce((a, p) => a + p.w, 0), ab.reduce((a, p) => a + p.w, 0));
     const expand = Math.max(1, Math.min(1.9, (X1 - X0 - 90) / Math.max(1, widest)));
@@ -231,7 +243,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
         {/* header */}
         <div className="flex items-start justify-between px-5 pt-4 pb-2">
           <div>
-            <div className="text-base font-bold">Splicing cartoon <span className="font-normal text-gray-500">· {tx.geneName} · {junctionLabel}</span></div>
+            <div className="text-base font-bold">{story?.fusion ? 'Fusion cartoon' : 'Splicing cartoon'} <span className="font-normal text-gray-500">· {story?.fusion ? `${story.fusion.five.geneName}–${story.fusion.three.geneName}` : tx.geneName} · {junctionLabel}</span></div>
             <div className="text-xs text-gray-500">{story ? story.event.text : loading || error || ''} · observed in {sampleName}</div>
           </div>
           <div className="flex items-center gap-2">
@@ -255,9 +267,9 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
               </defs>
               <rect x={0} y={0} width={VW} height={VH} fill="url(#sc-bg)" rx={14} />
               <g transform={explore ? `translate(${view.x}, ${view.y}) scale(${view.k})` : undefined}>
-                <Row iso={story.canonical} placed={scene.canon} expand={scene.expand} row={0} t={explore ? T_END : t} tx={tx} story={story} kind="canonical" color={C.exon} label={['MANE Select', tx.transcriptId]}
+                <Row iso={story.canonical} placed={scene.canon} expand={scene.expand} row={0} t={explore ? T_END : t} tx={tx} story={story} kind="canonical" color={C.exon} label={story.fusion ? [`5′ partner ${tx.geneName}`, tx.transcriptId] : ['MANE Select', tx.transcriptId]}
                   explore={explore} onHover={hover} selected={selected} onSelect={setSelected} />
-                <Row iso={story.aberrant} placed={scene.ab} expand={scene.expand} row={1} t={explore ? T_END : t} tx={tx} story={story} kind="observed" color={sampleColor} label={['Observed', sampleName]}
+                <Row iso={story.aberrant} placed={scene.ab} expand={scene.expand} row={1} t={explore ? T_END : t} tx={tx} story={story} kind="observed" color={sampleColor} label={[story.fusion ? 'Fusion' : 'Observed', sampleName]}
                   explore={explore} onHover={hover} selected={selected} onSelect={setSelected} />
               </g>
               {explore ? <Legend story={story} color={sampleColor} /> : <Caption t={t} story={story} />}
@@ -311,10 +323,10 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
 
 function VerdictBadge({ story, reveal }: { story: SpliceStory; reveal: boolean }) {
   const v = story.verdict;
-  const cls = v.degraded ? 'bg-red-600 text-white' : v.verdict === 'no_ptc' ? (story.diff.kind === 'identical' ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white') : v.verdict === 'escape_start_proximal' ? 'bg-amber-500 text-white' : 'bg-orange-600 text-white';
+  const cls = v.degraded ? 'bg-red-600 text-white' : v.verdict === 'no_ptc' ? (story.diff.kind === 'identical' || story.diff.kind === 'fusion' ? 'bg-emerald-600 text-white' : 'bg-amber-500 text-white') : v.verdict === 'escape_start_proximal' ? 'bg-amber-500 text-white' : 'bg-orange-600 text-white';
   return (
     <span className={`px-3 py-1 rounded-full text-xs font-semibold transition-opacity duration-700 ${cls}`} style={{ opacity: reveal ? 1 : 0.15 }} title={v.text}>
-      {v.degraded ? '⛔ degraded by NMD' : v.verdict === 'no_ptc' ? (story.diff.kind === 'identical' ? '✓ normal protein' : `✎ ${story.diff.text}`) : `✂ ${v.headline}`}
+      {v.degraded ? '⛔ degraded by NMD' : v.verdict === 'no_ptc' ? (story.diff.kind === 'identical' ? '✓ normal protein' : story.diff.kind === 'fusion' ? `✓ in-frame fusion protein · ${story.diff.aberrantLength} aa` : `✎ ${story.diff.text}`) : `✂ ${v.headline}`}
     </span>
   );
 }
@@ -344,7 +356,10 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
   const degraded = isObserved && story.verdict.degraded;
   const dissolve = degraded && !explore ? phase(t, T_TRANS + 1.3, T_TRANS + 2.6, easeOut) : 0;
   const hov = (lines: string[]) => (explore && onHover ? { onMouseEnter: (e: React.MouseEvent) => onHover(lines, e), onMouseMove: (e: React.MouseEvent) => onHover(lines, e), onMouseLeave: () => onHover(null) } : {});
-  const cpos = (g: number) => cdnaPosition(g, tx).label;
+  const fz = story.fusion;
+  /** the model a block belongs to: the 3′ partner's exons of a fusion are numbered on it */
+  const modelOf = (b: Block) => (fz && b.gene === fz.three.geneName ? fz.three : tx);
+  const cposIn = (m: TxModel) => (g: number) => cdnaPosition(g, m).label;
 
   // blocks widen as they join (the mature mRNA fills the band); x of every block at time t (pre → post)
   const wk = lerp(1, expand, join);
@@ -372,11 +387,12 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
   const tArrive = T_MRNA + (T_TRANS - T_MRNA) * ((stop - (cds ?? 0)) / span);   // when this ribosome reaches its stop
   const aaMade = cds != null && readPos != null ? Math.max(0, Math.floor((readPos - cds) / 3)) : 0;
   const protLen = iso.protein.length;
-  const aaPx = Math.min(2.4, (X1 - X0 - 80) / Math.max(1, story.canonical.protein.length));
+  // one scale for both rows: a fusion protein can be longer than the 5′ partner's
+  const aaPx = Math.min(2.4, (X1 - X0 - 80) / Math.max(1, story.canonical.protein.length, story.fusion ? story.aberrant.protein.length : 0));
   const chainX0 = X0;
 
   // ---- the skipped / affected exons in the pre-mRNA of the observed row (drawn as ghosts that leave with the lariat) ----
-  const removed = isObserved ? story.event.canonical.filter(cb => !story.event.blocks.some(b => b.rank === cb.rank && b.kind === 'exon')) : [];
+  const removed = isObserved ? story.event.canonical.filter(cb => !story.event.blocks.some(b => b.rank === cb.rank && b.gene === cb.gene && b.kind === 'exon')) : [];
   const affectedRank = new Set(story.event.affected);
 
   // ---- introns between consecutive non-contiguous blocks: lariat loops ----
@@ -395,13 +411,15 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       <g key={`in${i}`} opacity={(1 - cut) * appear} transform={`translate(0, ${-40 * cut})`}>
         <path d={d} fill="none" stroke={C.intron} strokeWidth={2} strokeLinecap="round" />
         {loop > 0.15 && <circle cx={mid} cy={y - h * 0.75} r={3 + 2 * loop} fill="#fff" stroke={C.intron} strokeWidth={1.5} opacity={loop} />}
-        {removedHere.map(r => {
-          const w = widthOf(r.end - r.start, 1) * 0.8;
+        {removedHere.map((r, ri) => {
+          // several exons in one lariat (a multi-exon skip, the exons between two fusion partners) sit side by side
+          const ws = removedHere.map(x => widthOf(x.end - x.start, 1) * 0.8), sum = ws.reduce((a, b) => a + b, 0), fit = Math.min(1, 140 / sum);
+          const w = ws[ri] * fit, x0 = mid - (sum * fit) / 2 + ws.slice(0, ri).reduce((a, b) => a + b, 0) * fit;
           const yy = y - h * 0.62;
           return (
-            <g key={`rm${r.rank}`} transform={`translate(${mid - w / 2}, ${yy - EXON_H / 2})`}>
+            <g key={`rm${r.gene ?? ''}${r.rank}`} transform={`translate(${x0}, ${yy - EXON_H / 2})`}>
               <rect width={w} height={EXON_H} rx={5} fill={C.lost} opacity={0.55 + 0.35 * (1 - loop)} />
-              <text x={w / 2} y={EXON_H / 2 + 4} textAnchor="middle" fill="#fff" fontSize={11} fontWeight={700}>{r.rank}</text>
+              {w >= 12 && <text x={w / 2} y={EXON_H / 2 + 4} textAnchor="middle" fill="#fff" fontSize={11} fontWeight={700}>{r.rank}</text>}
               {loop > 0.5 && <line x1={w * 0.15} y1={EXON_H * 0.15} x2={w * 0.85} y2={EXON_H * 0.85} stroke="#fff" strokeWidth={2} opacity={(loop - 0.5) * 2} />}
             </g>
           );
@@ -414,7 +432,10 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
   const blocks = placed.map((p, i) => {
     const x = xs[i];
     const isCryptic = p.kind === 'cryptic', isExt = p.kind === 'extension';
-    const fill = isCryptic || isExt ? 'url(#sc-hatch)' : color;
+    const fromPartner = !!fz && p.gene === fz.three.geneName;
+    const fill = isCryptic || isExt ? 'url(#sc-hatch)' : fromPartner ? C.partner : color;
+    const cpos = cposIn(modelOf(p));
+    const exonName = fz ? `${p.gene} exon ${p.rank}` : `Exon ${p.rank}`;
     const affected = isObserved && p.rank != null && affectedRank.has(p.rank) && !isCryptic && !isExt;
     // portions: coding at full height, UTR at half height
     const parts: JSX.Element[] = [];
@@ -427,7 +448,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       parts.push(<rect key="c" x={x + lo} y={y - EXON_H / 2} width={Math.max(1, hi - lo)} height={EXON_H} rx={4} fill={fill} />);
       if (p.w - hi > 0.5) parts.push(<rect key="u3" x={x + hi} y={y - UTR_H / 2} width={p.w - hi} height={UTR_H} rx={3} fill={C.utr} />);
       void ge;
-    } else if (!p.cds && !isCryptic && !isExt && tx.cdsStart != null) {
+    } else if (!p.cds && !isCryptic && !isExt && modelOf(p).cdsStart != null) {
       parts.push(<rect key="u" x={x} y={y - UTR_H / 2} width={p.w} height={UTR_H} rx={3} fill={C.utr} />);
     } else {
       parts.push(<rect key="x" x={x} y={y - EXON_H / 2} width={p.w} height={EXON_H} rx={4} fill={fill} stroke={isCryptic || isExt ? C.cryptic : 'none'} strokeWidth={1.2} />);
@@ -439,7 +460,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     const lines = isCryptic
       ? [`Cryptic exon · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)} (intronic offsets)`]
       : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`]
-      : [`Exon ${p.rank}${affected ? ' · affected' : ''} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
+      : [`${exonName}${affected ? ' · affected' : ''} · ${p.len} nt`, `${tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
     const isSel = explore && selected != null && p.rank === selected && !isCryptic && !isExt;
     return (
       <g key={`b${i}`} opacity={appear * vis * (1 - dissolve * 0.85)} filter="url(#sc-shadow)" {...hov(lines)}
@@ -450,6 +471,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
         {parts}
         {affected && <rect x={x - 1.5} y={y - EXON_H / 2 - 1.5} width={p.w + 3} height={EXON_H + 3} rx={5} fill="none" stroke={C.lost} strokeWidth={1.5} strokeDasharray="3 2" />}
         {p.w >= 16 && <text x={x + p.w / 2} y={y + 4} textAnchor="middle" fill={isCryptic || isExt ? C.cryptic : '#fff'} fontSize={isCryptic || isExt ? 9 : 11} fontWeight={700}>{labelTxt}</text>}
+        {fz && isObserved && (i === 0 || placed[i - 1].gene !== p.gene) && <text x={x} y={y + EXON_H / 2 + 13} fontSize={10} fontWeight={700} fill={fromPartner ? C.partner : C.text}>{p.gene} ▸</text>}
       </g>
     );
   });
@@ -509,8 +531,14 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     const L = shown * aaPx;
     chain.push(<line key="bb" x1={chainX0} y1={yP} x2={chainX0 + L} y2={yP} stroke={C.chain} strokeWidth={9} strokeLinecap="round" opacity={1 - dissolve} />);
     chain.push(<line key="beads" x1={chainX0 + 2} y1={yP} x2={chainX0 + L} y2={yP} stroke="#94a3b8" strokeWidth={5} strokeLinecap="round" strokeDasharray="0.1 6" opacity={0.9 * (1 - dissolve)} />);
-    // domains: canonical coordinates; on the observed row map through the diff
     const diff = story.diff;
+    // a fusion's 3′ partner residues, carried in their own frame
+    if (isObserved && fz?.partnerResidues) {
+      const a = Math.min(fz.partnerResidues[0], shown), b = Math.min(fz.partnerResidues[1], shown);
+      if (b > a) chain.push(<line key="partner" x1={chainX0 + a * aaPx} y1={yP} x2={chainX0 + b * aaPx} y2={yP} stroke={C.partnerChain} strokeWidth={9} strokeLinecap="round" opacity={1 - dissolve}
+        {...hov([`${fz.three.geneName} p.${fz.partnerFrom}–${fz.partnerLength}`, `fusion residues ${fz.partnerResidues[0] + 1}–${fz.partnerResidues[1]}, in ${fz.three.geneName}'s frame`])} />);
+    }
+    // domains: canonical coordinates; on the observed row map through the diff
     story.domains.forEach((ds, di) => {
       const colr = DOMAIN_COLORS[di % DOMAIN_COLORS.length];
       const segs = domainSegments(ds, isObserved, diff);
@@ -520,7 +548,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
         const w = (b - a) * aaPx;
         const state = isObserved ? ds.state : 'intact';
         chain.push(
-          <g key={`d${di}-${k}`} opacity={1 - dissolve} {...hov([`${ds.domain.description || ds.domain.id}`, `${ds.domain.type} ${ds.domain.id} · aa ${ds.domain.start}–${ds.domain.end}`, isObserved ? `${ds.state}: ${ds.note}` : 'MANE protein'])}>
+          <g key={`d${di}-${k}`} opacity={1 - dissolve} {...hov([`${ds.domain.description || ds.domain.id}`, `${ds.gene ? `${ds.gene} ` : ''}${ds.domain.type} ${ds.domain.id} · aa ${ds.domain.start}–${ds.domain.end}`, isObserved ? `${ds.state}: ${ds.note}` : fz ? `${tx.geneName} protein` : 'MANE protein'])}>
             <title>{`${ds.domain.description || ds.domain.id} · aa ${ds.domain.start}–${ds.domain.end}${isObserved ? ` · ${ds.state}: ${ds.note}` : ''}`}</title>
             <rect x={chainX0 + a * aaPx} y={yP - 9} width={w} height={18} rx={6} fill={state === 'lost' ? 'url(#sc-hatch-lost)' : colr} opacity={state === 'disrupted' ? 0.55 : 0.95} stroke={state === 'intact' ? 'none' : C.lost} strokeWidth={1.2} strokeDasharray={state === 'disrupted' ? '3 2' : undefined} />
             {k === 0 && w > 28 && <text x={chainX0 + a * aaPx + 4} y={yP - 13} fontSize={9} fill={colr} fontWeight={600}>{(ds.domain.description || ds.domain.id).slice(0, 26)}</text>}
@@ -542,7 +570,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
     if (!isObserved && diff.lost[1] > diff.lost[0] && shown >= protLen) {
       const a = diff.lost[0], b = Math.min(diff.lost[1], protLen);
       chain.push(<rect key="ghost" x={chainX0 + a * aaPx} y={yP - 12} width={(b - a) * aaPx} height={24} rx={6} fill="url(#sc-hatch-lost)" opacity={0.6 * outcome} stroke={C.lost} strokeWidth={1}
-        {...hov([`Residues ${a + 1}–${b} of the MANE protein are ${diff.kind === 'frameshift' || diff.kind === 'truncation' ? 'not made' : 'deleted'}`, diff.text])} />);
+        {...hov([fz ? `Residues ${a + 1}–${b} of ${tx.geneName} are not in the fusion` : `Residues ${a + 1}–${b} of the MANE protein are ${diff.kind === 'frameshift' || diff.kind === 'truncation' ? 'not made' : 'deleted'}`, diff.text])} />);
     }
     // stop marker
     if (shown >= protLen) {
@@ -555,7 +583,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
   return (
     <g>
       <text x={18} y={y - 10} fontSize={12} fontWeight={700} fill={C.text}>{label[0]}</text>
-      <text x={18} y={y + 6} fontSize={10} fill={C.muted}>{label[1]}</text>
+      <text x={18} y={y + 6} fontSize={10} fill={C.muted}>{label[1].length > 22 ? `${label[1].slice(0, 21)}…` : label[1]}<title>{label[1]}</title></text>
       <text x={18} y={yP + 4} fontSize={10} fill={C.muted}>protein</text>
       <line x1={X0} y1={y} x2={right} y2={y} stroke={C.intron} strokeWidth={1.2} opacity={appear * (1 - dissolve) * (mrna > 0 ? 0.35 : 0)} />
       {introns}
@@ -570,6 +598,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
 
 /** Amino-acid ranges (0-based half-open, in the row's own protein coordinates) drawn for a domain. */
 function domainSegments(ds: DomainStatus, observed: boolean, diff: SpliceStory['diff']): [number, number][] {
+  if (ds.rows) return observed ? ds.rows.observed : ds.rows.canonical;
   const s = ds.domain.start - 1, e = ds.domain.end;
   if (!observed || diff.kind === 'identical') return [[s, e]];
   const [a, b] = diff.lost;
@@ -587,7 +616,14 @@ function domainSegments(ds: DomainStatus, observed: boolean, diff: SpliceStory['
 // ======================== Caption ========================
 
 function Caption({ t, story }: { t: number; story: SpliceStory }) {
-  const lines: [number, string][] = [
+  const fz = story.fusion;
+  const lines: [number, string][] = fz ? [
+    [0, `Pre-mRNA: ${fz.five.geneName}'s transcript (top), and the fusion transcript below: ${fz.five.geneName}'s exons up to the junction, then ${fz.three.geneName}'s (teal) from it.`],
+    [T_PRE, `Splicing: the introns loop out; ${fz.five.geneName}'s donor is joined to ${fz.three.geneName}'s acceptor, and what lies between them leaves with the lariat.`],
+    [T_JOIN, 'Mature mRNA: 5′ cap, poly(A) tail, and an exon junction complex (EJC) ~20 nt upstream of every splice junction, the fusion junction included.'],
+    [T_MRNA, `Translation from ${fz.startFrom === 'three' ? `${fz.three.geneName}'s` : `${fz.five.geneName}'s`} start codon: ${fz.frame.verdict === 'in-frame' ? `across the junction in ${fz.three.geneName}'s frame` : fz.frame.verdict === 'frameshift' ? `across the junction, ${fz.three.geneName} read out of its frame` : 'through the junction'}.`],
+    [T_TRANS, story.verdict.text],
+  ] : [
     [0, 'Pre-mRNA: exons (numbered) and introns of the MANE transcript; the observed transcript starts from the same gene.'],
     [T_PRE, 'Splicing: the spliceosome loops each intron into a lariat and joins the flanking exons.' + (story.event.kind === 'skip' ? ' The skipped exon leaves with the lariat.' : story.event.kind === 'cryptic_exon' ? ' A cryptic exon is recognised inside the intron.' : story.event.kind === 'exonic_site' ? ' A cryptic splice site inside the exon trims it.' : story.event.kind === 'intronic_site' ? ' A cryptic site in the intron retains part of it.' : '')],
     [T_JOIN, 'Mature mRNA: 5′ cap, poly(A) tail, and an exon junction complex (EJC) deposited ~20 nt upstream of every splice junction.'],
@@ -612,7 +648,9 @@ function Legend({ story, color }: { story: SpliceStory; color: string }) {
   const y = VH - 30;
   const items: { w: number; el: JSX.Element }[] = [];
   const add = (w: number, el: JSX.Element) => items.push({ w, el });
-  add(158, <g><rect x={0} y={y - 8} width={16} height={16} rx={3} fill={C.exon} /><rect x={18} y={y - 8} width={16} height={16} rx={3} fill={color} /><text x={40} y={y + 4} fontSize={10} fill={C.muted}>exon (MANE / observed)</text></g>);
+  const fz = story.fusion;
+  if (fz) add(220, <g><rect x={0} y={y - 8} width={16} height={16} rx={3} fill={color} /><rect x={18} y={y - 8} width={16} height={16} rx={3} fill={C.partner} /><text x={40} y={y + 4} fontSize={10} fill={C.muted}>exon ({fz.five.geneName} / {fz.three.geneName})</text></g>);
+  else add(158, <g><rect x={0} y={y - 8} width={16} height={16} rx={3} fill={C.exon} /><rect x={18} y={y - 8} width={16} height={16} rx={3} fill={color} /><text x={40} y={y + 4} fontSize={10} fill={C.muted}>exon (MANE / observed)</text></g>);
   add(60, <g><rect x={0} y={y - 4} width={16} height={8} rx={2} fill={C.utr} /><text x={22} y={y + 4} fontSize={10} fill={C.muted}>UTR</text></g>);
   if (story.event.kind === 'cryptic_exon' || story.event.kind === 'intronic_site') add(120, <g><rect x={0} y={y - 8} width={16} height={16} rx={3} fill="url(#sc-hatch)" stroke={C.cryptic} /><text x={22} y={y + 4} fontSize={10} fill={C.muted}>cryptic / retained intron</text></g>);
   if (story.event.affected.length) add(92, <g><rect x={0} y={y - 8} width={16} height={16} rx={3} fill="none" stroke={C.lost} strokeDasharray="3 2" /><text x={22} y={y + 4} fontSize={10} fill={C.muted}>affected exon</text></g>);
@@ -620,7 +658,8 @@ function Legend({ story, color }: { story: SpliceStory; color: string }) {
   add(70, <g><rect x={0} y={y - 7} width={20} height={14} rx={5} fill={DOMAIN_COLORS[0]} /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>domain</text></g>);
   add(78, <g><rect x={0} y={y - 7} width={20} height={14} rx={5} fill={DOMAIN_COLORS[0]} opacity={0.55} stroke={C.lost} strokeDasharray="3 2" /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>disrupted</text></g>);
   add(60, <g><rect x={0} y={y - 7} width={20} height={14} rx={5} fill="url(#sc-hatch-lost)" stroke={C.lost} /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>lost</text></g>);
-  if (story.diff.kind === 'frameshift' || story.diff.inserted.length) add(88, <g><line x1={0} y1={y} x2={20} y2={y} stroke={C.neo} strokeWidth={8} strokeLinecap="round" strokeDasharray="4 3" /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>{story.diff.kind === 'frameshift' ? 'neopeptide' : 'inserted aa'}</text></g>);
+  if (fz?.partnerResidues) add(110, <g><line x1={0} y1={y} x2={20} y2={y} stroke={C.partnerChain} strokeWidth={8} strokeLinecap="round" /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>{fz.three.geneName} residues</text></g>);
+  else if (story.diff.kind === 'frameshift' || story.diff.inserted.length) add(88, <g><line x1={0} y1={y} x2={20} y2={y} stroke={C.neo} strokeWidth={8} strokeLinecap="round" strokeDasharray="4 3" /><text x={26} y={y + 4} fontSize={10} fill={C.muted}>{story.diff.kind === 'frameshift' ? 'neopeptide' : 'inserted aa'}</text></g>);
   add(90, <g><circle cx={6} cy={y} r={5} fill={C.lost} /><text x={6} y={y + 3.5} textAnchor="middle" fontSize={8} fill="#fff" fontWeight={700}>*</text><text x={16} y={y + 4} fontSize={10} fill={C.muted}>stop / PTC</text></g>);
   let x = 24;
   return (
@@ -645,7 +684,7 @@ function Details({ story }: { story: SpliceStory }) {
     else if (i === canon.length) rowC.push(cell('*', 'text-emerald-600 font-bold', i));
     else rowC.push(cell(' ', '', i));
     const inNew = i >= diff.prefix && i < diff.prefix + diff.inserted.length;
-    if (i < ab.length) rowA.push(cell(ab[i], inNew ? 'text-amber-600 font-bold' : 'text-gray-700', i));
+    if (i < ab.length) rowA.push(cell(ab[i], inNew ? (diff.kind === 'fusion' ? 'text-teal-700 font-bold' : 'text-amber-600 font-bold') : 'text-gray-700', i));
     else if (i === ab.length) rowA.push(cell(aberrant.stopIndex != null ? '*' : '…', verdict.verdict === 'no_ptc' ? 'text-emerald-600 font-bold' : 'text-red-600 font-bold', i));
     else rowA.push(cell(' ', '', i));
   }
@@ -654,14 +693,14 @@ function Details({ story }: { story: SpliceStory }) {
       <div>
         <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Amino acids around the change (residues {from + 1}–{to}) · {diff.text}</div>
         <div className="font-mono text-[12px] leading-5 overflow-x-auto">
-          <div><span className="inline-block w-20 text-gray-500 text-[10px]">MANE</span>{rowC}</div>
-          <div><span className="inline-block w-20 text-gray-500 text-[10px]">observed</span>{rowA}</div>
+          <div><span className="inline-block w-20 text-gray-500 text-[10px]">{story.fusion ? story.fusion.five.geneName : 'MANE'}</span>{rowC}</div>
+          <div><span className="inline-block w-20 text-gray-500 text-[10px]">{story.fusion ? 'fusion' : 'observed'}</span>{rowA}</div>
         </div>
         <div className="text-[10.5px] text-gray-500 mt-1">
           {verdict.ptc != null ? `PTC at codon ${verdict.ptcCodon}, ${verdict.distanceFromStart} nt after the AUG` : 'no premature stop'}
           {verdict.distanceToLastJunction != null ? ` · ${verdict.distanceToLastJunction} nt upstream of the last exon–exon junction` : ''}
           {verdict.utr3Length != null ? ` · 3′ UTR ${verdict.utr3Length.toLocaleString('en-US')} nt${verdict.longUtr ? ' (long: EJC-independent NMD possible)' : ''}` : ''}
-          {' · '}canonical protein {canonical.protein.length} aa, observed {aberrant.protein.length} aa
+          {story.fusion ? ` · ${story.fusion.five.geneName} ${canonical.protein.length} aa, ${story.fusion.three.geneName} ${story.fusion.partnerLength} aa, fusion ${aberrant.protein.length} aa` : ` · canonical protein ${canonical.protein.length} aa, observed ${aberrant.protein.length} aa`}
         </div>
       </div>
       <div>
@@ -671,7 +710,7 @@ function Details({ story }: { story: SpliceStory }) {
           {story.domains.map((d, i) => (
             <li key={i} className="flex items-center gap-2">
               <span className="inline-block w-3 h-3 rounded-sm" style={{ background: DOMAIN_COLORS[i % DOMAIN_COLORS.length] }} />
-              <span className="flex-1 truncate" title={`${d.domain.id} · aa ${d.domain.start}–${d.domain.end}`}>{d.domain.description || d.domain.id} <span className="text-gray-400">{d.domain.start}–{d.domain.end}</span></span>
+              <span className="flex-1 truncate" title={`${d.domain.id} · aa ${d.domain.start}–${d.domain.end} · ${d.note}`}>{d.gene && <span className="text-gray-500">{d.gene} · </span>}{d.domain.description || d.domain.id} <span className="text-gray-400">{d.domain.start}–{d.domain.end}</span></span>
               <span className={`px-1.5 rounded-full text-[10px] font-semibold ${d.state === 'intact' ? 'bg-emerald-100 text-emerald-700' : d.state === 'lost' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}`} title={d.note}>{d.state}</span>
             </li>
           ))}

@@ -10,7 +10,7 @@
  *   This sees what the lengths cannot: a stop codon in the 3′ partner's 5′ UTR before its start codon, or one formed
  *   by the junction codon itself.
  */
-import { translateCodon, type TxModel } from './geometry';
+import { cdnaPosition, translateCodon, type TxModel } from './geometry';
 
 /** One end of a fusion junction: the model, and the exon boundary the junction is on (genomic, 0-based). */
 export interface FusionEnd { model: TxModel; pos: number }
@@ -102,6 +102,17 @@ export function fusionFrame(five: FusionEnd, three: FusionEnd): FusionFrame {
       : `in frame: ${g5} p.1–${aCodons}${aBases % 3 ? ' (its last codon joined across the junction)' : ''} fused to ${g3} from p.${bCodon}` };
 }
 
+/**
+ * The fusion transcript in HGVS r. notation: the 5′ partner from its first base to the junction, `::`, the 3′ partner
+ * from the junction to its last base (e.g. NM_152263.2:r.-115_775::NM_002609.3:r.1580_*1924).
+ */
+export function fusionHgvs(five: FusionEnd, three: FusionEnd): string {
+  const ends = (m: TxModel) => { const ex = [...m.exons].sort((x, y) => x.start - y.start); return m.strand > 0 ? [ex[0].start, ex[ex.length - 1].end - 1] : [ex[ex.length - 1].end - 1, ex[0].start]; };
+  const r = (g: number, m: TxModel) => cdnaPosition(g, m).bare;
+  const A = five.model, B = three.model, pa = A.strand > 0, pb = B.strand > 0;
+  return `${A.transcriptId}:r.${r(ends(A)[0], A)}_${r(pa ? five.pos - 1 : five.pos, A)}::${B.transcriptId}:r.${r(pb ? three.pos : three.pos - 1, B)}_${r(ends(B)[1], B)}`;
+}
+
 /** The transcript bases [from, to] (1-based, inclusive) of a model, from its genomic bases. */
 export async function transcriptBases(m: TxModel, from: number, to: number, getRef: (start: number, end: number) => Promise<string | null>): Promise<string | null> {
   const L = layoutOf(m);
@@ -152,6 +163,8 @@ export async function fusionPeptide(five: FusionEnd, three: FusionEnd, frame: Fu
   const ta = lastBefore(five, A)!, tb = firstAfter(three, B)!;
   const rest = frame.aBases % 3, keep = Math.min(frame.aCodons ?? 0, beforeCodons);
   const aSeq = await transcriptBases(five.model, ta - rest - 3 * keep + 1, ta, getRef);
+  // read on to the 3′ partner's own stop codon when it lies further (a long CDS), so an in-frame fusion can be judged
+  if (B.cdsEnd != null) afterBases = Math.max(afterBases, Math.min(150000, B.cdsEnd - tb + 4));
   const bSeq = await transcriptBases(three.model, tb, tb + afterBases - 1, getRef);
   if (aSeq == null || bSeq == null) return null;
   const before = translate(aSeq.slice(0, 3 * keep));

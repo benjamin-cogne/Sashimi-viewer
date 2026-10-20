@@ -119,12 +119,21 @@ in percentages), **A− / A+** (label size) and **🎬 Cartoon** (experimental):
 UniProt/Pfam domains and the **NMD verdict** (a stop > 55 nt before the last exon junction is degraded; in the last
 exon, within 55 nt of the last junction, or within 150 nt of the start codon it escapes), as SVG/PNG.
 
-**Click a fusion arc** (*GENEA exon 2 → GENEB exon 2*): the supporting reads per sample and the **reading frame**. From
-the two partners' coding sequences it reads **in frame** (the 3′ partner's protein follows) or **frameshift**, or says
-the junction lies in a UTR. The fused sequence is then translated across the junction from the reference: the peptide
-on each side (`…QKLR[G]|VSCQ…`, the codon across the junction in brackets) and where the protein ends. That shows
-whether an in-frame fusion carries the 3′ partner's protein to its own stop, or stops early (in its 5′ UTR, at the
-junction codon). Both partners' models must be loaded: pan over the partner gene if the popover asks.
+**Click a fusion arc** (*GENEA exon 2 → GENEB exon 2*), or a dashed long-range arc whose two ends lie on exons of two
+genes on one strand (a read-through such as *GLE1 exon 12 → SPTAN1 exon 2*): the supporting reads per sample, the fusion
+transcript in HGVS notation (`NM_…:r.-87_1776::NM_…:r.-3_*328`) and the **reading frame**. From the two partners' coding
+sequences it reads **in frame** (the 3′ partner's protein follows) or **frameshift**, or says the junction lies in a
+UTR. The fused sequence is then translated across the junction from the reference: the peptide on each side
+(`…QKLR[G]|VSCQ…`, the codon across the junction in brackets) and where the protein ends. That shows whether an
+in-frame fusion carries the 3′ partner's protein to its own stop, or stops early (in its 5′ UTR, at the junction
+codon). Both partners' models must be loaded: pan over the partner gene if the popover asks.
+
+**🎬 Cartoon** on a fusion (experimental): the 5′ partner's transcript on top, the fused one below (its exons, then the
+3′ partner's in teal), spliced, translated across the junction and judged like any transcript. The verdict is **in-frame
+fusion protein** when translation reaches the 3′ partner's own stop codon; otherwise the stop is premature and the NMD
+rules apply to the fused transcript. Both partners' UniProt/Pfam domains are drawn on the fusion protein: the 5′ one's
+kept up to the junction, the 3′ one's carried when read in their frame. A junction in the 5′ partner's 5′ UTR uses the
+3′ partner's start codon (promoter swap). The fusion protein's own stability is not predicted.
 
 **% usage.** In *Usage*, an arc's label is its share of the reads competing at its intron, so one intron's labels sum
 to 100 %: canonical, alternative 5′/3′ site, pseudo-exon (A + B)/2, skipping (2·S over the two introns), retention

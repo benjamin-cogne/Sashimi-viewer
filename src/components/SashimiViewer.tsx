@@ -17,9 +17,9 @@ import {
   type TxModel, type Scale, type VirtualAxis, type JunctionInfo, type FrameInfo,
 } from './sashimi/geometry';
 import type { ExonPhase } from './sashimi/geometry';
-import { fusionFrame, fusionPeptide, type FusionPeptide } from './sashimi/fusionFrame';
+import { fusionFrame, fusionHgvs, fusionPeptide, type FusionEnd, type FusionPeptide } from './sashimi/fusionFrame';
 import SpliceCartoon from './sashimi/SpliceCartoon';
-import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
+import { fusionStory, fusionStoryPossible, fusionWindows, spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
@@ -1325,7 +1325,7 @@ export default function SashimiViewer({
   const [irSeq, setIrSeq] = useState<{ key: string; seq: string | null; error?: string } | null>(null);
   const dragMoved = useRef(false);
   /** Splicing cartoon opened from a junction popover (experimental). */
-  const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string } | null>(null);
+  const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string; /** a fusion transcript: its two partners */ fusion?: { five: FusionEnd; three: FusionEnd } } | null>(null);
   const [cartoonState, setCartoonState] = useState<{ story: SpliceStory | null; loading: string | null; error?: string }>({ story: null, loading: null });
   /** Per-exon depth of every sample of the run (the cohort of the exon-usage statistics), one fetch per gene. */
   const [exonDepths, setExonDepths] = useState<{ key: string; data: ExonUsageResponse | null; error?: string } | null>(null);
@@ -1660,12 +1660,11 @@ export default function SashimiViewer({
   useEffect(() => {
     if (!cartoon) { setCartoonState({ story: null, loading: null }); return; }
     let cancelled = false;
-    const { j, model } = cartoon;
+    const { j, model, fusion } = cartoon;
     const others = tracks.flatMap(t => t.junctions);
-    const event = spliceEvent(j, model, others);
     setCartoonState({ story: null, loading: 'fetching the reference sequence…' });
     (async () => {
-      const windows = storyWindows(event);
+      const windows = fusion ? fusionWindows(fusion.five, fusion.three) : storyWindows(spliceEvent(j, model, others));
       const seqs = await Promise.all(windows.map(([a, b]) => ds.getReference(currentChrom, a, b)));
       if (cancelled) return;
       if (seqs.some(x => x == null)) { setCartoonState({ story: null, loading: null, error: 'No reference sequence available for this gene (set REFERENCE_FASTA or allow access to the UCSC / Ensembl APIs).' }); return; }
@@ -1674,15 +1673,16 @@ export default function SashimiViewer({
         return 'N'.repeat(b - a);
       };
       setCartoonState({ story: null, loading: 'fetching protein domains…' });
-      let features: import('./sashimi/types').ProteinDomain[] = [];
-      if (model.cdsStart != null && model.cdsEnd != null) {
+      const domainsOf = async (m: TxModel): Promise<import('./sashimi/types').ProteinDomain[]> => {
+        if (m.cdsStart == null || m.cdsEnd == null) return [];
         try {
-          features = await ds.getProteinDomains({ transcriptId: model.transcriptId, translationId: model.translationId, chrom: currentChrom, strand: model.strand, exons: model.exons, cdsStart: model.cdsStart, cdsEnd: model.cdsEnd });
-        } catch { features = []; }
-      }
+          return await ds.getProteinDomains({ transcriptId: m.transcriptId, translationId: m.translationId, chrom: currentChrom, strand: m.strand, exons: m.exons, cdsStart: m.cdsStart, cdsEnd: m.cdsEnd });
+        } catch { return []; }
+      };
+      const [features, partnerFeatures] = await Promise.all([domainsOf(fusion ? fusion.five.model : model), fusion ? domainsOf(fusion.three.model) : Promise.resolve([])]);
       if (cancelled) return;
       try {
-        setCartoonState({ story: spliceStory(j, model, others, seqAt, features), loading: null });
+        setCartoonState({ story: fusion ? fusionStory(fusion.five, fusion.three, seqAt, features, partnerFeatures) : spliceStory(j, model, others, seqAt, features), loading: null });
       } catch (e: any) {
         setCartoonState({ story: null, loading: null, error: e?.message || String(e) });
       }
@@ -1767,6 +1767,15 @@ export default function SashimiViewer({
     }
     return { farAtStart, farPos, nearExon, partner, partnerExon, known: genes != null };
   }, [tx, altJunctionIndex, junctionContext, farGenes, currentChrom]);
+  /**
+   * The two partners of a long-range junction in transcription order, as fusionFrame takes them (the 5′ one's donor, the
+   * 3′ one's acceptor): on one strand, both ends on their gene's exon boundaries. Null otherwise.
+   */
+  const longRangeEnds = useCallback((j: JunctionArc, lr: NonNullable<ReturnType<typeof longRangeOf>>): { five: FusionEnd; three: FusionEnd } | null => {
+    if (!tx || !lr.partner || lr.partner.strand !== tx.strand || lr.partnerExon == null || lr.nearExon == null || lr.partner.geneName === tx.geneName) return null;
+    const left: TxModel = lr.farAtStart ? lr.partner : tx, right: TxModel = lr.farAtStart ? tx : lr.partner;
+    return tx.strand > 0 ? { five: { model: left, pos: j.start }, three: { model: right, pos: j.end } } : { five: { model: right, pos: j.end }, three: { model: left, pos: j.start } };
+  }, [tx]);
   /** The long-range junction of an arc in words: the two genes in transcription order (5′ partner first), with their exons. */
   const longRangeLabel = useCallback((j: JunctionArc, lr: NonNullable<ReturnType<typeof longRangeOf>>): string => {
     const me = `${tx?.geneName ?? 'the gene'}${lr.nearExon != null ? ` exon ${lr.nearExon}` : ' (unannotated site)'}`;
@@ -4167,7 +4176,8 @@ export default function SashimiViewer({
             : 'touches no annotated splice site: no share') +
             `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString('en-US')} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
           : null;
-        const title = (lr ? `${longRangeLabel(j, lr)}\n` : '') + (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
+        const lrEnds = lr ? longRangeEnds(j, lr) : null;
+        const title = (lr ? `${longRangeLabel(j, lr)}\n${lrEnds ? `reading frame: ${fusionFrame(lrEnds.five, lrEnds.three).text}\n` : ''}` : '') + (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
           `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
           (j.snapped ? `including ${j.snapped.toLocaleString('en-US')} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
@@ -4417,7 +4427,7 @@ export default function SashimiViewer({
       if (e) place(e.t, e.idx);
     }
     return { layouts: out, annotY };
-  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -6117,18 +6127,42 @@ export default function SashimiViewer({
   interface PopStrip { values: { value: number; name: string; color: string | null }[]; median: number | null }
   // the fused protein across a fusion junction whose popover is open, from the partners' reference bases (fusionFrame.ts)
   const [fusionPep, setFusionPep] = useState<{ key: string; pep?: FusionPeptide | null; error?: string } | null>(null);
+  /** The partners of the fusion junction whose popover is open: a structural arc of an RNA track, or a long-range spliced one. */
+  const popoverFusion = useMemo((): { five: FusionEnd; three: FusionEnd; frame: ReturnType<typeof fusionFrame> } | null => {
+    if (popover?.kind === 'structural' && popover.fusion && popover.sv !== 'deletion' && popover.sv !== 'discordant') {
+      const fz = fusionOf(popover.j as SvArc, popover.sv);
+      return fz?.frame && fz.five && fz.three ? { five: fz.five, three: fz.three, frame: fz.frame } : null;
+    }
+    if (popover?.kind === 'junction') {
+      const lr = longRangeOf(popover.j), ends = lr ? longRangeEnds(popover.j, lr) : null;
+      return ends ? { ...ends, frame: fusionFrame(ends.five, ends.three) } : null;
+    }
+    return null;
+  }, [popover, fusionOf, longRangeOf, longRangeEnds]);
   useEffect(() => {
-    if (popover?.kind !== 'structural' || !popover.fusion || popover.sv === 'deletion' || popover.sv === 'discordant') return;
-    const fz = fusionOf(popover.j as SvArc, popover.sv);
-    if (!fz?.frame || fz.frame.aBases == null || !fz.five || !fz.three) return;
+    const fz = popoverFusion;
+    if (!popover || popover.kind === 'exon' || popover.kind === 'retention' || !fz || fz.frame.aBases == null) return;
     const key = popover.key;
     if (fusionPep?.key === key) return;
     setFusionPep({ key });
     fusionPeptide(fz.five, fz.three, fz.frame, (a, b) => ds.getReference(currentChrom, a, b))
       .then(pep => setFusionPep(prev => (prev?.key === key ? { key, pep } : prev)))
       .catch(e => setFusionPep(prev => (prev?.key === key ? { key, error: e?.message || String(e) } : prev)));
-  }, [popover, fusionOf, currentChrom]); // eslint-disable-line react-hooks/exhaustive-deps
-  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string } | null } | null => {
+  }, [popover, popoverFusion, currentChrom]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** The frame and translation lines of a fusion junction's popover, and its cartoon when one can be drawn. */
+  const fusionLines = (fz: NonNullable<typeof popoverFusion>, key: string): string[] => {
+    const pep = fusionPep?.key === key ? fusionPep : null;
+    const lines = [`fusion transcript: ${fusionHgvs(fz.five, fz.three)}`, `reading frame: ${fz.frame.text}`];
+    if (pep?.pep) {
+      const p = pep.pep;
+      lines.push(`translation: …${p.before}${p.junction ? `[${p.junction}]` : ''}|${p.after}  (${fz.five.model.geneName} | ${fz.three.model.geneName}${p.junction ? '; [ ] the codon across the junction' : ''})`);
+      lines.push(p.text);
+    } else if (fz.frame.aBases != null) lines.push(pep?.error ? `translation: the partners' bases could not be read (${pep.error})` : pep && pep.pep === null ? 'translation: the partners\' bases are not available' : 'translation: reading the partners\' bases…');
+    return lines;
+  };
+  const fusionCartoon = (fz: typeof popoverFusion, j: JunctionArc) => (fz && fusionStoryPossible(fz.five, fz.three)
+    ? { j, model: fz.five.model, label: `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`, fusion: { five: fz.five, three: fz.three } } : null);
+  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string; fusion?: { five: FusionEnd; three: FusionEnd } } | null } | null => {
     if (!popover) return null;
     const pct = (v: number | null | undefined, d = 0) => (v == null || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(d)}%`);
     const num = (v: number | null | undefined, d = 1) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
@@ -6178,22 +6212,16 @@ export default function SashimiViewer({
       // a fusion junction of an RNA track: its partners, the reading frame across it and the fused protein there
       const fz = popover.fusion && (sv === 'split' || sv === 'duplication' || sv === 'inversion') ? fusionOf(j as SvArc, sv) : null;
       if (fz) {
-        const pep = fusionPep?.key === popover.key ? fusionPep : null;
         const lines = [fz.what];
-        if (fz.frame) {
-          lines.push(`reading frame: ${fz.frame.text}`);
-          if (pep?.pep) {
-            const p = pep.pep;
-            lines.push(`translation: …${p.before}${p.junction ? `[${p.junction}]` : ''}|${p.after}  (${fz.five!.model.geneName} | ${fz.three!.model.geneName}${p.junction ? '; [ ] the codon across the junction' : ''})`);
-            lines.push(p.text);
-          } else if (fz.frame.aBases != null) lines.push(pep?.error ? `translation: the partners' bases could not be read (${pep.error})` : pep && pep.pep === null ? 'translation: the partners\' bases are not available' : 'translation: reading the partners\' bases…');
+        if (fz.frame && popoverFusion) {
+          lines.push(...fusionLines(popoverFusion, popover.key));
         } else {
           lines.push(fz.oriented ? 'reading frame: needs a donor of one gene joined to an acceptor of another, both with their model in the view (pan to load the partner gene)' : 'reading frame: unknown, no end of the junction on a splice site');
         }
         return {
           title: `Fusion junction? ${fz.label}`,
           subtitle: `${currentChrom}:${(fz.start + 1).toLocaleString('en-US')}-${fz.end.toLocaleString('en-US')} · ${formatBp(fz.end - fz.start)} apart${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
-          cartoon: null, hgvs: lines,
+          cartoon: fusionCartoon(popoverFusion, j), hgvs: lines,
           tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
           strip: null,
           note: `Split reads (SA tags) and reads clipped at the junction whose clipped bases align at the other end, on each RNA sample. The reading frame is that of the two partners' models in view: the coding bases the 5′ partner keeps from its start codon against the junction's place in the 3′ partner's coding sequence (in frame when they agree modulo 3); the translation reads the fused sequence from the reference in the 5′ partner's frame across the junction to its first stop, which tells whether the 3′ partner's protein is carried to its own stop codon. Evidence, not a call: the transcript models are the annotated ones, the junction is placed on their exon boundaries (within ${FUSION_SNAP_BP} bp of the reads).`,
@@ -6311,12 +6339,20 @@ export default function SashimiViewer({
       const { model, info, foreign } = junctionContext(j);
       const allJunctions = tracks.flatMap(t => t.junctions);
       const hgvs = model ? junctionHgvs(j, model, allJunctions) : null;
-      const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, allJunctions) : null;
+      // a long-range junction: the frame is the fusion's, across the two partners (popoverFusion), not one model's
+      const lr = longRangeOf(j);
+      const frame = model && info.cls !== 'canonical' && !lr ? junctionFrame(j, model, allJunctions) : null;
       const key = junctionKey(j);
       const inAlt = altJunctionIndex.get(key);
-      const hgvsLines = hgvs ? [`${model!.transcriptId}: donor ${hgvs.donor} → acceptor ${hgvs.acceptor}`, `${hgvs.effect} · ${hgvs.summary}`] : ['no MANE Select model loaded'];
+      // a long-range junction with both partners known: the fusion's notation (fusionLines), not one gene's c. positions
+      const hgvsLines = lr && popoverFusion ? [] : hgvs ? [`${model!.transcriptId}: donor ${hgvs.donor} → acceptor ${hgvs.acceptor}`, `${hgvs.effect} · ${hgvs.summary}`] : ['no MANE Select model loaded'];
       if (foreign && tx) hgvsLines.unshift(`${foreign.geneName} (${foreign.strand === tx.strand ? 'same strand as' : 'antisense to'} ${tx.geneName}) · ${foreign.transcriptId}`);
       if (frame) hgvsLines.push(`reading frame: ${frameLabel(frame)} · ${frame.text}`);
+      if (lr) {
+        hgvsLines.unshift(longRangeLabel(j, lr).split('\n')[0]);
+        if (popoverFusion) hgvsLines.push(...fusionLines(popoverFusion, popover.key));
+        else hgvsLines.push(lr.partner && lr.partner.strand !== tx?.strand ? 'reading frame: none, the partner gene is on the other strand' : 'reading frame: needs both ends on exon boundaries of two genes with their models loaded');
+      }
       const alts = displayTracks.map(t => {
         const mine = t.junctions.find(k => junctionKey(k) === key);
         const alt = model ? junctionAlternative({ ...j, count: mine?.count ?? 0 }, t.junctions, model) : null;
@@ -6336,11 +6372,11 @@ export default function SashimiViewer({
           const st = stripFor(i); if (st) strips.push(st);
         }
       }
-      const canCartoon = !!model && model.cdsStart != null && ['canonical', 'skip', 'cryptic_exon', 'exonic_site', 'intronic_site'].includes(spliceEvent(j, model, allJunctions).kind);
+      const canCartoon = !lr && !!model && model.cdsStart != null && ['canonical', 'skip', 'cryptic_exon', 'exonic_site', 'intronic_site'].includes(spliceEvent(j, model, allJunctions).kind);
       return {
         title: `Junction ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
         subtitle: `intron ${formatBp(j.end - j.start)} · ${info.label}${inAlt ? ` · annotated in ${inAlt.slice(0, 3).join(', ')}${inAlt.length > 3 ? '…' : ''}` : ''}`,
-        cartoon: canCartoon ? { j, model: model!, label: info.label } : null,
+        cartoon: lr ? fusionCartoon(popoverFusion, j) : canCartoon ? { j, model: model!, label: info.label } : null,
         hgvs: hgvsLines, tables, strip: strips[0] ?? null,
         note: (altLabel ? `Share = reads of this junction / (reads + ${altLabel}), junction reads only (rMATS-style).` : 'A canonical junction has no single alternative; click an exon for its usage.') +
           (tables.length > 1 ? ' Usage of the skipped exon(s) below is depth-based (see exon panel).' : ''),
@@ -6370,7 +6406,7 @@ export default function SashimiViewer({
         ' ψ = mean inclusion junction reads / (mean inclusion + skipping reads).',
       status,
     };
-  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands, irSeq, usageEvents, viewStart, viewEnd, isDnaTrack, fusionOf, fusionPep]);
+  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands, irSeq, usageEvents, viewStart, viewEnd, isDnaTrack, fusionOf, fusionPep, popoverFusion, longRangeOf, longRangeLabel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // a retention popover reads the intron's bases (with a few exon bases each side) for its reading frame
   useEffect(() => {
@@ -7357,8 +7393,8 @@ export default function SashimiViewer({
               </div>
               <div className="flex items-center gap-2">
                 {popoverContent.cartoon && (
-                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
-                    className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
+                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
+                    className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
                 )}
                 {popover.kind !== 'exon' && popover.kind !== 'retention' && (() => {
                   const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;

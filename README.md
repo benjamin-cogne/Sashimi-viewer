@@ -50,6 +50,7 @@ a bookmark to the run folder.
 | Is this "mismatch" a known polymorphism? | **SNPs** track (dbSNP 155 common; AF ≥ 1 % by default, 0.1 or 5 %) and the **variant sites** scanned from every read of the window (★ on RNA, allele bars on DNA). Click a site for its reads, allele fraction and quality. |
 | How long is this repeat expansion? | **Repeat inspector**, for the STRchive loci (a pill on the ruler) or any repeat selected with Shift+drag. Each read is sized between locus-specific anchors. The result is a histogram and a waterfall of the reads unit by unit, with the alleles called and a consensus per allele. |
 | What does the protein look like afterwards? | **Splicing cartoon** (experimental): animated pre-mRNA, spliced mRNA, translation with UniProt/Pfam domains, NMD verdict, exportable as SVG/PNG. |
+| Is this read-through or fusion transcript in frame? | Click the fusion or long-range arc: the reading frame from the two partners' CDS and the fused peptide across the junction; **🎬 Cartoon** shows the fused transcript, its translation, both genes' domains and whether it is degraded by NMD or makes an in-frame fusion protein. |
 
 ## What it shows
 
