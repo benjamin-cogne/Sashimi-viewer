@@ -487,7 +487,7 @@ export function fusionStory(five: FusionEnd, three: FusionEnd, seqAt: (s: number
     diff = { ...base, kind: neo.length ? 'frameshift' : 'truncation', inserted: neo,
       text: frame.verdict === 'in-frame'
         ? `in frame by the lengths, but a stop codon ${neo.length + 1} codons after ${gA} p.${prefix} ends the protein before ${gB}'s own sequence`
-        : neo.length ? `${gA} p.1–${prefix}, then ${neo.length} aa of ${gB} read out of its frame, then a stop` : `${gA} p.1–${prefix}, then a stop codon at the junction` };
+        : neo.length ? `${gA} p.1–${prefix}, then ${neo.length} aa of ${gB} read out of its frame, then a stop` : `${gA} p.1–${prefix}, then a stop codon right after the junction` };
   }
 
   // the verdict, in the words of a fusion
