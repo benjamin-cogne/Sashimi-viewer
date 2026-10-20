@@ -936,6 +936,11 @@ function methylTicksIn(t: { pos: Int32Array; pre: [Int32Array, Int32Array, Int32
   for (let c = 0; c < 3; c++) n[c] += t.pre[c][j] - t.pre[c][i];
 }
 
+/** A track's deepest base over [start, end), the opposite strand's included when the strands are split. */
+function trackMaxDepth(t: { coverage: CoverageRun[]; anti?: { coverage: CoverageRun[] } }, start: number, end: number): number {
+  return Math.max(maxDepthIn(t.coverage, start, end), t.anti ? maxDepthIn(t.anti.coverage, start, end) : 0);
+}
+
 /**
  * The deletion-type arcs of split reads (and clipped reads placed by realignment): the source merges them with the CIGAR
  * deletions of the same span (`deletions`, by their sources); `splits` holds them in evidence gathered before that.
@@ -2860,7 +2865,7 @@ export default function SashimiViewer({
   // ======================== Derived rendering data ========================
 
   const globalMaxDepth = useMemo(
-    () => Math.max(1, ...tracks.map(t => maxDepthIn(t.coverage, viewStart, viewEnd))),
+    () => Math.max(1, ...tracks.map(t => trackMaxDepth(t, viewStart, viewEnd))),
     [tracks, viewStart, viewEnd],
   );
 
@@ -4087,7 +4092,8 @@ export default function SashimiViewer({
       void maxLevel;
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1.
       // Relative mode draws each sample as a fraction of its own maximum in view (the axis reads 0–100 %).
-      const ownMax = maxDepthIn(track.coverage, viewStart, viewEnd);
+      // both strands on one scale when they are split: the opposite one is mirrored under the baseline, never clipped
+      const ownMax = trackMaxDepth(track, viewStart, viewEnd);
       const yMax = track.gtex ? 1 : (depthAxis === 'relative' || track.group) ? Math.max(1, ownMax) : niceMax(depthAxis === 'shared' ? globalMaxDepth : ownMax);
       // Arcs are first laid out against a baseline at y = 0 and measured; the junction area is then sized to
       // what they and their pills really occupy (rather than a fixed height per nesting level), and everything
@@ -5314,7 +5320,8 @@ export default function SashimiViewer({
     const gtexWarn = track.gtex ? (track.error || track.gtex.warning || '') : '';
     const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
-    const axisNote = relative ? `  ·  max ${yMax.toLocaleString('en-US')}×` : '';
+    const antiMax = track.anti ? maxDepthIn(track.anti.coverage, viewStart, viewEnd) : 0;
+    const axisNote = relative ? (track.anti ? `  ·  max ${maxDepthIn(track.coverage, viewStart, viewEnd).toLocaleString('en-US')}× · opposite ${antiMax.toLocaleString('en-US')}×` : `  ·  max ${yMax.toLocaleString('en-US')}×`) : '';
     const dnaNote = isDnaTrack(track) ? '  ·  DNA' : '';
     const svDiag = isDnaTrack(track) && svHints && track.structural?.diagnostics ? svDiagnosticsText(track.structural, svMinReads(track.sampleId)) : '';
     const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
