@@ -997,6 +997,11 @@ function App() {
       <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={`w-4 h-4 grid place-items-center rounded ${v.id === activeId ? 'text-slate-400 hover:text-white' : 'text-slate-400 hover:text-red-500'}`} title="Forget this view" aria-label="Forget this view"><Icon name="x" size={12} /></button>
     </span>
   ));
+  // the DEV banner can be dismissed; remembered in this browser for this build (a new dev build shows it again), and the
+  // version pill and the footer still say "dev"
+  const devKey = DEV ? `sashimi.devBanner.hidden.${DEV.sha || DEV.date || DEV.branch}` : '';
+  const [devHidden, setDevHidden] = useState(() => { try { return !!DEV && localStorage.getItem(devKey) === '1'; } catch { return false; } });
+  const hideDevBanner = () => { setDevHidden(true); try { localStorage.setItem(devKey, '1'); } catch { /* private mode: hidden for this visit only */ } };
   const versionPill = (
     <span className="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold leading-none bg-indigo-50 text-indigo-600" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
   );
@@ -1004,12 +1009,13 @@ function App() {
 
   return (
     <div className="min-h-screen bg-[#f6f7fb] text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
-      {DEV && (
+      {DEV && !devHidden && (
         <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
           style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
           <span className="px-1.5 py-0.5 rounded bg-white text-red-700 tracking-wider">DEV MODE</span>
           <span>Unreleased build from branch <code>{DEV.branch}</code>{DEV.sha ? <> · commit <code>{DEV.sha}</code></> : null}{DEV.date ? ` · built ${DEV.date}` : ''} · not for clinical use.</span>
           <a href={DEV.stable} className="underline ml-auto">Go to the stable version →</a>
+          <button onClick={hideDevBanner} className="w-5 h-5 grid place-items-center rounded hover:bg-white/20" title="Hide this banner (for this build, in this browser; the version pill still says dev)" aria-label="Hide the DEV banner"><Icon name="x" size={12} /></button>
         </div>
       )}
       <header className="bg-white border-b border-slate-200">
