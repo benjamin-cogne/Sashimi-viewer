@@ -12,6 +12,8 @@
  *             window should not be derived from the variants.
  *   pad       Flank in bp around a point variant or position (default 100).
  *   label     Text drawn next to the marker (c. / p. notation); one per variant, separated by commas.
+ *             A `+` before a digit or `*` is kept (`c.157+5G>A`, `c.*12`); any other `+` is a space, as a
+ *             form-encoded link writes it (`label=BRCA1+c.5266dupC`). `%2B` is always a plus.
  *   gene      Symbol used when no RefSeq gene covers the locus (fallback lookup).
  *   build     GRCh38 (default) or GRCh37; only needed when no variant carries an accession.
  *   reads     `1` opens with the reads track on (off by default).
@@ -40,10 +42,16 @@ export interface LinkRequest {
 const DEFAULT_PAD = 100;
 const MAX_PAD = 5_000_000;
 
+/**
+ * The parameters of a fragment or query string. URLSearchParams reads `+` as a space (form encoding), which turned the
+ * intronic offset of `c.157+5G>A`, typed as is in a link, into `c.157 5G>A`: a `+` before a digit or `*` (an HGVS offset,
+ * a 3′ UTR position) is kept as a plus.
+ */
+const params = (text: string) => new URLSearchParams(text.replace(/\+(?=[0-9*])/g, '%2B'));
 function readParams(hash: string, search: string): URLSearchParams {
   const h = hash.replace(/^#\/?/, '');
-  const p = new URLSearchParams(h.includes('=') ? h : '');
-  if (!p.has('variant') && !p.has('locus')) return new URLSearchParams(search.replace(/^\?/, ''));
+  const p = params(h.includes('=') ? h : '');
+  if (!p.has('variant') && !p.has('locus')) return params(search.replace(/^\?/, ''));
   return p;
 }
 
@@ -74,7 +82,7 @@ function variantOf(text: string, index: number, label: string | undefined, fallb
   const locus = parseLocus(t);
   if (locus) {
     const point = locus.start === locus.end;
-    return { id: `link${index}`, kind: point ? 'snv' : 'other', chrom: locus.chrom, start: locus.start - 1, end: locus.end, label: label || `${locus.chrom}:${locus.start.toLocaleString()}${point ? '' : `-${locus.end.toLocaleString()}`}`, text: t, source: 'indication', build: null };
+    return { id: `link${index}`, kind: point ? 'snv' : 'other', chrom: locus.chrom, start: locus.start - 1, end: locus.end, label: label || `${locus.chrom}:${locus.start.toLocaleString('en-US')}${point ? '' : `-${locus.end.toLocaleString('en-US')}`}`, text: t, source: 'indication', build: null };
   }
   return null;
 }
@@ -126,6 +134,6 @@ export function parseLink(hash: string, search: string): LinkRequest | null {
 
 /** One line describing the request, for the waiting notice. */
 export function describeLink(req: LinkRequest): string {
-  const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString()}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString()}` : ''}`;
-  return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString()}-${req.view.end.toLocaleString()}`;
+  const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString('en-US')}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString('en-US')}` : ''}`;
+  return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString('en-US')}-${req.view.end.toLocaleString('en-US')}`;
 }

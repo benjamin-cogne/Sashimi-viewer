@@ -226,74 +226,246 @@ function firstRunFrom(runs: CoverageRun[], pos: number): number {
   return lo;
 }
 
-export function maxDepthIn(runs: CoverageRun[], start: number, end: number): number {
-  let m = 0;
-  for (let i = firstRunFrom(runs, start); i < runs.length && runs[i].start < end; i++) {
-    if (runs[i].depth > m) m = runs[i].depth;
+// ======================== Coverage: min/max pyramid ========================
+//
+// A deep library changes depth at almost every base, so a gene-wide window holds one run per base
+// (190 000 for a 190 kb capture at 1 000×). Drawing, or finding the axis maximum, by walking those
+// runs costs O(bases in view) per frame and per track. Worse, a pixel then stands for ~160 bases and
+// keeping only their maximum hides any narrow dropout: a 50 bp hole at 30× in 1 000× coverage drew
+// as 1 045×.
+//
+// The pyramid keeps, for bins of 2^k bases (k ≥ PYR_K0), the minimum and the maximum depth over the
+// bin — the extremes, never an average, so nothing is smoothed away (the idea behind bigWig zoom
+// levels, and behind M4, Jugel et al., PVLDB 7(10), 2014: a pixel-perfect line chart only needs the
+// extremes of each pixel). Any [a, b) then decomposes into O(log n) whole bins plus two edges read
+// from the runs, so the exact min and max of every pixel column cost the same whatever the zoom or
+// the depth. Positions inside the data that no run covers are depth 0, as the paths draw them.
+
+/** Finest pyramid level: bins of 16 bases. Narrower edges of a range are read from the runs. */
+const PYR_K0 = 4;
+interface PyrLevel { first: number; min: Int32Array; max: Int32Array; /** total depth of the bin's bases (their mean × the bin size) */ sum: Float64Array }
+export interface DepthIndex {
+  /** extent of the data: from the first run's start to the last run's end */
+  start: number;
+  end: number;
+  /** levels[i] has bins of 2^(PYR_K0 + i) bases, bin j covering [j << k, (j + 1) << k), stored from `first` */
+  levels: PyrLevel[];
+}
+const depthIndexes = new WeakMap<CoverageRun[], DepthIndex>();
+
+function pyramidUp(levels: PyrLevel[]): void {
+  for (;;) {
+    const lv = levels[levels.length - 1];
+    if (lv.min.length <= 2) return;
+    const first = lv.first >> 1, last = (lv.first + lv.min.length - 1) >> 1;
+    const min = new Int32Array(last - first + 1).fill(0x7fffffff), max = new Int32Array(last - first + 1), sum = new Float64Array(last - first + 1);
+    for (let i = 0; i < lv.min.length; i++) {
+      const j = ((lv.first + i) >> 1) - first;
+      if (lv.min[i] < min[j]) min[j] = lv.min[i];
+      if (lv.max[i] > max[j]) max[j] = lv.max[i];
+      sum[j] += lv.sum[i];
+    }
+    levels.push({ first, min, max, sum });
   }
-  return m;
 }
 
-export interface CoveragePaths { fill: string; stroke: string }
+/**
+ * Builds the pyramid of [start, end) from runs handed over left to right (sorted, not overlapping), as a sweep
+ * produces them: O(1) per run, plus one fill for the bins wholly inside a long run. Positions no run covers are 0.
+ */
+export class DepthIndexBuilder {
+  private readonly first: number;
+  private readonly min: Int32Array;
+  private readonly max: Int32Array;
+  private readonly sum: Float64Array;
+  private prev: number;
+  constructor(readonly start: number, readonly end: number) {
+    this.first = start >> PYR_K0;
+    const n = end > start ? ((end - 1) >> PYR_K0) - this.first + 1 : 0;
+    this.min = new Int32Array(n).fill(0x7fffffff);
+    this.max = new Int32Array(n);
+    this.sum = new Float64Array(n);
+    this.prev = start;
+  }
+  private span(a: number, b: number, d: number): void {
+    const { min, max, sum, first } = this;
+    const size = 1 << PYR_K0;
+    const ja = (a >> PYR_K0) - first, jb = ((b - 1) >> PYR_K0) - first;
+    if (d < min[ja]) min[ja] = d;
+    if (d > max[ja]) max[ja] = d;
+    if (jb === ja) { sum[ja] += d * (b - a); return; }
+    sum[ja] += d * ((ja + first + 1) * size - a);
+    if (d < min[jb]) min[jb] = d;
+    if (d > max[jb]) max[jb] = d;
+    sum[jb] += d * (b - (jb + first) * size);
+    // the bins wholly inside [a, b) hold this depth only: no other run reaches them
+    if (jb - ja > 1) { min.fill(d, ja + 1, jb); max.fill(d, ja + 1, jb); sum.fill(d * size, ja + 1, jb); }
+  }
+  add(start: number, end: number, depth: number): void {
+    if (start > this.prev) this.span(this.prev, start, 0);
+    if (end > start) this.span(start, end, depth);
+    if (end > this.prev) this.prev = end;
+  }
+  finish(): DepthIndex | null {
+    if (this.end <= this.start) return null;
+    const levels: PyrLevel[] = [{ first: this.first, min: this.min, max: this.max, sum: this.sum }];
+    pyramidUp(levels);
+    return { start: this.start, end: this.end, levels };
+  }
+}
+
+/** Pyramid of a run list (sorted, not overlapping). */
+export function buildDepthIndex(runs: CoverageRun[]): DepthIndex | null {
+  if (!runs.length) return null;
+  const b = new DepthIndexBuilder(runs[0].start, runs[runs.length - 1].end);
+  for (const r of runs) b.add(r.start, r.end, r.depth);
+  return b.finish();
+}
+
+export function registerDepthIndex(runs: CoverageRun[], index: DepthIndex | null): void {
+  if (index) depthIndexes.set(runs, index);
+}
+/** The pyramid of a run list, built on first use and kept for as long as the list lives. */
+export function depthIndexOf(runs: CoverageRun[]): DepthIndex | null {
+  let idx = depthIndexes.get(runs);
+  if (!idx) { const b = buildDepthIndex(runs); if (!b) return null; idx = b; depthIndexes.set(runs, idx); }
+  return idx;
+}
+
+/** Depth over a range: its lowest and highest base, and the mean of its bases. */
+export interface DepthStats { min: number; max: number; mean: number }
+/**
+ * Exact minimum, maximum and mean depth over [a, b), clipped to the data (null when the range misses it). The
+ * whole 16-base bins come from the pyramid, O(log n); the ragged edges from the runs.
+ */
+export function depthRange(runs: CoverageRun[], a: number, b: number, idx: DepthIndex | null = depthIndexOf(runs)): DepthStats | null {
+  const out = { min: 0, max: 0, mean: 0 };
+  return depthRangeInto(runs, a, b, idx, out) ? out : null;
+}
+
+/** depthRange without allocation (it runs once per pixel column per track per frame); false when the range misses the data. */
+function depthRangeInto(runs: CoverageRun[], a: number, b: number, idx: DepthIndex | null, out: DepthStats): boolean {
+  const n = runs.length;
+  if (!n) return false;
+  const lo = a > runs[0].start ? a : runs[0].start, hi = b < runs[n - 1].end ? b : runs[n - 1].end;
+  if (hi <= lo) return false;
+  let mn = 0x7fffffff, mx = -1, sm = 0;
+  const size = 1 << PYR_K0;
+  let L = Math.ceil(lo / size), R = Math.floor(hi / size);   // whole bins [L, R)
+  // ragged edges (or the whole range, when it holds fewer than two whole bins) from the runs, gaps counting as 0
+  let spans = 1, x1 = lo, y1 = hi, x2 = 0, y2 = 0;
+  if (idx && R - L >= 2) { spans = 2; y1 = L * size; x2 = R * size; y2 = hi; } else { L = R = 0; }
+  for (let s = 0; s < spans; s++) {
+    const x = s ? x2 : x1, y = s ? y2 : y1;
+    if (y <= x) continue;
+    let l = 0, h = n;
+    while (l < h) { const m = (l + h) >> 1; if (runs[m].end <= x) l = m + 1; else h = m; }
+    let cur = x;
+    for (let i = l; i < n && runs[i].start < y; i++) {
+      const r = runs[i];
+      if (r.start > cur) { if (mn > 0) mn = 0; if (mx < 0) mx = 0; }
+      if (r.depth < mn) mn = r.depth;
+      if (r.depth > mx) mx = r.depth;
+      sm += r.depth * ((r.end < y ? r.end : y) - (r.start > x ? r.start : x));
+      if (r.end > cur) cur = r.end;
+    }
+    if (cur < y) { if (mn > 0) mn = 0; if (mx < 0) mx = 0; }
+  }
+  if (idx && R > L) {
+    let l = L, r = R;
+    const levels = idx.levels;
+    for (let i = 0; i < levels.length && l < r; i++) {
+      const lv = levels[i], lmin = lv.min, lmax = lv.max, lsum = lv.sum, f = lv.first, len = lmin.length;
+      // the top level has no parent to climb to: what is left of the range is read there, bin by bin (two at most)
+      const top = i === levels.length - 1;
+      while (l < r && (top || (l & 1))) { const j = l - f; if (j >= 0 && j < len) { if (lmin[j] < mn) mn = lmin[j]; if (lmax[j] > mx) mx = lmax[j]; sm += lsum[j]; } l++; if (!top) break; }
+      if (top) break;
+      if (r & 1) { r--; const j = r - f; if (j >= 0 && j < len) { if (lmin[j] < mn) mn = lmin[j]; if (lmax[j] > mx) mx = lmax[j]; sm += lsum[j]; } }
+      l >>= 1; r >>= 1;
+    }
+  }
+  if (mx < 0) return false;
+  out.min = mn; out.max = mx; out.mean = sm / (hi - lo);
+  return true;
+}
+
+export function maxDepthIn(runs: CoverageRun[], start: number, end: number): number {
+  return depthRange(runs, start, end)?.max ?? 0;
+}
+
+export interface CoveragePaths {
+  /** area under the highest depth of each pixel column: the light band above the mean shows how far its bases spread */
+  fill: string;
+  /** area under the mean depth of each pixel column */
+  mean: string;
+  /** outline of that mean: the coverage line */
+  stroke: string;
+  /**
+   * a tick from the mean down to the lowest depth, in the columns where a base falls below half the mean: a dropout
+   * narrower than a pixel stays visible, without drawing the base-to-base noise of a shallow library as a second line
+   */
+  dips: string;
+}
 
 /**
- * Step-function coverage paths, decimated to pixel resolution: runs narrower than
- * one pixel are pooled into a per-column maximum, so the path length is bounded
- * by the plot width whatever the data size, and narrow high peaks are never lost.
+ * Coverage paths at pixel resolution: for each pixel column, the exact lowest and highest depth of the
+ * bases it covers (see depthRange), so the path length is bounded by the plot width whatever the data,
+ * narrow high peaks are never lost, and neither are narrow dropouts — they show where `floor` falls away
+ * from `fill`. Works on any axis (linear, equal introns, reversed): columns are mapped back to genomic
+ * ranges through the scale. Positions between runs are depth 0.
  */
 export function buildCoveragePaths(
   runs: CoverageRun[], scale: Scale, viewStart: number, viewEnd: number,
   baseline: number, depthToY: (d: number) => number,
 ): CoveragePaths {
-  if (runs.length === 0) return { fill: '', stroke: '' };
-  // Traversal is in genomic order; on the reverse strand that is right→left in pixels.
-  // A run that does not start where the previous one ended (a source that omits zero-depth
-  // stretches) is a gap: the profile drops to the baseline there instead of ramping across.
-  const segs: { a: number; b: number; d: number; gap: boolean }[] = [];
-  let bucketCol: number | null = null, bucketMax = 0, bucketA = 0, bucketB = 0, bucketGap = false;
-  const flush = () => {
-    if (bucketCol !== null) { segs.push({ a: bucketA, b: bucketB, d: bucketMax, gap: bucketGap }); bucketCol = null; }
+  const empty = { fill: '', mean: '', stroke: '', dips: '' };
+  if (runs.length === 0) return empty;
+  const dataStart = Math.max(viewStart, runs[0].start), dataEnd = Math.min(viewEnd, runs[runs.length - 1].end);
+  if (dataEnd <= dataStart) return empty;
+  const idx = depthIndexOf(runs);
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  // pixel span of the data, then one column per pixel (the first and last may be partial)
+  const pa = scale.x(dataStart), pb = scale.x(dataEnd);
+  const x0 = Math.min(pa, pb), x1 = Math.max(pa, pb);
+  const cap = Math.ceil(x1 - x0) + 2;
+  // per column: its x extent, and the y of its highest, mean and lowest depth
+  const ca = new Float64Array(cap), cb = new Float64Array(cap), yHi = new Float64Array(cap), yMean = new Float64Array(cap), yLo = new Float64Array(cap);
+  const dip = new Uint8Array(cap);
+  const m = { min: 0, max: 0, mean: 0 };
+  let n = 0;
+  for (let x = x0; x < x1; ) {
+    const nx = Math.min(x1, Math.floor(x) + 1);
+    const g1 = scale.invert(x), g2 = scale.invert(nx);
+    const ga = Math.max(dataStart, Math.floor(g1 < g2 ? g1 : g2));
+    const gb = Math.min(dataEnd, Math.max(ga + 1, Math.ceil(g1 < g2 ? g2 : g1)));
+    if (depthRangeInto(runs, ga, gb, idx, m)) {
+      const hi = r1(depthToY(m.max)), me = r1(depthToY(m.mean)), lo = r1(depthToY(m.min)), d = m.min < m.mean / 2 ? 1 : 0;
+      // neighbouring columns drawn alike make one step
+      if (n && yHi[n - 1] === hi && yMean[n - 1] === me && yLo[n - 1] === lo && dip[n - 1] === d && cb[n - 1] === x) cb[n - 1] = nx;
+      else { ca[n] = x; cb[n] = nx; yHi[n] = hi; yMean[n] = me; yLo[n] = lo; dip[n] = d; n++; }
+    }
+    x = nx;
+  }
+  if (!n) return empty;
+  const B = r1(baseline);
+  const area = (ys: Float64Array, withLine: boolean) => {
+    const d: string[] = [`M${r1(ca[0])},${B}`], line: string[] = [];
+    let lastY = NaN, lastB = ca[0];
+    for (let i = 0; i < n; i++) {
+      const y = ys[i], a = r1(ca[i]), b = r1(cb[i]);
+      if (ca[i] !== lastB) { d.push(`L${r1(lastB)},${B}L${a},${B}`); if (withLine) line.push(`M${a},${y}`); lastY = NaN; }
+      else if (withLine && i === 0) line.push(`M${a},${y}`);
+      if (y !== lastY) { d.push(`L${a},${y}`); if (withLine && i) line.push(`L${a},${y}`); }
+      d.push(`L${b},${y}`); if (withLine) line.push(`L${b},${y}`);
+      lastY = y; lastB = cb[i];
+    }
+    d.push(`L${r1(lastB)},${B}Z`);
+    return { d: d.join(''), line: line.join('') };
   };
-  let prevEnd: number | null = null;
-  for (let i = firstRunFrom(runs, viewStart); i < runs.length && runs[i].start < viewEnd; i++) {
-    const r = runs[i];
-    const gs = Math.max(r.start, viewStart), ge = Math.min(r.end, viewEnd);
-    const gap = prevEnd !== null && r.start > prevEnd;
-    prevEnd = r.end;
-    const pa = scale.x(gs), pb = scale.x(ge);
-    const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
-    if (hi - lo >= 1) {
-      flush();
-      segs.push({ a: pa, b: pb, d: r.depth, gap });
-    } else {
-      const col = Math.floor((lo + hi) / 2);
-      if (col !== bucketCol) {
-        flush();
-        bucketCol = col; bucketMax = r.depth; bucketGap = gap;
-        bucketA = scale.reverse ? col + 1 : col;
-        bucketB = scale.reverse ? col : col + 1;
-      } else if (r.depth > bucketMax) bucketMax = r.depth;
-    }
-  }
-  flush();
-  if (segs.length === 0) return { fill: '', stroke: '' };
-  const f = (n: number) => n.toFixed(1);
-  let fill = `M${f(segs[0].a)},${f(baseline)}`;
-  let stroke = `M${f(segs[0].a)},${f(depthToY(segs[0].d))}`;
-  let lastY = NaN, lastB = segs[0].a;
-  for (const s of segs) {
-    const y = depthToY(s.d);
-    if (s.gap && lastY !== baseline) {
-      fill += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
-      stroke += `L${f(lastB)},${f(baseline)}L${f(s.a)},${f(baseline)}`;
-      lastY = baseline;
-    }
-    if (y !== lastY) { fill += `L${f(s.a)},${f(y)}`; stroke += `L${f(s.a)},${f(y)}`; }
-    fill += `L${f(s.b)},${f(y)}`; stroke += `L${f(s.b)},${f(y)}`;
-    lastY = y; lastB = s.b;
-  }
-  fill += `L${f(segs[segs.length - 1].b)},${f(baseline)}Z`;
-  return { fill, stroke };
+  const top = area(yHi, false), mid = area(yMean, true);
+  const ticks: string[] = [];
+  for (let i = 0; i < n; i++) if (dip[i]) { const xm = r1((ca[i] + cb[i]) / 2); ticks.push(`M${xm},${yMean[i]}V${yLo[i]}`); }
+  return { fill: top.d, mean: mid.d, stroke: mid.line, dips: ticks.join('') };
 }
 
 // ======================== Junctions ========================
@@ -386,14 +558,51 @@ export interface ArcGeom { x1: number; y1: number; x2: number; y2: number; cy: n
 
 /**
  * Arc from (x1,y1) to (x2,y2) whose apex sits exactly `apexHeight` above the
- * higher endpoint. With both control points at height cy the curve's midpoint is
+ * higher endpoint (below the lower one with `down`). With both control points at height cy the curve's midpoint is
  * 0.125·(y1+y2) + 0.75·cy, which is solved for cy here.
  */
-export function arcGeom(x1: number, y1: number, x2: number, y2: number, apexHeight: number): ArcGeom {
-  const apexY = Math.min(y1, y2) - apexHeight;
+export function arcGeom(x1: number, y1: number, x2: number, y2: number, apexHeight: number, down = false): ArcGeom {
+  // `down`: hanging below the lower endpoint instead (the opposite strand, mirrored under the baseline)
+  const apexY = down ? Math.max(y1, y2) + apexHeight : Math.min(y1, y2) - apexHeight;
   const cy = (apexY - 0.125 * (y1 + y2)) / 0.75;
   const f = (n: number) => n.toFixed(1);
   return { x1, y1, x2, y2, cy, d: `M${f(x1)},${f(y1)}C${f(x1)},${f(cy)} ${f(x2)},${f(cy)} ${f(x2)},${f(y2)}` };
+}
+
+/** The arc's parameter t at pixel x (bisection on the monotone x(t)), clamped to [0, 1]. */
+function arcTAtX(g: ArcGeom, x: number): number {
+  const { x1, x2 } = g;
+  if (x2 === x1) return 0;
+  const inc = x2 > x1;
+  if (inc ? x <= x1 : x >= x1) return 0;
+  if (inc ? x >= x2 : x <= x2) return 1;
+  let lo = 0, hi = 1;
+  const xt = (t: number) => x1 * (1 - t) * (1 - t) * (1 + 2 * t) + x2 * t * t * (3 - 2 * t);
+  for (let i = 0; i < 30; i++) {
+    const mid = (lo + hi) / 2;
+    if ((xt(mid) < x) === inc) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * The part of an arc over the pixels [xLo, xHi], as a path: the whole arc when it lies inside, else the cubic cut at the
+ * two edges (de Casteljau). Zoomed in on one end of a long arc (a read-through 100 kb away at a few pixels per base)
+ * the whole curve is millions of pixels long, and a dashed one millions of dashes, drawn again at every frame.
+ */
+export function arcPathIn(g: ArcGeom, xLo: number, xHi: number): string {
+  const lo = Math.min(g.x1, g.x2), hi = Math.max(g.x1, g.x2);
+  if (lo >= xLo && hi <= xHi) return g.d;
+  const ta = arcTAtX(g, g.x2 > g.x1 ? xLo : xHi), tb = arcTAtX(g, g.x2 > g.x1 ? xHi : xLo);
+  if (tb <= ta) return '';
+  // control points P0..P3, the sub-curve over [ta, tb]
+  const P = [[g.x1, g.y1], [g.x1, g.cy], [g.x2, g.cy], [g.x2, g.y2]];
+  const at = (t: number) => { const u = 1 - t; return [0, 1].map(k => u * u * u * P[0][k] + 3 * u * u * t * P[1][k] + 3 * u * t * t * P[2][k] + t * t * t * P[3][k]); };
+  const d1 = (t: number) => { const u = 1 - t; return [0, 1].map(k => 3 * u * u * (P[1][k] - P[0][k]) + 6 * u * t * (P[2][k] - P[1][k]) + 3 * t * t * (P[3][k] - P[2][k])); };
+  const a = at(ta), b = at(tb), da = d1(ta), db = d1(tb), h = (tb - ta) / 3;
+  const c1 = [a[0] + h * da[0], a[1] + h * da[1]], c2 = [b[0] - h * db[0], b[1] - h * db[1]];
+  const f = (n: number) => n.toFixed(1);
+  return `M${f(a[0])},${f(a[1])}C${f(c1[0])},${f(c1[1])} ${f(c2[0])},${f(c2[1])} ${f(b[0])},${f(b[1])}`;
 }
 
 /** y of the arc at pixel x (bisection on the monotone x(t)). */
@@ -456,6 +665,154 @@ export function parseLocus(text: string): { chrom: string; start: number; end: n
   const a = toBp(m[2], m[3] || ''), b = m[4] ? toBp(m[4], m[5] || '') : a;
   if (!Number.isFinite(a) || !Number.isFinite(b) || a < 1 || b < 1) return null;
   return { chrom: `chr${c}`, start: Math.min(a, b), end: Math.max(a, b) };
+}
+
+/** One c./n. position as typed: which numbering it belongs to, the number, and the intronic offset. */
+export interface CdnaPoint {
+  region: 'cds' | 'utr5' | 'utr3' | 'noncoding';
+  /**
+   * The number itself. Positive under c., where the region carries the − or the *; plainly signed
+   * under n., whose numbering is the transcript coordinate itself and runs negative upstream of it
+   * (`cdnaPosition` writes n.-299 for a base 299 before a non-coding transcript starts).
+   */
+  n: number;
+  /** +m counted from the donor of the following intron, −m from the acceptor of the preceding one; 0 on an exonic base */
+  offset: number;
+}
+/** A c./n. query typed in the search box: one position, or a range written HGVS-style with an underscore. */
+export interface CdnaQuery { from: CdnaPoint; to: CdnaPoint | null; noncoding: boolean }
+
+const CDNA_POINT = /^([-*]?)(\d+)([+-]\d+)?/;
+/** What a position may carry when it was pasted from a whole variant description; navigating ignores it. */
+const CDNA_TAIL = /^(?:[acgtu]+>[acgtu]+|delins[a-z0-9]*|del[a-z0-9]*|dup[a-z0-9]*|ins[a-z0-9]*|inv[a-z0-9]*|=)?$/i;
+
+/**
+ * A c. / n. position or range typed in the search box, HGVS-style
+ * (https://hgvs-nomenclature.org): `c.234`, `c.-12`, `c.*30`, `c.234+5`, `c.235-10`, `n.412`,
+ * ranges `c.234_267`, and any of those carrying the rest of a variant description
+ * (`c.234A>G`, `c.123_125del`) — the description is ignored, the position is what the view
+ * moves to. Returns null when the text is not a c./n. position, so the caller can try
+ * something else.
+ */
+export function parseCdna(text: string): CdnaQuery | null {
+  const m = /^([cn])\s*\.\s*(.+)$/i.exec(text.trim());
+  if (!m) return null;
+  const noncoding = m[1].toLowerCase() === 'n';
+  const point = (str: string): { p: CdnaPoint; rest: string } | null => {
+    const q = CDNA_POINT.exec(str);
+    if (!q) return null;
+    const n = Number(q[2]);
+    // c. numbering has no zero (c.-1 is followed by c.1); n. does, one base before the transcript starts
+    if (!Number.isSafeInteger(n) || n < (noncoding ? 0 : 1)) return null;
+    if (noncoding && q[1] === '*') return null;   // n. has no 3′ UTR numbering: it counts the transcript itself
+    const region = noncoding ? 'noncoding' : q[1] === '-' ? 'utr5' : q[1] === '*' ? 'utr3' : 'cds';
+    return { p: { region, n: noncoding && q[1] === '-' ? -n : n, offset: q[3] ? Number(q[3]) : 0 }, rest: str.slice(q[0].length) };
+  };
+  const a = point(m[2].replace(/\s+/g, ''));
+  if (!a) return null;
+  let to: CdnaPoint | null = null, tail = a.rest;
+  if (tail.startsWith('_')) {
+    const b = point(tail.slice(1));
+    if (!b) return null;
+    to = b.p; tail = b.rest;
+  }
+  return CDNA_TAIL.test(tail) ? { from: a.p, to, noncoding } : null;
+}
+
+/** How a c./n. point reads back, for an error message about it. */
+const cdnaText = (p: CdnaPoint): string =>
+  `${p.region === 'noncoding' ? 'n.' : 'c.'}${p.region === 'utr5' ? '-' : p.region === 'utr3' ? '*' : ''}${p.n}${p.offset > 0 ? `+${p.offset}` : p.offset < 0 ? p.offset : ''}`;
+
+/** Genomic position of a 1-based transcript coordinate; outside the transcript the numbering continues from the nearer end, as `cdnaPosition` reads it back. */
+function genomicOfT(t: number, L: TxLayout): number {
+  const { order, plus } = L;
+  const step = plus ? 1 : -1;
+  const first = order[0], last = order[order.length - 1];
+  if (t < 1) return (plus ? first.start : first.end - 1) + step * (t - 1);
+  for (const e of order) {
+    const len = e.end - e.start;
+    if (t < e.tStart + len) return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
+  }
+  return (plus ? last.end - 1 : last.start) + step * (t - L.tLength);
+}
+
+/**
+ * Genomic 0-based position of a c./n. coordinate on a model: the inverse of `cdnaPosition`.
+ * Returns why instead when the coordinate does not exist on this model — a c. number past the
+ * stop codon, or an intronic offset on a base that is not a splice site, which is usually the
+ * sign that the number was written against another transcript.
+ */
+export function cdnaToGenomic(p: CdnaPoint, tx: TxModel): { pos: number } | { error: string } {
+  const L = txLayout(tx);
+  const coding = L.tCdsStart != null && L.tCdsEnd != null;
+  const what = cdnaText(p);
+  let t: number;
+  if (p.region === 'noncoding') {
+    // the transcript coordinate itself; outside the transcript it keeps counting, as c.-N and c.*N do
+    t = p.n;
+  } else if (!coding) {
+    return { error: `${tx.transcriptId} is non-coding: write n.${p.n} rather than ${what}` };
+  } else if (p.region === 'cds') {
+    const cdsLen = L.tCdsEnd! - L.tCdsStart! + 1;
+    if (p.n > cdsLen) return { error: `${what} is past the stop codon of ${tx.transcriptId} (${cdsLen} coding bases); the 3′ UTR is c.*1 onwards` };
+    t = L.tCdsStart! + p.n - 1;
+  } else if (p.region === 'utr5') {
+    t = L.tCdsStart! - p.n;
+  } else {
+    t = L.tCdsEnd! + p.n;
+  }
+  const pos = genomicOfT(t, L);
+  if (!p.offset) return { pos };
+  // an intronic offset is counted from a splice site: the base it hangs on must be one
+  const { order, plus } = L;
+  const i = order.findIndex(e => t >= e.tStart && t < e.tStart + (e.end - e.start));
+  if (i < 0) return { error: `${what}: an intronic offset counts from a splice site, and ${cdnaText({ ...p, offset: 0 })} is outside ${tx.transcriptId}` };
+  const e = order[i], len = e.end - e.start;
+  const last = t === e.tStart + len - 1, first = t === e.tStart;
+  if (p.offset > 0 && !(last && i < order.length - 1))
+    return { error: `${what}: ${cdnaText({ ...p, offset: 0 })} is not the last base of an exon of ${tx.transcriptId}, so it has no +${p.offset}` };
+  if (p.offset < 0 && !(first && i > 0))
+    return { error: `${what}: ${cdnaText({ ...p, offset: 0 })} is not the first base of an exon of ${tx.transcriptId}, so it has no ${p.offset}` };
+  // the offset must stay inside its own intron, or the position belongs to the next exon
+  const gap = p.offset > 0
+    ? (plus ? order[i + 1].start - e.end : e.start - order[i + 1].end)
+    : (plus ? e.start - order[i - 1].end : order[i - 1].start - e.end);
+  if (Math.abs(p.offset) > gap) return { error: `${what}: that intron of ${tx.transcriptId} is only ${gap} bp long` };
+  return { pos: pos + (plus ? p.offset : -p.offset) };
+}
+
+/** Genomic 0-based half-open span a c./n. query points at (a single base for a position). */
+export function cdnaGenomicRange(q: CdnaQuery, tx: TxModel): { start: number; end: number } | { error: string } {
+  const a = cdnaToGenomic(q.from, tx);
+  if ('error' in a) return a;
+  if (!q.to) return { start: a.pos, end: a.pos + 1 };
+  const b = cdnaToGenomic(q.to, tx);
+  if ('error' in b) return b;
+  return { start: Math.min(a.pos, b.pos), end: Math.max(a.pos, b.pos) + 1 };
+}
+
+/**
+ * An exon typed in the search box: a bare number (`12`), the word spelled out (`exon 12`,
+ * `exons 3-5`), or a range (`3-5`). Exons are numbered in transcription order, as they are
+ * drawn, so exon 1 is the 5′ one on either strand. Returns null when the text is something else.
+ */
+export function parseExonQuery(text: string): { from: number; to: number } | null {
+  const m = /^(?:exons?\s*)?(\d{1,4})(?:\s*(?:-|–|—|\.\.|_)\s*(\d{1,4}))?$/i.exec(text.trim());
+  if (!m) return null;
+  const a = Number(m[1]), b = m[2] ? Number(m[2]) : a;
+  if (!a || !b) return null;
+  return { from: Math.min(a, b), to: Math.max(a, b) };
+}
+
+/** Genomic 0-based half-open span of an exon, or of a run of exons by rank. */
+export function exonGenomicRange(q: { from: number; to: number }, tx: TxModel): { start: number; end: number } | { error: string } {
+  const hit = tx.exons.filter(e => e.rank >= q.from && e.rank <= q.to);
+  if (!hit.length) {
+    const n = tx.exons.length;
+    const which = q.from === q.to ? `Exon ${q.from}` : `Exons ${q.from}-${q.to}`;
+    return { error: `${which}: ${tx.transcriptId} has ${n} exon${n === 1 ? '' : 's'}` };
+  }
+  return { start: Math.min(...hit.map(e => e.start)), end: Math.max(...hit.map(e => e.end)) };
 }
 
 export function formatBp(n: number): string {
@@ -605,7 +962,7 @@ export function junctionHgvs(j: { start: number; end: number }, tx: TxModel, oth
     const b = (pos: number) => cdnaPosition(pos, tx).bare;
     return { donor: donor.label, acceptor: acceptor.label,
       effect: `r.${b(lastUp)}_${b(firstDown)}ins${b(peFirst)}_${b(peLast)}`,
-      summary: `${pe.end - pe.start}-nt cryptic exon ${tx.chrom}:${(pe.start + 1).toLocaleString()}-${pe.end.toLocaleString()} between exons ${first.rank} and ${second.rank}` };
+      summary: `${pe.end - pe.start}-nt cryptic exon ${tx.chrom}:${(pe.start + 1).toLocaleString('en-US')}-${pe.end.toLocaleString('en-US')} between exons ${first.rank} and ${second.rank}` };
   }
   const order = plus ? [...tx.exons] : [...tx.exons].reverse();  // transcription order
   const firstBase = (e: Exon0) => (plus ? e.start : e.end - 1);
@@ -925,14 +1282,17 @@ export interface CodonBox {
  */
 export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from: number, to: number): CodonBox[] {
   if (tx.cdsStart == null || tx.cdsEnd == null) return [];
-  const L = txLayout(tx);
+  const L = layoutCached(tx);
   if (L.tCdsStart == null || L.tCdsEnd == null) return [];
-  const plus = tx.strand > 0;
-  // transcript coordinate → genomic position
+  const plus = L.plus, order = L.order;
+  // transcript coordinate → genomic position: a binary search over the exons in transcription order (tStart ascending)
   const genomicOf = (t: number): number | null => {
-    for (const e of L.order) {
-      const len = e.end - e.start;
-      if (t >= e.tStart && t < e.tStart + len) return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
+    let lo = 0, hi = order.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1, e = order[mid], len = e.end - e.start;
+      if (t < e.tStart) hi = mid - 1;
+      else if (t >= e.tStart + len) lo = mid + 1;
+      else return plus ? e.start + (t - e.tStart) : e.end - 1 - (t - e.tStart);
     }
     return null;
   };
@@ -941,10 +1301,22 @@ export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from:
     const b = ref[g - refStart].toUpperCase();
     return plus ? b : (COMPLEMENT[b] ?? 'N');
   };
-  const out: CodonBox[] = [];
   const cs = L.tCdsStart, ce = L.tCdsEnd;
   const nCodons = Math.floor((ce - cs + 1) / 3);
-  for (let c = 0; c < nCodons; c++) {
+  // the transcript coordinates of the exonic bases in [from, to): only the codons over them are visited, not the whole
+  // CDS (35,000 codons for TTN, at every frame of a pan)
+  let tLo = Infinity, tHi = -Infinity;
+  for (const e of order) {
+    const a = Math.max(e.start, from), b = Math.min(e.end, to);
+    if (b <= a) continue;
+    const t1 = e.tStart + (plus ? a - e.start : e.end - 1 - (b - 1)), t2 = e.tStart + (plus ? b - 1 - e.start : e.end - 1 - a);
+    if (t1 < tLo) tLo = t1;
+    if (t2 > tHi) tHi = t2;
+  }
+  const out: CodonBox[] = [];
+  if (tLo > tHi) return out;
+  const c0 = Math.max(0, Math.floor((tLo - cs) / 3)), c1 = Math.min(nCodons - 1, Math.floor((tHi - cs) / 3));
+  for (let c = c0; c <= c1; c++) {
     const gs = [0, 1, 2].map(k => genomicOf(cs + 3 * c + k));
     if (gs.some(g => g == null)) continue;
     const g3 = gs as number[];
@@ -959,6 +1331,14 @@ export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from:
     out.push({ index: c + 1, aa: translateCodon(bs.join('')), segments });
   }
   return out;
+}
+
+/** txLayout of a model, kept with it (a model object is not changed once built). */
+const layoutCache = new WeakMap<TxModel, TxLayout>();
+function layoutCached(tx: TxModel): TxLayout {
+  let L = layoutCache.get(tx);
+  if (!L) layoutCache.set(tx, L = txLayout(tx));
+  return L;
 }
 
 // ======================== Depth-based exon usage ========================

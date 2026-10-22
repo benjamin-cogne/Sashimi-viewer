@@ -11,6 +11,7 @@
  */
 import { pseudoExonOf, translateCodon, type TxModel, type Exon0 } from './geometry';
 import type { ProteinDomain } from './types';
+import { fusionFrame, layoutOf, type FusionEnd, type FusionFrame } from './fusionFrame';
 
 // ======================== Splice event → blocks ========================
 
@@ -24,9 +25,16 @@ export interface Block {
   rank?: number;
   /** true when the block is genomically contiguous with the previous one in transcription order (no splice junction between them) */
   joinsPrev?: boolean;
+  /** the gene the block comes from, in a fusion transcript (exon ranks are the gene's own) */
+  gene?: string;
+  /** its coding part [start, end), when it is not the one of the model drawn (the 3′ partner's exons of a fusion) */
+  cds?: [number, number] | null;
+  /** its chromosome and strand, when they are not the model's (a fusion's 3′ partner on another chromosome or strand) */
+  chrom?: string;
+  strand?: 1 | -1;
 }
 
-export type EventKind = 'canonical' | 'skip' | 'cryptic_exon' | 'exonic_site' | 'intronic_site' | 'unsupported';
+export type EventKind = 'canonical' | 'skip' | 'cryptic_exon' | 'exonic_site' | 'intronic_site' | 'fusion' | 'unsupported';
 
 export interface SpliceEvent {
   kind: EventKind;
@@ -120,33 +128,39 @@ export interface Isoform {
   stopGenomic: number | null;
 }
 
-/** `seqAt(start, end)` returns the + strand reference of a genomic window. */
-export function buildIsoform(blocksGenomic: Block[], tx: TxModel, seqAt: (start: number, end: number) => string): Isoform {
+/**
+ * `seqAt(start, end, chrom)` returns the + strand reference of a genomic window (`chrom` is given for the blocks that
+ * carry their own). The blocks are put in transcription order, unless `inOrder` says they already are (a fusion
+ * transcript, whose 3′ partner may lie upstream of the 5′ one, on the other strand or on another chromosome).
+ */
+export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' | 'cdsStart' | 'cdsEnd'> & { chrom?: string }, seqAt: (start: number, end: number, chrom?: string) => string, inOrder = false): Isoform {
   const plus = tx.strand > 0;
-  const ordered = plus ? [...blocksGenomic].sort((a, b) => a.start - b.start) : [...blocksGenomic].sort((a, b) => b.start - a.start);
+  const fwd = (b: Block) => (b.strand ?? tx.strand) > 0;
+  const ordered = inOrder ? blocksGenomic : plus ? [...blocksGenomic].sort((a, b) => a.start - b.start) : [...blocksGenomic].sort((a, b) => b.start - a.start);
   const blocks: Block[] = ordered.map((b, i) => {
     const prev = ordered[i - 1];
-    const joins = prev ? (plus ? prev.end === b.start : prev.start === b.end) : false;
+    const joins = prev && prev.chrom === b.chrom && fwd(prev) === fwd(b) ? (fwd(b) ? prev.end === b.start : prev.start === b.end) : false;
     return { ...b, joinsPrev: joins };
   });
-  const parts = blocks.map(b => { const s = seqAt(b.start, b.end).toUpperCase(); return plus ? s : revComp(s); });
+  const parts = blocks.map(b => { const s = seqAt(b.start, b.end, b.chrom).toUpperCase(); return fwd(b) ? s : revComp(s); });
   const blockStart: number[] = [];
   let acc = 0;
   for (const p of parts) { blockStart.push(acc); acc += p.length; }
   const mrna = parts.join('');
   const junctions = blocks.map((b, i) => (i > 0 && !b.joinsPrev ? blockStart[i] : -1)).filter(x => x >= 0);
-  // transcript index of a genomic base
+  // transcript index of a genomic base (on `tx.chrom` when the blocks carry chromosomes)
   const toMrna = (g: number): number | null => {
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
-      if (g >= b.start && g < b.end) return blockStart[i] + (plus ? g - b.start : b.end - 1 - g);
+      if (b.chrom != null && tx.chrom != null && b.chrom !== tx.chrom) continue;
+      if (g >= b.start && g < b.end) return blockStart[i] + (fwd(b) ? g - b.start : b.end - 1 - g);
     }
     return null;
   };
   const toGenomic = (m: number): number | null => {
     for (let i = 0; i < blocks.length; i++) {
       const len = blocks[i].end - blocks[i].start;
-      if (m >= blockStart[i] && m < blockStart[i] + len) return plus ? blocks[i].start + (m - blockStart[i]) : blocks[i].end - 1 - (m - blockStart[i]);
+      if (m >= blockStart[i] && m < blockStart[i] + len) return fwd(blocks[i]) ? blocks[i].start + (m - blockStart[i]) : blocks[i].end - 1 - (m - blockStart[i]);
     }
     return null;
   };
@@ -204,7 +218,7 @@ export function nmdVerdict(iso: Isoform, canonical: Isoform): NmdVerdict {
   const lastJ = iso.junctions.length ? iso.junctions[iso.junctions.length - 1] : null;
   const d = lastJ != null ? lastJ - iso.stopIndex : null;
   const common = { ptc: iso.stopIndex, ptcCodon, distanceToLastJunction: d, distanceFromStart: fromStart, utr3Length: utr3, longUtr };
-  const utrNote = longUtr ? ` The ${utr3.toLocaleString()}-nt 3′ UTR left downstream is long, which can trigger EJC-independent NMD.` : '';
+  const utrNote = longUtr ? ` The ${utr3.toLocaleString('en-US')}-nt 3′ UTR left downstream is long, which can trigger EJC-independent NMD.` : '';
   if (lastJ == null || iso.stopIndex >= lastJ) {
     return { ...common, verdict: 'escape_last_exon', degraded: false, headline: 'PTC in the last exon: escapes NMD',
       text: `The premature stop (codon ${ptcCodon}) lies in the last exon, downstream of every exon junction complex: the truncated protein is made.${utrNote}` };
@@ -223,7 +237,9 @@ export function nmdVerdict(iso: Isoform, canonical: Isoform): NmdVerdict {
 
 // ======================== Protein comparison and domains ========================
 
-export type DiffKind = 'identical' | 'in_frame_deletion' | 'in_frame_insertion' | 'in_frame_indel' | 'frameshift' | 'truncation' | 'no_protein';
+export type DiffKind = 'identical' | 'in_frame_deletion' | 'in_frame_insertion' | 'in_frame_indel' | 'frameshift' | 'truncation' | 'no_protein'
+  /** a fusion protein: the 5′ partner's residues up to `prefix`, then the 3′ partner's, in frame to its own stop codon */
+  | 'fusion';
 
 export interface ProteinDiff {
   kind: DiffKind;
@@ -266,7 +282,13 @@ export function proteinDiff(canon: string, ab: string, canonicalStopReached: boo
 }
 
 export type DomainState = 'intact' | 'lost' | 'disrupted';
-export interface DomainStatus { domain: ProteinDomain; state: DomainState; note: string }
+export interface DomainStatus {
+  domain: ProteinDomain; state: DomainState; note: string;
+  /** the gene whose protein carries the domain, in a fusion */
+  gene?: string;
+  /** residue ranges drawn on each row (0-based half-open), when they do not follow from the diff (a fusion) */
+  rows?: { canonical: [number, number][]; observed: [number, number][] };
+}
 
 /** UniProt domains first, then Pfam, SMART, PANTHER / Superfamily; overlapping hits of the same id merged. */
 export function pickDomains(features: ProteinDomain[]): ProteinDomain[] {
@@ -316,6 +338,20 @@ export interface SpliceStory {
   verdict: NmdVerdict;
   diff: ProteinDiff;
   domains: DomainStatus[];
+  /** a fusion transcript: the canonical row is the 5′ partner's transcript, the observed row the fused one */
+  fusion?: FusionStoryInfo;
+}
+
+export interface FusionStoryInfo {
+  five: TxModel; three: TxModel;
+  frame: FusionFrame;
+  /** fused-protein residues [from, to) that come from the 3′ partner in its own frame (null: none, out of frame) */
+  partnerResidues: [number, number] | null;
+  /** the 3′ partner's protein length, and its first residue carried (1-based) */
+  partnerLength: number;
+  partnerFrom: number | null;
+  /** the start codon used: the 5′ partner's, or the 3′ partner's when the junction is in the 5′ partner's 5′ UTR */
+  startFrom: 'five' | 'three' | null;
 }
 
 export function spliceStory(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[], seqAt: (s: number, e: number) => string, features: ProteinDomain[]): SpliceStory {
@@ -330,13 +366,155 @@ export function spliceStory(j: { start: number; end: number }, tx: TxModel, othe
 
 /** Genomic windows whose sequence the story needs (blocks of both isoforms), merged when close. */
 export function storyWindows(event: SpliceEvent, mergeGap = 5000): [number, number][] {
-  const all = [...event.canonical, ...event.blocks].map(b => [b.start, b.end] as [number, number]).sort((a, b) => a[0] - b[0]);
+  return blockWindows([...event.canonical, ...event.blocks], mergeGap);
+}
+
+function blockWindows(blocks: { start: number; end: number }[], mergeGap: number): [number, number][] {
+  const all = blocks.map(b => [b.start, b.end] as [number, number]).sort((a, b) => a[0] - b[0]);
   const out: [number, number][] = [];
   for (const w of all) {
     const last = out[out.length - 1];
     if (last && w[0] <= last[1] + mergeGap) last[1] = Math.max(last[1], w[1]); else out.push([w[0], w[1]]);
   }
   return out;
+}
+
+// ======================== Fusion transcripts ========================
+
+const cdsPart = (start: number, end: number, m: TxModel): [number, number] | null => {
+  if (m.cdsStart == null || m.cdsEnd == null) return null;
+  const a = Math.max(start, m.cdsStart), b = Math.min(end, m.cdsEnd);
+  return b > a ? [a, b] : null;
+};
+
+/** The exons of a model in transcription order, tagged with its gene and their coding part. */
+function txBlocks(m: TxModel): Block[] {
+  const plus = m.strand > 0;
+  return [...m.exons].sort((a, b) => (plus ? a.start - b.start : b.start - a.start))
+    .map(e => ({ start: e.start, end: e.end, kind: 'exon' as const, rank: e.rank, gene: m.geneName, cds: cdsPart(e.start, e.end, m), chrom: m.chrom, strand: m.strand }));
+}
+
+/**
+ * The fused transcript in transcription order: the 5′ partner's exons up to its donor, then the 3′ partner's from its
+ * acceptor (the two partners on one strand; the ends are exon boundaries, as `fusionFrame` takes them).
+ */
+export function fusionBlocks(five: FusionEnd, three: FusionEnd): Block[] {
+  // each partner on its own strand (and chromosome): an inversion or a translocation joins them all the same
+  const pa = five.model.strand > 0, pb = three.model.strand > 0;
+  const clip = (b: Block, start: number, end: number, m: TxModel): Block => ({ ...b, start, end, cds: cdsPart(start, end, m) });
+  const a = txBlocks(five.model).filter(b => (pa ? b.start < five.pos : b.end > five.pos))
+    .map(b => (pa ? clip(b, b.start, Math.min(b.end, five.pos), five.model) : clip(b, Math.max(b.start, five.pos), b.end, five.model)));
+  const c = txBlocks(three.model).filter(b => (pb ? b.end > three.pos : b.start < three.pos))
+    .map(b => (pb ? clip(b, Math.max(b.start, three.pos), b.end, three.model) : clip(b, b.start, Math.min(b.end, three.pos), three.model)));
+  return [...a, ...c];
+}
+
+/** Genomic windows whose sequence a fusion story needs: every exon of the two partners, on each one's chromosome. */
+export function fusionWindows(five: FusionEnd, three: FusionEnd, mergeGap = 5000): { chrom: string; start: number; end: number }[] {
+  const A = five.model, B = three.model;
+  if (A.chrom !== B.chrom) return [...blockWindows(A.exons, mergeGap).map(([start, end]) => ({ chrom: A.chrom, start, end })), ...blockWindows(B.exons, mergeGap).map(([start, end]) => ({ chrom: B.chrom, start, end }))];
+  return blockWindows([...A.exons, ...B.exons], mergeGap).map(([start, end]) => ({ chrom: A.chrom, start, end }));
+}
+
+/** A fusion story can be told when both ends are on their partner's exons and a start codon is kept. */
+export function fusionStoryPossible(five: FusionEnd, three: FusionEnd): boolean {
+  if (five.model.geneName === three.model.geneName) return false;
+  const f = fusionFrame(five, three);
+  return f.aBases != null || f.verdict === 'five-utr';
+}
+
+const mod3 = (n: number) => ((n % 3) + 3) % 3;
+
+/**
+ * The fused transcript of `five` (donor end) joined to `three` (acceptor end), translated and judged like an aberrant
+ * splice product: the canonical row is the 5′ partner's transcript, the observed row the fusion. Translation starts at
+ * the 5′ partner's start codon, or at the 3′ partner's when the junction lies in the 5′ partner's 5′ UTR (a promoter
+ * swap). The stop codon is premature unless it is the 3′ partner's own, so the NMD rules apply as to any transcript:
+ * an in-frame fusion read to the 3′ partner's stop escapes; a stop more than 55 nt before the fused transcript's last
+ * exon junction is degraded. The 5′ partner's domains are kept up to the junction; the 3′ partner's are carried when
+ * they lie after it and the fusion is read in their frame.
+ */
+export function fusionStory(five: FusionEnd, three: FusionEnd, seqAt: (s: number, e: number, chrom?: string) => string, featuresFive: ProteinDomain[], featuresThree: ProteinDomain[]): SpliceStory {
+  const A = five.model, B = three.model, gA = A.geneName, gB = B.geneName;
+  const plusOf = (m: TxModel) => m.strand > 0;
+  const frame = fusionFrame(five, three);
+  const canonBlocks = txBlocks(A), blocks = fusionBlocks(five, three);
+  const nA = blocks.filter(b => b.gene === gA).length;
+  const canonical = buildIsoform(canonBlocks, A, seqAt, true);
+  const partner = buildIsoform(txBlocks(B), B, seqAt, true);
+  const startOf = (m: TxModel) => (m.cdsStart != null && m.cdsEnd != null ? (plusOf(m) ? m.cdsStart : m.cdsEnd - 1) : null);
+  const holds = (g: number | null, from: number, to: number) => g != null && blocks.slice(from, to).some(b => g >= b.start && g < b.end);
+  const sA = startOf(A), sB = startOf(B);
+  const startFrom = holds(sA, 0, nA) ? 'five' as const : holds(sB, nA, blocks.length) ? 'three' as const : null;
+  const startM = startFrom === 'five' ? A : B, startG = startFrom === 'five' ? sA : startFrom === 'three' ? sB : null;
+  const aberrant = buildIsoform(blocks, { strand: startM.strand, chrom: startM.chrom, cdsStart: startG, cdsEnd: startG != null ? startG + 1 : null }, seqAt, true);
+  // the stop codon is premature unless it is the 3′ partner's own (its first base, as Isoform.stopGenomic), reached in
+  // the 3′ partner's part of the transcript (the 5′ one may lie on another chromosome, at the same coordinates)
+  const ownStop = B.cdsStart != null && B.cdsEnd != null ? (plusOf(B) ? B.cdsEnd - 3 : B.cdsStart + 2) : null;
+  const stopInB = aberrant.stopIndex != null && nA < blocks.length && aberrant.stopIndex >= aberrant.blockStart[nA];
+  const v = nmdVerdict({ ...aberrant, stopGenomic: stopInB ? aberrant.stopGenomic : null }, { stopGenomic: ownStop } as Isoform);
+  const pa = canonical.protein, pf = aberrant.protein;
+  let prefix = 0;
+  if (startFrom === 'five') while (prefix < pa.length && prefix < pf.length && pa[prefix] === pf[prefix]) prefix++;
+
+  // the 3′ partner's residues the fusion carries in their own frame: its coding base `bOff` sits at the junction
+  let partnerResidues: [number, number] | null = null, partnerFrom: number | null = null, shift: number | null = null;
+  const LB = layoutOf(B), tb = LB.tOf(plusOf(B) ? three.pos : three.pos - 1);
+  if (aberrant.cdsStart != null && tb != null && LB.cdsStart != null && nA < blocks.length) {
+    const bOff = tb - LB.cdsStart;
+    const d = aberrant.blockStart[nA] - bOff - aberrant.cdsStart;   // fused coding base of the 3′ partner's first one
+    if (mod3(d) === 0) {
+      shift = d / 3;
+      const first = Math.max(0, Math.ceil(bOff / 3));   // its first codon wholly after the junction (0-based)
+      const from = first + shift, to = Math.min(pf.length, partner.protein.length + shift);
+      if (to > from && pf.slice(from, to) === partner.protein.slice(first, to - shift)) { partnerResidues = [from, to]; partnerFrom = first + 1; }
+    }
+  }
+  const carried = v.verdict === 'no_ptc' && partnerResidues != null && partnerResidues[1] === partner.protein.length + shift!;
+
+  let diff: ProteinDiff;
+  const base = { prefix, suffix: 0, lost: [prefix, pa.length] as [number, number], canonicalLength: pa.length, aberrantLength: pf.length };
+  if (!pf.length) diff = { ...base, kind: 'no_protein', inserted: '', text: `no protein: no start codon of ${gA} or ${gB} in the fused transcript` };
+  else if (carried) {
+    diff = { ...base, kind: 'fusion', inserted: pf.slice(prefix),
+      text: startFrom === 'three'
+        ? `${gB}'s whole protein (${partner.protein.length} aa) from its own start codon, under ${gA}'s promoter and 5′ UTR`
+        : `${gA} p.1–${prefix} fused in frame to ${gB} p.${partnerFrom}–${partner.protein.length}: a ${pf.length}-aa fusion protein` };
+  } else if (startFrom === 'five' && pf === pa) {
+    diff = { ...base, kind: 'identical', inserted: '', text: `${gA}'s whole protein: the junction lies after its stop codon, ${gB}'s exons are untranslated` };
+  } else {
+    const neo = pf.slice(prefix);
+    diff = { ...base, kind: neo.length ? 'frameshift' : 'truncation', inserted: neo,
+      text: frame.verdict === 'in-frame'
+        ? `in frame by the lengths, but a stop codon ${neo.length + 1} codons after ${gA} p.${prefix} ends the protein before ${gB}'s own sequence`
+        : neo.length ? `${gA} p.1–${prefix}, then ${neo.length} aa of ${gB} read out of its frame, then a stop` : `${gA} p.1–${prefix}, then a stop codon right after the junction` };
+  }
+
+  // the verdict, in the words of a fusion
+  const verdict: NmdVerdict = carried
+    ? { ...v, headline: `In-frame fusion: ${gB}'s own stop codon reached`,
+        text: `Translated from ${startFrom === 'three' ? `${gB}'s` : `${gA}'s`} start codon through the junction to ${gB}'s own stop codon: no premature stop, the fused transcript escapes NMD and a ${pf.length}-aa ${startFrom === 'three' ? `${gB} protein` : 'fusion protein'} is expected (its stability is that of the protein, which this does not predict).` }
+    : { ...v, text: `${frame.verdict === 'in-frame' ? 'In frame by the lengths, but the stop codon reached is not ' + gB + '\'s own. ' : frame.verdict === 'frameshift' ? `${gB} is read out of its frame after the junction. ` : frame.verdict === 'after-stop' ? `${gA}'s own stop codon lies before the junction; ${gB}'s exons become its 3′ UTR. ` : ''}${v.text}` };
+
+  // domains: the 5′ partner's up to the junction, the 3′ partner's where they are carried in frame
+  const domsA = domainStatus(pickDomains(featuresFive), diff.kind === 'identical' ? diff : { ...diff, kind: 'truncation' })
+    .map(ds => {
+      const s = ds.domain.start - 1, e = ds.domain.end;
+      return { ...ds, gene: gA, note: ds.state === 'lost' ? `not in the fusion (after ${gA} p.${prefix})` : ds.note, rows: { canonical: [[s, e]] as [number, number][], observed: (e <= prefix ? [[s, e]] : s >= prefix ? [] : [[s, prefix]]) as [number, number][] } };
+    });
+  const domsB = pickDomains(featuresThree).map((dom): DomainStatus => {
+    const s = dom.start - 1, e = dom.end;
+    if (!partnerResidues || shift == null) return { domain: dom, state: 'lost', note: frame.verdict === 'frameshift' ? `${gB} read out of its frame` : `${gB}'s protein not carried`, gene: gB, rows: { canonical: [], observed: [] } };
+    const a = Math.max(s + shift, partnerResidues[0]), b = Math.min(e + shift, partnerResidues[1]);
+    const state: DomainState = b <= a ? 'lost' : b - a === e - s ? 'intact' : 'disrupted';
+    const note = state === 'intact' ? `carried in frame (fusion residues ${a + 1}–${b})` : state === 'lost' ? (e + shift <= partnerResidues[0] ? `before the junction in ${gB}` : 'after the premature stop') : `${b - a} of ${e - s} aa carried`;
+    return { domain: dom, state, note, gene: gB, rows: { canonical: [], observed: b > a ? [[a, b]] : [] } };
+  });
+
+  const rankA = blocks[nA - 1]?.rank, rankB = blocks[nA]?.rank;
+  const event: SpliceEvent = { kind: 'fusion', text: `${gA}${rankA != null ? ` exon ${rankA}` : ''} → ${gB}${rankB != null ? ` exon ${rankB}` : ''} fusion transcript`, affected: [], blocks, canonical: canonBlocks };
+  return { event, canonical, aberrant, verdict, diff, domains: [...domsA, ...domsB],
+    fusion: { five: A, three: B, frame, partnerResidues, partnerLength: partner.protein.length, partnerFrom, startFrom } };
 }
 
 export { type Exon0 };

@@ -17,6 +17,7 @@
  */
 import type { BoundarySpanning, CoverageRun, JunctionArc, StructuralEvidence } from './types';
 import { classifyJunction, junctionKey, type TxModel } from './geometry';
+import { mergeSvArcs, poolPairArcs } from '../../standalone/svmerge';
 
 /** Longest cryptic exon that two facing alternative-site arcs are paired into a pseudo-exon event. */
 export const PSEUDO_EXON_MAX_BP = 500;
@@ -83,20 +84,22 @@ export function poolSpanning(samples: { spanning?: BoundarySpanning }[]): Bounda
 export function poolStructural(samples: { structural?: StructuralEvidence }[]): StructuralEvidence | undefined {
   const withData = samples.map(s => s.structural).filter((x): x is StructuralEvidence => !!x);
   if (!withData.length) return undefined;
-  const sumArcs = (lists: JunctionArc[][]) => {
-    const m = new Map<string, JunctionArc>();
-    for (const l of lists) for (const j of l) { const k = `${j.start}-${j.end}`; const p = m.get(k); if (p) p.count += j.count; else m.set(k, { ...j }); }
-    return [...m.values()].sort((a, b) => a.start - b.start || a.end - b.end);
-  };
   const clips = new Map<string, StructuralEvidence['clips'][number]>(), elsewhere = new Map<string, StructuralEvidence['elsewhere'][number]>(), ins = new Map<number, StructuralEvidence['insertions'][number]>();
   for (const s of withData) {
     for (const c of s.clips) { const k = `${c.side}${c.pos}`; const p = clips.get(k); if (p) p.count += c.count; else clips.set(k, { ...c }); }
-    for (const e of s.elsewhere) { const k = `${e.kind}${e.chrom}@${e.pos}`; const p = elsewhere.get(k); if (p) p.count += e.count; else elsewhere.set(k, { ...e }); }
+    for (const e of s.elsewhere) {
+      const k = `${e.kind}${e.chrom}@${e.pos}`; const p = elsewhere.get(k);
+      if (!p) { elsewhere.set(k, { ...e }); continue; }
+      p.count += e.count;
+      // the far position the most reads point to, over the group
+      if (e.farPos != null && (p.farPos == null || (e.farCount ?? 0) > (p.farCount ?? 0))) { p.farPos = e.farPos; p.farCount = e.farCount; }
+    }
     for (const x of s.insertions) { const p = ins.get(x.pos); if (p) { p.len = Math.round((p.len * p.count + x.len * x.count) / (p.count + x.count)); p.count += x.count; } else ins.set(x.pos, { ...x }); }
   }
   const medians = withData.map(s => s.insertMedian).filter((x): x is number => x != null).sort((a, b) => a - b);
   return {
-    deletions: sumArcs(withData.map(s => s.deletions)), splits: sumArcs(withData.map(s => s.splits)), duplications: sumArcs(withData.map(s => s.duplications)), inversions: sumArcs(withData.map(s => s.inversions)), discordant: sumArcs(withData.map(s => s.discordant)),
+    // events of the members pooled with the same breakpoint tolerance as within a sample (svmerge.ts)
+    deletions: mergeSvArcs(withData.map(s => [...s.deletions, ...s.splits])), splits: [], duplications: mergeSvArcs(withData.map(s => s.duplications ?? [])), inversions: mergeSvArcs(withData.map(s => s.inversions ?? [])), discordant: poolPairArcs(withData.map(s => s.discordant)),
     insertions: [...ins.values()].sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].sort((a, b) => a.pos - b.pos), elsewhere: [...elsewhere.values()].sort((a, b) => a.pos - b.pos),
     insertMedian: medians.length ? medians[medians.length >> 1] : null, reads: withData.reduce((a, s) => a + s.reads, 0),
@@ -221,7 +224,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     // last exonic base of each site, 1-based: intron start → iStart, intron end → iEnd + 1
     const donorPos = plus ? iStart : iEnd + 1, acceptorPos = plus ? iEnd + 1 : iStart;
     const sideNote = hasSpan
-      ? `${(plus ? rStart : rEnd).toLocaleString()} unspliced reads through the donor at ${donorPos.toLocaleString()} + ${(plus ? rEnd : rStart).toLocaleString()} through the acceptor at ${acceptorPos.toLocaleString()}`
+      ? `${(plus ? rStart : rEnd).toLocaleString('en-US')} unspliced reads through the donor at ${donorPos.toLocaleString('en-US')} + ${(plus ? rEnd : rStart).toLocaleString('en-US')} through the acceptor at ${acceptorPos.toLocaleString('en-US')}`
       : '';
     const competing = junctions.filter(j => j.start === iStart || j.end === iEnd);
     // pseudo-exon pairing: left-anchored arc ending inside the intron + right-anchored arc starting
@@ -248,7 +251,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
 
   // ---- pass 2: every event's share of the reads competing at its intron ----
   const pctTxt = (num: number, den: number) => pctLabel(den > 0 ? num / den : 0);
-  const num = (x: number) => (Number.isInteger(x) ? x.toLocaleString() : x.toFixed(1));
+  const num = (x: number) => (Number.isInteger(x) ? x.toLocaleString('en-US') : x.toFixed(1));
   for (const pool of pools) {
     if (!pool) continue;
     const { k, label, C, R, total } = pool;
@@ -258,7 +261,7 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
         intron: k, start: pool.iStart, end: pool.iEnd, fromExon: tx.exons[k].rank, toExon: tx.exons[k + 1].rank, rStart: pool.rStart, rEnd: pool.rEnd, canonical: C,
         pct: total > 0 ? (R / 2) / total : 0,
         note: `intron retention ${label} = (${pool.sideNote}; positions = last exonic base, 1-based) / 2 / ${totalTxt}` +
-          `\nvs the canonical junction alone (rMATS-style): (${R.toLocaleString()}) / (${R.toLocaleString()} + 2 × ${C.toLocaleString()}) = ${pctTxt(R, R + 2 * C)}`,
+          `\nvs the canonical junction alone (rMATS-style): (${R.toLocaleString('en-US')}) / (${R.toLocaleString('en-US')} + 2 × ${C.toLocaleString('en-US')}) = ${pctTxt(R, R + 2 * C)}`,
       });
     }
     if (!total) continue;
@@ -270,8 +273,8 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
         ev.cls = 'pseudo_exon'; ev.partner = junctionKey(other); ev.eventCount = p.n;
         ev.shares.push({
           pct: p.n / total, total,
-          note: `pseudo-exon = (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads of its two junctions) / 2 / ${totalTxt}` +
-            `\nvs the canonical junction alone (rMATS-style): (${sum.toLocaleString()}) / (${sum.toLocaleString()} + 2 × ${C.toLocaleString()}) = ${pctTxt(sum, sum + 2 * C)}`,
+          note: `pseudo-exon = (${p.a.count.toLocaleString('en-US')} + ${p.b.count.toLocaleString('en-US')} reads of its two junctions) / 2 / ${totalTxt}` +
+            `\nvs the canonical junction alone (rMATS-style): (${sum.toLocaleString('en-US')}) / (${sum.toLocaleString('en-US')} + 2 × ${C.toLocaleString('en-US')}) = ${pctTxt(sum, sum + 2 * C)}`,
         });
       }
     }
@@ -279,8 +282,8 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     for (const j of pool.alts) {
       out.get(junctionKey(j))!.shares.push({
         pct: j.count / total, total,
-        note: `= ${j.count.toLocaleString()} reads / ${totalTxt}` +
-          `\nvs the canonical junction alone (rMATS-style): ${j.count.toLocaleString()} / (${j.count.toLocaleString()} + ${C.toLocaleString()}) = ${pctTxt(j.count, j.count + C)}`,
+        note: `= ${j.count.toLocaleString('en-US')} reads / ${totalTxt}` +
+          `\nvs the canonical junction alone (rMATS-style): ${j.count.toLocaleString('en-US')} / (${j.count.toLocaleString('en-US')} + ${C.toLocaleString('en-US')}) = ${pctTxt(j.count, j.count + C)}`,
       });
     }
     // canonical: its own reads over the total; the competitors are listed so a value below 100 % is explained even when they are hidden or off-screen
@@ -299,22 +302,22 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
         const skipped = sk.k2 - sk.k1 > 1 ? `exons ${exonLabel(sk.k1 + 1, sk.k2)}` : `exon ${tx.exons[sk.k1 + 1].rank}`;
         ev.shares.push({
           pct: den > 0 ? Cs / den : 0, total: den,
-          note: `inclusion of ${skipped} = (${C.toLocaleString()} + ${other.C.toLocaleString()} reads of the two inclusion junctions) / (${C.toLocaleString()} + ${other.C.toLocaleString()} + 2 × ${S.toLocaleString()} skipping reads) = ${pctTxt(Cs, den)}` +
+          note: `inclusion of ${skipped} = (${C.toLocaleString('en-US')} + ${other.C.toLocaleString('en-US')} reads of the two inclusion junctions) / (${C.toLocaleString('en-US')} + ${other.C.toLocaleString('en-US')} + 2 × ${S.toLocaleString('en-US')} skipping reads) = ${pctTxt(Cs, den)}` +
             `\nthe same value on both inclusion junctions (rMATS ψ), the complement of the skipping arc's ${pctTxt(2 * S, den)}` +
-            `\nthis junction alone at intron ${label}: ${C.toLocaleString()} / ${totalTxt} = ${pctTxt(C, total)}`,
+            `\nthis junction alone at intron ${label}: ${C.toLocaleString('en-US')} / ${totalTxt} = ${pctTxt(C, total)}`,
         });
         continue;
       }
-      const inclusion = pool.skips.map(x => { const o = pools[x.k1 === k ? x.k2 : x.k1]; if (!o) return ''; const S = x.j.count, Cs = C + o.C; return `\ninclusion level of the skipping ${(x.j.start + 1).toLocaleString()}-${x.j.end.toLocaleString()}, pooled over its two introns (rMATS ψ): (${C.toLocaleString()} + ${o.C.toLocaleString()}) / (${C.toLocaleString()} + ${o.C.toLocaleString()} + 2 × ${S.toLocaleString()}) = ${pctTxt(Cs, Cs + 2 * S)}`; }).join('');
+      const inclusion = pool.skips.map(x => { const o = pools[x.k1 === k ? x.k2 : x.k1]; if (!o) return ''; const S = x.j.count, Cs = C + o.C; return `\ninclusion level of the skipping ${(x.j.start + 1).toLocaleString('en-US')}-${x.j.end.toLocaleString('en-US')}, pooled over its two introns (rMATS ψ): (${C.toLocaleString('en-US')} + ${o.C.toLocaleString('en-US')}) / (${C.toLocaleString('en-US')} + ${o.C.toLocaleString('en-US')} + 2 × ${S.toLocaleString('en-US')}) = ${pctTxt(Cs, Cs + 2 * S)}`; }).join('');
       const others = [
         ...(R > 0 ? [`intron retention (${pool.sideNote}; counted as their mean)`] : []),
-        ...pool.pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString()}-${p.b.start.toLocaleString()} (${p.a.count.toLocaleString()} + ${p.b.count.toLocaleString()} reads, counted as their mean)`),
-        ...pool.alts.map(x => `${AGG_CLASS_LABEL[out.get(junctionKey(x))!.cls]} ${(x.start + 1).toLocaleString()}-${x.end.toLocaleString()} (${x.count.toLocaleString()} reads)`),
-        ...pool.skips.map(sk => `exon skipping ${(sk.j.start + 1).toLocaleString()}-${sk.j.end.toLocaleString()} (${sk.j.count.toLocaleString()} reads)`),
+        ...pool.pairs.map(p => `pseudo-exon ${p.a.end.toLocaleString('en-US')}-${p.b.start.toLocaleString('en-US')} (${p.a.count.toLocaleString('en-US')} + ${p.b.count.toLocaleString('en-US')} reads, counted as their mean)`),
+        ...pool.alts.map(x => `${AGG_CLASS_LABEL[out.get(junctionKey(x))!.cls]} ${(x.start + 1).toLocaleString('en-US')}-${x.end.toLocaleString('en-US')} (${x.count.toLocaleString('en-US')} reads)`),
+        ...pool.skips.map(sk => `exon skipping ${(sk.j.start + 1).toLocaleString('en-US')}-${sk.j.end.toLocaleString('en-US')} (${sk.j.count.toLocaleString('en-US')} reads)`),
       ];
       ev.shares.push({
         pct: C / total, total,
-        note: `= ${C.toLocaleString()} canonical reads / ${totalTxt}` +
+        note: `= ${C.toLocaleString('en-US')} canonical reads / ${totalTxt}` +
           (others.length ? `\nother events at this intron, shown or not: ${others.slice(0, 5).join('; ')}${others.length > 5 ? `; +${others.length - 5} more` : ''}` : '') + inclusion,
       });
     }
@@ -328,9 +331,9 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     if (den <= 0) continue;
     out.get(junctionKey(sk.j))!.shares.push({
       pct: (2 * S) / den, total: den,
-      note: `skipping of exon${ri - li > 2 ? `s ${exonLabel(li + 1, ri - 1)}` : ` ${tx.exons[li + 1].rank}`} = 2 × ${S.toLocaleString()} skipping reads / (${num(p1.total)} reads competing at intron ${p1.label} + ${num(p2.total)} at intron ${p2.label})` +
+      note: `skipping of exon${ri - li > 2 ? `s ${exonLabel(li + 1, ri - 1)}` : ` ${tx.exons[li + 1].rank}`} = 2 × ${S.toLocaleString('en-US')} skipping reads / (${num(p1.total)} reads competing at intron ${p1.label} + ${num(p2.total)} at intron ${p2.label})` +
         `\nshare at intron ${p1.label}: ${pctTxt(S, p1.total)} · at intron ${p2.label}: ${pctTxt(S, p2.total)}` +
-        `\nvs the inclusion junctions alone (rMATS-style): 2 × ${S.toLocaleString()} / (${I1.toLocaleString()} + ${I2.toLocaleString()} + 2 × ${S.toLocaleString()}) = ${pctTxt(2 * S, I1 + I2 + 2 * S)}`,
+        `\nvs the inclusion junctions alone (rMATS-style): 2 × ${S.toLocaleString('en-US')} / (${I1.toLocaleString('en-US')} + ${I2.toLocaleString('en-US')} + 2 × ${S.toLocaleString('en-US')}) = ${pctTxt(2 * S, I1 + I2 + 2 * S)}`,
     });
   }
   return { events: out, retention };

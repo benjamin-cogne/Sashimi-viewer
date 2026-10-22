@@ -3,7 +3,8 @@
  * read encoding the viewer consumes, plus coverage runs and junction counts.
  * All coordinates are 0-based half-open.
  */
-import type { BoundarySpanning, AlignedRead, CoverageRun, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink } from '../components/sashimi/types';
+import type { AlignedRead, DiscordantArc, JunctionArc, StructuralEvidence, RealignedClip, Breakpoint, RescuedClips, ClipCluster, ElsewhereLink, SvArc, SvDiagnostics } from '../components/sashimi/types';
+import { clusterSv, type SvMember } from './svmerge';
 
 /** Aligner-agnostic view of one record (BAM or CRAM). */
 export interface RawRead {
@@ -23,6 +24,10 @@ export interface RawRead {
   mateChrom?: string; matePos?: number;
   /** SA tag: supplementary alignments "rname,pos,strand,CIGAR,mapQ,NM;" */
   sa?: string | null;
+  /** haplotag of a phased file (WhatsHap / LongPhase haplotag, HiPhase, DRAGEN): HP haplotype, PS phase set, PC confidence */
+  hp?: number | null; ps?: number | null; pc?: number | null;
+  /** base-modification tags (MM / ML, MN), kept for the methylation colours of the reads; absent in light scans */
+  mods?: { mm: string; ml: ArrayLike<number> | null; mn: number | null } | null;
 }
 
 const FLAG_PAIRED = 1, FLAG_UNMAPPED = 4, FLAG_REVERSE = 16, FLAG_READ2 = 128, FLAG_SECONDARY = 256, FLAG_QCFAIL = 512, FLAG_DUP = 1024;
@@ -42,10 +47,9 @@ export function cramMismatches(features: CramFeatureLike[] | undefined, qual: Ar
 /** Same filter as pysam count_coverage(read_callback='all'): flags of the records left out. */
 export const DROP_FLAGS = FLAG_UNMAPPED | FLAG_SECONDARY | FLAG_QCFAIL | FLAG_DUP;
 export const keepFlags = (flags: number): boolean => (flags & DROP_FLAGS) === 0;
-/** Uniquely mapped: NH:1 when the tag is there, else MAPQ ≥ 30. */
-export const uniqueFrom = (nh: number | null, mapq: number): boolean => (nh != null ? nh === 1 : mapq >= 30);
+/** keepFlags, secondary alignments (0x100, the other placements of a multi-mapped read) kept when `secondary`, as IGV shows them. */
+export const keepFlagsWith = (flags: number, secondary: boolean): boolean => (flags & (secondary ? DROP_FLAGS & ~FLAG_SECONDARY : DROP_FLAGS)) === 0;
 export function keepRead(r: RawRead): boolean { return keepFlags(r.flags); }
-export function isUnique(r: RawRead): boolean { return uniqueFrom(r.nh, r.mapq); }
 
 const CIGAR_RE = /(\d+)([MIDNSHP=X])/g;
 
@@ -101,7 +105,80 @@ export function encodeRead(r: RawRead, ref: string | null, refStart: number): Al
   if (hard[0] || hard[1]) out.h = hard;
   if (r.seq && ins.length) out.is = insSeq;
   if (r.sa) out.sa = r.sa;
+  if (r.hp != null && r.hp > 0) { out.hp = r.hp; if (r.ps != null) out.ps = r.ps; if (r.pc != null) out.pc = r.pc; }
   return out;
+}
+
+/**
+ * A CIGAR string rebuilt from an aligned read (blocks, deletions, introns, insertions, soft and hard clips), for the
+ * passes that read CIGARs when the source kept aligned reads only (an exported page, a converted file). An insertion
+ * sits before the reference base at its position: inside a block, at a block's end (before a deletion or intron, or the
+ * right clip) or at its start (after one); each is written once.
+ */
+export function cigarOfRead(r: AlignedRead): string {
+  const ins = [...r.i].sort((a, b) => a[0] - b[0]);
+  const used = new Uint8Array(ins.length);
+  let di = 0;   // deletions, in reference order as the blocks
+  let out = (r.h?.[0] ? `${r.h[0]}H` : '') + (r.c[0] ? `${r.c[0]}S` : '');
+  for (let k = 0; k < r.b.length; k++) {
+    const [bs, be] = r.b[k];
+    let p = bs;
+    for (let j = 0; j < ins.length; j++) {
+      const [ip, il] = ins[j];
+      if (used[j] || ip < bs || ip > be) continue;
+      if (ip > p) out += `${ip - p}M`;
+      out += `${il}I`; p = ip; used[j] = 1;
+    }
+    if (be > p) out += `${be - p}M`;
+    if (k + 1 < r.b.length) {
+      // the gap to the next block: its deletions, the rest an intron (a deletion next to an intron is not part of it)
+      const next = r.b[k + 1][0];
+      let q = be;
+      for (; di < r.d.length && r.d[di][0] < next; di++) {
+        const [ds, de] = r.d[di];
+        if (ds < q || de > next) continue;
+        if (ds > q) out += `${ds - q}N`;
+        out += `${de - ds}D`; q = de;
+      }
+      if (next > q) out += `${next - q}N`;
+    }
+  }
+  if (r.c[1]) out += `${r.c[1]}S`;
+  if (r.h?.[1]) out += `${r.h[1]}H`;
+  return /[MX=]/.test(out) ? out : `${r.e - r.s}M`;
+}
+
+/**
+ * The RawRead view of an aligned read, for the structural evidence. Its bases are rebuilt when it has soft clips or
+ * insertions whose bases were kept (`cs`, `is`), so that clips can be placed by realignment and insertions told apart
+ * from tandem copies: the clips as kept (N for the part of a long clip a source did not keep, away from the alignment),
+ * the inserted bases, and over its aligned blocks the reference with the read's mismatches (N where the reference is
+ * not given). Otherwise its bases are left out, as a light scan of a BAM does.
+ */
+export function rawOfRead(r: AlignedRead, chrom: string, ref?: { start: number; seq: string } | null): RawRead {
+  const cigar = cigarOfRead(r);
+  let seq = '';
+  if ((r.cs && (r.c[0] || r.c[1])) || r.is) {
+    const cs = r.cs ?? ['', ''];
+    const mm = new Map<number, string>();
+    for (const [pos, base] of r.m) mm.set(pos, base);
+    let pos = r.s, k = 0, first = true;
+    for (const [len, op] of parseCigar(cigar)) {
+      if (op === 'S') {
+        const kept = first ? cs[0] : cs[1];
+        seq += first ? 'N'.repeat(Math.max(0, len - kept.length)) + kept.slice(-len) : kept.slice(0, len) + 'N'.repeat(Math.max(0, len - kept.length));
+      } else if (op === 'M' || op === '=' || op === 'X') {
+        for (let q = pos; q < pos + len; q++) seq += mm.get(q) ?? (ref && q >= ref.start && q < ref.start + ref.seq.length ? ref.seq[q - ref.start] : 'N');
+        pos += len;
+      } else if (op === 'I') { const b = r.is?.[k] ?? ''; seq += b.length === len ? b : 'N'.repeat(len); k++; }
+      else if (op === 'D' || op === 'N') pos += len;
+      if (op !== 'H') first = false;
+    }
+  }
+  return {
+    name: r.n, start: r.s, cigar, seq, qual: null, flags: r.f, mapq: r.q, nh: r.nh,
+    tlen: r.tl, mateChrom: r.mp == null ? '' : r.mc ?? chrom, matePos: r.mp, sa: r.sa ?? null, hp: r.hp ?? null, ps: r.ps ?? null, pc: r.pc ?? null,
+  };
 }
 
 /** The SA tag parsed: the other parts of a split read (0-based starts). */
@@ -134,64 +211,11 @@ export function hardClippedBases(part: { h?: [number, number]; c: [number, numbe
   return [seq.substring(0, part.h[0]), seq.substring(total - part.h[1])];
 }
 
-/** Run-length coverage of [start, end) from the aligned blocks of encoded reads. */
-export function coverageRuns(reads: AlignedRead[], start: number, end: number): CoverageRun[] {
-  const n = end - start;
-  if (n <= 0) return [];
-  const diff = new Int32Array(n + 1);
-  for (const r of reads) for (const [bs, be] of r.b) {
-    const lo = Math.max(bs, start), hi = Math.min(be, end);
-    if (hi > lo) { diff[lo - start] += 1; diff[hi - start] -= 1; }
-  }
-  const runs: CoverageRun[] = [];
-  let depth = 0, runStart = 0;
-  for (let i = 0; i < n; i++) {
-    const d = depth + diff[i];
-    if (i > 0 && d !== depth) { runs.push({ start: start + runStart, end: start + i, depth }); runStart = i; }
-    depth = d;
-  }
-  runs.push({ start: start + runStart, end, depth });
-  return runs;
-}
 
 /** Anchors of a boundary-spanning read: aligned bases required on the exon side and on the intron side of the boundary. */
 export const SPAN_EXON_ANCHOR = 6, SPAN_INTRON_ANCHOR = 10;
 
-/**
- * Unspliced reads through exon–intron boundaries: one aligned block covering SPAN_EXON_ANCHOR bases
- * on the exon side and SPAN_INTRON_ANCHOR on the intron side. `intronStarts` are boundaries with the
- * intron to the right (exon ends), `intronEnds` with the intron to the left (exon starts).
- */
-export function boundarySpanning(reads: AlignedRead[], intronStarts: Iterable<number>, intronEnds: Iterable<number>): BoundarySpanning {
-  const starts = [...new Set(intronStarts)].sort((a, b) => a - b), ends = [...new Set(intronEnds)].sort((a, b) => a - b);
-  const startCount = new Map<number, number>(starts.map(p => [p, 0])), endCount = new Map<number, number>(ends.map(p => [p, 0]));
-  const lowerBound = (arr: number[], v: number) => { let lo = 0, hi = arr.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (arr[mid] < v) lo = mid + 1; else hi = mid; } return lo; };
-  for (const r of reads) for (const [bs, be] of r.b) {
-    // intron start p: block must cover [p - exonAnchor, p + intronAnchor)
-    for (let i = lowerBound(starts, bs + SPAN_EXON_ANCHOR); i < starts.length && starts[i] + SPAN_INTRON_ANCHOR <= be; i++) startCount.set(starts[i], (startCount.get(starts[i]) || 0) + 1);
-    // intron end q: block must cover [q - intronAnchor, q + exonAnchor)
-    for (let i = lowerBound(ends, bs + SPAN_INTRON_ANCHOR); i < ends.length && ends[i] + SPAN_EXON_ANCHOR <= be; i++) endCount.set(ends[i], (endCount.get(ends[i]) || 0) + 1);
-  }
-  return { intronStart: Object.fromEntries(startCount), intronEnd: Object.fromEntries(endCount) };
-}
 
-/** Junctions (CIGAR N gaps) overlapping [start, end). */
-export function junctionCounts(reads: AlignedRead[], start: number, end: number): JunctionArc[] {
-  const counts = new Map<string, JunctionArc>();
-  for (const r of reads) {
-    const dels = new Set(r.d.map(([s, e]) => `${s}-${e}`));
-    for (let k = 0; k + 1 < r.b.length; k++) {
-      const s = r.b[k][1], e = r.b[k + 1][0];
-      if (e <= s || dels.has(`${s}-${e}`)) continue;
-      if (e > start && s < end) {
-        const key = `${s}-${e}`;
-        const j = counts.get(key);
-        if (j) j.count++; else counts.set(key, { start: s, end: e, count: 1 });
-      }
-    }
-  }
-  return [...counts.values()].sort((a, b) => a.start - b.start || a.end - b.end);
-}
 
 /** Depth at a position from encoded reads (for site calling). */
 export function depthArray(reads: AlignedRead[], start: number, end: number): Int32Array {
@@ -289,6 +313,14 @@ export function exonDepth(reads: AlignedRead[], start: number, end: number): { m
 // ======================== Structural evidence (genomic libraries) ========================
 
 export const SV_MIN_DELETION = 50, SV_MIN_CLIP = 20, SV_MIN_SUPPORT = 3;
+/** Mates facing away from each other (← →) at least this far apart (and twice the median insert) are duplication-type. */
+export const OUTWARD_MIN_BP = 300;
+/** Bases the reverse mate of an outward pair may reach past the forward mate's start (soft-clip placement). */
+export const OUTWARD_OVERLAP_BP = 20;
+/** Clip at the outer end of each mate for a pair to be read as one molecule across a junction. */
+export const CROSSING_MIN_CLIP = 10;
+/** A CIGAR insertion is a tandem copy when its first and last TANDEM_PROBE bases are the reference at the copy's ends, within TANDEM_SLACK. */
+const TANDEM_PROBE = 24, TANDEM_SLACK = 60;
 const FLAG_PROPER = 2, FLAG_MATE_UNMAPPED = 8, FLAG_MATE_REVERSE = 32, FLAG_SUPPLEMENTARY = 2048;
 
 const cigarRefLen = (cigar: string) => parseCigar(cigar).reduce((n, [len, op]) => n + ('MDN=X'.includes(op) ? len : 0), 0);
@@ -364,6 +396,12 @@ export function placeClip(consensus: string, side: 'left' | 'right', ref: { star
 /** True when some read of the scan is soft-clipped by 20 bases or more without an SA tag and carries its sequence: the window is worth a reference for realignment. */
 export function hasRealignableClips(reads: RawRead[]): boolean {
   return reads.some(r => !r.sa && r.seq && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
+}
+/** The longest insertion of SV_MIN_DELETION or more whose bases a read carries (0: none): the reference around it tells a tandem copy. */
+export function longestPlaceableInsertion(reads: RawRead[]): number {
+  let max = 0;
+  for (const r of reads) if (r.seq) for (const [len, op] of parseCigar(r.cigar)) if (op === 'I' && len >= SV_MIN_DELETION && len > max) max = len;
+  return max;
 }
 /** True when some read is soft-clipped by RESCUE_MIN_CLIP bases or more without an SA tag and carries its sequence: a known breakpoint could rescue it. */
 export function hasRescuableClips(reads: RawRead[]): boolean {
@@ -504,21 +542,104 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
  * would give between its clip position and the placed sequence; hard-clipped records without SA tag, which carry
  * no sequence, count in the cluster at their clip position and follow it into the arc.
  */
-export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null): StructuralEvidence {
-  const dels = new Map<string, JunctionArc>(), splits = new Map<string, JunctionArc>(), dups = new Map<string, JunctionArc>(), invs = new Map<string, JunctionArc>(), disc = new Map<string, JunctionArc>();
+/**
+ * `insertMedian`, when given, is the median |template length| of the proper pairs of the window, for callers that
+ * pass only the records carrying structural evidence (the others would count for that median alone).
+ */
+/**
+ * `rna`: the evidence of an RNA library, its fusion junctions: split reads and clipped reads placed by realignment only.
+ * Its CIGAR deletions and insertions are left out (a long D there is rare and no structural event), and so are its
+ * pairs, which the introns between two mates make look discordant.
+ */
+export function structuralEvidence(reads: RawRead[], chrom: string, start: number, end: number, rate: number, ref?: { start: number; seq: string } | null, insertMedian?: number | null, rna = false): StructuralEvidence {
+  // every arc before merging, with its evidence units by source and the names of the reads behind them
+  const dels = new Map<string, SvMember>(), splits = new Map<string, SvMember>(), dups = new Map<string, SvMember>(), invs = new Map<string, SvMember>();
+  const discKind = { deletion: new Map<string, SvMember>(), duplication: new Map<string, SvMember>(), inversion: new Map<string, SvMember>() };
+  /**
+   * The breakpoints each discordant pair points to, from its reads (the bins only group the pairs): mates facing away
+   * (duplication) lie inside the duplicated stretch, so its ends are at or before the left mates' starts and at or after
+   * the right mates' ends; mates facing each other (deletion) lie outside, the ends at or after the left mates' ends and
+   * at or before the right mates' starts; same-strand mates (inversion) end before (→ →) or start after (← ←) the
+   * breakpoints.
+   */
+  const pairEnds = new Map<SvMember, [number, number][]>();
+  const cigarIns: { pos: number; len: number; seq: string; name: string }[] = [];
   const clips = new Map<string, ClipCluster>(), elsewhere = new Map<string, ElsewhereLink>();
   const clipSeqs = new Map<string, string[]>();
   const insertions = new Map<number, { pos: number; len: number; count: number }>();
-  const add = (m: Map<string, JunctionArc>, s: number, e: number, n = 1) => { const k = `${s}-${e}`; const j = m.get(k); if (j) j.count += n; else m.set(k, { start: s, end: e, count: n }); };
-  const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string) => { const k = `${kind}${target}@${pos}`; const x = m.get(k); if (x) x.count++; else m.set(k, { kind, pos, chrom: target, count: 1 }); };
+  const diag: SvDiagnostics = { records: reads.length, pairs: { deletion: 0, duplication: 0, inversion: 0 }, pairsWithDeletion: 0, pairsWithInsertion: 0, insertionGroups: [], reference: ref?.seq ? { start: ref.start, end: ref.start + ref.seq.length } : null };
+  const add = (m: Map<string, SvMember>, s: number, e: number, n = 1, src = 'other', name?: string) => {
+    const k = `${s}-${e}`;
+    let j = m.get(k);
+    if (!j) m.set(k, j = { start: s, end: e, count: 0, src: {}, names: new Set(), anon: 0 });
+    j.count += n; j.src[src] = (j.src[src] ?? 0) + n;
+    if (name) j.names.add(name); else j.anon += n;
+  };
+  // where the split reads continue on the other chromosome, per link: the most frequent position is kept
+  const farVotes = new Map<ElsewhereLink, Map<number, number>>();
+  const far = (m: Map<string, ElsewhereLink>, kind: 'split' | 'pair', pos: number, target: string, at?: number) => {
+    const k = `${kind}${target}@${pos}`;
+    let x = m.get(k);
+    if (x) x.count++; else m.set(k, x = { kind, pos, chrom: target, count: 1 });
+    if (at != null) { let v = farVotes.get(x); if (!v) farVotes.set(x, v = new Map()); v.set(at, (v.get(at) ?? 0) + 1); }
+  };
   const r5 = (x: number) => Math.round(x / 5) * 5;
   const inWindow = (a: number, b: number) => b > start && a < end;
-  const inserts: number[] = [];
-  for (const r of reads) if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
-  const median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
+  let median = insertMedian;
+  if (median === undefined) {
+    const inserts: number[] = [];
+    for (const r of reads) if (r.flags & FLAG_PAIRED && r.flags & FLAG_PROPER && r.tlen) inserts.push(Math.abs(r.tlen));
+    median = inserts.length ? inserts.sort((a, b) => a - b)[inserts.length >> 1] : null;
+  }
   const farInsert = median ? Math.max(5 * median, 1000) : Infinity;
+  // mates facing away from each other (← →) further apart than this: the junction of a tandem duplication. Closer, they
+  // are short fragments whose reads ran past each other (adapter read-through), not an event
+  const outwardMin = Math.max(OUTWARD_MIN_BP, 2 * (median ?? 0));
+  // primary records of each pair among `reads`: a pair is counted from its leftmost mate, or from the other one when the
+  // leftmost is not among them (a mate beyond the window: the reads of a duplication's far side, 4 kb away, were all lost)
+  const primaries = new Map<string, number>();
+  // where each primary record's alignment ends, by name and start: a mate's real end, when its record is here (a mate
+  // clipped at the junction ends there, not a read length after its start)
+  const alignedEnd = new Map<string, number>();
+  /** soft and hard clips at the left and right ends of each primary record, by name and start */
+  const clipsOf = new Map<string, [number, number]>();
+  const clipEndsOf = (cigar: string): [number, number] => {
+    const ops = parseCigar(cigar);
+    let l = 0, r = 0, k = 0;
+    for (; k < ops.length && (ops[k][1] === 'S' || ops[k][1] === 'H'); k++) l += ops[k][0];
+    for (let q = ops.length - 1; q >= k && (ops[q][1] === 'S' || ops[q][1] === 'H'); q--) r += ops[q][0];
+    return [l, r];
+  };
+  // pairs a mate of which carries a deletion or an insertion of SV_MIN_DELETION or more in its CIGAR: the event is in
+  // the alignment already (counted as a deletion, or an insertion / tandem copy below), and the mates' positions and
+  // orientation, taken without it, say something else (an 8 kb deletion read as a duplication by its short fragments)
+  // A mate carrying an insertion (a tandem copy, as realigners write a duplication) keeps its pair when the mates face
+  // away, which such a pair reads rightly; read as mates facing each other far apart, it would make a deletion of the
+  // duplication (33 pairs of an LDLR duplication did), and is left out. A mate carrying a deletion leaves its pair out.
+  const eventInAlignment = new Set<string>(), insertionInAlignment = new Set<string>();
+  for (const r of reads) if (r.name && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY))) {
+    for (const [len, op] of parseCigar(r.cigar)) {
+      if (op === 'D' && len >= SV_MIN_DELETION) eventInAlignment.add(r.name);
+      else if (op === 'I' && len >= SV_MIN_DELETION) insertionInAlignment.add(r.name);
+    }
+    primaries.set(r.name, (primaries.get(r.name) ?? 0) + 1);
+    let e = r.start;
+    for (const [len, op] of parseCigar(r.cigar)) if ('MDN=X'.includes(op)) e += len;
+    alignedEnd.set(`${r.name}:${r.start}`, e);
+    clipsOf.set(`${r.name}:${r.start}`, clipEndsOf(r.cigar));
+  }
   /** one record per split read, the primary when it is in the window */
   const chains = new Map<string, RawRead>();
+  // Deleted and skipped bases (CIGAR D, N) inside the primary records of each pair, by read name. The template length
+  // runs from one mate's outer end to the other's, across them: a pair whose gap is a deletion one of its reads already
+  // carries has a long TLEN but is not a discordant pair (it is the same event as that D, counted with the deletions).
+  const innerGap = (cigar: string) => { let g = 0; for (const [len, op] of parseCigar(cigar)) if (op === 'D' || op === 'N') g += len; return g; };
+  const pairGap = new Map<string, number>();
+  for (const r of reads) {
+    if (!r.name || r.flags & (FLAG_SECONDARY | FLAG_SUPPLEMENTARY) || !(r.flags & FLAG_PAIRED)) continue;
+    const g = innerGap(r.cigar);
+    if (g) pairGap.set(r.name, (pairGap.get(r.name) ?? 0) + g);
+  }
   const cluster = (key: string, pos: number, side: 'left' | 'right', hard: boolean, seq?: string) => {
     const c = clips.get(key);
     if (c) { c.count++; if (hard) c.hard = (c.hard ?? 0) + 1; } else clips.set(key, { pos, side, count: 1, hard: hard ? 1 : 0 });
@@ -530,8 +651,12 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     ops.forEach(([len, op]) => {
       if (op === 'S') { if (!seenAligned) leftClip += len; else rightClip += len; qLen += len; }
       else if (op === 'H') { if (!seenAligned) leftHard += len; else rightHard += len; }
-      else if ('MI=X'.includes(op)) { qLen += len; seenAligned = true; }
-      if (op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len);
+      else if ('MI=X'.includes(op)) {
+        // an insertion of SV_MIN_DELETION or more in the CIGAR (realigners such as ABRA2 write a tandem duplication so)
+        if (!rna && op === 'I' && len >= SV_MIN_DELETION && pos >= start && pos < end) cigarIns.push({ pos, len, seq: r.seq ? r.seq.substring(qLen, qLen + len) : '', name: r.name });
+        qLen += len; seenAligned = true;
+      }
+      if (!rna && op === 'D' && len >= SV_MIN_DELETION && pos + len > start && pos < end) add(dels, pos, pos + len, 1, 'cigar', r.name);
       if ('MDN=X'.includes(op)) { pos += len; seenAligned = true; }
     });
     const alnEnd = pos;
@@ -545,32 +670,75 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       else if (rightHard >= SV_MIN_CLIP && alnEnd > start && alnEnd <= end) cluster(`R${alnEnd}`, alnEnd, 'right', true);
     }
     if (r.sa && r.name) { const prev = chains.get(r.name); if (!prev || ((prev.flags & FLAG_SUPPLEMENTARY) && !(r.flags & FLAG_SUPPLEMENTARY))) chains.set(r.name, r); }
-    // discordant pairs, counted once from the leftmost mate
-    if (r.flags & FLAG_PAIRED && !(r.flags & FLAG_MATE_UNMAPPED) && r.mateChrom != null && r.matePos != null) {
+    // discordant pairs, counted once per pair: from the leftmost mate (the first of the pair when both start at the same
+    // base), and from primary records only (a supplementary record repeats its primary's mate fields)
+    if (!rna && r.flags & FLAG_PAIRED && !(r.flags & (FLAG_MATE_UNMAPPED | FLAG_SECONDARY | FLAG_SUPPLEMENTARY)) && r.mateChrom != null && r.matePos != null) {
       if (!sameChrom(r.mateChrom, chrom)) far(elsewhere, 'pair', Math.floor(r.start / 500) * 500, r.mateChrom);   // mates elsewhere never share a start: binned like the discordant pairs
-      else if (r.start <= r.matePos) {
-        const sameStrand = ((r.flags & FLAG_REVERSE) !== 0) === ((r.flags & FLAG_MATE_REVERSE) !== 0);
-        const span = Math.abs(r.tlen ?? (r.matePos + (alnEnd - r.start) - r.start));
-        if (sameStrand || span > farInsert) {
-          const a = Math.floor(r.start / 500) * 500, b = Math.ceil((r.matePos + (alnEnd - r.start)) / 500) * 500;
-          if (b > a) add(disc, a, b);
+      else if (r.name && eventInAlignment.has(r.name)) { if (r.start <= r.matePos) diag.pairsWithDeletion++; /* the event is in the alignment */ }
+      else if (r.start < r.matePos || (r.start === r.matePos && !(r.flags & FLAG_READ2)) || (r.name && primaries.get(r.name) === 1)) {
+        const rev = (r.flags & FLAG_REVERSE) !== 0, mateRev = (r.flags & FLAG_MATE_REVERSE) !== 0;
+        const leftmost = r.start <= r.matePos;
+        // the pair's extent: from the leftmost start to the rightmost end. From the positions, the mate's end taken as
+        // its start plus this read's aligned length (its own deletions and introns left out): TLEN is no guide across an
+        // event (BWA gave pairs of a 4 kb duplication, mates 3.9 kb apart, a TLEN of 110 and the proper-pair flag)
+        const readLen = alnEnd - r.start - innerGap(r.cigar);
+        const lo = Math.min(r.start, r.matePos);
+        const hi = r.matePos >= r.start ? Math.max(alnEnd, r.matePos + readLen) : alnEnd;
+        const span = hi - lo - (r.name ? pairGap.get(r.name) ?? 0 : innerGap(r.cigar));
+        // orientation: → ← normal, ← → outward (duplication), same strand (inversion). Outward means the reverse mate lies
+        // wholly before the forward one: its END before the other's start. Comparing starts took for outward the pairs
+        // of a short fragment across a deletion: the reverse mate aligned with the deletion in its CIGAR starts left of
+        // it and ends past it, while the forward mate, its few bases before the junction soft-clipped, starts after it
+        // (a VWF deletion drew a duplication arc of 103 pairs over its 288 deletion reads)
+        const knownMateEnd = r.name ? alignedEnd.get(`${r.name}:${r.matePos}`) : undefined;
+        const revStart = rev ? r.start : r.matePos, revEnd = rev ? alnEnd : knownMateEnd ?? r.matePos + readLen;
+        const fwdStart = rev ? r.matePos : r.start;
+        // A short fragment whose two mates both cross a junction, each aligned on its own side: the forward mate after it
+        // (its first bases clipped), the reverse mate before it (its last bases clipped). The molecule reads the reverse
+        // mate's aligned part, then the forward mate's: a split read seen through two mates, the junction going from the
+        // reverse mate's end to the forward mate's start, forward along the genome (a deletion) or back (a duplication).
+        // By orientation alone such pairs read the other way round: a deletion's as mates facing away, a duplication's as
+        // mates facing each other far apart (33 of them on an LDLR duplication).
+        const selfClips = clipEndsOf(r.cigar), mateClips = r.name ? clipsOf.get(`${r.name}:${r.matePos}`) : undefined;
+        const fwdClipL = rev ? mateClips?.[0] : selfClips[0], revClipR = rev ? selfClips[1] : mateClips?.[1];
+        const crossing = rev !== mateRev && fwdClipL != null && revClipR != null && fwdClipL >= CROSSING_MIN_CLIP && revClipR >= CROSSING_MIN_CLIP
+          && Math.abs(fwdStart - revEnd) >= SV_MIN_DELETION;
+        const kind: 'deletion' | 'duplication' | 'inversion' | null = rev === mateRev ? 'inversion'
+          : crossing ? (fwdStart > revEnd ? 'deletion' : 'duplication')
+          : revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP_BP ? (fwdStart - revStart > outwardMin ? 'duplication' : null)
+          : span > farInsert ? 'deletion' : null;
+        if (kind && kind !== 'duplication' && r.name && insertionInAlignment.has(r.name)) diag.pairsWithInsertion++;
+        else if (kind) {
+          diag.pairs[kind]++;
+          const a = Math.floor(lo / 500) * 500, b = Math.ceil(hi / 500) * 500;
+          if (b > a) {
+            add(discKind[kind], a, b, 1, 'pair', r.name);
+            // where the breakpoints lie from this pair's reads (see pairEnds): the arc is drawn there, not at the bins
+            const mateEnd = (r.name ? alignedEnd.get(`${r.name}:${r.matePos}`) : undefined) ?? r.matePos + readLen;
+            const leftEnd = leftmost ? alnEnd : mateEnd, rightStart = Math.max(r.start, r.matePos), rightEnd = leftmost ? mateEnd : alnEnd;
+            const est: [number, number] = kind === 'duplication' ? [lo, rightEnd] : kind === 'deletion' ? [leftEnd, rightStart]
+              : !rev ? [leftEnd, rightEnd] : [lo, rightStart];
+            const m = discKind[kind].get(`${a}-${b}`)!;
+            const e = pairEnds.get(m);
+            if (e) e.push(est); else pairEnds.set(m, [est]);
+          }
         }
       }
     }
   }
   /** One breakpoint between two adjacent parts of a read: classified and counted `n` times; returns the arc it joined, if any. */
-  const breakpoint = (a: Segment, b: Segment, n = 1): RealignedClip['arc'] | null => {
+  const breakpoint = (a: Segment, b: Segment, n = 1, src = 'split', name?: string): RealignedClip['arc'] | null => {
     const aOut = a.rev ? a.start : a.end;          // where the read leaves part a on the reference
     const bIn = b.rev ? b.end : b.start;           // where it enters part b
     const aHere = sameChrom(a.chrom, chrom), bHere = sameChrom(b.chrom, chrom);
     if (!aHere && !bHere) return null;
-    if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom); return null; }
+    if (!sameChrom(a.chrom, b.chrom)) { if (aHere && aOut >= start && aOut < end) far(elsewhere, 'split', aOut, b.chrom, bIn); else if (bHere && bIn >= start && bIn < end) far(elsewhere, 'split', bIn, a.chrom, aOut); return null; }
     const lo = r5(Math.min(aOut, bIn)), hi = r5(Math.max(aOut, bIn));
-    if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
+    if (a.rev !== b.rev) { if (inWindow(lo, hi) && hi > lo) { add(invs, lo, hi, n, src === 'split' ? (a.rev ? '-/+' : '+/-') : src, name); return { start: lo, end: hi, kind: 'inversion' }; } return null; }
     const refGap = a.rev ? a.start - b.end : b.start - a.end;
     const qGap = b.qs - a.qe;
-    if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) { add(splits, lo, hi, n); return { start: lo, end: hi, kind: 'split' }; } }
-    else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) { add(dups, lo, hi, n); return { start: lo, end: hi, kind: 'duplication' }; } }
+    if (refGap >= SV_MIN_DELETION) { if (inWindow(lo, hi)) { add(splits, lo, hi, n, src, name); return { start: lo, end: hi, kind: 'split' }; } }
+    else if (refGap <= -SV_MIN_DELETION) { if (inWindow(lo, hi) && hi > lo) { add(dups, lo, hi, n, src, name); return { start: lo, end: hi, kind: 'duplication' }; } }
     else if (qGap >= SV_MIN_DELETION && aOut >= start && aOut < end) { const k = r5(aOut); const x = insertions.get(k); if (x) { x.count += n; x.len = Math.round((x.len * (x.count - n) + qGap * n) / x.count); } else insertions.set(k, { pos: k, len: qGap, count: n }); }
     return null;
   };
@@ -585,7 +753,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       segs.push(segment(f[0], saStart, f[2] === '-', f[3]));
     }
     segs.sort((a, b) => a.qs - b.qs);
-    for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1]);
+    for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1], 1, 'split', r.name);
   }
   // clip clusters placed by realignment of their clipped consensus: the cluster becomes a breakpoint like a split read's
   const realigned: RealignedClip[] = [];
@@ -602,12 +770,47 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       // the aligned side as a one-base anchor at the clip position, the placed clip as the other part, in read order
       const anchor: Segment = c.side === 'right' ? { chrom, start: c.pos - 1, end: c.pos, rev: false, qs: 0, qe: 1 } : { chrom, start: c.pos, end: c.pos + 1, rev: false, qs: L, qe: L + 1 };
       const placed: Segment = { chrom, start: hit.start, end: hit.end, rev: hit.strand === '-', qs: c.side === 'right' ? 1 : 0, qe: c.side === 'right' ? 1 + L : L };
-      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count) : breakpoint(placed, anchor, c.count);
+      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count, 'clip') : breakpoint(placed, anchor, c.count, 'clip');
       if (!arc) continue;
       realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc });
       placedKeys.add(key);
       clips.delete(key);
     }
+  }
+  // CIGAR insertions, grouped (position within 5 bp, length within 10 %): a tandem copy when the inserted bases are the
+  // reference just before the insertion point (or just after it), placed on the window's reference, else an insertion
+  const insGroups: { pos: number; len: number; seq: string; names: string[] }[] = [];
+  for (const x of cigarIns) {
+    const g = insGroups.find(y => Math.abs(y.pos - x.pos) <= 5 && Math.abs(y.len - x.len) <= 0.1 * y.len);
+    if (g) { g.names.push(x.name); if (!g.seq && x.seq) g.seq = x.seq; } else insGroups.push({ pos: x.pos, len: x.len, seq: x.seq, names: [x.name] });
+  }
+  for (const g of insGroups) {
+    let copy: [number, number] | null = null;
+    if (ref?.seq && g.seq.length >= 2 * TANDEM_PROBE) {
+      const head = g.seq.slice(0, TANDEM_PROBE).toUpperCase(), tail = g.seq.slice(-TANDEM_PROBE).toUpperCase(), refSeq = ref.seq.toUpperCase();
+      // the copy before the insertion point: its first bases at pos − len, its last just before pos (within TANDEM_SLACK)
+      // the copy's end next to the insertion point is always in the window; its far end is checked where the reference
+      // reaches it (read around the window by the insertion's length, when it could be fetched), else the length places it
+      const refEnd = ref.start + refSeq.length;
+      const near = (probe: string, at: number) => {
+        const i = refSeq.indexOf(probe, Math.max(0, at - TANDEM_SLACK - ref.start));
+        return i >= 0 && Math.abs(ref.start + i - at) <= TANDEM_SLACK ? ref.start + i : null;
+      };
+      for (const [from, to, before] of [[g.pos - g.len, g.pos, true], [g.pos, g.pos + g.len, false]] as const) {
+        // copy before the point: its last bases end at pos; after it: its first bases start at pos
+        const inner = before ? near(tail, to - TANDEM_PROBE) : near(head, from);
+        if (inner == null) continue;
+        const farAt = before ? from : to - TANDEM_PROBE, farProbe = before ? head : tail;
+        const reachable = farAt - TANDEM_SLACK >= ref.start && farAt + TANDEM_PROBE + TANDEM_SLACK <= refEnd;
+        const far = reachable ? near(farProbe, farAt) : null;
+        if (reachable && far == null) continue;
+        copy = before ? [far ?? inner + TANDEM_PROBE - g.len, inner + TANDEM_PROBE] : [inner, far != null ? far + TANDEM_PROBE : inner + g.len];
+        break;
+      }
+    }
+    diag.insertionGroups.push({ pos: g.pos, len: g.len, reads: g.names.length, bases: g.seq.length, copy });
+    if (copy) for (const n of g.names) add(dups, copy[0], copy[1], 1, 'insertion', n);
+    else { const k = r5(g.pos); const x = insertions.get(k); if (x) { x.count += g.names.length; x.len = Math.round((x.len * (x.count - g.names.length) + g.len * g.names.length) / x.count); } else insertions.set(k, { pos: k, len: g.len, count: g.names.length }); }
   }
   // clipped reads rescued at the sample's own breakpoints (arcs from chains, deletions and placed clusters): their clipped
   // bases must match the reference at the other end; reads of a placed cluster are already counted and stay out
@@ -624,7 +827,7 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     for (const [k, n] of rescueClipEnds(ends, own, ref ?? null)) {
       const [kind, span] = k.split(':'); const [a, b] = span.split('-').map(Number);
       const m = kind === 'deletion' ? dels : kind === 'split' ? splits : kind === 'duplication' ? dups : invs;
-      add(m, a, b, n.count);
+      add(m, a, b, n.count, 'rescued');
       rescued.push({ start: a, end: b, kind: kind as Breakpoint['kind'], count: n.count * rate, hard: n.hard * rate, own: true });
       // rescued members of an unplaced cluster leave it (short clips were never in one)
       let left = n.long;
@@ -634,14 +837,60 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       }
     }
   }
-  const scaled = (m: Map<string, JunctionArc>) => [...m.values()].map(j => ({ ...j, count: j.count * rate })).sort((a, b) => a.start - b.start || a.end - b.end);
+  // one arc per event: arcs of a family whose breakpoints lie within the merge tolerance (svmerge.ts) are merged, the
+  // deletions inside CIGARs with the deletion-type split reads and placed clips; the placed and rescued clips then
+  // name the event they joined
+  const eventOf = new Map<string, SvArc & { kind: Breakpoint['kind'] }>();
+  const family = (kind: Breakpoint['kind'], maps: [string, Map<string, SvMember>][]) => {
+    const members = maps.flatMap(([k, m]) => [...m.values()].map(x => ({ x, k })));
+    const byMember = new Map(members.map(({ x, k }) => [x, k]));
+    return clusterSv(members.map(({ x }) => x)).map(({ event, members: ms }) => {
+      const ev = { ...event, count: event.count * rate };
+      for (const m of ms) eventOf.set(`${byMember.get(m)}:${m.start}-${m.end}`, { ...ev, kind });
+      return ev;
+    }).sort((a, b) => a.start - b.start || a.end - b.end);
+  };
+  const deletionEvents = family('deletion', [['deletion', dels], ['split', splits]]);
+  const duplicationEvents = family('duplication', [['duplication', dups]]);
+  const inversionEvents = family('inversion', [['inversion', invs]]);
+  for (const x of realigned) { const ev = eventOf.get(`${x.arc.kind}:${x.arc.start}-${x.arc.end}`); if (ev) x.arc = { start: ev.start, end: ev.end, kind: ev.kind }; }
+  for (const x of rescued) { const ev = eventOf.get(`${x.kind}:${x.start}-${x.end}`); if (ev) { x.start = ev.start; x.end = ev.end; x.kind = ev.kind; } }
+  // the pairs of one event fall in neighbouring bins (their insert sizes vary): bins of one class within one bin of the
+  // strongest at both ends join it, one arc per event
+  const discordant: DiscordantArc[] = (Object.keys(discKind) as (keyof typeof discKind)[]).flatMap(kind => {
+    const bins = [...discKind[kind].values()].sort((a, b) => b.count - a.count || a.start - b.start);
+    const out: DiscordantArc[] = [], used = new Set<SvMember>();
+    for (const x of bins) {
+      if (used.has(x)) continue;
+      const arc: DiscordantArc = { start: x.start, end: x.end, count: 0, kind };
+      const ests: [number, number][] = [];
+      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) {
+        used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end);
+        ests.push(...(pairEnds.get(y) ?? []));
+      }
+      // the arc at the breakpoints the pairs point to: the outermost reads of a duplication's pairs, the innermost of a
+      // deletion's (the breakpoint lies beyond them, within an insert size), the median of an inversion's
+      if (ests.length) {
+        const as = ests.map(e => e[0]).sort((p, q) => p - q), bs = ests.map(e => e[1]).sort((p, q) => p - q);
+        const [s0, e0] = kind === 'duplication' ? [as[0], bs[bs.length - 1]] : kind === 'deletion' ? [as[as.length - 1], bs[0]] : [as[as.length >> 1], bs[bs.length >> 1]];
+        if (e0 > s0) { arc.start = s0; arc.end = e0; }
+      }
+      out.push(arc);
+    }
+    return out;
+  }).sort((a, b) => a.start - b.start || a.end - b.end);
   return {
-    deletions: scaled(dels), splits: scaled(splits), duplications: scaled(dups), inversions: scaled(invs), discordant: scaled(disc),
+    deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant,
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
-    elsewhere: [...elsewhere.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
+    elsewhere: [...elsewhere.values()].map(x => {
+      const v = farVotes.get(x);
+      if (!v) return { ...x, count: x.count * rate };
+      const [farPos, farCount] = [...v.entries()].reduce((best, e) => (e[1] > best[1] ? e : best));
+      return { ...x, count: x.count * rate, farPos, farCount };
+    }).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     clips: [...clips.values()].map(c => ({ ...c, count: c.count * rate, hard: (c.hard ?? 0) * rate })).filter(c => c.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
     realigned: realigned.length ? realigned.sort((a, b) => a.pos - b.pos) : undefined,
     rescued: rescued.length ? rescued.sort((a, b) => a.start - b.start || a.end - b.end) : undefined,
-    insertMedian: median, reads: reads.length,
+    insertMedian: median, reads: reads.length, diagnostics: diag,
   };
 }

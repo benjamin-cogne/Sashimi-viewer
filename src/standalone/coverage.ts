@@ -1,0 +1,442 @@
+/**
+ * Exact coverage streamed out of the alignment records, and kept.
+ *
+ * A coverage request used to decode the reads of its window into objects, then walk them four times
+ * (depth, junctions, boundary-spanning reads, spliced fraction). Past a read budget it kept one read
+ * in k and scaled the counts back. Measured on deep BAMs, 75–92 % of the time goes to inflating the
+ * BGZF blocks and a few percent to the records themselves, so the budget bounded the memory but not
+ * the time — and it cost exactness.
+ *
+ * Here every aligned block of every read goes straight into two sparse histograms: where blocks start
+ * and where they end. Everything the viewer draws is read back from those two:
+ *
+ * - depth at x = (block starts ≤ x) − (block ends ≤ x);
+ * - reads spanning an exon–intron boundary with anchors [A, B) = blocks with start ≤ A and end ≥ B,
+ *   which is starts(≤ A) − ends(< B) + (blocks strictly inside (A, B)); the last term only involves
+ *   blocks shorter than the 16-base anchor window, kept apart in a short list;
+ * - junctions (the CIGAR N operations), counted as the reads go by.
+ *
+ * so any window, and any list of boundaries (the ones of a gene model chosen later included), is
+ * answered from the same pass. Reads under MAPQ 30 are counted again in the count of their MAPQ
+ * bucket, usually small: a minimum MAPQ is the first minus the buckets under it, so changing it costs
+ * nothing either.
+ *
+ * Nothing here decodes: the caller hands over each record's start, packed CIGAR and flags.
+ */
+import type { BoundaryHint, BoundarySpanning, CoverageRun, JunctionArc, StrandSlice } from '../components/sashimi/types';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, type RawRead } from './alignments';
+import { DepthIndexBuilder, registerDepthIndex } from '../components/sashimi/geometry';
+import { snapJunctions } from './junctionSnap';
+
+const CHUNK_BITS = 12, CHUNK = 1 << CHUNK_BITS, CHUNK_MASK = CHUNK - 1;
+/** Blocks this short or shorter can sit strictly inside a boundary's anchor window (16 bases) and are kept in a list. */
+const SHORT_BLOCK = SPAN_EXON_ANCHOR + SPAN_INTRON_ANCHOR;
+/** Junction key: start and length packed in one safe integer (introns up to 8.4 Mb, starts up to 2^30). */
+const JUNC_LEN = 8_388_608;
+/** Mean aligned bases per read above which the layers hold long reads (localSource.ts, isLongRead: 1 kb). */
+const LONG_READ_BASES = 1000;
+
+/** BAM CIGAR operation codes, as packed in NUMERIC_CIGAR (length << 4 | op). */
+export const CIGAR_OP = { M: 0, I: 1, D: 2, N: 3, S: 4, H: 5, P: 6, EQ: 7, X: 8 } as const;
+const OP_CODE: Record<string, number> = { M: 0, I: 1, D: 2, N: 3, S: 4, H: 5, P: 6, '=': 7, X: 8 };
+/** A CIGAR string packed the way BAM stores it, for records (CRAM) that only give the string. */
+export function packCigar(cigar: string): number[] {
+  const out: number[] = [];
+  let n = 0;
+  for (let i = 0; i < cigar.length; i++) {
+    const c = cigar.charCodeAt(i);
+    if (c >= 48 && c <= 57) n = n * 10 + (c - 48);
+    else { const op = OP_CODE[cigar[i]]; if (op != null) out.push(n * 16 + op); n = 0; }
+  }
+  return out;
+}
+
+/** Counts per genomic position, stored by 4 kb chunk only where something landed: an intron, or the gap between two panel targets, costs nothing. */
+export class Hist {
+  private chunks = new Map<number, Int32Array>();
+  private lastIdx = -1;
+  private last: Int32Array | null = null;
+  private version = 0;
+  /** chunk indices in order, and the total of the chunks before each: rebuilt after new counts */
+  private order: Int32Array | null = null;
+  private before: Float64Array | null = null;
+  private orderVersion = -1;
+
+  add(pos: number): void {
+    const idx = pos >> CHUNK_BITS;
+    let a = idx === this.lastIdx ? this.last : this.chunks.get(idx);
+    if (!a) { a = new Int32Array(CHUNK); this.chunks.set(idx, a); }
+    this.last = a; this.lastIdx = idx;
+    a[pos & CHUNK_MASK]++;
+    this.version++;
+  }
+  get bytes(): number { return this.chunks.size * CHUNK * 4; }
+  /** The chunk indices in order (cached until the next count). */
+  private sorted(): Int32Array {
+    if (this.orderVersion !== this.version || !this.order) {
+      const order = Int32Array.from(this.chunks.keys()).sort();
+      const before = new Float64Array(order.length + 1);
+      for (let k = 0; k < order.length; k++) {
+        const a = this.chunks.get(order[k])!;
+        let t = 0;
+        for (let i = 0; i < CHUNK; i++) t += a[i];
+        before[k + 1] = before[k] + t;
+      }
+      this.order = order; this.before = before; this.orderVersion = this.version;
+    }
+    return this.order;
+  }
+  /** Sum of the counts at positions < pos: the chunks before pos's by a binary search, then part of pos's own. */
+  below(pos: number): number {
+    const order = this.sorted(), ci = pos >> CHUNK_BITS;
+    let l = 0, h = order.length;
+    while (l < h) { const m = (l + h) >> 1; if (order[m] < ci) l = m + 1; else h = m; }
+    let s = this.before![l];
+    const a = l < order.length && order[l] === ci ? this.chunks.get(ci)! : null;
+    if (a) for (let i = 0, n = pos & CHUNK_MASK; i < n; i++) s += a[i];
+    return s;
+  }
+  /** Adds the indices of the chunks holding counts of [start, end) to `into`. */
+  chunksIn(start: number, end: number, into: Set<number>): void {
+    const order = this.sorted(), c0 = start >> CHUNK_BITS, c1 = (end - 1) >> CHUNK_BITS;
+    let l = 0, h = order.length;
+    while (l < h) { const m = (l + h) >> 1; if (order[m] < c0) l = m + 1; else h = m; }
+    for (let k = l; k < order.length && order[k] <= c1; k++) into.add(order[k]);
+  }
+  /** Adds `sign` × the counts of chunk `ci` into `out` (CHUNK long). */
+  addChunk(ci: number, out: Int32Array, sign: number): void {
+    const a = this.chunks.get(ci);
+    if (a) for (let i = 0; i < CHUNK; i++) out[i] += sign * a[i];
+  }
+  /** Adds `sign` × the counts of [start, start + out.length) into `out`. */
+  addInto(out: Int32Array, start: number, sign: number): void {
+    const end = start + out.length;
+    for (let ci = start >> CHUNK_BITS; ci <= (end - 1) >> CHUNK_BITS; ci++) {
+      const a = this.chunks.get(ci);
+      if (!a) continue;
+      const base = ci << CHUNK_BITS;
+      const lo = Math.max(start, base), hi = Math.min(end, base + CHUNK);
+      for (let p = lo; p < hi; p++) out[p - start] += sign * a[p - base];
+    }
+  }
+}
+
+/** Everything counted for one set of reads. */
+class Counts {
+  S = new Hist();
+  E = new Hist();
+  /** blocks of SHORT_BLOCK bases or fewer, start and end */
+  shortS: number[] = [];
+  shortE: number[] = [];
+  junc = new Map<number, number>();
+  /** of `junc`, the reads whose transcript strand under the reverse (dUTP) rule is + (see `plusStrand`): the library's orientation is read from them */
+  juncPlus = new Map<number, number>();
+  reads = 0;
+  spliced = 0;
+  /** aligned bases (not the introns nor the deletions): their mean per read tells a long-read library */
+  bases = 0;
+  /** |template length| of proper pairs, for the median insert the structural evidence measures discordance against */
+  inserts = new Map<number, number>();
+  /** the short blocks as start × 32 + length, sorted; rebuilt after new reads (a deep RNA gene holds hundreds of thousands) */
+  private sortedShort: Float64Array | null = null;
+
+  get bytes(): number { return this.S.bytes + this.E.bytes + this.shortS.length * 24 + (this.junc.size + this.juncPlus.size) * 32 + this.inserts.size * 32; }
+
+  shortKeys(): Float64Array {
+    if (!this.sortedShort) {
+      const k = new Float64Array(this.shortS.length);
+      for (let i = 0; i < k.length; i++) k[i] = this.shortS[i] * 32 + (this.shortE[i] - this.shortS[i]);
+      this.sortedShort = k.sort();
+    }
+    return this.sortedShort;
+  }
+
+  add(start: number, ops: ArrayLike<number>, insert: number, plus: boolean): void {
+    let pos = start, spliced = false;
+    for (let k = 0; k < ops.length; k++) {
+      const v = ops[k], len = v >>> 4, op = v & 15;
+      if (op === 0 || op === 7 || op === 8) {
+        this.S.add(pos); this.E.add(pos + len);
+        if (len <= SHORT_BLOCK) { this.shortS.push(pos); this.shortE.push(pos + len); this.sortedShort = null; }
+        pos += len; this.bases += len;
+      } else if (op === 3) {
+        // a junction is the N operation itself, as STAR's SJ.out.tab, regtools and pysam count it. The gap between two
+        // aligned blocks, which the previous counting used, also took in a deletion next to the intron (the junction
+        // then reported bases off its true donor) and made a junction of two deletions in a row.
+        const key = pos * JUNC_LEN + Math.min(len, JUNC_LEN - 1);
+        this.junc.set(key, (this.junc.get(key) ?? 0) + 1);
+        if (plus) this.juncPlus.set(key, (this.juncPlus.get(key) ?? 0) + 1);
+        pos += len; spliced = true;
+      } else if (op === 2) pos += len;
+    }
+    this.reads++;
+    if (spliced) this.spliced++;
+    if (insert > 0) this.inserts.set(insert, (this.inserts.get(insert) ?? 0) + 1);
+  }
+}
+
+/** Short blocks strictly inside (a, b): start > a and end < b. */
+function shortInside(c: Counts, a: number, b: number): number {
+  const keys = c.shortKeys();
+  // first key whose start is > a, i.e. key ≥ (a + 1) × 32
+  const lo = (a + 1) * 32;
+  let l = 0, h = keys.length;
+  while (l < h) { const m = (l + h) >> 1; if (keys[m] < lo) l = m + 1; else h = m; }
+  let n = 0;
+  for (let i = l; i < keys.length; i++) {
+    const s = Math.floor(keys[i] / 32);
+    if (s >= b) break;
+    if (s + (keys[i] - s * 32) < b) n++;
+  }
+  return n;
+}
+
+/**
+ * Transcript strand of a record under the reverse (dUTP, fr-firststrand) rule: read 2 of a pair lies on the
+ * transcript's strand, read 1 or a single read on the opposite one. True for +. A forward-stranded library (read 1 on
+ * the transcript, direct RNA) is the other way round: the viewer turns it over from the library's orientation.
+ */
+export function plusStrand(flags: number): boolean {
+  const reverse = (flags & 16) !== 0, read2 = (flags & 1) !== 0 && (flags & 128) !== 0;
+  return read2 ? !reverse : reverse;
+}
+
+/**
+ * The minimum mapping qualities a window can be read at, without reading it again: MAPQ ≥ 0 (every read), ≥ 1, ≥ 10,
+ * ≥ 20, ≥ 30. Aligners grade differently (STAR: 255 unique, 3 / 1 / 0 for 2, 3–4, more loci; HISAT2: 60, 1, 0; bwa
+ * and minimap2: 0–60), and these steps cover them: ≥ 10 is "uniquely mapped" for STAR and HISAT2, ≥ 20–30 a confident
+ * placement for bwa and minimap2.
+ */
+export const MAPQ_THRESHOLDS = [0, 1, 10, 20, 30] as const;
+/** The threshold a minimum MAPQ is read at: the largest of MAPQ_THRESHOLDS not above it. */
+export const mapqThreshold = (q: number): number => [...MAPQ_THRESHOLDS].reverse().find(t => t <= q) ?? 0;
+/** How many MAPQ buckets a minimum MAPQ takes out (those wholly under its threshold). */
+export const bucketsUnder = (minMapq: number): number => { const t = mapqThreshold(minMapq); return MAPQ_THRESHOLDS.filter(x => x > 0 && x <= t).length; };
+/** The MAPQ bucket a read is counted in besides `all`: [0], [1, 10), [10, 20), [20, 30); none from 30 up. */
+export const mapqBucket = (q: number): number => (q < 1 ? 0 : q < 10 ? 1 : q < 20 ? 2 : q < 30 ? 3 : -1);
+
+/**
+ * The reads of one part of a scan: every read goes to `all`, and a read under MAPQ 30 to the count of its MAPQ bucket
+ * as well (made when a first read falls in it), so a window is read at any of MAPQ_THRESHOLDS by taking the buckets
+ * under it out. With `strands`, the reads on + under the reverse rule also go to `plus` (and its buckets): the − strand
+ * is then `all` − `plus`, so a strand costs one more set of counts, not two.
+ */
+export class Layer {
+  all = new Counts();
+  /** the reads of each MAPQ bucket (mapqBucket), counted again */
+  low: (Counts | undefined)[] = [];
+  plus: Counts | null;
+  plusLow: (Counts | undefined)[] = [];
+  /** records the structural evidence needs (split, clipped, deleted, discordant), when it was asked for */
+  sv: { r: RawRead; mapq: number; end: number }[] = [];
+
+  constructor(readonly strands = false) {
+    this.plus = strands ? new Counts() : null;
+  }
+
+  get bytes(): number {
+    let n = this.all.bytes + (this.plus?.bytes ?? 0) + this.sv.length * 400;
+    for (const c of [...this.low, ...this.plusLow]) n += c?.bytes ?? 0;
+    return n;
+  }
+
+  /**
+   * One alignment. `insert` is the |template length| of a proper pair (0 otherwise), `flags` its SAM flag (its
+   * strand). Counting starts at the record's own start, wherever the caller's window is: the caller decides which
+   * layer owns which reads so that each is counted once.
+   */
+  add(start: number, ops: ArrayLike<number>, mapq: number, insert: number, flags: number): void {
+    const plus = plusStrand(flags), b = mapqBucket(mapq);
+    this.all.add(start, ops, insert, plus);
+    if (b >= 0) (this.low[b] ??= new Counts()).add(start, ops, insert, plus);
+    if (plus && this.plus) {
+      this.plus.add(start, ops, insert, true);
+      if (b >= 0) (this.plusLow[b] ??= new Counts()).add(start, ops, insert, true);
+    }
+  }
+}
+
+/** One strand of a slice: the reads on + or on − under the reverse rule. */
+export type StrandPick = 'plus' | 'minus';
+
+export interface CoverageSlice {
+  coverage: CoverageRun[];
+  junctions: JunctionArc[];
+  spanning: BoundarySpanning;
+  /** over every read of the layers, not only the window's: library-type evidence, the more reads the better */
+  spliced: { reads: number; fraction: number };
+  /** the structural records of the reads counted, the insert median of their proper pairs */
+  sv: RawRead[];
+  insertMedian: number | null;
+}
+
+/** A depth sweep of [start, end) under way: the chunks holding counts, the next one, and the run being extended. */
+interface Sweep {
+  parts: [Counts, number][]; start: number; end: number; ids: number[]; next: number;
+  d: number; runStart: number; coverage: CoverageRun[]; pyr: DepthIndexBuilder; delta: Int32Array;
+}
+/**
+ * Sweeps chunks until they are done (false) or `budgetMs` has passed (true: call again). A plain function, not the
+ * async caller: the hot loop then gets the engine's full optimisation.
+ */
+function sweepChunks(sw: Sweep, budgetMs: number): boolean {
+  const { parts, start, end, ids, coverage, pyr, delta } = sw;
+  const t0 = budgetMs < Infinity ? performance.now() : 0;
+  let d = sw.d, runStart = sw.runStart;
+  while (sw.next < ids.length) {
+    if (budgetMs < Infinity && performance.now() - t0 > budgetMs) { sw.d = d; sw.runStart = runStart; return true; }
+    const ci = ids[sw.next++];
+    delta.fill(0);
+    for (const [c, sign] of parts) { c.S.addChunk(ci, delta, sign); c.E.addChunk(ci, delta, -sign); }
+    const base = ci << CHUNK_BITS, lo = Math.max(start, base), hi = Math.min(end, base + CHUNK);
+    for (let p = lo; p < hi; p++) {
+      const x = delta[p - base];
+      if (x === 0) continue;
+      if (p > runStart) { coverage.push({ start: runStart, end: p, depth: d }); pyr.add(runStart, p, d); runStart = p; }
+      d += x;
+    }
+  }
+  sw.d = d; sw.runStart = runStart;
+  return false;
+}
+
+/** Work done between two hand-backs to the browser while a slice is read (a wide, deep window holds ~10⁶ runs). */
+const SLICE_STEP_MS = 8;
+
+/**
+ * Coverage, junctions and boundary-spanning counts of [start, end) from the layers that hold the
+ * reads overlapping it, each read in exactly one of them (the caller's invariant). `pause`, when
+ * given, is awaited every SLICE_STEP_MS of the depth sweep, so a wide window never holds the page;
+ * the layers must not change meanwhile (the caller holds the sample's lock).
+ */
+export async function readSlice(layers: Layer[], minMapq: number, start: number, end: number, boundaries?: BoundaryHint,
+  pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
+  const parts: [Counts, number][] = [];
+  // the MAPQ buckets under the threshold, taken out
+  const t = mapqThreshold(minMapq), under = bucketsUnder(minMapq);
+  for (const l of layers) {
+    if (strand && !l.plus) throw new Error('these counts were made without the strands');
+    // − is everything but +: all − plus, and the same for each bucket taken out
+    if (strand !== 'plus') { parts.push([l.all, 1]); for (let b = 0; b < under; b++) if (l.low[b]) parts.push([l.low[b]!, -1]); }
+    if (strand) { const sg = strand === 'plus' ? 1 : -1; parts.push([l.plus!, sg]); for (let b = 0; b < under; b++) if (l.plusLow[b]) parts.push([l.plusLow[b]!, -sg]); }
+  }
+  /** block starts ≤ x, block ends ≤ x */
+  const startsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.S.below(x + 1); return n; };
+  const endsTo = (x: number) => { let n = 0; for (const [c, sign] of parts) n += sign * c.E.below(x + 1); return n; };
+
+  // depth over [start, end) as runs, one per stretch of equal depth: depth(x) = depth(x − 1) + starts at x − ends at x,
+  // swept over the 4 kb chunks that hold counts only. A stretch without any (an intron, the gap between two panel
+  // targets, everything around a gene on a zoomed-out view) is one run whatever its length, so a slice costs what the
+  // window holds, not how wide it is. The min/max pyramid the viewer draws from is built from the runs, flat stretches
+  // included in one step, and attached to them.
+  const coverage: CoverageRun[] = [];
+  if (end > start) {
+    const ids = new Set<number>();
+    for (const [c] of parts) { c.S.chunksIn(start, end, ids); c.E.chunksIn(start, end, ids); }
+    // an integer from the start (the chunk totals are doubles): runs then hold small integers, not boxed numbers
+    const sw: Sweep = { parts, start, end, ids: [...ids].sort((a, b) => a - b), next: 0, d: (startsTo(start - 1) - endsTo(start - 1)) | 0,
+      runStart: start, coverage, pyr: new DepthIndexBuilder(start, end), delta: new Int32Array(CHUNK) };
+    while (sweepChunks(sw, pause ? SLICE_STEP_MS : Infinity)) await pause!();
+    coverage.push({ start: sw.runStart, end, depth: sw.d });
+    sw.pyr.add(sw.runStart, end, sw.d);
+    registerDepthIndex(coverage, sw.pyr.finish());
+  }
+
+  // junctions overlapping the window
+  const junc = new Map<number, number>(), juncPlus = new Map<number, number>();
+  for (const [c, sign] of parts) {
+    for (const [k, v] of c.junc) junc.set(k, (junc.get(k) ?? 0) + sign * v);
+    for (const [k, v] of c.juncPlus) juncPlus.set(k, (juncPlus.get(k) ?? 0) + sign * v);
+  }
+  let reads = 0, spliced = 0, bases = 0;
+  for (const [c, sign] of parts) { reads += sign * c.reads; spliced += sign * c.spliced; bases += sign * c.bases; }
+  let arcs: JunctionArc[] = [];
+  for (const [k, count] of junc) {
+    if (count <= 0) continue;
+    const js = Math.floor(k / JUNC_LEN);
+    arcs.push({ start: js, end: js + (k % JUNC_LEN), count, plus: Math.max(0, juncPlus.get(k) ?? 0) });
+  }
+  // long reads (mean aligned length over 1 kb, as the reads track tells them): the junctions placed a few bases off a
+  // much more common one are counted with it (junctionSnap.ts), instead of a fan of arcs around each true junction
+  if (reads && bases / reads > LONG_READ_BASES) {
+    const snap = snapJunctions(arcs);
+    if (snap.size) {
+      const merged = new Map<number, JunctionArc>();
+      for (const a of arcs) {
+        const to = snap.get(a.start * JUNC_LEN + Math.min(a.end - a.start, JUNC_LEN - 1));
+        const [s0, e0] = to ?? [a.start, a.end], k = s0 * JUNC_LEN + (e0 - s0);
+        let m = merged.get(k);
+        if (!m) merged.set(k, m = { start: s0, end: e0, count: 0, plus: 0 });
+        m.count += a.count; m.plus! += a.plus ?? 0;
+        if (to) m.snapped = (m.snapped ?? 0) + a.count;
+      }
+      arcs = [...merged.values()];
+    }
+  }
+  const junctions = arcs.filter(j => j.end > start && j.start < end).sort((a, b) => a.start - b.start || a.end - b.end);
+
+  /** blocks with start ≤ a and end ≥ b */
+  const covering = (a: number, b: number): number => {
+    let inside = 0;
+    for (const [c, sign] of parts) inside += sign * shortInside(c, a, b);
+    return startsTo(a) - endsTo(b - 1) + inside;
+  };
+  const starts = [...new Set([...junctions.map(j => j.start), ...(boundaries?.intronStarts ?? [])].filter(p => p >= start && p < end))].sort((a, b) => a - b);
+  const ends = [...new Set([...junctions.map(j => j.end), ...(boundaries?.intronEnds ?? [])].filter(p => p > start && p <= end))].sort((a, b) => a - b);
+  const spanning: BoundarySpanning = { intronStart: {}, intronEnd: {} };
+  // intron start p: a block over [p − exon anchor, p + intron anchor); intron end q: over [q − intron anchor, q + exon anchor)
+  for (const p of starts) spanning.intronStart[p] = covering(p - SPAN_EXON_ANCHOR, p + SPAN_INTRON_ANCHOR);
+  for (const q of ends) spanning.intronEnd[q] = covering(q - SPAN_INTRON_ANCHOR, q + SPAN_EXON_ANCHOR);
+
+  // insert median, at the same rank structuralEvidence takes it (sorted list, index length >> 1)
+  const inserts = new Map<number, number>();
+  for (const [c, sign] of parts) for (const [k, v] of c.inserts) inserts.set(k, (inserts.get(k) ?? 0) + sign * v);
+  let total = 0;
+  for (const v of inserts.values()) total += v;
+  let insertMedian: number | null = null;
+  if (total > 0) {
+    let rank = total >> 1;
+    for (const k of [...inserts.keys()].sort((a, b) => a - b)) { const v = inserts.get(k)!; if (rank < v) { insertMedian = k; break; } rank -= v; }
+  }
+  const sv: RawRead[] = [];
+  // the records of the reads overlapping the window, as a scan of the window would have handed them over
+  for (const l of layers) for (const x of l.sv) if (x.mapq >= t && x.r.start < end && x.end > start) sv.push(x.r);
+
+  return { coverage, junctions, spanning, spliced: { reads, fraction: reads ? spliced / reads : 0 }, sv, insertMedian };
+}
+
+/**
+ * What one sample has counted on one chromosome: every read whose start lies in [ps, pe) in `owned`,
+ * and the reads that start before ps but reach into it in `spill`. Coverage, junctions and
+ * boundary counts are then exact over [ps, pe), whatever length the reads or their introns have.
+ *
+ * Growing the range to the right only adds owned reads. Growing it to the left moves ps: the
+ * reads of the old spill are counted again as they come — owned when they start in the new tiles,
+ * in the new spill when they start before them — so the old spill is dropped whole.
+ */
+export class CoverageState {
+  owned: Layer;
+  spill: Layer;
+  ps = 0;
+  pe = 0;
+  lastUsed = 0;
+  constructor(readonly chrom: string, readonly structural: boolean | 'rna', readonly secondary = false, readonly strands = false) {
+    this.owned = new Layer(strands); this.spill = new Layer(strands);
+  }
+  get empty(): boolean { return this.pe <= this.ps; }
+  get bytes(): number { return this.owned.bytes + this.spill.bytes; }
+  covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }
+  slice(minMapq: number, start: number, end: number, boundaries?: BoundaryHint, pause?: () => Promise<void>, strand?: StrandPick): Promise<CoverageSlice> {
+    return readSlice([this.owned, this.spill], minMapq, start, end, boundaries, pause, strand);
+  }
+}
+
+/** The two strands of a window, from counts made with the strands (`SampleCoverage.strands`). */
+export async function strandSlices(st: CoverageState, minMapq: number, start: number, end: number, boundaries?: BoundaryHint): Promise<{ plus: StrandSlice; minus: StrandSlice }> {
+  const one = async (strand: StrandPick): Promise<StrandSlice> => {
+    const sl = await st.slice(minMapq, start, end, boundaries, yieldStrand, strand);
+    return { coverage: sl.coverage, junctions: sl.junctions, spanning: sl.spanning };
+  };
+  return { plus: await one('plus'), minus: await one('minus') };
+}
+const yieldStrand = () => new Promise<void>(r => setTimeout(r, 0));

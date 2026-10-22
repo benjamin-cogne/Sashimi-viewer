@@ -4,32 +4,35 @@
  * decoded in the browser; only gene lookups (RefSeq models from the UCSC API, Ensembl REST as
  * fallback) and reference sequence (when no FASTA is given) are fetched from the network.
  */
+import '../plugins';   // registered file kinds (fileKinds.ts), before anything asks which files it reads
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
+import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
-import { fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
-import { LocalDataSource, type LocalSample } from './localSource';
-import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2 } from './embedded';
+import { FOLDER_MAX_FILES, fileInFolder, filesFromDrop, filesFromFolderInput, filesInFolder, hasFileSystemAccess, permitted, pickFiles, pickFolder, recallFile, recallFolder, rememberFiles, rememberFolder, type FSDirHandle, type FSHandle, type PathedFile } from './handles';
+import { LocalDataSource, METHYL_MAX_BP, type LocalSample } from './localSource';
+import { READS_PHASE_CAP } from './readsWindow';
+import { exportedCall, thresholdAt, type MethylWindow } from './methylation';
+import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
+import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeMethyl, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2, type EmbeddedPhase, type EncodedMethyl } from './embedded';
 import type { GenomeBuild } from './ensembl';
-import { parseLocus, toTxModel } from '../components/sashimi/geometry';
-import type { KnownVariant, LibraryEvidence, LibraryType, SampleCoverage } from '../components/sashimi/types';
+import { liftRange, liftSegments } from './liftover';
+import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
+import { attachVariantWorker } from './variantClient';
+import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
 import { describeLink, parseLink, variantOfInterest } from './link';
+import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
+import { GeneSuggest } from '../components/sashimi/GeneSuggest';
+import { rememberGene } from './geneSuggest';
 import '../index.css';
 
 /** Unreleased build (branch dev published under /dev/): banner, tab title and a red favicon, so it is never mistaken for the stable page. */
 const VERSION = __APP_VERSION__;
-/** short version for the badge: v1.1 */
+/** short version for the badge: v1.2 */
 const VERSION_SHORT = `v${VERSION.split('.').slice(0, 2).join('.')}`;
-/**
- * Structural-variant hints on DNA tracks (arcs, pills, panel): hidden everywhere in 1.1 until they mature, including on
- * the dev page. Set SV_HINTS_IN_DEV to true on the dev branch after the 1.1 merge to show them on dev builds again;
- * ?sv=1 on the URL shows them on any build.
- */
-const SV_HINTS_IN_DEV = true;
-const SV_HINTS = (import.meta.env.VITE_DEV_MODE === '1' && SV_HINTS_IN_DEV) || new URLSearchParams(location.search).get('sv') === '1';
 const DEV = import.meta.env.VITE_DEV_MODE === '1'
   ? { branch: import.meta.env.VITE_DEV_BRANCH || 'dev', sha: (import.meta.env.VITE_DEV_SHA || '').slice(0, 7), date: import.meta.env.VITE_DEV_DATE || '', stable: import.meta.env.VITE_STABLE_URL || '../' }
   : null;
@@ -49,7 +52,13 @@ const EMBEDDED = readEmbedded();
 /** A region open in the viewer: the gene (1-based inclusive bounds) and, optionally, the window, the pinned locus and the reads track. */
 type Opened = { geneName: string; geneId?: string; chrom: string; start: number; end: number; view?: { start: number; end: number }; /** undefined: the window itself is pinned when there is one; null: nothing pinned */ mark?: { start: number; end: number } | null; reads?: boolean };
 /** A registered view (tab): its region, the last state the viewer reported for it, and the options it must start with when reopened. */
-interface ViewTab { id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings> }
+interface ViewTab {
+  id: number; label: string; opened: Opened; state: ViewerState | null; settings?: Partial<ViewerSettings>;
+  /** what the search box asked for when the tab was opened (searchKey), kept while the view moves: a second search for it switches to this tab */
+  asked?: string;
+}
+/** A search's target: the gene (whole), or the locus searched (its gene opened, the locus pinned). */
+const searchKey = (o: Opened) => (o.mark ? `l:${o.chrom.replace(/^chr/i, '').toUpperCase()}:${o.mark.start}-${o.mark.end}` : `g:${o.geneName.toUpperCase()}`);
 const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
 /** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
 const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
@@ -63,18 +72,61 @@ const stateOfTab = (t: ViewTab): ViewerState => t.state ?? {
 const openedOfState = (st: ViewerState, prev?: Opened): Opened => ({ geneName: st.gene.name, geneId: st.gene.id ?? prev?.geneId, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end, view: { ...st.view }, mark: st.mark ?? null });
 /** Largest window fetched around a view (the viewer's own rule), for the export. */
 const MAX_FETCH_BP = 2_000_000;
-/** The reads track exists below this window size (the viewer's rule); the export follows it. */
-const READS_MAX_VIEW_BP = 100_000;
+/** The reads track of a view exists below its reads window (the viewer's rule, 100 kb unless set otherwise); the export follows it. */
+const readsWindowOfView = (st: ViewerState) => readsWindowOf(st.readsWindow);
 /** Choices of the export dialog: the window exported around each view (coverage, junctions, retention and reads alike) and the reads per sample. */
 interface ExportOptions { window: 'view' | 'margin' | 'max'; readsCap: 'shown' | 'dense' | 'all' }
 const READS_CAPS: Record<ExportOptions['readsCap'], number> = { shown: 20000, dense: 100000, all: Number.MAX_SAFE_INTEGER };
+
+/** Spliced reads of a gene's own introns needed before a library's orientation is called from them. */
+const STRAND_MIN_READS = 50;
+const STRAND_NAMES: Record<LibraryStrand, string> = {
+  reverse: 'reverse-stranded (dUTP, fr-firststrand: read 1 antisense, read 2 sense; Illumina Stranded / TruSeq Stranded, NEB Directional, SMARTer Stranded v2-v3)',
+  forward: 'forward-stranded (read 1 or the single read sense; QuantSeq FWD, SMARTer Stranded v1, direct RNA, oriented long reads)',
+  unstranded: 'unstranded (reads on both strands alike)',
+};
+const strandBadge = (e: StrandEvidence | undefined) => (!e ? '±?' : e.call === 'reverse' ? 'REV' : e.call === 'forward' ? 'FWD' : 'UNS');
+const strandTitle = (e: StrandEvidence | undefined) => `${!e ? 'Library orientation not known yet: it is read from the spliced reads of the first multi-exon gene opened'
+  : `${e.source === 'user' ? 'Chosen by the user' : `Detected: ${Math.round((e.fraction ?? 0) * 100)} % of ${(e.reads ?? 0).toLocaleString('en-US')} spliced reads of the gene's introns on its strand under the reverse rule`} · ${STRAND_NAMES[e.call]}`}`
+  + ' · click to set it (reverse → forward → unstranded); the Strands option of the plot splits the coverage of the stranded samples';
 
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
 const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
-type PairedSample = { name: string; kind: 'bam' | 'cram'; file: File; index: File; path?: string; indexPath?: string };
+type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
+/**
+ * Names for samples being added, none taken by another sample (sessions, groups and exports refer to samples by
+ * name): a file's name without its extension, and where two files share it (STAR writes Aligned.sortedByCoord.out.bam
+ * in one folder per sample) the folders it is in, from the nearest, as many as tell it apart; a number after it when
+ * nothing else does.
+ */
+function uniqueSampleNames(adding: { name: string; path?: string }[], taken: Iterable<string>): string[] {
+  const used = new Set(taken);
+  const dirsOf = (a: { path?: string }) => (a.path ?? '').split('/').slice(0, -1).filter(Boolean);
+  const label = (a: { name: string; path?: string }, k: number) => `${dirsOf(a).slice(-k).join('/')}/${a.name}`;
+  const byName = new Map<string, number[]>();
+  adding.forEach((a, i) => { const l = byName.get(a.name); if (l) l.push(i); else byName.set(a.name, [i]); });
+  const out: string[] = [];
+  for (const [name, idx] of byName) {
+    if (idx.length === 1 && !used.has(name)) { out[idx[0]] = name; used.add(name); continue; }
+    // the fewest folders that tell these files apart, giving names no other sample has
+    const most = Math.min(...idx.map(i => dirsOf(adding[i]).length));
+    let k = 1;
+    for (; k <= most; k++) { const ls = idx.map(i => label(adding[i], k)); if (new Set(ls).size === ls.length && ls.every(l => !used.has(l))) break; }
+    for (const i of idx) {
+      let n = k <= most ? label(adding[i], k) : used.has(name) ? '' : name;
+      for (let c = 2; !n || used.has(n); c++) n = `${name} (${c})`;
+      out[i] = n; used.add(n);
+    }
+  }
+  return out;
+}
+/** A sample already loaded: the same relative path, or without paths the same file name, size and index. */
+const sameSample = (a: { file: File; index: File; path?: string }, b: { file: File; index: File; path?: string }) =>
+  a.path && b.path ? a.path === b.path : a.file.name === b.file.name && a.file.size === b.file.size && a.index.name === b.index.name;
+
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
 function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
   const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
@@ -85,8 +137,22 @@ function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unm
   const lookup = (n: string) => lookupIn('', n)?.file;
   const samples: PairedSample[] = [];
   const unmatched: string[] = [];
+  const taken = new Set<string>();
   for (const x of items) {
     const f = x.file;
+    // a registered file kind (fileKinds.ts): paired with its index, or alone when it indexes itself
+    const k = fileKindOf(f.name);
+    if (k) {
+      const dir = dirOf(x), key = `${dir}|${f.name.toLowerCase()}`;
+      if (taken.has(key)) continue;   // a self-indexed file comes back twice from a session's reopening
+      taken.add(key);
+      const ext = k.extensions.find(e => f.name.toLowerCase().endsWith(e))!;
+      const stem = f.name.slice(0, f.name.length - ext.length);
+      const idx = k.index ? k.index.map(i => lookupIn(dir, `${f.name}${i}`) || lookupIn(dir, `${stem}${i}`)).find(Boolean) : x;
+      if (idx) samples.push({ name: stem, kind: k.id, file: f, index: idx.file, path: x.path, indexPath: idx.path });
+      else unmatched.push(f.name);
+      continue;
+    }
     if (!ALIGN_EXT.test(f.name)) continue;
     const kind = f.name.toLowerCase().endsWith('.cram') ? 'cram' : 'bam';
     const stem = f.name.replace(ALIGN_EXT, '');
@@ -122,7 +188,16 @@ function Logo({ size = 28 }: { size?: number }) {
 
 function App() {
   const [build, setBuild] = useState<GenomeBuild>(EMBEDDED?.build ?? LINK?.build ?? 'GRCh38');
+  /** the other build whose coordinates the views show too (a second line over the ruler), or none */
+  const [liftTo, setLiftTo] = useState<GenomeBuild | null>(null);
+  /** the build switch clicked while views are open: what to do is asked first */
+  const [buildAsk, setBuildAsk] = useState<GenomeBuild | null>(null);
+  /** the build was chosen by hand (or by a session or a link): the files' headers no longer set it */
+  const buildChosen = useRef(!!(EMBEDDED || LINK));
   const [samples, setSamples] = useState<LocalSample[]>(() => (EMBEDDED ? embeddedSamples(EMBEDDED) : []));
+  /** the samples as they are now, those just added included (their state lands at the next render) */
+  const samplesRef = useRef(samples);
+  samplesRef.current = samples;
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
   const [notes, setNotes] = useState<string[]>([]);
@@ -166,7 +241,12 @@ function App() {
   const [reopenState, setReopenState] = useState<{ folder: string; ready: boolean; note?: string } | null>(null);
   const nextId = useRef(EMBEDDED ? Math.max(0, ...EMBEDDED.samples.map(s => s.id)) + 1 : 1);
   const dsRef = useRef<LocalDataSource>();
-  if (!dsRef.current) { dsRef.current = EMBEDDED ? new EmbeddedDataSource(EMBEDDED, { build }) : new LocalDataSource({ build }); if (LINK && !EMBEDDED) dsRef.current.knownVariants = LINK.variants; }
+  if (!dsRef.current) {
+    dsRef.current = EMBEDDED ? new EmbeddedDataSource(EMBEDDED, { build }) : new LocalDataSource({ build });
+    if (LINK && !EMBEDDED) dsRef.current.knownVariants = LINK.variants;
+    // full variant scans in a Web Worker, so that no scan, however deep the window, holds the page's thread
+    attachVariantWorker(dsRef.current);
+  }
   const ds = dsRef.current;
 
   /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */
@@ -180,7 +260,7 @@ function App() {
     const id = tabSeq.current++;
     const prev = viewerStateRef.current;
     pendingSettingsRef.current = prev ? { ...prev, transcriptId: prev.gene.name === o.geneName ? prev.transcriptId : undefined } : undefined;
-    setViews(tabs => [...snapshot(tabs), { id, label: labelOf(o), opened: o, state: null }]);
+    setViews(tabs => [...snapshot(tabs), { id, label: labelOf(o), opened: o, state: null, asked: searchKey(o) }]);
     setActiveId(id);
     setGene(o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : o.geneName);
   }, [snapshot]);
@@ -213,16 +293,22 @@ function App() {
 
   const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
     const files = Array.from(list as ArrayLike<File | PathedFile>);
-    const { samples: found, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
+    const { samples: paired, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
     const msgs: string[] = [];
-    const added: LocalSample[] = found.map(s => ({ id: nextId.current++, ...s, pending: true }));
+    // a file already loaded is not added again (a session reopening its files while they arrive by another way)
+    const have = samplesRef.current;
+    const found = paired.filter(s => !have.some(x => !x.embedded && sameSample(x, s)));
+    const names = uniqueSampleNames(found, have.map(x => x.name));
+    const added: LocalSample[] = found.map((s, i) => ({ id: nextId.current++, ...s, name: names[i], pending: true }));
     for (const s of added) ds.addSample(s);
-    if (added.length) setSamples(prev => [...prev, ...added]);
+    if (added.length) { samplesRef.current = [...have, ...added]; setSamples(prev => [...prev, ...added]); }
     // library type from the header (the aligner); the reads of the first gene opened confirm or correct it. The chip pulses until the file is open.
     for (const s of added) {
-      const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? ev : x.lib } : x)));
+      const settle = (ev: LibraryEvidence | null) => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, pending: false, lib: ev && x.lib?.source !== 'user' && (!x.lib || x.lib.source === 'none') ? { ...ev, strand: x.lib?.strand } : x.lib } : x)));
       if (ds.getLibraryType) ds.getLibraryType(s.id).then(settle).catch(() => settle(null));
       else settle(null);
+      // the build it was aligned on, from the chromosome lengths in its header
+      ds.getAssembly?.(s.id).then(asm => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, asm } : x)))).catch(() => {});
     }
     if (unmatched.length) msgs.push(`No index found for ${unmatched.join(', ')} (add the .bai / .crai file together with it)`);
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
@@ -249,7 +335,11 @@ function App() {
     }
     setIntake(`Listing the folder ${h.name}…`);
     setNotes([`Reading ${h.name}…`]);
-    try { addFolder(h.name, h, await filesInFolder(h)); }
+    try {
+      const files = await filesInFolder(h);
+      addFolder(h.name, h, files);
+      if (files.length >= FOLDER_MAX_FILES) setNotes(n => [...n, `Only the first ${FOLDER_MAX_FILES.toLocaleString('en-US')} alignment files of ${h!.name} were listed: choose the folder holding the BAMs themselves (or a run folder) to see them all.`]);
+    }
     catch (e: any) { setError(`Could not list the folder ${h.name}: ${e.message}`); }
     finally { setIntake(null); }
   }, [addFolder, openFolderInput]);
@@ -264,7 +354,7 @@ function App() {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const onFolderInput = useCallback((list: FileList) => {
-    setIntake(`Listing ${list.length.toLocaleString()} file${list.length === 1 ? '' : 's'}…`);
+    setIntake(`Listing ${list.length.toLocaleString('en-US')} file${list.length === 1 ? '' : 's'}…`);
     try { const { folder, files } = filesFromFolderInput(list); addFolder(folder, null, files); } finally { setIntake(null); }
   }, [addFolder]);
   const onDropFiles = useCallback(async (dt: DataTransfer) => {
@@ -273,6 +363,7 @@ function App() {
       const { folder, folderHandle, files, fileHandles, others } = await filesFromDrop(dt);
       for (const [n, h] of fileHandles) fileHandlesRef.current.set(n, h);
       if (folder) addFolder(folder, folderHandle, files); else if (files.length) addFiles(files);
+      if (files.length >= FOLDER_MAX_FILES) setNotes(n => [...n, `Only the first ${FOLDER_MAX_FILES.toLocaleString('en-US')} alignment files of the drop were listed: drop the folder holding the BAMs themselves (or a run folder) to see them all.`]);
       const session = others.find(f => /\.json$/i.test(f.name));
       if (session) void loadSessionRef.current?.(session);
       else if (!files.length && !folder && others.length) setNotes([`Nothing usable in the drop (${others.map(f => f.name).join(', ')}): expected BAM/CRAM files with their index, a FASTA, a folder, or a session .json.`]);
@@ -283,9 +374,11 @@ function App() {
   const loadSessionRef = useRef<((file: File) => Promise<void>) | null>(null);
 
   const renameSample = useCallback((id: number, raw: string) => {
-    const name = raw.trim();
+    const typed = raw.trim();
     setRenaming(null);
-    if (!name) return;
+    if (!typed) return;
+    // a name another sample has would merge the two in sessions and exports: numbered
+    const name = uniqueSampleNames([{ name: typed }], samplesRef.current.filter(s => s.id !== id).map(s => s.name))[0];
     ds.renameSample(id, name);
     setSamples(prev => prev.map(s => (s.id === id ? { ...s, name } : s)));
   }, [ds]);
@@ -296,14 +389,45 @@ function App() {
     if (ev.reads < 200 || !ev.multiExon) return;
     const type: LibraryType | null = ev.fraction >= 0.02 ? 'rna' : ev.fraction < 0.002 ? 'dna' : null;
     if (!type) return;
-    const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString()} reads spliced`;
-    setSamples(prev => prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note } } : s)));
+    const note = `${(ev.fraction * 100).toFixed(ev.fraction < 0.01 ? 2 : 1)} % of ${ev.reads.toLocaleString('en-US')} reads spliced`;
+    // unchanged samples keep the same array: a new one re-derives the sample types, which the viewer reacts to
+    setSamples(prev => {
+      const next: LocalSample[] = prev.map(s => (s.id === sid && s.lib?.source !== 'user' && (s.lib?.type !== type || s.lib.source !== 'reads') ? { ...s, lib: { type, source: 'reads', note, strand: s.lib?.strand } } : s));
+      return next.some((s, i) => s !== prev[i]) ? next : prev;
+    });
   }, []);
   /** The user decides the type of a sample (a click on its badge): RNA ↔ DNA, an undetermined sample becomes RNA. */
   const cycleLibrary = useCallback((sid: number) => setSamples(prev => prev.map(s => {
     if (s.id !== sid) return s;
     const type: LibraryType = s.lib?.type === 'rna' ? 'dna' : 'rna';
-    return { ...s, lib: { type, source: 'user', note: 'chosen by the user' } };
+    return { ...s, lib: { type, source: 'user', note: 'chosen by the user', strand: s.lib?.strand } };
+  })), []);
+  /** Library orientation of each sample, for the viewer's Strands option. */
+  const sampleStrands = useMemo(() => Object.fromEntries(samples.map(s => [s.id, s.lib?.strand?.call])) as Record<number, LibraryStrand | undefined>, [samples]);
+  /**
+   * Evidence from the spliced reads of a gene's own introns: the share on the gene's strand under the reverse (dUTP)
+   * rule. ≥ 90 % is a reverse library, ≤ 10 % a forward one, anything between unstranded (as RSeQC's infer_experiment
+   * reads it). The call made on the most reads stands, unless the user chose one.
+   */
+  const onStrandEvidence = useCallback((sid: number, ev: { fraction: number; reads: number }) => {
+    if (ev.reads < STRAND_MIN_READS) return;
+    const call: LibraryStrand = ev.fraction >= 0.9 ? 'reverse' : ev.fraction <= 0.1 ? 'forward' : 'unstranded';
+    setSamples(prev => {
+      const next: LocalSample[] = prev.map(s => {
+        const old = s.lib?.strand;
+        if (s.id !== sid || old?.source === 'user' || (old && (old.reads ?? 0) >= ev.reads)) return s;
+        const lib: LibraryEvidence = s.lib ?? { type: 'unknown', source: 'none', note: '' };
+        return { ...s, lib: { ...lib, strand: { call, source: 'reads', fraction: ev.fraction, reads: ev.reads } } };
+      });
+      return next.some((s, i) => s !== prev[i]) ? next : prev;
+    });
+  }, []);
+  /** The user sets the orientation (a click on the strand badge): reverse → forward → unstranded → reverse. */
+  const cycleStrand = useCallback((sid: number) => setSamples(prev => prev.map(s => {
+    if (s.id !== sid) return s;
+    const call: LibraryStrand = s.lib?.strand?.call === 'reverse' ? 'forward' : s.lib?.strand?.call === 'forward' ? 'unstranded' : 'reverse';
+    const lib: LibraryEvidence = s.lib ?? { type: 'unknown', source: 'none', note: '' };
+    return { ...s, lib: { ...lib, strand: { call, source: 'user' } } };
   })), []);
   const libBadge = (lib: LibraryEvidence | undefined) => (lib?.type === 'rna' ? 'RNA' : lib?.type === 'dna' ? 'DNA' : '?');
 
@@ -322,7 +446,66 @@ function App() {
   }, [knownLocus, knownLabel, knownVars, setKnown]);
   const removeKnown = useCallback((id: string) => setKnown(knownVars.filter(v => v.id !== id)), [knownVars, setKnown]);
 
-  const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); };
+  const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); if (liftTo === b) setLiftTo(null); };
+  /** The files whose header says another build than the page's, and the build they share when they agree. */
+  const asmOther = samples.filter(s => s.asm && (s.asm.build ? s.asm.build !== build : !!s.asm.other));
+  const filesBuild = (() => { const b = new Set(samples.map(s => s.asm?.build).filter(Boolean)); return b.size === 1 ? [...b][0] as GenomeBuild : null; })();
+  // The first file that tells its build sets the page's, while nothing is open and the build was not chosen by hand
+  useEffect(() => {
+    if (buildChosen.current || views.length || !filesBuild || filesBuild === build) return;
+    buildChosen.current = true;
+    changeBuild(filesBuild);
+    const s = samples.find(x => x.asm?.build === filesBuild);
+    setNotes(n => [...n, `Genome build set to ${filesBuild} from the files' headers${s ? ` (${s.name}: ${s.asm!.note})` : ''}.`]);
+  }, [filesBuild]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** The build switch: straight away while no view is open, else the choice is asked (keep the views and add the other coordinates, or switch everything). */
+  const requestBuild = (b: GenomeBuild) => {
+    if (b === build) return;
+    if (!views.length) { buildChosen.current = true; changeBuild(b); return; }
+    setBuildAsk(b);
+  };
+  /** The views keep their build; `b`'s coordinates are drawn over the ruler. */
+  const liftover = useMemo(() => (liftTo && liftTo !== build ? {
+    from: build, to: liftTo,
+    segments: (chrom: string, start: number, end: number, signal: AbortSignal) => liftSegments(build, liftTo, chrom, start, end, signal),
+    onRemove: () => setLiftTo(null),
+  } : null), [build, liftTo]);
+  /**
+   * Everything moves to build `b`: each open view is lifted to its coordinates there (its gene, window and searched
+   * locus, Ensembl's assembly map) and reopened with its options; a view that cannot be lifted reopens on its gene by
+   * name. For files aligned on `b` (a page whose build was wrong).
+   */
+  const switchAnnotation = useCallback(async (b: GenomeBuild) => {
+    const from = build;
+    setBuildAsk(null); setBusy(true); setError(null);
+    const tabs = snapshot(views);
+    const failed: string[] = [];
+    const moved = await Promise.all(tabs.map(async (t): Promise<ViewTab> => {
+      const st = stateOfTab(t);
+      const { name, chrom } = st.gene;
+      const lo = Math.min(st.gene.start, st.view.start, st.mark?.start ?? Infinity), hi = Math.max(st.gene.end, st.view.end, st.mark?.end ?? -Infinity);
+      const keep = { ...st, gene: { ...st.gene, id: undefined } };
+      try {
+        const segs = await liftSegments(from, b, chrom, lo, hi);
+        const g = liftRange(segs, st.gene.start, st.gene.end), v = liftRange(segs, st.view.start, st.view.end), m = st.mark ? liftRange(segs, st.mark.start, st.mark.end) : null;
+        if (!g || !v) throw new Error('no counterpart');
+        const o: Opened = { geneName: name, chrom: g.chrom, start: g.start, end: g.end, view: { start: v.start, end: v.end }, mark: m ? { start: m.start, end: m.end } : null, reads: t.opened.reads };
+        return { id: t.id, label: labelOf(o), opened: o, state: null, settings: keep };
+      } catch {
+        failed.push(name);
+        const o: Opened = { geneName: name, chrom, start: st.gene.start, end: st.gene.end, mark: null };
+        return { id: t.id, label: labelOf(o), opened: o, state: null, settings: keep };
+      }
+    }));
+    viewerStateRef.current = null;
+    pendingSettingsRef.current = moved.find(t => t.id === activeIdRef.current)?.settings;
+    setViews(moved);
+    buildChosen.current = true;
+    setLiftTo(null);
+    changeBuild(b);
+    setBusy(false);
+    setNotes([`Views moved to ${b}: their windows lifted from ${from} by Ensembl's assembly map.${failed.length ? ` ${failed.join(', ')} could not be lifted (offline, or no counterpart): reopened on the gene.` : ''}`]);
+  }, [build, views, snapshot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Open the window a deep link asked for: the gene at the locus (coding first), else the `gene` parameter, with the variant pinned. */
   const openLink = useCallback(async () => {
@@ -337,7 +520,7 @@ function App() {
         const t = await ds.getTranscript(LINK.gene, LINK.gene.toUpperCase().startsWith('ENSG') ? LINK.gene : undefined);
         best = { gene_name: t.gene_name, start: t.start, end: t.end } as any;
       }
-      if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString()}-${view.end.toLocaleString()} (add gene=SYMBOL to the link)`);
+      if (!best) throw new Error(`no RefSeq gene at ${view.chrom}:${view.start.toLocaleString('en-US')}-${view.end.toLocaleString('en-US')} (add gene=SYMBOL to the link)`);
       openNew({ geneName: best.gene_name, chrom: view.chrom, start: best.start, end: best.end, view: { start: view.start, end: view.end }, mark: { start: mark.start, end: mark.end }, reads: LINK.reads });
     } catch (e: any) {
       setError(`Could not open the linked locus: ${e.message}. Check the genome build (${LINK.build}) and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
@@ -351,11 +534,44 @@ function App() {
     if (LINK && !autoOpened.current) { autoOpened.current = true; openLink(); }
   }, [openLink]);
 
+  /**
+   * A search's result: its tab when one was opened for the same gene (or the same locus) already, switched to rather than
+   * opened twice (Enter pressed again, a suggestion clicked after Enter, the gene searched again later); a new tab
+   * otherwise, or always with Shift (Shift+Enter, Shift+click on Open): a second view of the gene on purpose.
+   */
+  const openSearched = useCallback((o: Opened, force: boolean) => {
+    const k = searchKey(o);
+    // the gene each tab shows now (the active one as its viewer last reported): a tab moved to another gene is not this search's
+    const geneNow = (v: ViewTab) => (v.id === activeIdRef.current && viewerStateRef.current?.gene.chrom ? viewerStateRef.current.gene.name : v.opened.geneName);
+    const have = force ? undefined : views.find(v => (v.asked ?? searchKey(v.opened)) === k && geneNow(v).toUpperCase() === o.geneName.toUpperCase());
+    if (!have) { openNew(o); return; }
+    const what = o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : o.geneName;
+    if (have.id === activeIdRef.current) setNotes([`${what} is the view shown already. Shift+Enter opens a second view of it.`]);
+    else { activateTab(have.id); setNotes([`${what} has a view already: switched to it (${have.label}). Shift+Enter opens a second one.`]); }
+  }, [views, openNew, activateTab]);
+  /** The search running: its text (the same asked again while it runs is not run twice) and its number (a later search supersedes it). */
+  const searching = useRef<{ q: string; seq: number } | null>(null);
+  const searchSeq = useRef(0);
+  /** Shift held on the Enter or the click that submitted the search: a new view even when one shows that gene */
+  const forceNewView = useRef(false);
+
   const open = useCallback(async () => {
     const q = gene.trim();
+    const force = forceNewView.current;
+    forceNewView.current = false;
     if (!q) return;
+    if (searching.current && searching.current.q.toUpperCase() === q.toUpperCase()) return;
     if (LINK && q === LINK_TEXT) return openLink();
+    // c. positions and exon numbers are read on the transcript of a view: this box opens genes, so
+    // it says where they work rather than sending them to a gene lookup that cannot resolve them
+    if (parseCdna(q) || parseExonQuery(q)) {
+      setError(`"${q}" moves the view on its transcript: type it in the search box inside the view (next to the gene name), not here.`);
+      return;
+    }
     setBusy(true); setError(null);
+    const seq = ++searchSeq.current;
+    searching.current = { q, seq };
+    const latest = () => searchSeq.current === seq;
     try {
       const locus = parseLocus(q);
       if (locus) {
@@ -364,23 +580,40 @@ function App() {
         const ov = (g: { start: number; end: number }) => Math.min(g.end, locus.end) - Math.max(g.start, locus.start);
         const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
         if (!best) throw new Error(`no RefSeq gene at ${q}`);
+        if (!latest()) return;
         const point = locus.start === locus.end;
-        openNew({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } });
+        openSearched({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } }, force);
       } else {
         const t = await ds.getTranscript(q, q.toUpperCase().startsWith('ENSG') ? q : undefined);
-        openNew({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end });
+        if (!latest()) return;
+        openSearched({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end }, force);
       }
     } catch (e: any) {
-      setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+      if (latest()) setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+    } finally {
+      // a superseded search leaves the box to the one that replaced it
+      if (latest()) { searching.current = null; setBusy(false); }
     }
-    setBusy(false);
-  }, [gene, ds, openLink, openNew]);
+  }, [gene, ds, openLink, openSearched]);
 
   // Options the viewer starts with: a reopened tab's snapshot or a loaded session, else the live options of the
   // viewer being remounted (a sample added, the build changed)
   const viewerInit: Partial<ViewerSettings> | undefined = pendingSettingsRef.current ?? (viewerStateRef.current ? { ...viewerStateRef.current } : undefined);
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
   const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [activeId, opened, samples, build, fasta, sessionSeq]);
+  /**
+   * Where the viewer starts when it is mounted. A tab opened or reopened (or a loaded session) starts at its region. The
+   * same tab's viewer remounted (a sample added or removed, the build or the FASTA changed) starts where it was: its gene,
+   * window and pinned locus as it last reported them, as a tab switched back to does. Taken once per mount, so that the
+   * viewer's own moves never feed back into its props.
+   */
+  const mountRef = useRef<{ key: string; opened: Opened | null; tab: number | null; shown: Opened | null }>({ key: '', opened: null, tab: null, shown: null });
+  if (mountRef.current.key !== viewerKey) {
+    const m = mountRef.current, live = viewerStateRef.current;
+    const same = !!opened && m.tab === activeId && m.opened === opened && !pendingSettingsRef.current && !!live?.gene.chrom;
+    mountRef.current = { key: viewerKey, opened, tab: activeId, shown: same ? { ...opened!, ...openedOfState(live!, opened!) } : opened };
+  }
+  const shown = mountRef.current.shown ?? opened;
   /** Every tab with a full state (the active one refreshed from the viewer, never-opened ones from their region and options), and the index of the active one. */
   const currentViews = useCallback(() => {
     const tabs = snapshot(views).map(v => ({ ...v, state: stateOfTab(v) }));
@@ -415,7 +648,8 @@ function App() {
       const { tabs, activeIndex } = currentViews();
       if (!tabs.length) throw new Error('open a gene first');
       // one step per view (annotation), per sample coverage, per sample reads when exported, plus the file itself
-      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= READS_MAX_VIEW_BP ? samples.length : 0), 0);
+      const dnaSamples = samples.filter(s => s.lib?.type === 'dna');
+      total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= readsWindowOfView(t.state!) ? samples.length : 0) + (t.state!.methylation ? dnaSamples.length : 0), 0);
       progress('Preparing…');
       const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
@@ -441,8 +675,12 @@ function App() {
         for (const smp of samples) {
           progress(`${t.label}: coverage and junctions of ${smp.name}`);
           try {
-            // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.uniqueOnly, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural: smp.lib?.type === 'dna' }));
+            // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
+            // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
+            const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' ? 'rna' as const : false;
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
+              // a stranded sample of a view showing the strands keeps them split in the page
+              strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -450,27 +688,68 @@ function App() {
         }
         // clipped reads of each DNA sample rescued at the breakpoints of the others, as the live page does
         if (ds.rescueClips) for (const [sid, c] of raw) {
-          if (!c.structural) continue;
+          if (!c.structural || samples.find(x => x.id === sid)?.lib?.type !== 'dna') continue;
           const others = [...raw].filter(([o, oc]) => o !== sid && oc.structural).flatMap(([, oc]) => breakpointsOf(oc.structural!));
           const mine = new Set(breakpointsOf(c.structural).map(b => `${b.kind}:${b.start}-${b.end}`));
           const cand = others.filter(b => !mine.has(`${b.kind}:${b.start}-${b.end}`));
           if (!cand.length) continue;
-          try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.uniqueOnly); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
+          try { const r = await ds.rescueClips(sid, st.gene.chrom, cand, st.minMapq); if (r.length) c.structural = { ...c.structural, rescued: [...(c.structural.rescued ?? []), ...r] }; } catch { /* optional */ }
         }
         for (const [sid, c] of raw) coverage[String(sid)] = await encodeCoverageV2(c, { start: ws, end: we });
+        // CpG methylation of each long-read DNA sample when the view shows it: the counts over the window (2 Mb at most,
+        // around the view), read back by the exported page as the live one reads its own
+        let methylation: Record<string, EncodedMethyl> | undefined;
+        const methylWindows = new Map<number, MethylWindow>();
+        if (st.methylation && ds.getMethylation && span <= METHYL_MAX_BP) {
+          const extra = Math.max(0, Math.floor((METHYL_MAX_BP - span) / 2));
+          const ms = Math.max(ws, vs - extra), me = Math.min(we, ve + extra);
+          for (const smp of dnaSamples) {
+            setNotes([`Exporting ${t.label}: methylation of ${smp.name}…`]);
+            progress(`${t.label}: methylation of ${smp.name}`);
+            try {
+              const w = await ds.getMethylation(smp.id, st.gene.chrom, ms, me);
+              if (w.calls || w.filtered) { (methylation ??= {})[String(smp.id)] = encodeMethyl(w); methylWindows.set(smp.id, w); }
+            } catch (e: any) { skipped.push(`${t.label} / methylation of ${smp.name}: ${e?.message || e}`); }
+            done++;
+          }
+        }
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
+        let phase: Record<string, EmbeddedPhase> | undefined;
         if (st.reads) {
-          if (span > READS_MAX_VIEW_BP) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above the ${READS_MAX_VIEW_BP / 1000} kb reads limit)`);
+          const readsMax = readsWindowOfView(st);
+          if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
           else {
-            const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((READS_MAX_VIEW_BP - span) / 2);
-            const rs = Math.max(0, vs - half), re = ve + half;
+            const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
+            // as the view asks for them: grouped by the page's phasing, the reads the page phases (the view and a quarter
+            // of it on each side, up to READS_PHASE_CAP of them) exported as they are, each with its haplotype, and the
+            // phasing kept with them; the export's own window and cap past them; long reads with their CpG calls while
+            // Methylation is on
+            const phased = st.readsGroup === 'phase' && !st.collapseReads;
+            const m = Math.floor(span * 0.25), pw = { start: Math.max(0, vs - m), end: ve + m };
+            const rs = Math.max(0, Math.min(vs - half, phased ? pw.start : Infinity)), re = Math.max(ve + half, phased ? pw.end : 0);
             reads = {};
+            const minVaf = Math.min(1, Math.max(0, st.minVafPct / 100)), longReadMinVaf = (st.longReadMinVafPct ?? 20) / 100;
             for (const smp of samples) {
               setNotes([`Exporting ${t.label}: reads of ${smp.name}…`]);
               progress(`${t.label}: reads of ${smp.name}`);
               try {
-                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.uniqueOnly, READS_CAPS[opts.readsCap], 'reads', 1, 0.05);
+                const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, minVaf, {
+                  secondary: !!st.secondary, methylation: !!st.methylation && smp.lib?.type === 'dna',
+                });
+                if (phased) {
+                  // the reads over the phased window are those the page phases (the same sample of them): the exported page
+                  // draws them as the live one, and the export's own reads only past that window
+                  const ph = await ds.getReads(smp.id, st.gene.chrom, pw.start, pw.end, st.minMapq, READS_PHASE_CAP, 'reads', 1, minVaf,
+                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
+                  if (ph.phase) {
+                    r.reads = [...r.reads.filter(x => x.e <= pw.start || x.s >= pw.end), ...ph.reads].sort((a, b) => a.s - b.s);
+                    (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase, total: ph.total };
+                  }
+                }
+                // each CpG call kept as a byte on the side of its block's threshold it is on here (exportedCall)
+                const mw = methylWindows.get(smp.id);
+                if (mw) r.reads = r.reads.map(x => (x.me ? { ...x, me: x.me.map((v, i, a) => (i & 1 ? exportedCall(v, thresholdAt(mw, a[i - 1])) : v)) } : x));
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
               } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
@@ -478,7 +757,7 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, uniqueOnly: st.uniqueOnly, coverage, reads });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -493,7 +772,7 @@ function App() {
       const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setNotes([
-        `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString()} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
+        `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString('en-US')} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
         ...(skipped.length ? [`Reads not exported for ${skipped.join('; ')}`] : []),
       ]);
     } catch (e: any) {
@@ -558,9 +837,12 @@ function App() {
   /** Applies a loaded session with the files present: names, order, options, then the gene and window. */
   const applySession = useCallback((session: SessionFile) => {
     if (session.knownVariants) setKnown(session.knownVariants.map(k => variantOfInterest(k.text, k.label, `user${nextKnownId.current++}`)).filter((v): v is KnownVariant => !!v).map((v, i) => ({ ...v, id: `session${i + 1}` })));
-    const { matched } = matchSession(session, samples);
-    for (const { entry, sample } of matched) if (sample.name !== entry.name) ds.renameSample(sample.id, entry.name);
-    const renamed = samples.map(s => { const m = matched.find(x => x.sample.id === s.id); return m ? { ...s, name: m.entry.name, lib: m.entry.library ?? s.lib } : s; });
+    const now = samplesRef.current;
+    const { matched } = matchSession(session, now);
+    // the session's names (a session saved before names were kept apart may give two samples one: numbered)
+    const given = uniqueSampleNames(matched.map(m => ({ name: m.entry.name })), now.filter(s => !matched.some(m => m.sample.id === s.id)).map(s => s.name));
+    matched.forEach((m, i) => { if (m.sample.name !== given[i]) ds.renameSample(m.sample.id, given[i]); });
+    const renamed = now.map(s => { const i = matched.findIndex(x => x.sample.id === s.id); return i >= 0 ? { ...s, name: given[i], lib: matched[i].entry.library ?? s.lib } : s; });
     const ordered = [...matched.map(m => renamed.find(s => s.id === m.sample.id)!), ...renamed.filter(s => !matched.some(m => m.sample.id === s.id))];
     setSamples(ordered);
     setSessionSeq(n => n + 1);
@@ -578,8 +860,11 @@ function App() {
     setViews(tabs);
     setActiveId(act?.id ?? null);
     if (act) setGene(act.opened.geneName);
-    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.`]);
-  }, [samples, ds]);
+    // the session's FASTA, when it had one and another (or none) is loaded: the bases then come from the web APIs
+    const faNote = session.fasta && !EMBEDDED && fasta?.fa.name !== session.fasta.file
+      ? ` The session used the reference ${session.fasta.file}, not loaded here: add it (with ${session.fasta.index}) for the same bases, else they come from the UCSC / Ensembl APIs.` : '';
+    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.${faNote}`]);
+  }, [samples, ds, fasta]);
 
   /**
    * Gets a session's files back by itself (Chromium): from the remembered run folder by relative path, else from
@@ -587,10 +872,13 @@ function App() {
    */
   const reopenSession = useCallback(async (session: SessionFile, ask: boolean) => {
     if (!hasFileSystemAccess()) { setReopenState(session.folder ? { folder: session.folder, ready: false } : null); return; }
-    const { missing } = matchSession(session, samples);
+    const { missing } = matchSession(session, samplesRef.current);
     if (!missing.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
+    /** files found under the session's name but of another size (another file of that name), or whose bookmark no longer opens */
+    const changed: string[] = [], gone: string[] = [];
+    const sameSize = (f: File, size: number) => !size || f.size === size;
     if (session.folder) setIntake(`Looking for the session's files in ${session.folder}…`);
     try {
     if (session.folder) {
@@ -601,27 +889,37 @@ function App() {
           for (const m of missing) {
             if (!m.path || !m.indexPath) continue;
             const [f, i] = await Promise.all([fileInFolder(dir, m.path), fileInFolder(dir, m.indexPath)]);
-            if (f && i) out.push({ file: f, path: m.path }, { file: i, path: m.indexPath });
+            if (f && i && sameSize(f, m.size)) out.push({ file: f, path: m.path }, { file: i, path: m.indexPath });
+            else if (f && i) changed.push(m.file);
           }
         } else needPermission = true;
       }
     }
-    // individual bookmarks for what the folder did not give
+    // individual bookmarks for what the folder did not give: each on its own, so a file moved or deleted since (its
+    // bookmark then fails) or replaced by another of the same name (another size) leaves the others to be reopened
     const got = new Set(out.map(x => x.file.name));
     for (const m of missing) {
       if (got.has(m.file)) continue;
-      const [fh, ih] = await Promise.all([recallFile(m.file), recallFile(m.index)]);
-      if (!fh || !ih) continue;
-      if (await permitted(fh, ask) && await permitted(ih, ask)) {
-        out.push({ file: await fh.getFile() }, { file: await ih.getFile() });
-        fileHandlesRef.current.set(m.file, fh); fileHandlesRef.current.set(m.index, ih);
-      } else needPermission = true;
+      try {
+        const [fh, ih] = await Promise.all([recallFile(m.file), recallFile(m.index)]);
+        if (!fh || !ih) continue;
+        if (await permitted(fh, ask) && await permitted(ih, ask)) {
+          const [f, i] = await Promise.all([fh.getFile(), ih.getFile()]);
+          if (!sameSize(f, m.size)) { changed.push(m.file); continue; }
+          out.push({ file: f }, { file: i });
+          fileHandlesRef.current.set(m.file, fh); fileHandlesRef.current.set(m.index, ih);
+        } else needPermission = true;
+      } catch { gone.push(m.file); }
     }
     if (out.length) addFiles(out);
     const stillMissing = missing.filter(m => !out.some(x => x.file.name === m.file));
     setReopenState(stillMissing.length ? {
       folder: session.folder ?? '', ready: needPermission,
-      note: needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : undefined,
+      note: [
+        needPermission ? 'this browser remembers the files: click Reopen to allow access' : session.folder ? (dir ? 'some files were not found in the remembered folder' : 'the folder is not remembered by this browser yet') : '',
+        changed.length ? `${changed.join(', ')}: a file of that name was found but its size differs from the session's (another file), so it was not used` : '',
+        gone.length ? `${gone.join(', ')}: moved or deleted since this browser last opened ${gone.length === 1 ? 'it' : 'them'}` : '',
+      ].filter(Boolean).join(' · ') || undefined,
     } : null);
     } finally { setIntake(null); }
   }, [samples, addFiles]);
@@ -632,19 +930,24 @@ function App() {
     try {
       const session = parseSession(await file.text());
       setSessionName(file.name); setSessionNameEdited(true);
-      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); }
+      buildChosen.current = true;
+      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); setLiftTo(null); }
       setPendingSession({ file: session, name: file.name });
       void reopenSession(session, true);
     } catch (e: any) {
       setError(`Could not load the session ${file.name}: ${e.message}`);
     }
-  }, [build, ds, fasta]);
+  }, [build, ds, fasta, reopenSession]);
 
   // An exported page opens its views at once (its samples are embedded)
   const embeddedOpened = useRef(false);
   useEffect(() => {
     if (EMBEDDED && !embeddedOpened.current) {
-      embeddedOpened.current = true; applySession(EMBEDDED.session);
+      embeddedOpened.current = true;
+      // read as a session file is, so that the options of older pages are carried over ("unique only" as MAPQ ≥ 30)
+      let session = EMBEDDED.session;
+      try { session = parseSession(JSON.stringify(EMBEDDED.session)); } catch { /* kept as stored */ }
+      applySession(session);
       // the active view's blocks first, the others in idle moments: the page never waits for a decode
       if (ds instanceof EmbeddedDataSource) ds.prefetchAll(EMBEDDED.session.activeView ?? 0);
     }
@@ -659,179 +962,217 @@ function App() {
     if (!missing.length) applySession(pendingSession.file);
   }, [pendingSession, samples, applySession]);
 
+  // genes opened are suggested first in the next searches
+  useEffect(() => { if (opened?.geneName) rememberGene(opened.geneName); }, [opened?.geneName]);
+
   // Default file name follows the gene until the user types one
   useEffect(() => { if (!sessionNameEdited) setSessionName(defaultSessionName(opened?.geneName)); }, [opened?.geneName, sessionNameEdited]);
 
   /** Drops are accepted anywhere on the page: files, a folder, or a session .json. */
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); void onDropFiles(e.dataTransfer); };
 
-  /** The gene / locus search: in the title row of the panel, or on the folded bar. */
+  /** The gene / locus search, with the genome build in it: in the app bar, folded or not. */
   const searchForm = (
-    <form onSubmit={e => { e.preventDefault(); open(); }} className="flex items-center gap-1">
-      <input value={gene} onChange={e => setGene(e.target.value)} placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened)" className="border border-gray-300 rounded px-2 py-1 text-sm w-48 bg-white" />
-      <button type="submit" disabled={busy || !gene.trim()} className="px-3 py-1 text-sm rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+    <form onSubmit={e => { e.preventDefault(); open(); }} onKeyDown={e => { if (e.key === 'Enter') forceNewView.current = e.shiftKey; }}
+      className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
+      <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
+        title={`Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other build asks first: its coordinates over the views', or everything moved to it.`}
+        options={(['GRCh38', 'GRCh37'] as GenomeBuild[]).map(b => ({
+          value: b, label: b.slice(4), hint: `${b} / ${b === 'GRCh38' ? 'hg38' : 'hg19'}${liftTo === b && b !== build ? ` · its coordinates shown over the ruler (click for the options)` : ''}${filesBuild === b ? ' · the build of the files' : ''}`,
+          dot: liftTo === b && b !== build ? '#0f766e' : undefined,
+        }))} />
+      <Icon name="search" size={15} className="text-slate-400" />
+      <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
+        title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
+        className="flex-1 min-w-0 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400" />
+      <button type="submit" disabled={busy || !gene.trim()} onClick={e => { forceNewView.current = e.shiftKey; }} title="Open the gene or the locus: its view when it has one already, a new one with Shift" className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
     </form>
   );
+  /** The registered views as tabs: click one to reopen it, × to forget it. */
+  const viewTabs = views.map(v => (
+    <span key={v.id} onClick={() => activateTab(v.id)}
+      className={`inline-flex items-center gap-1.5 h-7 pl-2.5 pr-1.5 rounded-lg text-xs font-medium border cursor-pointer whitespace-nowrap ${v.id === activeId ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
+      title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
+      {v.label}
+      <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={`w-4 h-4 grid place-items-center rounded ${v.id === activeId ? 'text-slate-400 hover:text-white' : 'text-slate-400 hover:text-red-500'}`} title="Forget this view" aria-label="Forget this view"><Icon name="x" size={12} /></button>
+    </span>
+  ));
+  // the DEV banner can be dismissed; remembered in this browser for this build (a new dev build shows it again), and the
+  // version pill and the footer still say "dev"
+  const devKey = DEV ? `sashimi.devBanner.hidden.${DEV.sha || DEV.date || DEV.branch}` : '';
+  const [devHidden, setDevHidden] = useState(() => { try { return !!DEV && localStorage.getItem(devKey) === '1'; } catch { return false; } });
+  const hideDevBanner = () => { setDevHidden(true); try { localStorage.setItem(devKey, '1'); } catch { /* private mode: hidden for this visit only */ } };
+  const versionPill = (
+    <span className="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold leading-none bg-indigo-50 text-indigo-600" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
+  );
+  const brandNote = 'Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.';
 
   return (
-    <div className="min-h-screen bg-gray-100 text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
-      {DEV && (
+    <div className="min-h-screen bg-[#f6f7fb] text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+      {DEV && !devHidden && (
         <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
           style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
           <span className="px-1.5 py-0.5 rounded bg-white text-red-700 tracking-wider">DEV MODE</span>
           <span>Unreleased build from branch <code>{DEV.branch}</code>{DEV.sha ? <> · commit <code>{DEV.sha}</code></> : null}{DEV.date ? ` · built ${DEV.date}` : ''} · not for clinical use.</span>
           <a href={DEV.stable} className="underline ml-auto">Go to the stable version →</a>
+          <button onClick={hideDevBanner} className="w-5 h-5 grid place-items-center rounded hover:bg-white/20" title="Hide this banner (for this build, in this browser; the version pill still says dev)" aria-label="Hide the DEV banner"><Icon name="x" size={12} /></button>
         </div>
       )}
-      <header className="bg-white border-b border-gray-200 px-5 py-3 space-y-2">
-        {/* Row 1: title, build, gene search. Row 2: files and sample chips, which may wrap over several lines without moving the search. */}
-        {!panelHidden && <>
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-        <div className="flex items-center gap-2.5 flex-1 min-w-[320px]">
-          <Logo size={34} />
-          <div className="min-w-0">
-            <h1 className="text-lg font-bold leading-tight flex items-center gap-2">Sashimi <span className="font-normal">viewer</span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
-            </h1>
-            <p className="text-xs text-gray-500">Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.</p>
-            <p className="text-xs font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
+      <header className="bg-white border-b border-slate-200">
+        {/* Row 1: brand, samples (or the views when the panel is folded), search, session and export. Row 2: views, known variants, the clinical note. */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-2.5">
+          <div className="flex items-center gap-2.5 shrink-0" title={brandNote}>
+            <Logo size={30} />
+            <h1 className="text-base font-bold tracking-tight leading-tight text-slate-900">Sashimi viewer</h1>
+            {versionPill}
+          </div>
+          {!panelHidden ? (
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
+              {samples.map((s, i) => (
+                <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-indigo-50 border-indigo-200 text-slate-900' : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 cursor-pointer'}`}
+                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+                  onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
+                  onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
+                  {i === 0 && <span className="text-indigo-600" title="primary sample"><Icon name="star" size={13} /></span>}
+                  {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
+                  {renaming?.id === s.id ? (
+                    <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
+                      onBlur={() => renameSample(s.id, renaming.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
+                      onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
+                  ) : <span className="font-medium">{s.name}</span>}
+                  <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
+                    className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-100 text-slate-700' : s.lib?.type === 'rna' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}
+                    title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
+                    {s.pending ? '…' : libBadge(s.lib)}
+                  </button>
+                  {s.lib?.type !== 'dna' && !s.pending && (
+                    <button onClick={e => { e.stopPropagation(); cycleStrand(s.id); }}
+                      className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.lib?.strand ? (s.lib.strand.call === 'unstranded' ? 'bg-gray-100 text-gray-500' : 'bg-violet-50 text-violet-700') : 'bg-gray-50 text-gray-400'}`}
+                      title={strandTitle(s.lib?.strand)}>
+                      {strandBadge(s.lib?.strand)}
+                    </button>
+                  )}
+                  <span className="hidden group-hover:inline-flex items-center">
+                    <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-slate-400 hover:text-indigo-600 px-0.5" title="Rename">✎</button>
+                    <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-slate-400 hover:text-red-500" title="Remove" aria-label="Remove"><Icon name="x" size={13} /></button>
+                  </span>
+                </span>
+              ))}
+              {fasta && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference FASTA: ${fasta.fa.name}`}>ref · {fasta.fa.name}</span>}
+              <Popover width={300} title="Add alignment files, a run folder or a reference FASTA (or drop them anywhere on the page)"
+                buttonClass="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12.5px] border border-dashed border-slate-300 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 whitespace-nowrap"
+                button={<><Icon name="plus" size={13} />{samples.length ? 'Add' : 'Add files'}</>}>
+                {close => (
+                  <>
+                    <MenuItem icon="folder" label={runFolder ? `Run folder · ${runFolder.name}` : 'Run folder…'} onClick={() => { close(); void chooseFolder(); }}
+                      hint="Every BAM/CRAM (with its index) and FASTA inside it is listed; sessions record the files by their path in it"
+                      title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files." />
+                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" onClick={() => { close(); void chooseFiles(); }}
+                      title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" />
+                    <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. They stay on this computer.</div>
+                  </>
+                )}
+              </Popover>
+              {intake && (
+                <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-xs border border-indigo-200 bg-indigo-50 text-indigo-800" role="status" data-intake>
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                  {intake}
+                </span>
+              )}
+              {samples.some(s => s.pending) && (
+                <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                  Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1.5 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
+              {views.length === 0 ? <span className="text-xs text-slate-400">no view yet: open a gene or a locus</span> : viewTabs}
+            </div>
+          )}
+          {searchForm}
+          <div className="flex items-center gap-2 ml-auto shrink-0">
+            {!panelHidden && <>
+              {/* a session file (JSON) records the files by name, the samples, the FASTA, the views and every option: saved and loaded with one button each */}
+              <Popover width={340} label="Save session"
+                title="Download the session as a JSON file: the alignment files by name (and path in the run folder), the sample names and order, the FASTA, every view with its gene, window and options, the groups and the known variants. Load it later and add the same files again."
+                buttonClass={`inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border text-[12.5px] font-medium whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:bg-slate-50 ${!samples.length && !opened ? 'opacity-40 pointer-events-none' : ''}`}
+                button={<><Icon name="download" size={15} />Save session</>}>
+                {close => (
+                  <form className="p-1 space-y-2" onSubmit={e => { e.preventDefault(); close(); saveSession(); }}>
+                    <label className="block text-[11.5px] text-slate-500">File name
+                      <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false} autoFocus
+                        className="mt-1 w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white font-mono text-slate-800 outline-none focus:border-indigo-300" title="File name of the session to save (.json)" />
+                    </label>
+                    <button type="submit" className="w-full inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700"><Icon name="download" size={14} />Download</button>
+                  </form>
+                )}
+              </Popover>
+              <label className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border border-slate-200 bg-white text-slate-700 text-[12.5px] font-medium whitespace-nowrap hover:bg-slate-50 cursor-pointer"
+                title="Load a session JSON file, then add the alignment files it names (or let the page reopen them from the remembered run folder)">
+                <Icon name="upload" size={15} />Load session
+                <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
+              </label>
+              <Popover width={320} title="Export the views: a self-contained HTML page with the data embedded, or every view on one SVG page"
+                buttonClass="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] text-[12.5px] font-semibold bg-indigo-600 text-white shadow-[0_1px_2px_rgba(79,70,229,.35)] hover:bg-indigo-700"
+                button={<><Icon name="download" size={15} />Export<Icon name="chev" size={13} className="text-indigo-200" /></>}>
+                {close => (
+                  <>
+                    <MenuItem icon="file" label={busy ? 'Export HTML…' : 'Export HTML'} disabled={busy || !opened || pageIsUnbuilt()} onClick={() => { close(); setExportDialog({ window: 'margin', readsCap: 'shown' }); }}
+                      hint="This viewer with the data of every view embedded: opens anywhere, without the alignment files"
+                      title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'} />
+                    <MenuItem icon="image" label={views.length > 1 ? `SVG · ${views.length} views` : 'SVG'} disabled={busy || !views.length} onClick={() => { close(); void exportAllSvg(); }}
+                      hint="Every view on one page, stacked under their titles (vector)"
+                      title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The ⋯ menu of the plot saves the current view alone." />
+                  </>
+                )}
+              </Popover>
+            </>}
+            <button onClick={togglePanel} aria-label={panelHidden ? 'Show the upper panel' : 'Hide the upper panel'}
+              className="w-8 h-8 grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+              title={panelHidden ? 'Show the upper panel again (files, session, known variants)' : 'Fold the panel away (files, session, known variants): the logo, the views and the search box stay on one line, so the plot takes the rest of the window'}>
+              <Icon name={panelHidden ? 'panelDown' : 'panelUp'} size={16} />
+            </button>
           </div>
         </div>
-        <div className="flex items-center gap-4 shrink-0 ml-auto">
-        <label className="flex items-center gap-1 text-xs text-gray-600">Build
-          <select value={build} onChange={e => changeBuild(e.target.value as GenomeBuild)} className="border border-gray-300 rounded px-1 py-0.5 text-xs bg-white">
-            <option value="GRCh38">GRCh38 / hg38</option>
-            <option value="GRCh37">GRCh37 / hg19</option>
-          </select>
-        </label>
-        {searchForm}
-        </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <button onClick={chooseFolder} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium"
-          title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files.">
-          {runFolder ? `Run folder · ${runFolder.name}` : '+ Run folder…'}
-        </button>
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
-        <button onClick={chooseFiles} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium" title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)">
-          + Files…
-        </button>
-        <button onClick={togglePanel} className="px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Fold this panel away (notes, build, files, session, known variants): only the logo, the search box and the views stay, so the plot takes the rest of the window; Show panel brings it back" aria-label="Hide the upper panel">
-          ▲ Hide panel
-        </button>
-        <input ref={fileInputRef} type="file" multiple className="hidden" accept=".bam,.bai,.cram,.crai,.fa,.fasta,.fna,.gz,.fai,.gzi" onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
-        {intake && (
-          <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs border border-indigo-300 bg-indigo-50 text-indigo-800" role="status" data-intake>
-            <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-            {intake}
-          </span>
-        )}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {samples.map((s, i) => (
-            <span key={s.id} className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${i === 0 ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-gray-50 border-gray-300 text-gray-700 hover:border-indigo-300 cursor-pointer'}`}
-              title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${s.kind.toUpperCase()}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
-              onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
-              onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
-              {i === 0 && <span title="primary sample">★</span>}
-              {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
-              <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
-                className={`px-1 rounded text-[9px] font-bold leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-700 text-white' : s.lib?.type === 'rna' ? 'bg-emerald-600 text-white' : 'bg-gray-300 text-gray-700'}`}
-                title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
-                {s.pending ? '…' : libBadge(s.lib)}
-              </button>
-              {renaming?.id === s.id ? (
-                <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
-                  onBlur={() => renameSample(s.id, renaming.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
-                  onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
-              ) : s.name}
-              <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-gray-400 hover:text-indigo-600" title="Rename">✎</button>
-              <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-gray-400 hover:text-red-500" title="Remove">×</button>
-            </span>
-          ))}
-          {fasta && <span className="px-2 py-0.5 rounded-full text-xs border bg-emerald-50 border-emerald-300 text-emerald-800" title={fasta.fa.name}>FASTA · {fasta.fa.name}</span>}
-          {samples.some(s => s.pending) && (
-            <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
-              <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
-              Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 ml-auto" title="A session file (JSON) records the alignment files by name, the sample names and order, the FASTA, the gene and window, and every option of the viewer. Load it later and add the same files again.">
-          <span className="text-xs text-gray-600">Session</span>
-          <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false}
-            className="border border-gray-300 rounded px-2 py-0.5 text-xs w-64 bg-white font-mono" title="File name of the session to save (.json)" />
-          <button onClick={saveSession} disabled={!samples.length && !opened} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40" title="Download the session as a JSON file">Save session</button>
-          <label className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 cursor-pointer font-medium" title="Load a session JSON file, then add the alignment files it names">
-            Load session
-            <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
-          </label>
-          <button onClick={() => setExportDialog({ window: 'margin', readsCap: 'shown' })} disabled={busy || !opened || pageIsUnbuilt()} className="px-3 py-1 text-xs rounded border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 font-medium disabled:opacity-40"
-            title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'}>
-            {busy ? '…' : 'Export HTML'}
-          </button>
-          <button onClick={exportAllSvg} disabled={busy || !views.length} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40"
-            title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The SVG button inside the plot saves the current view alone.">
-            {views.length > 1 ? `SVG · ${views.length} views` : 'SVG'}
-          </button>
-        </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
-          <span className="text-xs text-gray-600">Known variants</span>
-          <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="flex items-center gap-1">
-            <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false}
-              className={`border rounded px-2 py-0.5 text-xs w-44 bg-white font-mono ${knownError ? 'border-red-400' : 'border-gray-300'}`}
-              title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
-            <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" className="border border-gray-300 rounded px-2 py-0.5 text-xs w-52 bg-white"
-              title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
-            <button type="submit" disabled={!knownLocus.trim()} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 font-medium disabled:opacity-40">+ Add</button>
-          </form>
-          {knownError && <span className="text-xs text-red-600">{knownError}</span>}
-          {knownVars.map(v => (
-            <span key={v.id} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border bg-rose-50 border-rose-300 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
-              <span className="font-medium">{v.label}</span>
-              <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString()}{v.end > v.start + 1 ? `-${v.end.toLocaleString()}` : ''}</span>
-              <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove">×</button>
-            </span>
-          ))}
-        </div>
-        </>}
-        {panelHidden && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            <div className="flex items-center gap-2 shrink-0">
-              <Logo size={24} />
-              <span className="text-sm font-bold leading-tight">Sashimi <span className="font-normal">viewer</span></span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-semibold leading-none bg-indigo-50 border border-indigo-200 text-indigo-700" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
-              <button onClick={togglePanel} className="px-2 py-0.5 text-xs rounded border border-gray-300 bg-white hover:bg-indigo-50 text-gray-600" title="Show the upper panel again (files, session, known variants)" aria-label="Show the upper panel">
-                ▼ Show panel
-              </button>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5 flex-1 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
-              <span className="text-xs text-gray-600">Views</span>
-              {views.length === 0 && <span className="text-xs text-gray-400">none yet: open a gene or a locus</span>}
-              {views.map(v => (
-                <span key={v.id} onClick={() => activateTab(v.id)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400'}`}
-                  title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
-                  {v.label}
-                  <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
+        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+        {!panelHidden && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 pb-2.5">
+            {views.length > 1 && (
+              <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
+                <span className="text-[10px] font-bold tracking-[.08em] uppercase text-slate-400 mr-0.5">Views</span>
+                {viewTabs}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+              <Popover width={420} title="Add a variant of interest, drawn on every view"
+                buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 whitespace-nowrap"
+                button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-slate-400" /></>}>
+                <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="p-1 space-y-2">
+                  <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false} autoFocus aria-label="Variant locus"
+                    className={`w-full border rounded-lg px-2 py-1.5 text-xs bg-white font-mono outline-none ${knownError ? 'border-red-400' : 'border-slate-200 focus:border-indigo-300'}`}
+                    title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
+                  <div className="flex gap-2">
+                    <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" aria-label="Variant label"
+                      className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white outline-none focus:border-indigo-300"
+                      title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
+                    <button type="submit" disabled={!knownLocus.trim()} className="px-3 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40">Add</button>
+                  </div>
+                  {knownError && <div className="text-[11.5px] text-red-600">{knownError}</div>}
+                </form>
+              </Popover>
+              {knownVars.map(v => (
+                <span key={v.id} className="inline-flex items-center gap-1 h-7 px-2 rounded-lg text-xs border bg-rose-50 border-rose-200 text-rose-900" title={`${v.text}${v.label !== v.text ? ` · ${v.label}` : ''}`}>
+                  <span className="font-medium">{v.label}</span>
+                  <span className="font-mono text-rose-700/80">{v.chrom || '?'}:{(v.start + 1).toLocaleString('en-US')}{v.end > v.start + 1 ? `-${v.end.toLocaleString('en-US')}` : ''}</span>
+                  <button onClick={() => removeKnown(v.id)} className="text-rose-400 hover:text-red-600" title="Remove" aria-label="Remove"><Icon name="x" size={12} /></button>
                 </span>
               ))}
             </div>
-            <div className="ml-auto shrink-0">{searchForm}</div>
-          </div>
-        )}
-        {!panelHidden && views.length > 1 && (
-          <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box above is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
-            <span className="text-xs text-gray-600">Views</span>
-            {views.map(v => (
-              <span key={v.id} onClick={() => activateTab(v.id)}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border cursor-pointer ${v.id === activeId ? 'bg-indigo-600 border-indigo-600 text-white' : 'bg-white border-gray-300 text-gray-700 hover:border-indigo-400 hover:bg-indigo-50'}`}
-                title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
-                {v.label}
-                <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={v.id === activeId ? 'text-indigo-200 hover:text-white' : 'text-gray-400 hover:text-red-500'} title="Forget this view">×</button>
-              </span>
-            ))}
+            <p className="ml-auto text-[11px] font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
         )}
       </header>
@@ -875,6 +1216,17 @@ function App() {
           {error && <div className="text-red-600">{error}</div>}
         </div>
       )}
+      {asmOther.length > 0 && (
+        <div className="mx-5 my-1 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs text-amber-900" role="alert">
+          <span>
+            <b>Genome build:</b> {asmOther.map(s => `${s.name} (${s.asm!.note})`).join(', ')} {asmOther.length > 1 ? 'are' : 'is'} not on {build}, the build the page uses:
+            {asmOther.some(s => s.asm!.other && !s.asm!.build) ? ' the viewer has no annotation for that reference, so genes, coordinates and known variants will not match the reads.' : ' genes, coordinates and known variants will not match the reads.'}
+          </span>
+          {filesBuild && filesBuild !== build && (
+            <button onClick={() => requestBuild(filesBuild)} className="h-6 px-2.5 rounded-md bg-amber-600 text-white font-semibold hover:bg-amber-700">Use {filesBuild}</button>
+          )}
+        </div>
+      )}
       {!opened ? (
         <div className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
           <div className="text-xl font-semibold text-indigo-700">Drop a run folder, BAM / CRAM files, or a session file anywhere on this page</div>
@@ -891,11 +1243,11 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="p-3">
-          <SashimiViewer key={viewerKey} geneName={opened.geneName} geneId={opened.geneId} chrom={opened.chrom} geneStart={opened.start} geneEnd={opened.end}
-            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={opened.view} initialMark={opened.mark} initialReads={opened.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} svHints={SV_HINTS}
+        <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
+          <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
+            sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} liftover={liftover} build={build}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
-        </div>
+        </div></div>
       )}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
@@ -917,6 +1269,41 @@ function App() {
           </div>
         </div>
       )}
+      {buildAsk && (() => {
+        const b = buildAsk, lifted = liftTo === b, filesOnB = filesBuild === b;
+        const filesSay = filesBuild ? `the files' headers say ${filesBuild}` : 'the files do not say their build';
+        return (
+          <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setBuildAsk(null)}>
+            <div role="dialog" aria-label={`Switch to ${b}?`} className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-xl text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-4 px-4 py-3 border-b border-gray-200">
+                <div>
+                  <div className="font-bold text-sm">{b} with {views.length} view{views.length === 1 ? '' : 's'} open on {build}</div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">The views are drawn on {build} ({filesSay}). Choose what {b} should change.</div>
+                </div>
+                <button onClick={() => setBuildAsk(null)} className="text-gray-400 hover:text-gray-700 text-lg leading-none px-1" title="Close">×</button>
+              </div>
+              <div className="px-4 py-3 space-y-2.5">
+                <button onClick={() => { setLiftTo(lifted ? null : b); setBuildAsk(null); }} autoFocus
+                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border border-gray-300 hover:bg-gray-50' : 'border-2 border-teal-500 bg-teal-50/60 hover:bg-teal-50'}`}>
+                  <div className="font-semibold text-[12.5px] text-teal-900">{lifted ? `Remove the ${b} coordinates` : `Keep the views on ${build}, add the ${b} coordinates`}{!lifted && !filesOnB && <span className="ml-2 text-[10.5px] font-medium text-teal-700">recommended</span>}</div>
+                  <div className="text-[11px] text-gray-600 mt-0.5">{lifted
+                    ? `The line of ${b} positions over the ruler goes away; nothing else changes.`
+                    : `Genes, reads and positions do not move. A second line over the ruler gives the ${b} position of each tick, the pointer gives both builds for any base, and the view's header shows its ${b} window (click to copy it). Lifted by Ensembl's assembly map (rest.ensembl.org): only the chromosome and the window's coordinates are sent.`}</div>
+                </button>
+                <button onClick={() => void switchAnnotation(b)}
+                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border-2 border-indigo-500 bg-indigo-50/60 hover:bg-indigo-50' : 'border border-gray-300 hover:bg-gray-50'}`}>
+                  <div className="font-semibold text-[12.5px]">Move everything to {b}{filesOnB && <span className="ml-2 text-[10.5px] font-medium text-indigo-700">recommended: the files are on {b}</span>}</div>
+                  <div className="text-[11px] text-gray-600 mt-0.5">For files aligned on {b}. Gene models, known SNPs, GTEx and the searches use {b}; each open view is lifted to its {b} window and reopened with its options.</div>
+                  {filesBuild && filesBuild !== b && <div className="text-[11px] text-red-700 mt-1">Your files are on {filesBuild}: on {b} the genes would no longer match the reads.</div>}
+                </button>
+              </div>
+              <div className="flex justify-end px-4 py-3 border-t border-gray-200">
+                <button onClick={() => setBuildAsk(null)} className="px-3 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {exportDialog && (
         <div className="fixed inset-0 z-50 bg-black/40 flex items-start justify-center p-6 overflow-y-auto" onMouseDown={() => setExportDialog(null)}>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-xl text-gray-900 text-xs" onMouseDown={e => e.stopPropagation()}>
@@ -930,15 +1317,15 @@ function App() {
             <div className="px-4 py-3 space-y-3">
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Window exported around each view · coverage, junctions, retention counts and reads</legend>
-                {([['view', 'the view as shown: the recipient cannot pan outside it'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest window: what the viewer itself loads around the view (up to ${MAX_FETCH_BP / 1e6} Mb for coverage and junctions, ${READS_MAX_VIEW_BP / 1000} kb for reads)`]] as const).map(([v, label]) => (
+                {([['view', 'the view as shown: the recipient cannot pan outside it'], ['margin', 'the view with a margin of half its width on each side'], ['max', `the widest window: what the viewer itself loads around the view (up to ${MAX_FETCH_BP / 1e6} Mb for coverage and junctions, the view's reads window for reads, 100 kb unless set otherwise)`]] as const).map(([v, label]) => (
                   <label key={v} className="flex items-center gap-2"><input type="radio" name="exportWindow" checked={exportDialog.window === v} onChange={() => setExportDialog({ ...exportDialog, window: v })} />{label}</label>
                 ))}
               </fieldset>
               <div className="font-semibold">Reads track · {viewsWithReads ? `${viewsWithReads} view${viewsWithReads === 1 ? '' : 's'} with the reads track on` : 'no view has the reads track on'}</div>
-              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views above {READS_MAX_VIEW_BP / 1000} kb have no reads track and are skipped.</div>
+              <div className="text-[11px] text-gray-500">For those views the reads of every loaded sample are embedded over the same window, with the reference bases and the mismatches (the recipient can switch reads / collapsed and change Min VAF); read names are replaced by numbers. Views wider than their reads window (100 kb unless set otherwise, next to the Reads switch) have no reads track and are skipped.</div>
               <fieldset className="space-y-1">
                 <legend className="font-medium mb-1">Reads per sample in that window</legend>
-                {([['shown', 'as displayed: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (
+                {([['shown', 'standard: up to 20,000 reads (sampled evenly when the window holds more) · about 150 kB per sample and view'], ['dense', 'dense: up to 100,000 reads, for deep windows · under 1 MB per sample and view'], ['all', 'every read of the window · exact at any zoom, a few MB per sample and view on a deep window']] as const).map(([v, label]) => (
                   <label key={v} className="flex items-center gap-2"><input type="radio" name="readsCap" checked={exportDialog.readsCap === v} onChange={() => setExportDialog({ ...exportDialog, readsCap: v })} disabled={!viewsWithReads} />{label}</label>
                 ))}
               </fieldset>
@@ -957,8 +1344,6 @@ function App() {
         <span>Sashimi viewer {VERSION}</span>
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
-        <span>·</span>
-        <span>made with Claude Opus 5 and Fable 5.1</span>
         <span>·</span>
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>

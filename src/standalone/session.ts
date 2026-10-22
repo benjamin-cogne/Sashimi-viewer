@@ -8,12 +8,13 @@
  */
 import type { ViewerSettings, ViewerState } from '../components/SashimiViewer';
 import type { GenomeBuild } from './ensembl';
-import type { LibraryEvidence } from '../components/sashimi/types';
+import type { LibraryEvidence, StrandEvidence } from '../components/sashimi/types';
+import type { SampleKind } from './fileKinds';
 
 export const SESSION_APP = 'sashimi-viewer';
 export const SESSION_VERSION = 1;
 
-export interface SessionSample { name: string; file: string; index: string; size: number; kind: 'bam' | 'cram'; /** paths relative to the run folder, when known */ path?: string; indexPath?: string; /** RNA-seq or DNA, as decided or chosen in the saving page */ library?: LibraryEvidence }
+export interface SessionSample { name: string; file: string; index: string; size: number; kind: SampleKind; /** paths relative to the run folder, when known */ path?: string; indexPath?: string; /** RNA-seq or DNA, as decided or chosen in the saving page */ library?: LibraryEvidence }
 export interface SessionGene {
   name: string; id?: string; chrom: string;
   /** gene bounds, 1-based inclusive */
@@ -23,7 +24,7 @@ export interface SessionGene {
   mark: { start: number; end: number } | null;
 }
 /** Viewer options with samples referred to by name (ids are per page load). */
-export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample'> & { groups: { name: string; samples: string[]; color?: string }[]; readsSample: string | null };
+export type SessionViewer = Omit<ViewerSettings, 'groups' | 'readsSample' | 'shownSamples'> & { groups: { name: string; samples: string[]; color?: string }[]; readsSample: string | null; /** the samples shown as tracks, by name, in order */ samples?: string[] };
 export interface SessionFile {
   app: typeof SESSION_APP;
   version: number;
@@ -46,7 +47,7 @@ export interface SessionFile {
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
 
 /** The minimum a loaded sample must expose (LocalSample without the File objects' behaviour). */
-export interface SampleLike { id: number; name: string; kind: 'bam' | 'cram'; file: { name: string; size: number }; index: { name: string }; path?: string; indexPath?: string; lib?: LibraryEvidence }
+export interface SampleLike { id: number; name: string; kind: SampleKind; file: { name: string; size: number }; index: { name: string }; path?: string; indexPath?: string; lib?: LibraryEvidence }
 
 export function defaultSessionName(geneName?: string | null): string {
   const day = new Date().toISOString().slice(0, 10);
@@ -70,19 +71,22 @@ export function buildSession(args: {
   const nameOf = (id: number | null | undefined) => samples.find(s => s.id === id)?.name ?? null;
   const viewerOf = (state: ViewerState): SessionViewer => ({
     equalIntrons: state.equalIntrons, intronWidth: state.intronWidth ?? null, allTranscripts: state.allTranscripts, commonSnps: state.commonSnps, snpMinAf: state.snpMinAf,
-    depthAxis: state.depthAxis, uniqueOnly: state.uniqueOnly,
+    depthAxis: state.depthAxis, minMapq: state.minMapq,
     reads: state.reads, readsAll: state.readsAll, readsSample: nameOf(state.readsSample), collapseReads: state.collapseReads, minVafPct: state.minVafPct,
-    minJunctionReads: state.minJunctionReads, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
+    minJunctionReads: state.minJunctionReads, minJunctionReadsSet: state.minJunctionReadsSet, minUsagePct: state.minUsagePct, arcLabels: state.arcLabels, intronRetention: state.intronRetention,
     viewMode: state.viewMode,
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
+    samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
-    consensusMode: state.consensusMode, minIndelBp: state.minIndelBp, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, pairs: state.pairs, haplotypes: state.haplotypes, clippedBases: state.clippedBases, insertedBases: state.insertedBases,
+    consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, rnaVariants: state.rnaVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands, readsColor: state.readsColor,
+    // the panel order names its samples by name (ids are the page's own, renumbered at each load)
+    panelOrder: state.panelOrder?.length ? state.panelOrder.map(k => (k.startsWith('s:') ? `s:${nameOf(Number(k.slice(2))) ?? k.slice(2)}` : k)) : undefined,
   });
   const geneOf = (state: ViewerState): SessionGene => ({ name: state.gene.name, id: state.gene.id, chrom: state.gene.chrom, start: state.gene.start, end: state.gene.end, view: { ...state.view }, mark: state.mark });
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
-    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && s.lib.type !== 'unknown' ? s.lib : undefined })),
+    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
     fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name } : null,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
@@ -102,9 +106,13 @@ export function parseSession(text: string): SessionFile {
   const build: GenomeBuild = raw.build === 'GRCh37' ? 'GRCh37' : 'GRCh38';
   const samples: SessionSample[] = raw.samples
     .filter((s: any) => s && typeof s.file === 'string')
-    .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: s.kind === 'cram' ? 'cram' : 'bam',
+    .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: typeof s.kind === 'string' && /^[a-z0-9_-]+$/.test(s.kind) ? s.kind : 'bam',
       path: typeof s.path === 'string' ? s.path : undefined, indexPath: typeof s.indexPath === 'string' ? s.indexPath : undefined,
-      library: s.library && (s.library.type === 'rna' || s.library.type === 'dna') ? { type: s.library.type, source: ['header', 'reads', 'user'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? '') } : undefined }));
+      library: s.library && (s.library.type === 'rna' || s.library.type === 'dna' || s.library.strand) ? {
+        type: s.library.type === 'rna' || s.library.type === 'dna' ? s.library.type : 'unknown',
+        source: ['header', 'reads', 'user', 'none'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? ''),
+        strand: strandOf(s.library.strand),
+      } : undefined }));
   const parseGene = (g: any): SessionGene | null => g && typeof g.name === 'string' && typeof g.chrom === 'string' && Number.isFinite(g.start) && Number.isFinite(g.end)
     ? { name: g.name, id: typeof g.id === 'string' ? g.id : undefined, chrom: g.chrom, start: g.start, end: g.end,
         view: g.view && Number.isFinite(g.view.start) && Number.isFinite(g.view.end) ? { start: g.view.start, end: g.view.end } : { start: g.start, end: g.end },
@@ -113,7 +121,10 @@ export function parseSession(text: string): SessionFile {
   const parseViewer = (v: any): SessionViewer | null => v && typeof v === 'object' ? {
     ...v,
     groups: Array.isArray(v.groups) ? v.groups.filter((x: any) => x && typeof x.name === 'string').map((x: any) => ({ name: x.name, samples: Array.isArray(x.samples) ? x.samples.map(String) : [], color: typeof x.color === 'string' && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : undefined })) : [],
+    // sessions saved before the MAPQ threshold had "uniqueOnly" (NH:1, or MAPQ ≥ 30 without NH): MAPQ ≥ 30 keeps the same reads with the usual aligners (STAR 255, HISAT2 60 for NH:1)
+    minMapq: typeof v.minMapq === 'number' && Number.isFinite(v.minMapq) ? Math.max(0, v.minMapq) : v.uniqueOnly === true ? 30 : 0,
     readsSample: typeof v.readsSample === 'string' ? v.readsSample : null,
+    samples: Array.isArray(v.samples) ? v.samples.filter((x: any) => typeof x === 'string') : undefined,
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
     labelScales: v.labelScales && typeof v.labelScales === 'object' ? Object.fromEntries(Object.entries(v.labelScales).filter(([, n]) => typeof n === 'number' && Number.isFinite(n) && n > 0)) as Record<string, number> : undefined,
     hiddenTranscripts: Array.isArray(v.hiddenTranscripts) ? v.hiddenTranscripts.filter((x: any) => typeof x === 'string') : undefined,
@@ -148,10 +159,20 @@ export function viewerSettingsOf(session: SessionFile | { viewer: SessionViewer 
   const v = session.viewer;
   if (!v) return undefined;
   const idOf = (name: string) => samples.find(s => s.name === name)?.id;
-  const { groups, readsSample, ...rest } = v;
+  const { groups, readsSample, samples: shown, ...rest } = v;
+  // none of the view's samples loaded: the view starts as a new one does rather than empty
+  const shownIds = shown?.map(idOf).filter((id): id is number => id != null);
   return {
     ...rest,
     readsSample: readsSample ? idOf(readsSample) ?? null : null,
+    ...(shown && shownIds && (shownIds.length || !shown.length) ? { shownSamples: shownIds } : {}),
     groups: groups.map(g => ({ name: g.name, sampleIds: g.samples.map(idOf).filter((id): id is number => id != null), color: g.color })),
+    ...(v.panelOrder ? { panelOrder: v.panelOrder.map(k => (k.startsWith('s:') ? (idOf(k.slice(2)) != null ? `s:${idOf(k.slice(2))}` : null) : k)).filter((k): k is string => !!k) } : {}),
   };
+}
+
+/** A sample's library orientation as a session file holds it, checked. */
+function strandOf(x: any): StrandEvidence | undefined {
+  if (!x || !['reverse', 'forward', 'unstranded'].includes(x.call)) return undefined;
+  return { call: x.call, source: x.source === 'reads' ? 'reads' : 'user', fraction: typeof x.fraction === 'number' ? x.fraction : undefined, reads: typeof x.reads === 'number' ? x.reads : undefined };
 }

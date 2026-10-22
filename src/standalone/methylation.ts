@@ -1,0 +1,403 @@
+/**
+ * CpG methylation from the base-modification tags of long reads (ONT: dorado; PacBio: primrose / jasmine), counted the
+ * way ONT's modkit builds a CpG table (`modkit pileup --cpg --ref … --combine-strands`, its "traditional" preset):
+ *
+ * - **Sites from the reference, not from the reads**: every CpG of the reference; a read counts at the C of a CpG when
+ *   it aligns there (+ strand reads) or at its G (− strand reads: the C of the other strand), both strands summed on the
+ *   C, and only when the read carries the canonical base there (a SNP destroying the CpG is not a call).
+ * - **Calls from MM / ML** (SAM tags specification): MM lists, per modification, how many bases of its canonical kind
+ *   to skip between two listed ones, counted on the read as sequenced (for a read aligned on the − strand, from the
+ *   end of SEQ, on its complement); ML gives each listed base a probability (N ↦ (N + 0.5) / 256). A `?` entry says
+ *   nothing of the bases it skips; a `.` entry (or none) says they are unmodified. The legacy Mm / Ml names are read too.
+ *   Records whose SEQ no longer matches the read the tags describe (hard clips without an MN tag, MN ≠ SEQ length) are
+ *   left out, as the specification asks.
+ * - **5mC against unmodified C, 5hmC set aside**: the 5hmC probability is shared out between the two others (their
+ *   probabilities renormalised), then the call is the likelier state and its probability the call's confidence.
+ * - **Low-confidence calls filtered**: calls below a threshold estimated from the data, the 10th percentile of the
+ *   call confidences (modkit's default filter percentile), are counted apart and left out of the fractions. modkit
+ *   estimates one threshold per file from a sample of its reads; here it is estimated per block of METHYL_BLOCK_BP of the
+ *   chromosome (a fixed grid), from every call at the block's CpGs. A CpG's value thus depends on its reads and its block
+ *   alone: the same whatever was counted before, the zoom, the window asked for or the source (BAM, CRAM, container).
+ *   (Estimated from whatever had been counted, it moved with the navigation: a window read again after zooming out and in,
+ *   or after the layer was turned off and on, could get another threshold and other fractions.) The confidences are binned
+ *   finer towards 1 (CONF_BINS, confBin): current basecallers put most calls above 0.95, where bins of equal width could
+ *   not place the percentile (on ONT HG002, 97 % of the calls fell in the top 1/32 and only 2.7 % were filtered instead
+ *   of 10 %).
+ *
+ * Counts are kept per CpG, per haplotag (untagged, HP 1, HP 2) and per confidence bin, and the confidences per block, so
+ * the thresholds are applied when a window is read back. A source counts whole blocks (methylBlocks) for a window.
+ *
+ * Haplotags only mean something within their phase set (PS): HP 1 of one set and HP 1 of the next one need not be the
+ * same chromosome copy, and where the reads of two sets overlap (around a set's ends, tens of kb with long reads) a CpG
+ * holds both. The tagged calls are therefore also kept per phase set, and a window read back gives each CpG's HP 1 and
+ * HP 2 from the one set holding most of its tagged calls (`ps`), the other sets' calls joining the untagged ones.
+ */
+
+/**
+ * Confidence bins over [0.5, 1], finer towards 1: bin k starts at 1 − 2^−(1 + k/2), i.e. 0.5, 0.65, 0.75, 0.82, 0.875,
+ * 0.91, 0.94, 0.956, 0.969, 0.978, 0.984, 0.989, 0.992, 0.9945, 0.9961 and 0.9972 for the last. Near 1 a bin is about
+ * one ML step wide (1/256), so the filter's percentile is placed about as finely as the calls themselves.
+ */
+export const CONF_BINS = 16;
+/** The lower edge of a confidence bin. */
+export const confBinLow = (bin: number) => 1 - Math.pow(2, -(1 + bin / 2));
+const HAPS = 3;                         // 0 untagged (or HP > 2), 1, 2
+/**
+ * The grid the confidence threshold is estimated on: blocks of this many bases from the chromosome's start. 100 kb hold
+ * tens of thousands of calls at 30× (about 1 CpG per 100 bp), enough to place the percentile, and cost a source at most
+ * one block on each side of a window to count.
+ */
+export const METHYL_BLOCK_BP = 100_000;
+export const methylBlock = (pos: number) => Math.floor(pos / METHYL_BLOCK_BP);
+/** The span of the whole blocks over [start, end): what a source counts for that window. */
+export function methylBlocks(start: number, end: number): [number, number] {
+  return [methylBlock(start) * METHYL_BLOCK_BP, (methylBlock(Math.max(start, end - 1)) + 1) * METHYL_BLOCK_BP];
+}
+/** Share of the sample's calls the threshold filters: its lowest-confidence 10 %, as modkit does by default. */
+export const FILTER_PERCENTILE = 0.1;
+const C = 67, G = 71;
+
+/** Counts of one CpG: [hap][state 0 unmodified / 1 modified][confidence bin]. */
+export type CpgCounts = Uint16Array;
+const idx = (hap: number, state: number, bin: number) => (hap * 2 + state) * CONF_BINS + bin;
+export const confBin = (conf: number) => conf >= 1 ? CONF_BINS - 1 : Math.max(0, Math.min(CONF_BINS - 1, Math.floor(2 * (-Math.log2(1 - conf) - 1) + 1e-9)));
+
+/** CpG sites of a reference stretch: the positions of their C (0-based). */
+export function cpgSites(start: number, seq: string): Int32Array<ArrayBuffer> {
+  const out: number[] = [];
+  for (let i = 0; i + 1 < seq.length; i++) {
+    const a = seq.charCodeAt(i) & 0xdf, b = seq.charCodeAt(i + 1) & 0xdf;   // upper case
+    if (a === C && b === G) out.push(start + i);
+  }
+  return Int32Array.from(out);
+}
+
+/** Scratch buffers reused from read to read. */
+export interface ModScratch { pm: Float32Array; ph: Float32Array; listed: Uint8Array; cIdx: Int32Array }
+export const newModScratch = (): ModScratch => ({ pm: new Float32Array(1024), ph: new Float32Array(1024), listed: new Uint8Array(1024), cIdx: new Int32Array(1024) });
+
+/**
+ * Parses the MM / ML tags of a read for C modifications on the sequenced strand into `sc`, indexed by SEQ position:
+ * pm / ph the 5mC / 5hmC probabilities, listed[i] 1 when the base was listed. Returns whether unlisted C's are
+ * implicitly unmodified (a `.` or bare 5mC entry), or null when the tags do not describe this SEQ.
+ */
+export function parseModTags(mm: string, ml: ArrayLike<number> | null, codes: Uint8Array, n: number, reverse: boolean, sc: ModScratch): boolean | null {
+  if (sc.pm.length < n) { const m = Math.max(n, sc.pm.length * 2); sc.pm = new Float32Array(m); sc.ph = new Float32Array(m); sc.listed = new Uint8Array(m); sc.cIdx = new Int32Array(m); }
+  sc.listed.fill(0, 0, n);
+  // SEQ positions of the C's of the read as sequenced, in sequencing order: C's of SEQ forward, or G's of SEQ from its end
+  let nc = 0;
+  if (!reverse) { for (let i = 0; i < n; i++) if (codes[i] === C) sc.cIdx[nc++] = i; }
+  else { for (let i = n - 1; i >= 0; i--) if (codes[i] === G) sc.cIdx[nc++] = i; }
+  let mlAt = 0, implicit = false, any = false;
+  for (const entry of mm.split(';')) {
+    if (!entry) continue;
+    const parts = entry.split(',');
+    const head = parts[0];
+    // head: base, strand, modification codes (letters, or one ChEBI number), optional '.' / '?'
+    const m = /^([ACGTUN])([+-])([a-z]+|\d+)([.?]?)$/.exec(head);
+    const nSkips = parts.length - 1;
+    if (!m) { return null; }
+    const codesInEntry = /^\d+$/.test(m[3]) ? [m[3]] : m[3].split('');
+    const per = codesInEntry.length;
+    if (m[1] !== 'C' || m[2] !== '+') { mlAt += nSkips * per; continue; }
+    // the letters or their ChEBI numbers (27551 5mC, 76792 5hmC), as the SAM specification allows
+    const im = codesInEntry.findIndex(c => c === 'm' || c === '27551'), ih = codesInEntry.findIndex(c => c === 'h' || c === '76792');
+    if (im < 0 && ih < 0) { mlAt += nSkips * per; continue; }
+    if (im >= 0 && m[4] !== '?') implicit = true;
+    let p = -1;
+    for (let k = 1; k <= nSkips; k++) {
+      p += parseInt(parts[k], 10) + 1;
+      if (!(p < nc)) return null;    // more listed C's than the SEQ has: the tags describe another sequence
+      const q = sc.cIdx[p];
+      if (!sc.listed[q]) { sc.listed[q] = 1; sc.pm[q] = 0; sc.ph[q] = 0; }
+      if (ml) {
+        if (im >= 0) sc.pm[q] = mlProb(ml[mlAt + (k - 1) * per + im]);
+        if (ih >= 0) sc.ph[q] = mlProb(ml[mlAt + (k - 1) * per + ih]);
+      }
+      any = true;
+    }
+    mlAt += nSkips * per;
+  }
+  return any || implicit ? implicit : null;
+}
+
+/** Probability of an ML byte (SAM tags specification: N ↦ (N + 0.5) / 256). */
+export const mlProb = (n: number) => (n + 0.5) / 256;
+
+/** The 5mC call of one base: whether it is modified, and the call's confidence (5hmC set aside, the two others renormalised). */
+export function callOf(pm: number, ph: number): { mod: boolean; conf: number } | null {
+  const pc = Math.max(0, 1 - pm - ph), s = pm + pc;
+  if (s <= 1e-6) return null;
+  const m = pm / s;
+  return m > 0.5 ? { mod: true, conf: m } : { mod: false, conf: 1 - m };
+}
+
+/** A phase set's key in the counts: its PS value, or NO_PS for reads tagged without one. */
+const NO_PS = -1;
+/** CpG counts of one set of reads, with the histogram of their call confidences (for the filter threshold). */
+export class MethylCounts {
+  sites = new Map<number, CpgCounts>();
+  /** the tagged calls (HP 1, 2) again, per CpG and phase set: [hap 1, 2][state][bin] */
+  bySet = new Map<number, Map<number, Uint16Array>>();
+  /** the call confidences by block of the CpG (methylBlock): each block's threshold */
+  hists = new Map<number, Float64Array>();
+  calls = 0;
+  private setArrays = 0;
+  get bytes(): number { return this.sites.size * (HAPS * 2 * CONF_BINS * 2 + 48) + this.bySet.size * 64 + this.setArrays * (4 * CONF_BINS * 2 + 32) + this.hists.size * (CONF_BINS * 8 + 48); }
+  /** `ps`: the read's phase set (tagged reads; null or undefined when it has none) */
+  add(pos: number, hap: number, mod: boolean, conf: number, ps?: number | null): void {
+    let c = this.sites.get(pos);
+    if (!c) this.sites.set(pos, c = new Uint16Array(HAPS * 2 * CONF_BINS));
+    const b = confBin(conf), i = idx(hap, mod ? 1 : 0, b);
+    if (c[i] < 65535) c[i]++;
+    if (hap === 1 || hap === 2) {
+      let m = this.bySet.get(pos);
+      if (!m) this.bySet.set(pos, m = new Map());
+      const k = ps ?? NO_PS;
+      let a = m.get(k);
+      if (!a) { m.set(k, a = new Uint16Array(4 * CONF_BINS)); this.setArrays++; }
+      const j = idx(hap - 1, mod ? 1 : 0, b);
+      if (a[j] < 65535) a[j]++;
+    }
+    const k = methylBlock(pos);
+    let h = this.hists.get(k);
+    if (!h) this.hists.set(k, h = new Float64Array(CONF_BINS));
+    h[b]++; this.calls++;
+  }
+}
+
+/**
+ * Counts one read's CpG calls. `ops` the packed CIGAR, `codes[0..n)` its SEQ as character codes, `cpgs` the sorted CpG
+ * positions of the reference over it, `hap` its haplotag (0 untagged).
+ */
+export function countRead(out: MethylCounts, start: number, ops: ArrayLike<number>, codes: Uint8Array, n: number, reverse: boolean,
+  mm: string, ml: ArrayLike<number> | null, cpgs: Int32Array, hap: number, sc: ModScratch, ps?: number | null): number {
+  const h = hap > 0 && hap <= 2 ? hap : 0;
+  return visitReadCalls(start, ops, codes, n, reverse, mm, ml, cpgs, sc, (cpg, mod, conf) => out.add(cpg, h, mod, conf, ps));
+}
+
+/**
+ * One CpG call a source holds in its own form rather than as MM / ML tags: `pm` / `ph` the 5mC / 5hmC probabilities at
+ * the C of the CpG `cpg`. Counted into `out` (when given) exactly as countRead counts a call, and returned as the
+ * read's P(5mC) against unmodified, 5hmC set aside (what a read's `me` holds); null when there is no call.
+ */
+export function addCall(out: MethylCounts | null, cpg: number, hap: number, pm: number, ph: number, ps?: number | null): number | null {
+  const call = callOf(pm, ph);
+  if (!call) return null;
+  out?.add(cpg, hap > 0 && hap <= 2 ? hap : 0, call.mod, call.conf, ps);
+  return call.mod ? call.conf : 1 - call.conf;
+}
+
+/**
+ * Each CpG call of one read, in reference order: `visit(cpg, modified, confidence)` with `cpg` the C of the CpG on the
+ * + strand. Returns the number of calls.
+ */
+export function visitReadCalls(start: number, ops: ArrayLike<number>, codes: Uint8Array, n: number, reverse: boolean,
+  mm: string, ml: ArrayLike<number> | null, cpgs: Int32Array, sc: ModScratch, visit: (cpg: number, mod: boolean, conf: number) => void): number {
+  const implicit = parseModTags(mm, ml, codes, n, reverse, sc);
+  if (implicit === null) return 0;
+  let pos = start, q = 0, counted = 0;
+  // first CpG at or after the read start
+  let lo = 0, hi = cpgs.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cpgs[mid] < start - 1) lo = mid + 1; else hi = mid; }
+  let k = lo;
+  for (let o = 0; o < ops.length; o++) {
+    const v = ops[o], len = v >>> 4, op = v & 15;
+    if (op === 0 || op === 7 || op === 8) {
+      const bEnd = pos + len;
+      // + strand: the C at c must be in the block; − strand: the G at c + 1
+      while (k < cpgs.length && cpgs[k] + (reverse ? 1 : 0) < pos) k++;
+      for (let j = k; j < cpgs.length; j++) {
+        const at = cpgs[j] + (reverse ? 1 : 0);
+        if (at >= bEnd) break;
+        const qi = q + (at - pos);
+        if (qi >= n || codes[qi] !== (reverse ? G : C)) continue;
+        let pm = 0, ph = 0;
+        if (sc.listed[qi]) { pm = sc.pm[qi]; ph = sc.ph[qi]; }
+        else if (!implicit) continue;
+        const call = callOf(pm, ph);
+        if (!call) continue;
+        visit(cpgs[j], call.mod, call.conf);
+        counted++;
+      }
+      pos = bEnd; q += len;
+    } else if (op === 1 || op === 4) q += len;
+    else if (op === 2 || op === 3) pos += len;
+  }
+  return counted;
+}
+
+/** One window read back: per CpG, per haplotag, the modified and total calls passing the threshold. */
+export interface MethylWindow {
+  start: number; end: number;
+  /** CpG positions (C of the CpG, 0-based) with at least one call */
+  pos: Int32Array;
+  /**
+   * per haplotag 0, 1, 2: modified calls and all passing calls at each CpG. HP 1 and HP 2 are those of the CpG's phase
+   * set (`ps`); 0 holds the untagged calls and those of reads tagged in another set
+   */
+  mod: [Uint16Array, Uint16Array, Uint16Array];
+  total: [Uint16Array, Uint16Array, Uint16Array];
+  /** each CpG's phase set: the PS holding most of its tagged calls; NaN when none, -1 for reads tagged without PS */
+  ps: Float64Array;
+  /**
+   * confidence threshold of each block over the window (the lower edge of its bin; see METHYL_BLOCK_BP), `threshold` the
+   * lowest of them; the calls they left out of the window and all its calls, those left out included
+   */
+  thresholds: { start: number; end: number; threshold: number }[];
+  threshold: number; filtered: number; calls: number;
+  /** CpG islands of the reference over the window (Gardiner-Garden & Frommer 1987) */
+  islands: [number, number][];
+  /** CpG sites of the reference in the window, called or not */
+  cpgs: number;
+  /** what the source wants said about its calls (shown with the panel's status), e.g. that they are approximate */
+  note?: string;
+}
+
+/** The threshold bin: the 10th percentile of the call confidences of `hist`. */
+export function thresholdBin(hist: Float64Array): number {
+  let total = 0;
+  for (const x of hist) total += x;
+  if (!total) return 0;
+  let acc = 0;
+  for (let b = 0; b < hist.length; b++) { acc += hist[b]; if (acc >= total * FILTER_PERCENTILE) return b; }
+  return 0;
+}
+
+/**
+ * How the reads track draws a read's call (`me`: its P(5mC)) against the confidence threshold `thr` of its block: 2 below
+ * it, 0 methylated, 1 unmethylated. Compared by confidence bin, as the counts compare it, so that a call the panel keeps
+ * is never drawn as filtered, nor the reverse.
+ */
+export function callClass(p: number, thr: number): 0 | 1 | 2 {
+  return confBin(Math.max(p, 1 - p)) < confBin(thr) ? 2 : p > 0.5 ? 0 : 1;
+}
+
+/**
+ * A read's call as an exported page keeps it, a byte (P(5mC) × 255, returned as the probability it stands for): the
+ * nearest byte that falls on the same side of the threshold `thr` as `p` does. Near 1 a byte holds less than a bin, and
+ * rounded plainly a passing call would read back as filtered.
+ */
+export function exportedCall(p: number, thr: number): number {
+  const keep = callClass(p, thr);
+  let q = Math.round(p * 255);
+  // a call kept moves towards certainty, a call filtered towards 0.5
+  const dir = (p > 0.5 ? 1 : -1) * (keep === 2 ? -1 : 1);
+  while (q > 0 && q < 255 && callClass(q / 255, thr) !== keep) q += dir;
+  return q / 255;
+}
+
+/** The confidence threshold at a position of a window read back: its block's. */
+export function thresholdAt(w: Pick<MethylWindow, 'thresholds' | 'threshold'>, pos: number): number {
+  const t = w.thresholds;
+  let lo = 0, hi = t.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (t[mid].end <= pos) lo = mid + 1; else hi = mid; }
+  return lo < t.length && t[lo].start <= pos ? t[lo].threshold : w.threshold;
+}
+
+/**
+ * Reads a window back from counts (layers each holding reads once), each CpG's calls filtered by its block's threshold.
+ * The layers must hold every read over the blocks of [start, end) (methylBlocks), or those blocks' thresholds are those
+ * of part of their calls. `refSeq` (from `refStart`) may run past the window: the CpG islands are found over all of it,
+ * then those overlapping the window kept, so an island at the window's edge is not cut by it.
+ */
+export function methylWindow(layers: MethylCounts[], start: number, end: number, refSeq: string | null, refStart: number): MethylWindow {
+  const tbOf = new Map<number, number>();
+  const blockTb = (k: number) => {
+    let tb = tbOf.get(k);
+    if (tb == null) {
+      const hist = new Float64Array(CONF_BINS);
+      for (const l of layers) { const h = l.hists.get(k); if (h) for (let b = 0; b < CONF_BINS; b++) hist[b] += h[b]; }
+      tbOf.set(k, tb = thresholdBin(hist));
+    }
+    return tb;
+  };
+  const merged = new Map<number, Uint16Array>();
+  for (const l of layers) for (const [p, c] of l.sites) {
+    if (p < start || p >= end) continue;
+    const m = merged.get(p);
+    if (!m) merged.set(p, c.slice()); else for (let i = 0; i < c.length; i++) m[i] = Math.min(65535, m[i] + c[i]);
+  }
+  const pos = Int32Array.from([...merged.keys()].sort((a, b) => a - b));
+  const mod = [new Uint16Array(pos.length), new Uint16Array(pos.length), new Uint16Array(pos.length)] as MethylWindow['mod'];
+  const total = [new Uint16Array(pos.length), new Uint16Array(pos.length), new Uint16Array(pos.length)] as MethylWindow['total'];
+  const ps = new Float64Array(pos.length).fill(NaN);
+  let filtered = 0, calls = 0;
+  pos.forEach((p, i) => {
+    const c = merged.get(p)!, tb = blockTb(methylBlock(p));
+    for (let h = 0; h < HAPS; h++) for (let st = 0; st < 2; st++) for (let b = 0; b < CONF_BINS; b++) {
+      const x = c[idx(h, st, b)];
+      if (!x) continue;
+      calls += x;
+      if (b < tb) { filtered += x; continue; }
+      total[h][i] += x; if (st === 1) mod[h][i] += x;
+    }
+    // HP 1 and HP 2 within the CpG's phase set only: the set with most passing tagged calls (ties: the lower PS); the
+    // other sets' tagged calls go with the untagged ones
+    const sets = new Map<number, Uint16Array>();
+    for (const l of layers) for (const [k, a] of l.bySet.get(p) ?? []) {
+      const m = sets.get(k);
+      if (!m) sets.set(k, a.slice()); else for (let j = 0; j < a.length; j++) m[j] = Math.min(65535, m[j] + a[j]);
+    }
+    if (!sets.size) return;
+    const passing = (a: Uint16Array, h: number, st?: number) => { let n = 0; for (let s2 = 0; s2 < 2; s2++) { if (st != null && s2 !== st) continue; for (let b = tb; b < CONF_BINS; b++) n += a[idx(h, s2, b)]; } return n; };
+    let best: number | null = null, bestN = -1;
+    for (const [k, a] of sets) { const n = passing(a, 0) + passing(a, 1); if (n > bestN || (n === bestN && best != null && k < best)) { best = k; bestN = n; } }
+    if (best == null || sets.size === 1) { ps[i] = best ?? NaN; return; }
+    ps[i] = best;
+    for (const [k, a] of sets) {
+      if (k === best) continue;
+      for (let h = 0; h < 2; h++) {
+        const t = passing(a, h), m = passing(a, h, 1);
+        total[h + 1][i] -= t; mod[h + 1][i] -= m; total[0][i] += t; mod[0][i] += m;
+      }
+    }
+  });
+  let cpgs = 0;
+  if (refSeq) for (let i = Math.max(0, start - refStart); i + 1 < refSeq.length && refStart + i < end; i++) if ((refSeq.charCodeAt(i) & 0xdf) === C && (refSeq.charCodeAt(i + 1) & 0xdf) === G) cpgs++;
+  const thresholds: MethylWindow['thresholds'] = [];
+  if (end > start) for (let k = methylBlock(start); k <= methylBlock(end - 1); k++) thresholds.push({ start: k * METHYL_BLOCK_BP, end: (k + 1) * METHYL_BLOCK_BP, threshold: confBinLow(blockTb(k)) });
+  const islands = refSeq ? cpgIslands(refSeq, refStart, refStart, refStart + refSeq.length).filter(([a, b]) => b > start && a < end) : [];
+  return { start, end, pos, mod, total, ps, thresholds, threshold: thresholds.length ? Math.min(...thresholds.map(t => t.threshold)) : confBinLow(0), filtered, calls, islands, cpgs };
+}
+
+/**
+ * CpG islands of a reference stretch by the criteria of Gardiner-Garden & Frommer (1987): 200 bp windows with a GC
+ * content of at least 50 % and an observed / expected CpG ratio of at least 0.6, merged where they overlap.
+ */
+export function cpgIslands(seq: string, seqStart: number, start: number, end: number): [number, number][] {
+  const W = 200, a0 = Math.max(0, start - seqStart), a1 = Math.min(seq.length, end - seqStart);
+  if (a1 - a0 < W) return [];
+  const up = (i: number) => seq.charCodeAt(i) & 0xdf;
+  let c = 0, g = 0, cg = 0;
+  const addAt = (i: number, s: number) => {
+    const x = up(i);
+    if (x === C) c += s; else if (x === G) g += s;
+    if (i + 1 < a1 && x === C && up(i + 1) === G) cg += s;
+  };
+  for (let i = a0; i < a0 + W; i++) addAt(i, 1);
+  const out: [number, number][] = [];
+  let open = -1, lastEnd = -1;
+  for (let i = a0; i + W <= a1; i++) {
+    if (i > a0) { addAt(i - 1, -1); addAt(i + W - 1, 1); }
+    // the CpG straddling the right edge was counted with its C only once the G came in: close enough for a 200 bp scan
+    const gc = (c + g) / W, oe = c && g ? (cg * W) / (c * g) : 0;
+    const ok = gc >= 0.5 && oe >= 0.6;
+    if (ok) { if (open < 0) open = i; lastEnd = i + W; }
+    else if (open >= 0 && i >= lastEnd) { out.push([seqStart + open, seqStart + lastEnd]); open = -1; }
+  }
+  if (open >= 0) out.push([seqStart + open, seqStart + lastEnd]);
+  return out;
+}
+
+/** Methylation counts of one sample over one stretch of a chromosome: owned reads start in [ps, pe), the spill reaches in (see CoverageState). */
+export class MethylState {
+  owned = new MethylCounts();
+  spill = new MethylCounts();
+  ps = 0;
+  pe = 0;
+  lastUsed = 0;
+  constructor(readonly chrom: string) {}
+  get empty(): boolean { return this.pe <= this.ps; }
+  get bytes(): number { return this.owned.bytes + this.spill.bytes; }
+}

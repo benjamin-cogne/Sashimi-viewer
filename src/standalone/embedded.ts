@@ -5,22 +5,28 @@
  * "Export HTML" writes a copy of this very page with a JSON payload in a `<script type="application/json">`
  * tag: per view, the gene models (reference transcript, every transcript, neighbouring genes) and, per
  * sample, the coverage, junctions and boundary-spanning counts of the window already fetched around the
- * view (view plus margins). When the page starts with such a payload, an EmbeddedDataSource serves those
- * regions from memory: the reader switches views, zooms and pans inside the exported windows; anything
- * else (another gene, the reads track, exon-usage statistics) needs the original files, which the reader
- * can still add. Gene lookups, common SNPs and GTEx go to the network as usual when it is available.
+ * view (view plus margins), with the view's filters; the reads of views shown with their reads track, the CpG
+ * methylation of views shown with it, and the page's phasing of views grouped by it. When the page starts with such
+ * a payload, an EmbeddedDataSource serves those regions from memory: the reader switches views, zooms and pans inside
+ * the exported windows; anything else (another gene, a window or a filter not exported, exon-usage statistics) needs
+ * the original files, which the reader can still add. Gene lookups, common SNPs and GTEx go to the network as usual
+ * when it is available.
  */
-import type { AlignedRead, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
+import { addSiteHaplotypesFromReads } from './haplotypes';
+import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
-import { LocalDataSource, isLongRead, type LocalSample, type ReferenceChoice } from './localSource';
-import { callSites, collapseReads } from './collapse';
-import { phaseReads } from './phasing';
+import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
+import { READS_PHASE_CAP, answerReads, supportAndCap, thinFragments } from './readsWindow';
+import { keepFlags, keepFlagsWith, rawOfRead, structuralEvidence } from './alignments';
+import { mapqThreshold } from './coverage';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
+import type { MethylWindow } from './methylation';
+import type { SampleKind } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 
 export const EMBEDDED_APP = 'sashimi-viewer-export';
-export const EMBEDDED_VERSION = 2;
+export const EMBEDDED_VERSION = 4;
 export const EMBEDDED_TAG_ID = 'sashimi-embedded';
 
 /** Coverage of one sample over one window, compact: run lengths and depths instead of one object per run. */
@@ -36,6 +42,7 @@ export interface EncodedCoverage {
   sampled?: { rate: number; total: number; decoded: number };
   spliced?: { reads: number; fraction: number };
   structural?: StructuralEvidence;
+  unavailable?: SampleCoverage['unavailable'];
   error?: string;
 }
 /**
@@ -44,11 +51,17 @@ export interface EncodedCoverage {
  */
 export interface EncodedCoverageV2 {
   bin: string;
+  /**
+   * the window split by transcript strand under the reverse rule (SampleCoverage.strands), for a stranded sample of a view
+   * exported with its strands shown: each strand's runs and junctions as a coverage stream of their own, like `bin`
+   */
+  strands?: { plus: string; minus: string; spanning?: { plus?: BoundarySpanning; minus?: BoundarySpanning } };
   window: { start: number; end: number };
   spanning?: BoundarySpanning;
   sampled?: { rate: number; total: number; decoded: number };
   spliced?: { reads: number; fraction: number };
   structural?: StructuralEvidence;
+  unavailable?: SampleCoverage['unavailable'];
   error?: string;
 }
 /** Reads of one sample in the columnar form: the stream carries the window, the reads with their pairs and the reference bases. */
@@ -56,7 +69,12 @@ export interface EncodedReadsV2 { bin: string; window: { start: number; end: num
 const isBin = (x: unknown): x is { bin: string } => !!x && typeof (x as any).bin === 'string';
 
 export async function encodeCoverageV2(c: SampleCoverage, window: { start: number; end: number }): Promise<EncodedCoverageV2> {
-  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, error: c.error };
+  const strands = c.strands ? {
+    plus: toBase64(await encodeCoverageColumns({ runs: c.strands.plus.coverage, junctions: c.strands.plus.junctions })),
+    minus: toBase64(await encodeCoverageColumns({ runs: c.strands.minus.coverage, junctions: c.strands.minus.junctions })),
+    spanning: { plus: c.strands.plus.spanning, minus: c.strands.minus.spanning },
+  } : undefined;
+  return { bin: toBase64(await encodeCoverageColumns({ runs: c.coverage, junctions: c.junctions })), strands, window: c.window ?? window, spanning: c.spanning, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error };
 }
 export async function encodeReadsV2(p: ReadsPayload): Promise<EncodedReadsV2> {
   return { bin: toBase64(await encodeReadsColumns(p)), window: p.window };
@@ -80,18 +98,68 @@ export interface EmbeddedView {
   regionGenes?: GeneModel[];
   /** the window fetched (0-based half-open), the view plus margins */
   window: { chrom: string; start: number; end: number };
-  uniqueOnly: boolean;
+  /** minimum MAPQ of the alignments counted (0 = all) */
+  minMapq?: number;
+  /** secondary alignments counted (the view's Secondary filter on) */
+  secondary?: boolean;
+  /** pages exported before the MAPQ threshold: NH:1, or MAPQ ≥ 30 without NH */
+  uniqueOnly?: boolean;
   /** by sample id; the JSON form of version 1 exports or the columnar form of version 2 */
   coverage: Record<string, EncodedCoverage | EncodedCoverageV2>;
   /** reads by sample id, for views exported with their reads track on */
   reads?: Record<string, EncodedReads | EncodedReadsV2>;
+  /** CpG methylation by sample id (long-read DNA samples), for views exported with their Methylation layer on */
+  methylation?: Record<string, EncodedMethyl>;
+  /** the page's phasing of the reads by sample id, for views exported with their reads grouped by it (phased here) */
+  phase?: Record<string, EmbeddedPhase>;
+}
+/**
+ * A window of CpG methylation counts (MethylWindow) as JSON: CpG positions as differences from the previous one, the
+ * counts per haplotag lane, each CpG's phase set (null for none).
+ */
+export interface EncodedMethyl {
+  start: number; end: number;
+  pos: number[]; mod: [number[], number[], number[]]; total: [number[], number[], number[]]; ps: (number | null)[];
+  thresholds: MethylWindow['thresholds']; threshold: number; filtered: number; calls: number;
+  islands: [number, number][]; cpgs: number; note?: string;
+}
+export function encodeMethyl(w: MethylWindow): EncodedMethyl {
+  const pos: number[] = [];
+  let prev = 0;
+  for (const p of w.pos) { pos.push(p - prev); prev = p; }
+  return {
+    start: w.start, end: w.end, pos, mod: w.mod.map(a => Array.from(a)) as EncodedMethyl['mod'], total: w.total.map(a => Array.from(a)) as EncodedMethyl['total'],
+    ps: Array.from(w.ps, p => (Number.isNaN(p) ? null : p)), thresholds: w.thresholds, threshold: w.threshold, filtered: w.filtered, calls: w.calls,
+    islands: w.islands, cpgs: w.cpgs, ...(w.note ? { note: w.note } : {}),
+  };
+}
+function decodeMethyl(e: EncodedMethyl): MethylWindow {
+  const pos = new Int32Array(e.pos.length);
+  for (let i = 0, p = 0; i < e.pos.length; i++) { p += e.pos[i]; pos[i] = p; }
+  return {
+    start: e.start, end: e.end, pos, mod: e.mod.map(a => Uint16Array.from(a)) as MethylWindow['mod'], total: e.total.map(a => Uint16Array.from(a)) as MethylWindow['total'],
+    ps: Float64Array.from(e.ps, p => (p == null ? NaN : p)), thresholds: e.thresholds ?? [], threshold: e.threshold, filtered: e.filtered, calls: e.calls,
+    islands: e.islands, cpgs: e.cpgs, ...(e.note ? { note: e.note } : {}),
+  };
+}
+/**
+ * The page's phasing of a view's reads when it was exported: computed over every read of the window (up to
+ * READS_PHASE_CAP, as on the page), where the embedded reads, fewer, would phase into other blocks. Used while the
+ * reader keeps the thresholds it was computed with; otherwise phased again from the embedded reads.
+ */
+export interface EmbeddedPhase {
+  /** the window phased: the one the view asked for when it was exported */
+  window?: { start: number; end: number };
+  minVaf: number; longReadMinIndel?: number; longReadMinVaf?: number; result: PhaseResult;
+  /** reads of the window passing the filters, before the page sampled them for the phasing (the reads exported are that sample) */
+  total?: number;
 }
 export interface EmbeddedExport {
   app: typeof EMBEDDED_APP;
   version: number;
   saved: string;
   build: GenomeBuild;
-  samples: { id: number; name: string; kind: 'bam' | 'cram'; file: string; index: string; library?: LibraryEvidence }[];
+  samples: { id: number; name: string; kind: SampleKind; file: string; index: string; library?: LibraryEvidence }[];
   /** the session (views, options, groups) to restore; its sample names match `samples` */
   session: SessionFile;
   views: EmbeddedView[];
@@ -104,7 +172,7 @@ export function encodeCoverage(c: SampleCoverage, window: { start: number; end: 
     start: runs.length ? runs[0].start : window.start,
     len: runs.map(r => r.end - r.start), depth: runs.map(r => r.depth),
     junctions: c.junctions.map(j => [j.start, j.end, j.count]),
-    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, structural: c.structural, error: c.error,
+    spanning: c.spanning, window: c.window ?? window, sampled: c.sampled, spliced: c.spliced, structural: c.structural, unavailable: c.unavailable, error: c.error,
   };
 }
 export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName: string): SampleCoverage {
@@ -114,7 +182,7 @@ export function decodeCoverage(e: EncodedCoverage, sampleId: number, sampleName:
   return {
     sample_id: sampleId, sample_name: sampleName, coverage,
     junctions: e.junctions.map(([start, end, count]) => ({ start, end, count })),
-    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, structural: e.structural, error: e.error,
+    spanning: e.spanning, window: e.window, sampled: e.sampled, spliced: e.spliced, structural: e.structural, unavailable: e.unavailable, error: e.error,
   };
 }
 
@@ -197,12 +265,27 @@ export class EmbeddedDataSource extends LocalDataSource {
     }
     return p;
   }
+  /** The two strands of a block exported with them, decoded the first time they are asked for; undefined otherwise. */
+  private strandCache = new Map<string, Promise<SampleCoverage['strands']>>();
+  private decodedStrands(vi: number, sid: number): Promise<SampleCoverage['strands']> {
+    const key = `${vi}|${sid}`;
+    let p = this.strandCache.get(key);
+    if (!p) {
+      const c = this.payload.views[vi].coverage[String(sid)];
+      const st = isBin(c) ? (c as EncodedCoverageV2).strands : undefined;
+      p = !st ? Promise.resolve(undefined) : Promise.all([decodeCoverageColumns(fromBase64(st.plus)), decodeCoverageColumns(fromBase64(st.minus))])
+        .then(([a, b]) => ({ plus: { coverage: a.runs, junctions: a.junctions, spanning: st.spanning?.plus }, minus: { coverage: b.runs, junctions: b.junctions, spanning: st.spanning?.minus } }));
+      p.catch(() => this.strandCache.delete(key));
+      this.strandCache.set(key, p);
+    }
+    return p;
+  }
   private decodedReads(vi: number, sid: number): Promise<ReadsPayload> {
     const key = `${vi}|${sid}`;
     let p = this.readsCache.get(key);
     if (!p) {
       const r = this.payload.views[vi].reads![String(sid)];
-      p = isBin(r) ? decodeReadsColumns(fromBase64(r.bin)) : Promise.resolve(r as EncodedReads);
+      p = (isBin(r) ? decodeReadsColumns(fromBase64(r.bin)) : Promise.resolve(r as EncodedReads)).then(rp => { nameEmbeddedReads(rp.reads, vi, isBin(r)); return rp; });
       p.catch(() => this.readsCache.delete(key));
       this.readsCache.set(key, p);
     }
@@ -225,15 +308,17 @@ export class EmbeddedDataSource extends LocalDataSource {
     void this.prefetch(active).then(() => idle(next));
   }
   /** An exported sample has no file to scan: its variant sites come from the exported reads of the window, when they were exported. */
-  override async getVariantSites(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
-    if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, uniqueOnly, minVaf, opts);
-    const r = await this.getReads(sampleId, chrom, start, end, uniqueOnly, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
+  override async getVariantSites(sampleId: number, chrom: string, start: number, end: number, minMapq: number, minVaf: number, opts?: VariantScanOptions): Promise<VariantScan> {
+    if (!this.names.has(sampleId)) return super.getVariantSites(sampleId, chrom, start, end, minMapq, minVaf, opts);
+    const r = await this.getReads(sampleId, chrom, start, end, minMapq, Number.MAX_SAFE_INTEGER, 'reads', 1, minVaf, opts);
     opts?.onProgress?.(1);
-    return { sites: r.sites, total: r.total, long_reads: !!r.long_reads };
+    // a phased file's reads keep their haplotags: the sites get their counts by haplotype as from the file
+    const haplotagged = addSiteHaplotypesFromReads(r.reads, r.sites);
+    return { sites: r.sites, total: r.total, long_reads: !!r.long_reads, ...(haplotagged ? { haplotagged } : {}) };
   }
-  override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], uniqueOnly: boolean) {
+  override async rescueClips(sampleId: number, chrom: string, breakpoints: Breakpoint[], minMapq: number) {
     if (this.names.has(sampleId)) return [];   // an embedded sample has no reads to go back to
-    return super.rescueClips(sampleId, chrom, breakpoints, uniqueOnly);
+    return super.rescueClips(sampleId, chrom, breakpoints, minMapq);
   }
   override async getPrimaryRecord(sampleId: number, chrom: string, start: number, name: string) {
     if (this.names.has(sampleId)) return null;   // embedded reads carry no names and no file to go back to
@@ -268,62 +353,139 @@ export class EmbeddedDataSource extends LocalDataSource {
     if (v?.regionGenes) return structuredClone(v.regionGenes.filter(g => !exclude || (g.gene_name !== exclude && g.gene_id !== exclude)));
     try { return await super.getRegionGenes(chrom, start, end, exclude); } catch { return []; }
   }
-  override async getCoverage(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
-    if (!this.names.has(sampleId)) return super.getCoverage(sampleId, chrom, start, end, uniqueOnly, boundaries, opts);
+  /**
+   * The view to answer a request from (several views may hold the same sample): among those exported with the request's
+   * filters (minimum MAPQ, secondary alignments), the one whose window overlaps [start, end) the most, then the one
+   * holding what `wants` asks for (the strands, the phasing). With `looser`, a view exported with looser filters answers
+   * too when none matches (its reads are filtered here). `mismatch` tells what the views overlapping were exported with,
+   * when none of them can answer.
+   */
+  private pickView(chrom: string, start: number, end: number, windowOf: (v: EmbeddedView) => { start: number; end: number } | undefined,
+    minMapq: number, secondary: boolean, looser = false, wants?: (v: EmbeddedView) => boolean): { vi: number; exact: boolean; mismatch?: string } {
+    const want = mapqThreshold(minMapq);
+    let best = { vi: -1, exact: false, ov: 0, has: false };
+    const other: string[] = [];
+    this.payload.views.forEach((v, vi) => {
+      const w = windowOf(v);
+      if (!w || !sameChrom(v.window.chrom, chrom)) return;
+      const ov = Math.min(w.end, end) - Math.max(w.start, start);
+      if (ov <= 0) return;
+      const q = viewMapq(v), sec = !!v.secondary;
+      const exact = q === want && sec === secondary;
+      if (!exact && !(looser && q <= want && (sec || !secondary))) { other.push(filterText(q, sec)); return; }
+      const has = !!wants?.(v);
+      if (best.vi < 0 || (exact && !best.exact) || (exact === best.exact && (ov > best.ov || (ov === best.ov && has && !best.has)))) best = { vi, exact, ov, has };
+    });
+    return { vi: best.vi, exact: best.exact, ...(best.vi < 0 && other.length ? { mismatch: [...new Set(other)].join(' and ') } : {}) };
+  }
+  override async getCoverage(sampleId: number, chrom: string, start: number, end: number, minMapq: number, boundaries?: BoundaryHint, opts?: CoverageOptions): Promise<SampleCoverage> {
+    if (!this.names.has(sampleId)) return super.getCoverage(sampleId, chrom, start, end, minMapq, boundaries, opts);
     const name = this.names.get(sampleId)!;
     const core = opts?.core ?? { start, end };
-    // the exported window overlapping the view the most (several views may hold the same sample)
-    let bestOv = 0, bestVi = -1;
-    this.payload.views.forEach((v, vi) => {
-      const c = v.coverage[String(sampleId)];
-      if (!c || !sameChrom(v.window.chrom, chrom)) return;
-      const ov = Math.min(c.window.end, core.end) - Math.max(c.window.start, core.start);
-      if (ov > bestOv) { bestOv = ov; bestVi = vi; }
-    });
-    if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see it` };
+    // the counts were made with the view's filters: only a view exported with the request's answers
+    const { vi: bestVi, mismatch } = this.pickView(chrom, core.start, core.end, v => v.coverage[String(sampleId)]?.window, minMapq, !!opts?.secondary, false, v => !!opts?.strands && !!(v.coverage[String(sampleId)] as EncodedCoverageV2).strands);
+    if (bestVi < 0 && mismatch) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `this window was exported with ${mismatch}: set the filters back to it to see it, or add the alignment file` };
+    if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
     const { coverage, junctions } = await this.decodedCoverage(bestVi, sampleId);
-    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural: b.structural, error: b.error };
+    const strands = opts?.strands ? await this.decodedStrands(bestVi, sampleId) : undefined;
+    const structural = b.structural ?? (opts?.structural === 'rna' ? await this.fusionEvidence(bestVi, sampleId, chrom, minMapq, b.spliced?.reads) : undefined);
+    return { sample_id: sampleId, sample_name: name, coverage, junctions, spanning: b.spanning, window: b.window, sampled: b.sampled, spliced: b.spliced, structural, strands, unavailable: b.unavailable, error: b.error };
   }
-  override async getReads(sampleId: number, chrom: string, start: number, end: number, uniqueOnly: boolean, maxReads: number,
+  /**
+   * The fusion junctions of an RNA sample exported without them (a page exported before they existed, or without the
+   * hints): from its exported reads, which keep their clipped bases and the reference of the window, as the live page
+   * reads them from the file (split reads and clipped reads placed by realignment). Over the reads window only.
+   */
+  private fusionCache = new Map<string, Promise<StructuralEvidence | undefined>>();
+  private fusionEvidence(vi: number, sid: number, chrom: string, minMapq: number, spliced?: number): Promise<StructuralEvidence | undefined> {
+    const key = `${vi}|${sid}|${mapqThreshold(minMapq)}`;
+    let p = this.fusionCache.get(key);
+    if (!p) {
+      p = (async () => {
+        if (!this.payload.views[vi].reads?.[String(sid)]) return undefined;
+        const rp = await this.decodedReads(vi, sid);
+        const kept = rp.reads.filter(r => keepFlags(r.f) && r.q >= mapqThreshold(minMapq));
+        // an export capped below the window's reads holds one in `rate` of them: the counts are scaled back
+        const rate = kept.length && rp.total > kept.length ? rp.total / kept.length : 1;
+        const raw = kept.map(r => rawOfRead(r, chrom, rp.reference));
+        return { ...structuralEvidence(raw, chrom, rp.window.start, rp.window.end, rate, rp.reference, null, true), reads: spliced ?? rp.total };
+      })().catch(() => undefined);
+      this.fusionCache.set(key, p);
+    }
+    return p;
+  }
+  override async getReads(sampleId: number, chrom: string, start: number, end: number, minMapq: number, maxReads: number,
     mode: 'reads' | 'collapsed', minSupport: number, minVaf: number, opts?: ReadsOptions): Promise<ReadsResponse> {
-    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, uniqueOnly, maxReads, mode, minSupport, minVaf, opts);
+    if (!this.names.has(sampleId)) return super.getReads(sampleId, chrom, start, end, minMapq, maxReads, mode, minSupport, minVaf, opts);
     const name = this.names.get(sampleId)!;
-    // the exported reads window overlapping the request the most
-    let bestOv = 0, bestVi = -1;
-    this.payload.views.forEach((v, vi) => {
-      const r = v.reads?.[String(sampleId)];
-      if (!r || !sameChrom(v.window.chrom, chrom)) return;
-      const ov = Math.min(r.window.end, end) - Math.max(r.window.start, start);
-      if (ov > bestOv) { bestOv = ov; bestVi = vi; }
-    });
-    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString()}-${end.toLocaleString()}); add the alignment files to see them`);
+    // the exported reads window overlapping the request the most, exported with the request's filters or looser ones (the
+    // reads keep their MAPQ and flags: they are filtered here)
+    const phasedAsk = mode === 'reads' && !opts?.support && !!opts?.phase;
+    const { vi: bestVi, exact, mismatch } = this.pickView(chrom, start, end, v => v.reads?.[String(sampleId)]?.window, minMapq, !!opts?.secondary, true, v => phasedAsk && !!v.phase?.[String(sampleId)]);
+    if (bestVi < 0 && mismatch) throw new Error(`The reads of this window were exported with ${mismatch}: set the filters back to it to see them, or add the alignment files`);
+    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
-    let reads = best.reads.filter(r => r.e > start && r.s < end);
-    const total = reads.length;
-    const cap = collapsed ? 40000 : Math.max(100, maxReads);
-    if (reads.length > cap) { const step = reads.length / cap; reads = Array.from({ length: cap }, (_, i) => reads[Math.floor(i * step)]); }
-    const ref = best.reference?.seq ?? null, refStart = best.reference?.start ?? 0;
-    const longReads = isLongRead(reads);
-    const minIndel = longReads ? Math.max(1, opts?.longReadMinIndel ?? 1) : 1;
-    const vaf = longReads ? Math.max(minVaf, opts?.longReadMinVaf ?? 0.2) : minVaf;
-    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length, long_reads: longReads, reference: best.reference, reference_source: best.reference_source };
-    if (collapsed) {
-      if (opts?.haplotypes !== 'any') {
-        const phase = phaseReads(reads, start, end, ref, refStart, 3, vaf, 20, minIndel);
-        return { ...base, reads: [], sites: phase.sites, groups: [], phase };
-      }
-      const summary = collapseReads(reads, start, end, ref, refStart, 3, vaf, 20, Math.max(1, minSupport), minIndel);
-      return { ...base, reads: [], sites: summary.sites, groups: summary.groups };
+    const support = !collapsed ? opts?.support : undefined;
+    // the supporting reads (every k-th past maxReads), then their mates in the window; or every k-th read past the cap
+    // reads phased in reads mode: phased over more of them, `maxReads` returned (answerReads)
+    const phased = !collapsed && !support && !!opts?.phase;
+    const q = mapqThreshold(minMapq), sec = !!opts?.secondary;
+    const inWindow = best.reads.filter(r => r.e > start && r.s < end && (exact || (r.q >= q && keepFlagsWith(r.f, sec))));
+    const { reads, total, mates } = supportAndCap(inWindow, chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support);
+    const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
+    // the phasing exported with the view, for a window within the one it phased and while its thresholds are the
+    // reader's (the reads carry their `ph` / `pb`); elsewhere the embedded reads are phased again
+    const stored = phased && exact ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
+    if (stored && (!stored.window || (stored.window.start <= start && stored.window.end >= end)) && stored.minVaf === minVaf && (stored.longReadMinIndel ?? 1) === (opts?.longReadMinIndel ?? 1) && (stored.longReadMinVaf ?? 0.2) === (opts?.longReadMinVaf ?? 0.2))
+    {
+      // the sites of every read phased, `maxReads` of them drawn, as the live page draws them
+      const a = answerReads(base, reads, start, end, mode, minSupport, minVaf, { ...opts, phase: false });
+      const shown = thinFragments(a.reads, Math.max(100, maxReads));
+      const whole = stored.total != null && stored.window && stored.window.start === start && stored.window.end === end ? stored.total : a.total;
+      return { ...a, total: whole, shown: shown.length, reads: shown, phase: stored.result };
     }
-    return { ...base, reads, sites: callSites(reads, start, end, ref, refStart, 3, vaf, 20, minIndel), groups: [] };
+    return answerReads(base, reads, start, end, mode, minSupport, minVaf, opts, phased ? maxReads : undefined);
   }
-  override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], uniqueOnly: boolean): Promise<ExonUsageResponse> {
-    const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, uniqueOnly) : { run_id: runId, chrom, exons, samples: [] };
+  /** The CpG methylation exported with the views: the window of the view on `chrom` overlapping [start, end) the most. */
+  override async getMethylation(sampleId: number, chrom: string, start: number, end: number, opts?: { signal?: AbortSignal; onProgress?: (fraction: number) => void }): Promise<MethylWindow> {
+    if (!this.names.has(sampleId)) return super.getMethylation(sampleId, chrom, start, end, opts);
+    let bestOv = 0, best: EncodedMethyl | null = null;
+    for (const v of this.payload.views) {
+      const m = v.methylation?.[String(sampleId)];
+      if (!m || !sameChrom(v.window.chrom, chrom)) continue;
+      const ov = Math.min(m.end, end) - Math.max(m.start, start);
+      if (ov > bestOv) { bestOv = ov; best = m; }
+    }
+    if (!best) throw new Error('the methylation of this window is not part of this exported file (it is embedded for the views exported with their Methylation layer on): add the alignment file');
+    let w = this.methylCache.get(best);
+    if (!w) this.methylCache.set(best, w = decodeMethyl(best));
+    return w;
+  }
+  private methylCache = new WeakMap<EncodedMethyl, MethylWindow>();
+  override async getExonUsage(runId: number, chrom: string, strand: number, exons: [number, number][], minMapq: number): Promise<ExonUsageResponse> {
+    const local = super.list().length ? await super.getExonUsage(runId, chrom, strand, exons, minMapq) : { run_id: runId, chrom, exons, samples: [] };
     const embedded = [...this.names].map(([id, name]) => ({ sample_id: id, sample_name: name, strandness: 'unknown' as const, strand_fraction: null, exons: [], error: 'exon depths are not part of this exported file' }));
     return { ...local, samples: [...embedded, ...local.samples] };
   }
+}
+
+/** The MAPQ threshold a view was exported with (pages before the threshold: "unique only" as MAPQ ≥ 30, as sessions read it). */
+const viewMapq = (v: EmbeddedView) => mapqThreshold(v.minMapq ?? (v.uniqueOnly ? 30 : 0));
+const filterText = (q: number, secondary: boolean) => `${q ? `MAPQ ≥ ${q}` : 'every MAPQ'}${secondary ? ' and the secondary alignments' : ''}`;
+/**
+ * Names for the reads of one exported stream: the stream numbers them, and the two mates of a pair (linked by `mk`, the
+ * window start and the lower stream index) take one name, as in the file, so that pair phasing joins them; the view's
+ * number keeps two streams apart. The JSON reads of version 1 pages keep their numbers (one per name), the view's before.
+ */
+function nameEmbeddedReads(reads: AlignedRead[], vi: number, columnar: boolean): void {
+  if (!columnar) { for (const r of reads) r.n = `read ${vi + 1}.${r.n}`; return; }
+  reads.forEach((r, k) => {
+    const own = /^read (\d+)$/.exec(r.n);
+    const i = r.mk ? Number(r.mk.slice(r.mk.indexOf(':') + 1)) : own ? Number(own[1]) - 1 : k;
+    r.n = `read ${vi + 1}.${i + 1}`;
+  });
 }
 
 const sameChrom = (a: string, b: string) => a.replace(/^chr/i, '').toUpperCase() === b.replace(/^chr/i, '').toUpperCase();

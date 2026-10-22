@@ -21,8 +21,32 @@ export interface AllTranscripts { gene_name: string; chrom: string; strand: numb
 
 /** Run-length encoded coverage: 0-based half-open [start, end) at constant depth. */
 export interface CoverageRun { start: number; end: number; depth: number; }
+/** Discordant pairs of one class between two 500-bp bins. */
+export interface DiscordantArc extends JunctionArc { kind?: 'deletion' | 'duplication' | 'inversion' }
 /** Splice junction = intron interval, 0-based half-open [start, end). */
-export interface JunctionArc { start: number; end: number; count: number; }
+export interface JunctionArc {
+  start: number; end: number; count: number;
+  /** long reads: of `count`, the reads that placed this junction a few bases off and were counted with it (junctionSnap.ts) */
+  snapped?: number;
+  /**
+   * of `count`, the reads whose transcript strand under the reverse (dUTP) rule is +: read 2 of a pair mapped on +, read 1
+   * or a single read mapped on −. Against the gene's strand, it tells a stranded library from an unstranded one
+   * (absent from sources that do not count it)
+   */
+  plus?: number;
+}
+/**
+ * A structural arc: its breakpoints (0-based half-open) and supporting reads. Arcs of one event whose breakpoints lie
+ * within a few tens of bases (svmerge.ts) are merged: the event then says what it was made of.
+ */
+export interface SvArc extends JunctionArc {
+  /** evidence units by source: cigar (CIGAR D), split (SA chain), clip (clip cluster placed by realignment), rescued, pair (discordant), '+/-' and '-/+' (inversion junctions) */
+  sources?: Record<string, number>;
+  /** breakpoints of the merged arcs: first and last start, first and last end */
+  spread?: [number, number, number, number];
+  /** arcs merged into this one */
+  merged?: number;
+}
 /**
  * Reads that continue through an exon–intron boundary unspliced (intron retention / pre-mRNA):
  * one aligned block covering at least 6 bases on the exon side and 10 on the intron side.
@@ -34,8 +58,16 @@ export interface BoundarySpanning { intronStart: Record<number, number>; intronE
 export interface BoundaryHint { intronStarts: number[]; intronEnds: number[] }
 /** What a library is: RNA-seq (spliced reads, junction arcs) or genomic DNA (exome, genome, long reads). */
 export type LibraryType = 'rna' | 'dna' | 'unknown';
+/**
+ * Orientation of an RNA library: reverse (dUTP / fr-firststrand: read 1 antisense, read 2 sense; Illumina Stranded,
+ * TruSeq Stranded, NEB Directional, SMARTer Stranded v2/v3), forward (read 1 or the single read sense; QuantSeq FWD,
+ * SMARTer Stranded v1, direct RNA) or unstranded.
+ */
+export type LibraryStrand = 'reverse' | 'forward' | 'unstranded';
+/** How a sample's library orientation was decided: from its spliced reads against the gene's introns, or by the user. */
+export interface StrandEvidence { call: LibraryStrand; source: 'reads' | 'user'; /** share of the gene's spliced reads on its strand under the reverse rule */ fraction?: number; reads?: number }
 /** How a sample's library type was decided. */
-export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string }
+export interface LibraryEvidence { type: LibraryType; source: 'header' | 'reads' | 'user' | 'none'; note: string; /** RNA: its orientation, once known */ strand?: StrandEvidence }
 
 /** A soft-clip cluster: reads clipped on the same side at the same position (a breakpoint candidate). */
 export interface ClipCluster { pos: number; side: 'left' | 'right'; count: number; /** hard-clipped records without SA tag among the count (no sequence of their own) */ hard?: number }
@@ -53,27 +85,38 @@ export interface RealignedClip {
   /** where the clipped sequence was placed (0-based start) and on which strand, and the length matched */
   target: number; strand: '+' | '-'; matched: number;
   /** the arc it joined */
-  arc: { start: number; end: number; kind: 'split' | 'duplication' | 'inversion' };
+  arc: { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' };
 }
 /** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
-export interface ElsewhereLink { kind: 'split' | 'pair'; pos: number; chrom: string; count: number }
+export interface ElsewhereLink {
+  kind: 'split' | 'pair'; pos: number; chrom: string; count: number;
+  /** split reads: where they continue on `chrom` (0-based boundary, as `pos`: the end of the part left or the start of the part entered), the most frequent */
+  farPos?: number;
+  /** the reads at `farPos` among `count` (unscaled) */
+  farCount?: number;
+}
 /**
  * Structural evidence of a genomic window (DNA libraries), 0-based half-open positions, counts scaled like
  * the junctions when the window was sampled.
  */
 export interface StructuralEvidence {
   /** deletions of at least 50 bp inside reads (CIGAR D), by span */
-  deletions: JunctionArc[];
+  deletions: SvArc[];
   /** split reads whose next part continues further along the chromosome on the same strand (deletion-type), from the chain of alignments of each read (primary + SA parts ordered along the read), breakpoints rounded to 5 bp */
-  splits: JunctionArc[];
+  splits: SvArc[];
   /** split reads whose next part goes back (tandem duplication-type) */
-  duplications: JunctionArc[];
+  duplications: SvArc[];
   /** split reads whose next part is on the other strand (inversion breakpoints) */
-  inversions: JunctionArc[];
+  inversions: SvArc[];
   /** unaligned stretch of the read between two adjacent parts on the reference: an insertion of about `len` bases */
   insertions: { pos: number; len: number; count: number }[];
-  /** discordant pairs on the same chromosome (insert size far above the median, or mates on the same strand), both ends binned to 500 bp */
-  discordant: JunctionArc[];
+  /**
+   * discordant pairs on the same chromosome, grouped in 500 bp bins, the ends where their reads place the breakpoints, by orientation (IGV's convention):
+   * `deletion` mates facing each other (→ ←) far above the median insert; `duplication` mates facing away (← →), the
+   * junction of a tandem duplication read across; `inversion` both mates on the same strand (→ → or ← ←). Absent kind:
+   * `deletion` (files exported before the classes).
+   */
+  discordant: DiscordantArc[];
   /** split alignments and mates on other chromosomes */
   elsewhere: ElsewhereLink[];
   /** soft-clip clusters of at least 3 reads clipped by 20 bases or more, whose clipped sequence could not be placed in the window */
@@ -84,8 +127,28 @@ export interface StructuralEvidence {
   rescued?: RescuedClips[];
   /** median insert size of the proper pairs of the window (paired libraries) */
   insertMedian: number | null;
-  /** reads scanned for this evidence (after sampling) */
+  /** reads the evidence was gathered from (after sampling, for a source that samples) */
   reads: number;
+  /** what the evidence was gathered from and what was left out, to tell why an expected arc is missing */
+  diagnostics?: SvDiagnostics;
+}
+
+/** The counts behind a window's structural evidence (see StructuralEvidence.diagnostics). */
+export interface SvDiagnostics {
+  /** records examined: those carrying possible evidence (clips, SA tag, big D or I, mates away or elsewhere) */
+  records: number;
+  /** discordant pairs counted, by class */
+  pairs: { deletion: number; duplication: number; inversion: number };
+  /** pairs left out because a mate carries a deletion of 50 bp or more (the event is in the alignment) */
+  pairsWithDeletion: number;
+  /** pairs read as a deletion or inversion left out because a mate carries an insertion of 50 bp or more */
+  pairsWithInsertion: number;
+  /** CIGAR insertions of 50 bp or more grouped by position and length: the tandem copy they were found to be, if any */
+  insertionGroups: { pos: number; len: number; reads: number; bases: number; copy: [number, number] | null }[];
+  /** reference stretch the clips and insertions were matched against; null when none was fetched */
+  reference: { start: number; end: number } | null;
+  /** why the reference could not be had, when it was needed */
+  referenceError?: string;
 }
 
 export interface SampleCoverage {
@@ -97,12 +160,27 @@ export interface SampleCoverage {
   window?: { start: number; end: number };
   /** set when only every `rate`-th read was decoded: depths, junction and boundary counts are scaled back by `rate` (estimates) */
   sampled?: { rate: number; total: number; decoded: number };
-  /** reads decoded and the fraction of them carrying a splice gap (CIGAR N): the library-type evidence of this window */
+  /**
+   * stretches of the window the source holds no data for (0-based half-open, sorted), drawn hatched rather than as a
+   * depth of 0; `note` says why, in the source's words
+   */
+  unavailable?: { spans: [number, number][]; note: string };
+  /**
+   * Reads counted and the fraction of them carrying a splice gap (CIGAR N): library-type evidence. A source that keeps its
+   * counts between requests gives it over everything it has counted for the sample on this chromosome, not just the window.
+   */
   spliced?: { reads: number; fraction: number };
   /** structural evidence, when the caller asked for it (DNA samples) */
   structural?: StructuralEvidence;
+  /**
+   * the window split by transcript strand under the reverse (dUTP) rule, when the caller asked for it (`strands`): + holds
+   * read 2 of the pairs mapped on + and read 1 or single reads mapped on −. The viewer turns it over for a forward library.
+   */
+  strands?: { plus: StrandSlice; minus: StrandSlice };
   error?: string;
 }
+/** Coverage, junctions and boundary counts of the reads of one transcript strand. */
+export interface StrandSlice { coverage: CoverageRun[]; junctions: JunctionArc[]; spanning?: BoundarySpanning }
 
 /** One alignment for the reads track (compact keys, all coordinates 0-based half-open).
  *  n name · s/e reference span · r reverse (1/0) · q MAPQ · f SAM flag · nh NH tag ·
@@ -121,11 +199,63 @@ export interface AlignedRead {
   is?: string[];
   /** SA tag of a split read: "rname,pos,strand,CIGAR,mapQ,NM;" per other part */
   sa?: string;
+  /**
+   * mate key: set on the two reads of a pair when the source links them to each other (a v3+ columnar stream does),
+   * so they are joined on it rather than by the mate position, which several reads may share
+   */
+  mk?: string;
+  /**
+   * haplotag written by a phasing tool (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN): HP the haplotype (1, 2;
+   * DRAGEN's "copy label" may go higher), PS the phase set it belongs to, PC the Phred-scaled confidence; absent when untagged
+   */
+  hp?: number; ps?: number; pc?: number;
+  /**
+   * haplotype from the page's own read-based phasing (a reads window asked with `phase`): 1 or 2 within the phase block
+   * starting at `pb` (0-based); absent when the read's fragment covers no phased site or matches both haplotypes alike
+   */
+  ph?: 1 | 2; pb?: number;
+  /** CpG calls of a long read with base-modification tags, when asked for: position of the CpG's C, P(5mC), flat */
+  me?: number[];
 }
 /** A variable site called from the reads: SNV, insertion or deletion above the support and fraction thresholds. */
 export interface VariantSite {
   pos: number; kind: 'snv' | 'ins' | 'del'; ref: string; alt: string; length: number;
   alt_count: number; depth: number; vaf: number;
+  /** quality evidence (full variant scans): the alternate reads' shares, each with the same share among the other reads over the site */
+  q?: SiteQuality;
+  /** strands shown on a stranded sample: the site is counted on the gene's strand, this is the opposite strand's alternate reads and depth */
+  anti?: { alt: number; depth: number };
+  /** a phased file (reads carrying HP / PS haplotags): the site's reads by haplotype (full variant scans) */
+  hap?: SiteHaplotypes;
+}
+/**
+ * The reads over a site by haplotag, for a file phased by a tool (WhatsHap or LongPhase haplotag, HiPhase, DRAGEN): HP
+ * gives the haplotype within the phase set PS. Counted like the site itself: every read over the position (the
+ * deleting reads too, for a deletion), the allele whatever its base quality.
+ */
+export interface SiteHaplotypes {
+  /** the phase set holding the most tagged reads over the site (its PS value), null for reads tagged without PS */
+  ps: number | null;
+  /** HP 1 and HP 2 of that phase set: reads with the alternate allele, and reads over the site */
+  alt: [number, number];
+  depth: [number, number];
+  /** reads tagged in another phase set, or with another HP (DRAGEN copy labels): with the allele, and over the site */
+  otherAlt: number;
+  otherDepth: number;
+}
+export interface SiteQuality {
+  /** on the + strand */
+  fwd: number; fwdRef: number | null;
+  /** mapping quality under 20 */
+  lowMq: number; lowMqRef: number;
+  /** the call within 10 bases of an alignment end */
+  end: number; endRef: number | null;
+  /** the other reads over the site (the reference side of each comparison) */
+  nRef?: number;
+  /** SNV: share of the alternate bases seen with a base quality under 20 (left out of the allele fraction) */
+  lowBq?: number;
+  /** indel: length of the reference homopolymer at the site */
+  hp?: number;
 }
 /** One consensus group: a local haplotype × splice pattern with its supporting read count. */
 export interface ReadGroup {
@@ -165,12 +295,64 @@ export interface PhaseResult {
   /** heterozygous sites considered */
   het: number;
 }
+/** One haplotype's consensus over a phase set: where at least HAP_MIN_DEPTH of its reads cover, and what most of them carry. */
+export interface HaplotypeConsensus {
+  /** 1, 2 (HP tag, or the block's haplotype); higher for DRAGEN copy labels */
+  hap: number;
+  /** reads (tags) or fragments (in-page phasing) of this haplotype */
+  reads: number;
+  /** stretches the haplotype's reads cover, deletions included, 0-based half-open */
+  covered: [number, number][];
+  /** variants carried by at least half of the haplotype's reads over them */
+  sites: VariantSite[];
+  /** median PC (assignment confidence) of its tagged reads, when the file gives one */
+  pc?: number;
+  /** splice junctions of its reads (RNA): see HapJunction */
+  junctions?: HapJunction[];
+}
+/**
+ * A splice junction as one haplotype uses it: `n` reads (tags) or fragments (in-page phasing) of the haplotype carry
+ * it, `other` go another way at one of its ends (another junction from its donor or to its acceptor, or the exon
+ * continuing into the intron); `psi` = n / (n + other), the junction's share where the haplotype decides.
+ */
+export interface HapJunction { start: number; end: number; n: number; other: number; psi: number }
+/**
+ * A junction used differently by the two haplotypes of a set: Fisher's exact test of [[n1, other1], [n2, other2]]
+ * (two-sided), flagged at p < 0.001 with at least 20 points between the two shares. The splice change of a variant
+ * in cis (a donor or acceptor variant, a created cryptic site) is on one haplotype only.
+ */
+export interface AllelicJunction { start: number; end: number; n: [number, number]; other: [number, number]; psi: [number, number]; p: number }
+/** A phase set: haplotypes linked within it, not across (H1 here is unrelated to H1 of the next set). */
+export interface HaplotypeSet {
+  id: string; ps: number | null; start: number; end: number; haps: HaplotypeConsensus[];
+  /** junctions whose use differs between the set's two haplotypes (RNA) */
+  allelic?: AllelicJunction[];
+}
+/** The haplotypes of a reads window, from the file's haplotags or from the in-page read-based phasing. */
+export interface HaplotypeView {
+  source: 'tags' | 'reads';
+  sets: HaplotypeSet[];
+  /** reads (tags) or fragments (reads) given a haplotype, and not */
+  assigned: number; unassigned: number;
+  /** heterozygous sites of the window that the two haplotypes of their set do not split (both, or neither, carry the alt) */
+  notSplit: { pos: number; kind: VariantSite['kind']; alt: string; fractions: number[]; set: string }[];
+  /** heterozygous sites checked, and the reads whose allele at one of them contradicts their haplotype */
+  checked: number; conflicting: number;
+}
 export interface ReadsResponse {
   sample_id: number; sample_name: string;
   reads: AlignedRead[]; total: number; shown: number;
+  /** only the reads supporting an arc were asked for (ReadsOptions.support): `total` supporting reads, `shown` kept of them; `mates` reads added as their mates */
+  supporting?: { mates: number };
   sites: VariantSite[]; groups: ReadGroup[];
   /** read-based phasing of the window (collapsed mode with two haplotypes) */
   phase?: PhaseResult;
+  /** the two haplotypes of the window as consensus rows (collapsed mode with two haplotypes) */
+  haplotypes?: HaplotypeView;
+  /** collapsed mode split by strand (ReadsOptions.strands): the opposite strand's reads, collapsed on their own */
+  anti?: Pick<ReadsResponse, 'total' | 'shown' | 'sites' | 'groups' | 'phase' | 'haplotypes'>;
+  /** reads of the window carrying a haplotag (HP), and the phase sets (PS) among them: the file is phased */
+  haplotags?: { tagged: number; sets: number };
   /** the reads are long (median aligned length above 1 kb): noise filters apply */
   long_reads?: boolean;
   /** Reference sequence covering the window (plus margin), or null when no source is available. */
@@ -183,6 +365,8 @@ export interface GeneModel {
   gene_id: string; gene_name: string; biotype: string; strand: number; start: number; end: number;
   transcript_id: string; is_canonical: boolean; exons: { start: number; end: number }[];
   cds_start?: number | null; cds_end?: number | null;
+  /** the exons of the gene's other transcripts, merged (1-based inclusive): drawn lighter where they reach beyond the model */
+  other_exons?: { start: number; end: number }[];
 }
 
 /** Depth statistics of one exon in one sample (aligned bases only; reads with a block on the exon). */

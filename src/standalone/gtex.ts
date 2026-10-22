@@ -94,7 +94,9 @@ const strandOf = (v: unknown): number => (v === '-' || v === -1 || v === '-1' ? 
 
 /**
  * Exons of the GTEx collapsed gene model, which the exon expression rows (ENSG…_N) refer to.
- * First choice: the collapsedGeneModelExon endpoint. Otherwise the transcript exons of the gene
+ * First choice: the collapsedGeneModelExon endpoint, under dataset/ in the API v2 (as the gtexr client calls it; the
+ * reference/ path the page asked first does not exist, which sent every gene to the merged model below and, where its
+ * exon count differs from GTEx's, left the tissue tracks without exon depth). Otherwise the transcript exons of the gene
  * (reference/exon lists every exon of every transcript, Ensembl ENSE ids) merged into non-overlapping
  * intervals, the way GTEx's collapse_annotation builds its model; those are matched by rank.
  */
@@ -106,8 +108,10 @@ function geneExons(gencodeId: string, dataset: GtexDataset): Promise<RefExons> {
       const toExon = (e: any): RefExon => ({ id: String(e.exonId ?? e.id ?? ''), start: num(e.start ?? e.exonStart), end: num(e.end ?? e.exonEnd) });
       const valid = (e: RefExon) => Number.isFinite(e.start) && Number.isFinite(e.end) && e.end >= e.start;
       const order = (list: RefExon[], strand: number) => [...list].sort((a, b) => (strand < 0 ? b.start - a.start : a.start - b.start));
-      for (const q of [`datasetId=${dataset}`, `gencodeVersion=${GENCODE[dataset]}&genomeBuild=GRCh38%2Fhg38`]) {
-        const rows = await getAllRows(`${API}/reference/collapsedGeneModelExon?gencodeId=${gc}&${q}`).catch(() => [] as any[]);
+      for (const path of [`dataset/collapsedGeneModelExon?gencodeId=${gc}&datasetId=${dataset}`,
+        `reference/collapsedGeneModelExon?gencodeId=${gc}&datasetId=${dataset}`,
+        `reference/collapsedGeneModelExon?gencodeId=${gc}&gencodeVersion=${GENCODE[dataset]}&genomeBuild=GRCh38%2Fhg38`]) {
+        const rows = await getAllRows(`${API}/${path}`).catch(() => [] as any[]);
         const list = rows.map(toExon).filter(valid);
         if (list.length && list.some(e => /_\d+$/.test(e.id))) return { ordered: order(list, strandOf(rows[0]?.strand)), source: 'collapsed', strand: strandOf(rows[0]?.strand) };
       }
@@ -231,7 +235,8 @@ export function getGtexProfile(geneName: string, geneId: string | undefined, tis
         if (erows.length && !ex.length) console.warn('[sashimi] GTEx exon rows could not be placed', { exonRow: erows[0], referenceExon: exons[0], exonRows: erows.length, referenceExons: exons.length, source: refExons.source });
         const warning = lastError ? `partial: ${lastError}`
           : !junctions.length ? `no junction data (${jrows.length} rows, first: ${brief(jrows[0])})`
-          : !ex.length ? `no exon data: ${erows.length} expression rows (first: ${brief(erows[0])}) vs ${exons.length} ${refExons.source} model exons (first: ${brief(exons[0])})`
+          // exon depths that could not be placed say so in the console (above) only: the tracks draw exon usage from the
+          // junction medians, not these depths
           : undefined;
         return { dataset, gencodeId: gene.gencodeId, tissue, junctions, exons: ex, coverage, unit: String(jrows[0]?.unit || erows[0]?.unit || 'median read count'), warning, tpm };
       }

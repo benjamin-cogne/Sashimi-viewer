@@ -1,24 +1,47 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
-import type { LibraryType, StructuralEvidence } from './sashimi/types';
-import type { SashimiDataSource } from './sashimi/datasource';
-import type { TranscriptData, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite } from './sashimi/types';
+import type { ElsewhereLink, LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
+import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
+import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
+import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
+import { Q_COLORS, binomialHalf, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence, type SiteObs } from './sashimi/siteQuality';
+import { PHASE_HI, PHASE_LO, PHASE_MIN_DEPTH, sitePhase } from './sashimi/sitePhase';
+import { METHYL_BLOCK_BP, callClass, thresholdAt, type MethylWindow } from '../standalone/methylation';
 import {
   LINEAR_AXIS, equalIntronAxis, defaultIntronV, makeScale, toTxModel, intronsOf,
-  buildCoveragePaths, depthAt, maxDepthIn,
-  classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX,
+  buildCoveragePaths, depthAt, maxDepthIn, type CoveragePaths,
+  parseCdna, cdnaGenomicRange, parseExonQuery, exonGenomicRange,
+  classifyJunction, layerJunctions, junctionKey, arcGeom, arcYAtX, arcPathIn,
   niceTicks, niceMax, formatBp, packReads, cdnaPosition, junctionHgvs, exonPsi, junctionAlternative, junctionFrame, codonsInWindow, parseLocus, exonPhases,
   usageIntervals, referenceExons, exonUsage, usageCohort, usageZ, exonSiteUsage,
   type TxModel, type Scale, type VirtualAxis, type JunctionInfo, type FrameInfo,
 } from './sashimi/geometry';
 import type { ExonPhase } from './sashimi/geometry';
+import { fusionFrame, fusionHgvs, fusionPeptide, type FusionEnd, type FusionPeptide } from './sashimi/fusionFrame';
 import SpliceCartoon from './sashimi/SpliceCartoon';
-import { spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
+import { fusionStory, fusionStoryPossible, fusionWindows, spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
-import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
+import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
 import { HET_MIN, HET_MAX } from '../standalone/phasing';
+import { READS_PHASE_CAP } from '../standalone/readsWindow';
+import { HAP_MIN_DEPTH } from '../standalone/haplotypes';
+import { mapqThreshold, plusStrand } from '../standalone/coverage';
+import { callSites } from '../standalone/collapse';
+import { JUNCTION_SNAP_BP, JUNCTION_SNAP_RATIO } from '../standalone/junctionSnap';
+import { pairMates } from '../standalone/mates';
+import type { ArcSupport } from '../standalone/arcSupport';
+import { liftPos, liftRange, type LiftSegment } from '../standalone/liftover';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
+import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
+import { GeneSuggest } from './sashimi/GeneSuggest';
+import { RepeatInspector } from './sashimi/RepeatInspector';
+import { PairPhasePanel, type PairPhaseOrigin, type PairPicked } from './sashimi/PairPhasePanel';
+import { startPanelDrag } from './sashimi/panelDrag';
+import { variantCoordinates } from './sashimi/variantText';
+import { RETENTION_FLANK, retentionEffect, retentionHgvs } from './sashimi/retention';
+import { FLANK as REPEAT_FLANK, detectMotif, makeLocus, type RepeatLocus } from '../standalone/repeatScan';
+import { STR_LOCI, type StrLocus } from '../standalone/strCatalog';
 import { sumCoverage, poolJunctions, poolSpanning, poolStructural, aggregateJunctions, pctLabel, AGG_CLASS_LABEL, PSEUDO_EXON_MAX_BP, type AggEvent, type AggResult } from './sashimi/aggregate';
 
 // ======================== Types ========================
@@ -59,14 +82,29 @@ interface SashimiViewerProps {
   knownVariantsVersion?: number;
   /** Library type of each sample (RNA-seq or genomic DNA), by sample id: DNA tracks show no junction arcs and no usage. */
   sampleTypes?: Record<number, LibraryType>;
-  /** structural-variant hints on DNA tracks (arcs, pills, panel): computed and drawn only when true (development builds, ?sv=1) */
+  /** structural evidence (DNA tracks: arcs, pills, panel; RNA tracks: fusion junctions): computed and drawn unless false */
   svHints?: boolean;
-  /** Called after each coverage load with the spliced-read fraction of the window, the host's evidence for the library type. */
+  /** Orientation of each RNA sample's library (reverse, forward, unstranded), by sample id: the Strands option splits the stranded ones. */
+  sampleStrands?: Record<number, LibraryStrand | undefined>;
+  /**
+   * Called once per sample and gene with the spliced reads of the gene's own introns: their number and the share of them
+   * on the gene's strand under the reverse (dUTP) rule, the host's evidence for the library orientation.
+   */
+  onStrandEvidence?: (sampleId: number, evidence: { fraction: number; reads: number }) => void;
+  /** Called after each coverage load with the spliced-read fraction of the reads counted (the window or more), the host's evidence for the library type. */
   onLibraryEvidence?: (sampleId: number, evidence: { reads: number; fraction: number; multiExon: boolean }) => void;
   /** Options to start with (a saved session, or the previous viewer's options when the host remounts it). */
   initialSettings?: Partial<ViewerSettings>;
   /** Called whenever an option or the navigation changes, with everything a session file needs. */
   onStateChange?: (state: ViewerState) => void;
+  /**
+   * The window's coordinates in another build too, on a line over the ruler (the host lifts them: liftover.ts):
+   * `from` is the build of the view (of the files and the annotation), `to` the other one. The view itself does not
+   * move. `onRemove` takes the line away.
+   */
+  liftover?: { from: string; to: string; segments: (chrom: string, start: number, end: number, signal: AbortSignal) => Promise<LiftSegment[]>; onRemove?: () => void } | null;
+  /** the genome build of the view ('GRCh38', 'GRCh37'): places the known repeat loci (strCatalog.ts) */
+  build?: string;
 }
 
 /** Every user option of the viewer, as stored in a session file. Samples are referred to by id (the host maps names ↔ ids). */
@@ -74,9 +112,13 @@ export interface ViewerSettings {
   equalIntrons: boolean; allTranscripts: boolean; commonSnps: boolean; snpMinAf: number;
   /** width of every intron in equal-introns mode, bp-equivalents; null = default (median exon length, 80–300) */
   intronWidth: number | null;
-  depthAxis: DepthAxis; uniqueOnly: boolean;
+  depthAxis: DepthAxis;
+  /** minimum MAPQ of the alignments counted, one of MAPQ_THRESHOLDS (0 = all) */
+  minMapq: number;
   reads: boolean; readsAll: boolean; readsSample: number | null; collapseReads: boolean; minVafPct: number;
   minJunctionReads: number; minUsagePct: number; arcLabels: 'reads' | 'usage'; intronRetention: boolean;
+  /** Min reads was typed by the user and applies as it is everywhere; absent or false = the default, which on a deep DNA track (> 200×) asks 20 reads of structural evidence */
+  minJunctionReadsSet?: boolean;
   viewMode: 'samples' | 'groups'; groups: { name: string; sampleIds: number[]; /** CSS colour chosen by the user; absent = palette */ color?: string }[];
   knownVariants: boolean;
   /** arcs the user hid by clicking them, as "chrom:start-end" (0-based half-open); they still count in the percentages */
@@ -87,30 +129,72 @@ export interface ViewerSettings {
   hiddenTranscripts?: string[];
   /** long reads (ONT, PacBio): draw mismatches and indels only at called variant sites (default on) */
   consensusMode?: boolean;
-  /** long reads: indels shorter than this many bases are neither drawn nor called (default 10) */
+  /** no longer used (the long-read minimum indel size was removed: Consensus mode draws indels only at called sites); ignored in old sessions */
   minIndelBp?: number;
   /** long reads: a variant site needs at least this alternate-allele fraction, in percent (default 20) */
   longReadMinVafPct?: number;
   /** DNA tracks: draw the variant sites called from the reads as allele bars on the coverage (default on); off = plain coverage */
   coverageVariants?: boolean;
-  /** reads track: mates on one row joined by a line, discordant pairs in amber (default on); off = every read on its own */
+  /** RNA tracks: the variant sites of the window scanned from every read and drawn on the coverage (stars and allele bars), reads track open or not (default on) */
+  rnaVariants?: boolean;
+  /** long-read DNA tracks: CpG methylation from the MM / ML tags, a panel under the coverage and colours on the reads (default off) */
+  methylation?: boolean;
+  /** no longer used (the sequence strip is always drawn under the gene model); ignored in sessions that have it */
+  sequence?: boolean;
+  /** DNA tracks: the coverage layer (histogram and structural arcs; default on). Off, a DNA track keeps its label band and the layers under it */
+  coverage?: boolean;
+  /** the methylation panel restricted to the CpG islands of the reference (default off: every CpG) */
+  methylIslands?: boolean;
+  /** reads track: mates on one row joined by a line, discordant pairs coloured by orientation (default on); off = every read on its own */
   pairs?: boolean;
   /** collapsed reads: two haplotypes per phase block from read-based phasing (default), or any number of consensus groups (haplotype × splice pattern) */
   haplotypes?: 2 | 'any';
+  /** two haplotypes from the file's haplotags (HP/PS) when the window has tagged reads ('auto', default), or always from the reads' own phasing */
+  phaseSource?: 'auto' | 'reads';
+  /**
+   * raw reads grouped by haplotype: by their haplotag (HP 1, HP 2, …, untagged), like IGV's Group by tag, or by the page's
+   * own read-based phasing (the collapsed mode's, H1 / H2 per phase block, unphased last); default none
+   */
+  readsGroup?: 'none' | 'hp' | 'phase';
   /** reads track: soft-clipped bases drawn beyond the read ends, hard clips as stubs, the parts of a split read joined (default off) */
   clippedBases?: boolean;
   /** reads track: inserted bases written inside the insertion marks (default off) */
   insertedBases?: boolean;
+  /** reads track: widest view whose reads are loaded, bp (one of READS_WINDOW_CHOICES_BP; absent = 100 kb) */
+  readsWindow?: number;
+  /**
+   * reads track: the reads coloured by strand, as IGV's "Color alignments by": `strand` each read's own alignment strand,
+   * `first` the strand of read 1 of its pair (both mates alike: the fragment's orientation); absent = none
+   */
+  readsColor?: 'none' | 'strand' | 'first';
+  /** secondary alignments (0x100, the other placements of multi-mapped reads) counted in coverage and junctions and drawn among the reads, as IGV does (default off) */
+  secondary?: boolean;
+  /**
+   * stranded RNA samples split by transcript strand: the gene's strand above the baseline (coverage, arcs, usage, variant
+   * sites, reads first), the opposite strand mirrored below it and its reads tinted (default off)
+   */
+  strands?: boolean;
   /** reference transcript chosen in the transcript list; absent = the default model of the gene */
   transcriptId?: string;
+  /**
+   * the order of the panels under the ruler, as dragged by their grips: 'tx' (gene model), 'seq', 'known', 'snps', 'alt'
+   * (all transcripts), 's:<sample id>', 'grp:<group id>', 'gtex:<tissue id>'; what it does not name keeps its default
+   * place. Absent: the default order (annotations, then the samples)
+   */
+  panelOrder?: string[];
+  /**
+   * the samples shown as tracks, in track order (the primary first): a view opens with exactly these (none when empty);
+   * absent = a first view, which shows the primary sample and one comparison sample
+   */
+  shownSamples?: number[];
 }
 /** The options a fresh viewer starts with (the same defaults as its state initialisers), for hosts that need a full state before the viewer has reported one. */
 export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   equalIntrons: false, intronWidth: null, allTranscripts: false, commonSnps: false, snpMinAf: 0.01,
-  depthAxis: 'relative', uniqueOnly: false,
+  depthAxis: 'relative', minMapq: 0,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, coverage: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -134,7 +218,9 @@ export interface SashimiSnapshotContext {
     /** shared: one depth axis for every sample; own: each sample scaled to its own maximum; relative: each sample as % of its own maximum */
     depthAxis: DepthAxis;
     /** kept for consumers of older snapshots: depthAxis === 'shared' */
-    sharedY: boolean; uniqueOnly: boolean;
+    sharedY: boolean;
+    /** minimum MAPQ of the alignments counted (0 = all); minMapq, kept for consumers of older snapshots, is minMapq > 0 */
+    minMapq: number; uniqueOnly: boolean;
     reads: boolean; readsSample?: string; collapsed: boolean; minJunctionReads: number; minVafPct: number;
     /** minimum allele frequency of the common-SNP track, null when the track is off */
     commonSnpsMinAf?: number | null;
@@ -177,7 +263,7 @@ async function svgToPng(svg: SVGSVGElement, scale = 2): Promise<Blob> {
   }
 }
 
-interface FetchWindow { chrom: string; start: number; end: number; uniqueOnly: boolean }
+interface FetchWindow { chrom: string; start: number; end: number; minMapq: number; /** secondary alignments counted / drawn too */ secondary?: boolean; /** split by transcript strand too */ strands?: boolean }
 
 interface TrackData {
   sampleId: number;
@@ -188,13 +274,24 @@ interface TrackData {
   error?: string;
   /** Window the current coverage/junctions were fetched for (with margin). */
   fetched?: FetchWindow;
+  /** the coverage shown is what a running request has counted so far (`fetched` says how far it got) */
+  partial?: boolean;
   /** Unspliced reads through the exon–intron boundaries (intron retention), when the source counts them. */
   spanning?: BoundarySpanning;
   /** The source decoded one read in `rate` of this window: depths and counts are scaled estimates. */
   sampled?: { rate: number; total: number; decoded: number };
+  /** Stretches the source holds no data for, hatched (SampleCoverage.unavailable). */
+  unavailable?: SampleCoverage['unavailable'];
   /** Structural evidence of a DNA sample's window (deletions, split reads, clips, discordant pairs). */
   structural?: StructuralEvidence;
-  /** GTEx tissue track (median junction reads + reads-per-base exon profile); sampleId is negative */
+  /** The window split by transcript strand under the reverse rule, when it was asked for (SampleCoverage.strands). */
+  strands?: SampleCoverage['strands'];
+  /**
+   * Strands shown: `coverage`, `junctions` and `spanning` are the gene's strand, this the opposite one, mirrored under
+   * the baseline. Set on the tracks derived for display, never on the loaded ones.
+   */
+  anti?: { coverage: CoverageRun[]; junctions: JunctionArc[] };
+  /** GTEx tissue track (median junction reads, exon usage from them); sampleId is negative */
   gtex?: { tissue: GtexTissue; dataset: string; unit: string; warning?: string; tpm: number | null; lowCoverage: boolean };
   /** Pooled track of a sample group (aggregate view); sampleId is negative */
   group?: { id: number; n: number; loaded: number; agg: AggResult; samplesWith: Map<string, number>; /** the group's colour (chosen or from the palette) */ color: string; /** every member is a DNA sample */ dna: boolean };
@@ -204,11 +301,51 @@ interface TrackData {
 interface SampleGroup { id: number; name: string; sampleIds: number[]; color?: string }
 const GROUP_ID_BASE = -100000;   // group tracks use sampleId = GROUP_ID_BASE - group id (negative, like GTEx tracks)
 const PSEUDO_EXON_COLOR = '#7c3aed';
+/** the opposite strand of a stranded sample: its mirrored coverage, its arcs and its reads (lighter) */
+const ANTI_COLOR = '#8b5cf6';
+/**
+ * An opposite-strand junction under this share of the reads of the same intron (both strands) on a sample whose
+ * gene-strand junction has 20 reads or more reads as the gene's own reads on the wrong strand: stranded libraries
+ * (dUTP) leave about 0.5–3 % there: 0.47–0.63 % of the reads antisense for the best protocols (Levin et al. 2010, Nat
+ * Methods 7:709), 0.6–3 % of the sense signal in practice (Mourão et al. 2019, RoSA, F1000Research 8:819).
+ */
+const ANTI_LEAK_SHARE = 0.05;
+const ANTI_READ_FILL = '#ddd6fe';
+/** the label band over the opposite strand's rows in the collapsed reads track */
+const ANTI_BAND_H = 16;
+/** smallest band under the baseline for the opposite strand, and its clearance */
+const MIRROR_MIN_H = 14;
+const MIRROR_PAD = 6;
+/** Junctions leaving the queried gene (read-through or fusion transcripts): drawn from their reads, whatever their usage share. */
+const LONG_RANGE_COLOR = '#c026d3';
+/** an arc is drawn over the plot and this far past its edges (clipped there), not over its whole length */
+const ARC_EDGE_PX = 40;
+/** Fusion junctions of an RNA track from split reads and clipped reads placed by realignment (an end within this many bases of an exon boundary is drawn on it). */
+const FUSION_SNAP_BP = 5;
+/**
+ * Shortest fusion junction drawn on an RNA track. RNA libraries carry fold-back and template-switch chimeras: reads
+ * clipped where their clipped bases are the reverse complement of the sequence a few to a few hundred bases away,
+ * which read as tiny inversions (MED25: dozens of them, 5-460 bp, in every sample). A fusion across an inversion,
+ * a deletion or a duplication joins parts far apart.
+ */
+const FUSION_MIN_BP = 1000;
 const RETENTION_COLOR = '#0d9488';
 /** Structural evidence on DNA tracks: arcs for deletions, split reads and discordant pairs, pills for clip clusters and other-chromosome links. */
 type SvKind = 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant';
+/** the evidence an SV event gathers, as named in its tooltip and panel */
+const SV_SOURCE_LABEL: Record<string, string> = { cigar: 'CIGAR D', split: 'split reads (SA)', clip: 'clipped reads placed by realignment', rescued: 'clipped reads rescued at the breakpoint', '+/-': 'split reads, junction + → −', '-/+': 'split reads, junction − → +', pair: 'discordant pairs', insertion: 'reads with an insertion in their CIGAR whose bases are the reference just before (or after) it: a tandem copy, as realigners such as ABRA2 write it' };
+/** "CIGAR D 8 · split reads (SA) 4" for an event, and the spread of the breakpoints it merged */
+const svEvidenceText = (j: SvArc, approx: string): string => {
+  const src = Object.entries(j.sources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${SV_SOURCE_LABEL[k] ?? k} ${approx}${Math.round(n).toLocaleString('en-US')}`);
+  const spread = j.spread && j.merged && j.merged > 1
+    ? `
+${j.merged} arcs merged (breakpoints within ${svMergeTolerance(j.end - j.start)} bp): starts ${(j.spread[0] + 1).toLocaleString('en-US')}–${(j.spread[1] + 1).toLocaleString('en-US')}, ends ${j.spread[2].toLocaleString('en-US')}–${j.spread[3].toLocaleString('en-US')}`
+    : '';
+  return (src.length ? `
+evidence: ${src.join(' · ')}` : '') + spread;
+};
 const SV_COLORS: Record<SvKind | 'clip' | 'elsewhere' | 'insertion', string> = { deletion: '#b91c1c', split: '#7c3aed', duplication: '#15803d', inversion: '#2563eb', discordant: '#d97706', clip: '#0f766e', elsewhere: '#6d28d9', insertion: '#9333ea' };
-const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion inside reads (CIGAR D)', split: 'split reads, deletion-type (the read continues further on)', duplication: 'split reads, duplication-type (the read goes back)', inversion: 'split reads, inversion (the read continues on the other strand)', discordant: 'discordant pairs' };
+const SV_LABEL: Record<SvKind, string> = { deletion: 'deletion (CIGAR D ≥ 50 bp, split and clipped reads)', split: 'split reads, deletion-type (the read continues further on)', duplication: 'split reads, duplication-type (the read goes back)', inversion: 'split reads, inversion (the read continues on the other strand)', discordant: 'discordant pairs' };
 /** Exon–intron boundaries of a model, for the unspliced-read counts of the coverage request. */
 const boundariesOf = (t: TxModel | null): BoundaryHint | undefined =>
   t && t.exons.length > 1 ? { intronStarts: t.exons.slice(0, -1).map(e => e.end), intronEnds: t.exons.slice(1).map(e => e.start) } : undefined;
@@ -229,7 +366,15 @@ function saveGtexFavourites(ids: string[]) { try { localStorage.setItem(GTEX_FAV
 
 const PLOT_LEFT = 64;       // room for the depth axis
 const PLOT_RIGHT_PAD = 36;  // room for the per-track remove button
-const RULER_H = 42;
+const RULER_BASE_H = 42;
+/** the other build's line of the ruler (liftover): its height, where it starts, its colour */
+const LIFT_ROW_H = 18;
+const LIFT_TOP = 18;
+const LIFT_COLOR = '#0f766e';
+/** tandem repeats: the catalogue's pills, the Shift+drag selection */
+const REPEAT_COLOR = '#ea580c';
+const chromKeyOf = (c: string) => c.replace(/^chr/i, '').toUpperCase().replace(/^MT$/, 'M');
+const revCompSeq = (s: string) => s.split('').reverse().map(c => ({ A: 'T', C: 'G', G: 'C', T: 'A' } as Record<string, string>)[c] ?? 'N').join('');
 const COVERAGE_H = 130;
 const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
 const JUNC_LEVEL_STEP = 17; // extra apex height per arc nesting level
@@ -252,17 +397,90 @@ const LEGEND_ROW_H = 22;
 const MIN_V_SPAN = 40;            // smallest zoom window, in virtual (bp-equivalent) units
 const MAX_VIEW_BP = 4_000_000;    // largest zoom-out window
 const MAX_FETCH_BP = 2_000_000;   // largest window fetched at once (view + margins)
-const MAX_READS_PER_TRACK = 250_000; // reads decoded per coverage request; the source shrinks the margins and then samples 1 in 2, 4, 8… past it
+/**
+ * What the margins of a coverage request may cost, in reads (the source's index estimate). The view itself is read in
+ * full and exactly whatever its depth, and drawn as it fills; past this the margins shrink, which only makes panning
+ * out of the view cost a new request. ~2 M reads is 5–10 s of background decoding on one thread.
+ */
+const COVERAGE_MARGIN_READS = 2_000_000;
+/**
+ * Structural evidence on deep DNA. At a few hundred × a handful of reads with a long soft clip, a split alignment or an
+ * odd insert turn up at many places (PCR chimeras, adapter read-through, capture edges, mapping artefacts), so while the
+ * user has not typed a number the reads a structural hint needs rise from MIN_READS_DEFAULT to SV_DEEP_MIN_READS on a
+ * DNA track whose median depth over the model's coding exons is above SV_DEEP_X.
+ */
+const MIN_READS_DEFAULT = 3;
+const SV_DEEP_X = 200;
+const SV_DEEP_MIN_READS = 20;
+
+/**
+ * Median depth of a coverage track over the covered bases of the model's coding exons (all exons of a non-coding
+ * model) inside [from, to), weighted by bases: the depth a capture panel or an exome is described by. Bases at 0× are
+ * left out, so a gene targeted in part is measured on the exons the panel holds (a gene outside it, on its off-target
+ * reads). Without 100 such bases (no model, a window inside an intron), the median over the covered bases of the window.
+ * Null when nothing is covered.
+ */
+function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number, to: number): number | null {
+  const median = (parts: { start: number; end: number }[], coveredOnly: boolean) => {
+    const pairs: [number, number][] = [];
+    let n = 0, j = 0;
+    for (const p of parts) {
+      const a = Math.max(p.start, from), b = Math.min(p.end, to);
+      if (b <= a) continue;
+      while (j < runs.length && runs[j].end <= a) j++;
+      for (let k = j; k < runs.length && runs[k].start < b; k++) {
+        const r = runs[k], len = Math.min(b, r.end) - Math.max(a, r.start);
+        if (len > 0 && (!coveredOnly || r.depth > 0)) { pairs.push([r.depth, len]); n += len; }
+      }
+    }
+    if (!n) return { n, depth: null };
+    pairs.sort((x, y) => x[0] - y[0]);
+    let acc = 0;
+    for (const [d, len] of pairs) { acc += len; if (acc * 2 >= n) return { n, depth: d }; }
+    return { n, depth: pairs[pairs.length - 1][0] };
+  };
+  if (tx) {
+    const cs = tx.cdsStart, ce = tx.cdsEnd;
+    const parts = tx.exons.map(e => cs != null && ce != null ? { start: Math.max(e.start, cs), end: Math.min(e.end, ce) } : e).filter(e => e.end > e.start);
+    const m = median(parts, true);
+    if (m.n >= 100) return m.depth;
+  }
+  return median([{ start: from, end: to }], true).depth;
+}
 
 // Reads track (IGV-like alignment view)
-const READS_MAX_VIEW_BP = 100_000; // reads load only below this window size (IGV's "visibility window")
 const READS_MAX_ROWS = 120;
+/** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
+const VARIANTS_MAX_VIEW_BP = 3_000_000;
+/** the annotation panels under the ruler, in their default order: gene model, sequence, known variants, SNPs, all transcripts */
+const ANNOT_KEYS = ['tx', 'seq', 'known', 'snps', 'alt'];
+const ANNOT_NAMES: Record<string, string> = { tx: 'the gene model', seq: 'the sequence strip', known: 'the known variants', snps: 'the common SNPs', alt: 'all transcripts' };
+/** a sample, group or GTEx track's key in the panel order */
+const panelKeyOf = (t: { sampleId: number; gtex?: { tissue: { id: string } }; group?: { id: number } }) => (t.gtex ? `gtex:${t.gtex.tissue.id}` : t.group ? `grp:${t.group.id}` : `s:${t.sampleId}`);
+/** a retained intron's bases are read for its stop codons up to this length */
+const IR_SEQ_MAX_BP = 200_000;
+/** GTEx tracks: the longest exon taken from a tissue's junctions alone (an acceptor and the next donor) */
+const GTEX_ALT_EXON_MAX_BP = 3000;
+/** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
+const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
+/** Supporting reads of an arc kept at most (every k-th past it), their mates added. */
+const READS_SUPPORT_MAX = 300;
+/** Reads placed with a mapping quality under this are drawn hollow, as IGV draws its MAPQ 0 reads (STAR: 3 for 2 loci, 1 for 3–4, 0 for more; 255 unique). */
+const LOW_MAPQ = 10;
+/** spliced reads of a gene's own introns needed before they are handed to the host as evidence of the library orientation */
+const STRAND_EVIDENCE_MIN_READS = 50;
+/** Coverage requests at once when "Show all" adds many samples (samples picker). */
+const SHOW_ALL_PARALLEL = 3;
 const READS_SEQ_ROW_H = 18;
 const READS_MAX = 2500;
 const SITES_STRIP_H = 18;      // strip above the sashimi holding the variant-site stars
 const GROUP_ROW_H = 16;        // consensus row height in collapsed mode
 const AA_ROW_H = 16;           // amino-acid row above the reference bases
+/** Widest stretch whose reference bases are drawn (the sequence strip, the reads track). */
+const SEQ_MAX_BP = 8000;
+/** The sequence strip while zoomed out: one line saying how far to zoom in. */
+const SEQ_NOTE_H = 14;
 
 // ======================== Colours ========================
 // Categorical slots validated for colour-vision deficiency (adjacent-pair ΔE ≥ 8);
@@ -280,8 +498,539 @@ const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto
 const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#6b7280' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const READ_FILL = '#c8cdd6';
+/** reads coloured by strand: IGV's colours (igv.js alignmentTrack posStrandColor / negStrandColor) */
+const READ_FWD_FILL = 'rgba(230,150,150,0.75)';
+const READ_REV_FILL = 'rgba(150,150,230,0.75)';
+// ======================== Variants track (DNA) ========================
+/**
+ * Under the coverage of a DNA track, one mark per called site: a bar as high as its alternate-allele fraction (0–100 %,
+ * the reference share in grey above it) in the colour of the allele, and under it four quality cells (base quality or
+ * homopolymer, mapping quality, strand, read position; siteQuality.ts) in green, amber or red. Where neighbouring
+ * sites leave less than VAR_CELLS_PX, the four cells give way to one in the colour of the worst. Zoomed in, a site
+ * grows with its bases as the reads do: the bar and the four cells span the changed bases (an insertion stays a thin
+ * mark between two bases) and the label grows, naming the change once there is room.
+ */
+const VAR_GAP = 3, VAR_HEAD_H = 11, VAR_BAR_H = 30, VAR_CELL_H = 7;
+const VAR_TRACK_H = VAR_GAP + VAR_HEAD_H + VAR_BAR_H + 3 + VAR_CELL_H + 5;
+/** A phased file (HP / PS haplotags): the two haplotype lanes under the variants track, their phase sets above them. */
+const VAR_PHASE_H = 46, VAR_PHASE_LANE = [22, 37] as const;
+const VAR_CELLS_PX = 17;
+const DEL_COLOR = '#111827';
+/** the checks of a site, computed once per site object (their binomial tests are not redone at every frame) */
+const siteCheckCache = new WeakMap<VariantSite, { long: boolean; checks: QCheck[]; worst: QLevel }>();
+function cachedChecks(s: VariantSite, long: boolean): { checks: QCheck[]; worst: QLevel } {
+  const c = siteCheckCache.get(s);
+  if (c && c.long === long) return c;
+  const checks = siteChecks(s, long), out = { long, checks, worst: worstLevel(checks) };
+  siteCheckCache.set(s, out);
+  return out;
+}
+
+/**
+ * A small two-series histogram for the variant panel: per bin, the share of the alternate reads (in the allele's
+ * colour) next to the share of the reference reads (grey), each series summing to 100 %, so a skew of the
+ * alternate reads shows whatever the depth.
+ */
+function MiniHist({ title, bins, alt, other, color }: { title: string; bins: string[]; alt: number[]; other?: number[]; color: string }) {
+  const W = 340, H = 38, n = bins.length, bw = (W - 8) / n;
+  const ta = alt.reduce((a, b) => a + b, 0), tr = other ? other.reduce((a, b) => a + b, 0) : 0;
+  return (
+    <div className="mt-1.5">
+      <div className="text-[10px] text-gray-500">{title}</div>
+      <svg width={W} height={H + 12} className="block">
+        {bins.map((b, i) => {
+          const fa = ta ? alt[i] / ta : 0, fr = tr ? other![i] / tr : 0, x = 4 + i * bw;
+          const one = other ? (bw - 6) / 2 : bw - 6;
+          return (
+            <g key={b}>
+              <rect x={x + 2} y={H - fa * H} width={one} height={Math.max(fa ? 1 : 0, fa * H)} fill={color}><title>{`${b}: ${Math.round(fa * 100)} % of the alternate reads (${alt[i]})`}</title></rect>
+              {other && <rect x={x + 3 + one} y={H - fr * H} width={one} height={Math.max(fr ? 1 : 0, fr * H)} fill="#9ca3af"><title>{`${b}: ${Math.round(fr * 100)} % of the reference reads (${other[i]})`}</title></rect>}
+              <text x={x + bw / 2} y={H + 10} textAnchor="middle" fontSize={8} fill="#6b7280">{b}</text>
+            </g>
+          );
+        })}
+        <line x1={2} y1={H + 0.5} x2={W - 2} y2={H + 0.5} stroke="#d1d5db" />
+      </svg>
+    </div>
+  );
+}
+const binOf = (edges: number[], v: number) => { let i = 0; while (i + 1 < edges.length && v >= edges[i + 1]) i++; return i; };
+const histOf = (edges: number[], vals: number[]) => { const h = new Array(edges.length).fill(0); for (const v of vals) h[binOf(edges, v)]++; return h; };
+
+// ======================== CpG methylation panel ========================
+/** Widest view whose methylation is counted and drawn (the counted window reaches half a view further on each side). */
+const METHYL_MAX_VIEW_BP = 2_000_000;
+/** Widest view whose reads are coloured by their CpG calls (wider, a row has less than a pixel per CpG). */
+const METHYL_READS_MAX_BP = 30_000;
+const METHYL_HEAD_H = 13, METHYL_LANE_H = 12, METHYL_DELTA_H = 16, METHYL_GAP = 3;
+/** Fraction of 5mC, 0 → 1, in 11 steps (ColorBrewer RdBu, reversed: blue unmethylated, red methylated). */
+const METHYL_COLORS = ['#2166ac', '#4393c3', '#6fa9d1', '#92c5de', '#c2dcec', '#ececec', '#f5ccb4', '#f4a582', '#e0795f', '#d6604d', '#b2182b'];
+/** Calls in a pixel column below which its colour is drawn faint. */
+const METHYL_MIN_CALLS = 3;
+/** Allele-specific methylation: the two haplotypes differ by at least this over METHYL_ASM_CPGS consecutive CpGs covered by both. */
+const METHYL_ASM_DELTA = 0.5, METHYL_ASM_CPGS = 5, METHYL_ASM_MIN_CALLS = 10;
+const METHYL_ASM_COLOR = '#7c3aed';
+interface MethylEntry { chrom: string; start: number; end: number; w?: MethylWindow; prefix?: MethylPrefix; loading: boolean; progress: number; error?: string }
+/**
+ * Prefix sums of a window's calls per lane (haplotag 0 untagged, 1, 2, and 3 all reads), for any range's sums in two
+ * binary searches. `run` numbers the stretches of consecutive CpGs of one phase set (a CpG without tagged calls joins
+ * the stretch before it): HP 1 and HP 2 are only ever pooled within one, and `ps` gives each stretch's PS.
+ */
+interface MethylPrefix { pos: Int32Array; mod: Float64Array[]; total: Float64Array[]; tagged: boolean; run: Int32Array; ps: Float64Array }
+/** The phase-set stretches of CpGs: a new one wherever the CpG's set differs from the last set seen. */
+function methylRuns(ps: ArrayLike<number>): Int32Array {
+  const run = new Int32Array(ps.length);
+  let r = 0, last = NaN;
+  for (let i = 0; i < ps.length; i++) {
+    const p = ps[i];
+    if (!Number.isNaN(p)) { if (!Number.isNaN(last) && p !== last) r++; last = p; }
+    run[i] = r;
+  }
+  return run;
+}
+function methylPrefix(w: MethylWindow): MethylPrefix {
+  const n = w.pos.length, mod: Float64Array[] = [], total: Float64Array[] = [];
+  for (let lane = 0; lane < 4; lane++) {
+    const m = new Float64Array(n + 1), t = new Float64Array(n + 1);
+    for (let i = 0; i < n; i++) {
+      const dm = lane < 3 ? w.mod[lane][i] : w.mod[0][i] + w.mod[1][i] + w.mod[2][i];
+      const dt = lane < 3 ? w.total[lane][i] : w.total[0][i] + w.total[1][i] + w.total[2][i];
+      m[i + 1] = m[i] + dm; t[i + 1] = t[i] + dt;
+    }
+    mod.push(m); total.push(t);
+  }
+  const ps = w.ps ?? new Float64Array(n).fill(NaN);
+  return { pos: w.pos, mod, total, tagged: total[1][n] + total[2][n] > 0, run: methylRuns(ps), ps };
+}
+/** Index of the first CpG at or after `p`. */
+const methylLower = (pos: Int32Array, p: number) => { let lo = 0, hi = pos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (pos[mid] < p) lo = mid + 1; else hi = mid; } return lo; };
+/** Modified and all calls of a lane over [a, b). */
+const methylSum = (P: MethylPrefix, lane: number, a: number, b: number): [number, number] => {
+  const i = methylLower(P.pos, a), j = methylLower(P.pos, b);
+  return [P.mod[lane][j] - P.mod[lane][i], P.total[lane][j] - P.total[lane][i]];
+};
+/**
+ * The density of the view, one column per pixel. Each column pools the calls of the CpGs under it and, when those are
+ * fewer than METHYL_SMOOTH_CPGS, of the nearest CpGs on either side up to METHYL_SMOOTH_MAX_BP beyond the pixel: zoomed
+ * out a column is exactly its pixel, zoomed in the window stays a few CpGs wide, so the panel reads as a regional
+ * density at every zoom (and readjusts with it) instead of isolated sites, while a CpG desert stays a gap.
+ * The cost is a few binary searches per pixel, whatever the reads or the CpGs of the window.
+ */
+const METHYL_SMOOTH_CPGS = 6, METHYL_SMOOTH_MAX_BP = 1000;
+/**
+ * A column is drawn split into the two haplotypes when each is deep enough to read on its own: at least
+ * METHYL_PHASED_DEPTH calls per CpG of the column (about as many reads), the less covered one holding at least
+ * METHYL_PHASED_BALANCE of the tagged calls (a copy missing, a deletion or loss of heterozygosity, is not drawn split).
+ * The untagged reads beside them do not count against it: a phasing tool tags reads by their alleles, not by their
+ * methylation, so the tagged ones are a fair sample of each copy whatever their share (a file tagged over 40 % of its
+ * reads splits where both copies are covered). Elsewhere, where the reads are not phased (no heterozygous variant to tag
+ * them by, a homozygous or hemizygous stretch, a gap between phase sets), the two lanes join into one of all reads.
+ * Phased stretches narrower than METHYL_PHASED_MIN_PX are joined too.
+ */
+const METHYL_PHASED_DEPTH = 3, METHYL_PHASED_BALANCE = 0.25, METHYL_PHASED_MIN_PX = 4;
+interface MethylCol { x: number; a: number; b: number; phased: boolean; f: number[]; t: number[]; /** the phase-set stretch its HP 1 / HP 2 come from, and its PS (NaN: none) */ run: number; ps: number }
+/** Modified and all calls of a lane over the CpGs of indices [i, j). */
+const methylSumIdx = (P: MethylPrefix, lane: number, i: number, j: number): [number, number] => [P.mod[lane][j] - P.mod[lane][i], P.total[lane][j] - P.total[lane][i]];
+/**
+ * What the panel counts: every CpG, or (CpG islands only) the CpGs of the islands, each column then kept to the islands
+ * it overlaps and its smoothing to their bounds, so nothing outside an island leaks in.
+ */
+interface MethylSource { P: MethylPrefix; bounds?: (ga: number, gb: number) => [number, number] | null }
+const methylIslandCache = new WeakMap<MethylPrefix, MethylPrefix>();
+function methylSource(e: MethylEntry, islandsOnly: boolean): MethylSource | null {
+  const P = e.prefix, w = e.w;
+  if (!P || !w) return null;
+  if (!islandsOnly) return { P };
+  const isl = w.islands;
+  let Q = methylIslandCache.get(P);
+  if (!Q) {
+    const keep: number[] = [];
+    for (let i = 0, k = 0; i < P.pos.length; i++) {
+      while (k < isl.length && isl[k][1] <= P.pos[i]) k++;
+      if (k < isl.length && isl[k][0] <= P.pos[i]) keep.push(i);
+    }
+    const n = keep.length, mod: Float64Array[] = [], total: Float64Array[] = [];
+    for (let lane = 0; lane < 4; lane++) {
+      const m = new Float64Array(n + 1), t = new Float64Array(n + 1);
+      keep.forEach((i, j) => { m[j + 1] = m[j] + P.mod[lane][i + 1] - P.mod[lane][i]; t[j + 1] = t[j] + P.total[lane][i + 1] - P.total[lane][i]; });
+      mod.push(m); total.push(t);
+    }
+    const ps = Float64Array.from(keep, i => P.ps[i]);
+    Q = { pos: Int32Array.from(keep, i => P.pos[i]), mod, total, tagged: total[1][n] + total[2][n] > 0, run: methylRuns(ps), ps };
+    methylIslandCache.set(P, Q);
+  }
+  const starts = isl.map(r => r[0]);
+  return {
+    P: Q,
+    bounds: (ga, gb) => {
+      // the islands overlapping [ga, gb): from the last starting before gb, back while they end after ga
+      let j = methylLowerArr(starts, gb) - 1;
+      if (j < 0 || isl[j][1] <= ga) return null;
+      let lo = isl[j][0];
+      const hi = isl[j][1];
+      while (j > 0 && isl[j - 1][1] > ga) lo = isl[--j][0];
+      return [lo, hi];
+    },
+  };
+}
+const methylLowerArr = (a: number[], p: number) => { let lo = 0, hi = a.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < p) lo = mid + 1; else hi = mid; } return lo; };
+/** The column at pixel x (x the left edge of the pixel), or null without calls (or outside the islands, when kept to them). */
+function methylCol(S: MethylSource, scale: { invert(px: number): number }, x: number): MethylCol | null {
+  const P = S.P, n = P.pos.length;
+  const g1 = scale.invert(x), g2 = scale.invert(x + 1);
+  let ga = Math.ceil(Math.min(g1, g2)), gb = Math.ceil(Math.max(g1, g2));
+  if (gb <= ga) { ga = Math.floor((g1 + g2) / 2); gb = ga + 1; }
+  let lo = -Infinity, hi = Infinity;
+  if (S.bounds) { const r = S.bounds(ga, gb); if (!r) return null; [lo, hi] = r; }
+  const i0 = methylLower(P.pos, ga), i1 = methylLower(P.pos, gb);
+  let a = i0, b = i1;
+  if (b - a < METHYL_SMOOTH_CPGS) {
+    // the nearest CpGs, alternately left and right, within reach
+    while (b - a < METHYL_SMOOTH_CPGS) {
+      const canL = a > 0 && P.pos[a - 1] >= Math.max(lo, ga - METHYL_SMOOTH_MAX_BP), canR = b < n && P.pos[b] < Math.min(hi, gb + METHYL_SMOOTH_MAX_BP);
+      if (!canL && !canR) break;
+      if (canL && (!canR || ga - P.pos[a - 1] <= P.pos[b] - gb)) a--; else b++;
+    }
+  }
+  if (b <= a) return null;
+  const f: number[] = [], t: number[] = [];
+  for (let lane = 0; lane < 4; lane++) { const [m, tt] = methylSumIdx(P, lane, a, b); f.push(tt ? m / tt : NaN); t.push(tt); }
+  if (!t[3]) return null;
+  // HP 1 and HP 2 from one phase set only: the stretch holding most of the column's tagged calls; the other stretches'
+  // tagged calls join lane 0 (their haplotypes are not this set's)
+  let run = P.run[a], ps = NaN;
+  if (P.run[b - 1] !== P.run[a]) {
+    const per = new Map<number, number>();
+    for (let i = a; i < b; i++) per.set(P.run[i], (per.get(P.run[i]) ?? 0) + P.total[1][i + 1] - P.total[1][i] + P.total[2][i + 1] - P.total[2][i]);
+    let best = -1;
+    for (const [r, n] of per) if (n > best) { best = n; run = r; }
+    let m1 = 0, t1 = 0, m2 = 0, t2 = 0, mo = 0, to = 0;
+    for (let i = a; i < b; i++) {
+      const dm1 = P.mod[1][i + 1] - P.mod[1][i], dt1 = P.total[1][i + 1] - P.total[1][i], dm2 = P.mod[2][i + 1] - P.mod[2][i], dt2 = P.total[2][i + 1] - P.total[2][i];
+      if (P.run[i] === run) { m1 += dm1; t1 += dt1; m2 += dm2; t2 += dt2; } else { mo += dm1 + dm2; to += dt1 + dt2; }
+    }
+    const [m0, t0] = methylSumIdx(P, 0, a, b);
+    f[1] = t1 ? m1 / t1 : NaN; t[1] = t1; f[2] = t2 ? m2 / t2 : NaN; t[2] = t2;
+    t[0] = t0 + to; f[0] = t[0] ? (m0 + mo) / t[0] : NaN;
+  }
+  for (let i = a; i < b; i++) if (P.run[i] === run && !Number.isNaN(P.ps[i])) { ps = P.ps[i]; break; }
+  const cpgs = b - a;
+  const phased = P.tagged && t[1] >= METHYL_PHASED_DEPTH * cpgs && t[2] >= METHYL_PHASED_DEPTH * cpgs && Math.min(t[1], t[2]) >= METHYL_PHASED_BALANCE * (t[1] + t[2]);
+  return { x, a, b, phased, f, t, run, ps };
+}
+function methylCols(S: MethylSource, scale: Scale): MethylCol[] {
+  const out: MethylCol[] = [];
+  for (let x = scale.plotLeft; x < scale.plotRight; x++) { const c = methylCol(S, scale, x); if (c) out.push(c); }
+  // phased runs too narrow to read as a split are joined
+  for (let i = 0; i < out.length;) {
+    if (!out[i].phased) { i++; continue; }
+    let j = i;
+    while (j + 1 < out.length && out[j + 1].phased && out[j + 1].x === out[j].x + 1) j++;
+    if (out[j].x - out[i].x + 1 < METHYL_PHASED_MIN_PX) for (let k = i; k <= j; k++) out[k].phased = false;
+    i = j + 1;
+  }
+  return out;
+}
+type MethylPath = { d: string; color: string; faint: boolean };
+/**
+ * One band of the ribbon: the columns `pick` keeps, coloured by the 5mC fraction of `lane`, as one path per colour
+ * step and strength (faint under METHYL_MIN_CALLS calls). Touching columns of one colour make one rect.
+ */
+function methylBand(cols: MethylCol[], lane: number, pick: (c: MethylCol) => boolean, y: number, h: number, out: MethylPath[]): void {
+  const acc = new Map<string, string[]>();
+  let run: { key: string; x0: number; x1: number } | null = null;
+  const flush = () => { if (!run) return; const l = acc.get(run.key) ?? []; l.push(`M${run.x0},${y}h${run.x1 - run.x0}v${h}h${run.x0 - run.x1}z`); acc.set(run.key, l); run = null; };
+  for (const c of cols) {
+    if (!pick(c) || !c.t[lane]) { flush(); continue; }
+    const key = `${Math.round(c.f[lane] * 10)}${c.t[lane] < METHYL_MIN_CALLS ? 'f' : ''}`;
+    if (run && run.key === key && run.x1 === c.x) run.x1 = c.x + 1;
+    else { flush(); run = { key, x0: c.x, x1: c.x + 1 }; }
+  }
+  flush();
+  for (const [key, parts] of acc) out.push({ d: parts.join(''), color: METHYL_COLORS[parseInt(key)], faint: key.endsWith('f') });
+}
+/** The ribbon: HP 1 over HP 2 where the column is phased, one band of all reads where it is not. */
+const METHYL_RIBBON_H = 2 * METHYL_LANE_H + 1;
+/** Everything a track's panel draws, in panel-local coordinates (y from the panel's top), for one view. */
+interface MethylDraw {
+  ribbon: MethylPath[];
+  /** pixel runs drawn split into the two haplotypes */
+  phasedRuns: [number, number][];
+  /** share of the drawn columns that are phased */
+  phasedShare: number;
+  /** the phased pixel runs by phase set: where HP 1 / HP 2 are one set's, and its PS (NaN: tagged without PS) */
+  setRuns: { x0: number; x1: number; ps: number }[];
+  /** HP 1 − HP 2 bars per phase set (up: HP 1 more methylated) */
+  delta?: { ps: number; up: string; down: string }[];
+  asm: { x0: number; x1: number; delta: number; cpgs: number; start: number; end: number }[];
+  islands: { x0: number; x1: number; start: number; end: number }[];
+  /**
+   * CpGs, calls and 5mC fraction of the view per lane (3 = all reads); the phase sets of its CpGs holding tagged calls
+   * (`sets`), and the set when there is one (`ps`, NaN: tagged without PS)
+   */
+  summary: { cpgs: number; frac: number[]; calls: number[]; sets: number; ps: number };
+}
+function methylDraw(e: MethylEntry, scale: Scale, viewStart: number, viewEnd: number, islandsOnly: boolean): MethylDraw | null {
+  const S = methylSource(e, islandsOnly), w = e.w;
+  if (!S || !w) return null;
+  const P = S.P, cols = methylCols(S, scale);
+  const ribbon: MethylPath[] = [], y = METHYL_HEAD_H;
+  methylBand(cols, 1, c => c.phased, y, METHYL_LANE_H, ribbon);
+  methylBand(cols, 2, c => c.phased, y + METHYL_LANE_H + 1, METHYL_LANE_H, ribbon);
+  methylBand(cols, 3, c => !c.phased, y, METHYL_RIBBON_H, ribbon);
+  const phasedRuns: [number, number][] = [];
+  for (const c of cols) {
+    if (!c.phased) continue;
+    const last = phasedRuns[phasedRuns.length - 1];
+    if (last && last[1] === c.x) last[1] = c.x + 1; else phasedRuns.push([c.x, c.x + 1]);
+  }
+  const setRuns: MethylDraw['setRuns'] = [];
+  for (const c of cols) {
+    if (!c.phased) continue;
+    const last = setRuns[setRuns.length - 1];
+    if (last && last.x1 === c.x && (last.ps === c.ps || (Number.isNaN(last.ps) && Number.isNaN(c.ps)))) last.x1 = c.x + 1;
+    else setRuns.push({ x0: c.x, x1: c.x + 1, ps: c.ps });
+  }
+  let delta: MethylDraw['delta'];
+  if (P.tagged) {
+    const h = METHYL_DELTA_H, half = h / 2 - 1, by = new Map<string, { ps: number; up: string[]; down: string[] }>();
+    for (const c of cols) {
+      if (!c.phased) continue;
+      const d = c.f[1] - c.f[2], bh = Math.max(0.6, Math.abs(d) * half), k = String(c.ps);
+      let g = by.get(k);
+      if (!g) by.set(k, g = { ps: c.ps, up: [], down: [] });
+      (d > 0 ? g.up : g.down).push(`M${c.x},${(d > 0 ? h / 2 - bh : h / 2).toFixed(1)}h1v${bh.toFixed(1)}h-1z`);
+    }
+    delta = [...by.values()].map(g => ({ ps: g.ps, up: g.up.join(''), down: g.down.join('') }));
+  }
+  const span = (a: number, b: number) => { const xa = scale.x(a), xb = scale.x(b); return { x0: Math.min(xa, xb), x1: Math.max(xa, xb) }; };
+  const asm = P.tagged ? methylAsm(P, viewStart, viewEnd).map(r => ({ ...span(r.start, r.end), ...r })) : [];
+  const islands = w.islands.filter(([a, b]) => b > viewStart && a < viewEnd).map(([a, b]) => ({ ...span(a, b), start: a, end: b }));
+  const frac: number[] = [], calls: number[] = [];
+  const i0 = methylLower(P.pos, viewStart), i1 = methylLower(P.pos, viewEnd);
+  for (let lane = 0; lane < 4; lane++) { const [m, t] = methylSumIdx(P, lane, i0, i1); frac.push(t ? m / t : NaN); calls.push(t); }
+  // the sets of the view's CpGs, phased stretch or not: HP 1 and HP 2 summed over two sets are not the same copies
+  const sets = new Set<string>();
+  let ps = NaN;
+  for (let i = i0; i < i1; i++) {
+    if (P.total[1][i + 1] - P.total[1][i] + P.total[2][i + 1] - P.total[2][i] <= 0) continue;
+    if (!sets.has(String(P.ps[i]))) { sets.add(String(P.ps[i])); ps = P.ps[i]; }
+  }
+  return { ribbon, phasedRuns, phasedShare: cols.length ? cols.filter(c => c.phased).length / cols.length : 0, setRuns, delta, asm, islands, summary: { cpgs: i1 - i0, frac, calls, sets: sets.size, ps } };
+}
+/**
+ * Stretches where the two haplotypes are methylated differently: runs of METHYL_ASM_CPGS consecutive CpGs covered on
+ * both haplotypes whose pooled fractions differ by at least METHYL_ASM_DELTA (each side with METHYL_ASM_MIN_CALLS
+ * calls), merged while the sign holds. Imprinted loci, X inactivation in females and allele-specific promoters look so.
+ */
+function methylAsm(P: MethylPrefix, from: number, to: number): { start: number; end: number; delta: number; cpgs: number }[] {
+  const i0 = methylLower(P.pos, from), i1 = methylLower(P.pos, to);
+  const both: number[] = [];
+  for (let i = i0; i < i1; i++) if (P.total[1][i + 1] - P.total[1][i] > 0 && P.total[2][i + 1] - P.total[2][i] > 0) both.push(i);
+  const out: { start: number; end: number; delta: number; cpgs: number; sign: number; sumD: number; run: number }[] = [];
+  for (let k = 0; k + METHYL_ASM_CPGS <= both.length; k++) {
+    const a = both[k], b = both[k + METHYL_ASM_CPGS - 1] + 1;
+    // within one phase set: HP 1 − HP 2 has no meaning across two
+    if (P.run[a] !== P.run[b - 1]) continue;
+    const m1 = P.mod[1][b] - P.mod[1][a], t1 = P.total[1][b] - P.total[1][a], m2 = P.mod[2][b] - P.mod[2][a], t2 = P.total[2][b] - P.total[2][a];
+    if (t1 < METHYL_ASM_MIN_CALLS || t2 < METHYL_ASM_MIN_CALLS) continue;
+    const d = m1 / t1 - m2 / t2;
+    if (Math.abs(d) < METHYL_ASM_DELTA) continue;
+    const s = Math.sign(d), last = out[out.length - 1], st = P.pos[a], en = P.pos[b - 1] + 2;
+    if (last && last.sign === s && st <= last.end && last.run === P.run[a]) { last.end = Math.max(last.end, en); last.cpgs = 0; last.sumD += d; }
+    else out.push({ start: st, end: en, delta: d, cpgs: 0, sign: s, sumD: d, run: P.run[a] });
+  }
+  return out.map(x => {
+    // the stretch's own CpGs only (an overlap of two sets' reads at its ends)
+    let m1 = 0, t1 = 0, m2 = 0, t2 = 0;
+    for (let i = methylLower(P.pos, x.start), j = methylLower(P.pos, x.end); i < j; i++) if (P.run[i] === x.run) {
+      m1 += P.mod[1][i + 1] - P.mod[1][i]; t1 += P.total[1][i + 1] - P.total[1][i]; m2 += P.mod[2][i + 1] - P.mod[2][i]; t2 += P.total[2][i + 1] - P.total[2][i];
+    }
+    return { start: x.start, end: x.end, delta: m1 / Math.max(1, t1) - m2 / Math.max(1, t2), cpgs: methylLower(P.pos, x.end) - methylLower(P.pos, x.start) };
+  });
+}
+/**
+ * Mean methylation of each CpG island compared between samples: over the CpGs of the island covered by at least
+ * METHYL_DIFF_MIN_CALLS calls in both samples (paired, so a CpG covered in one sample only does not tilt the mean), the
+ * mean of their 5mC fractions, all reads; an island needs METHYL_DIFF_MIN_CPGS such CpGs. The primary sample's tag is
+ * its mean minus the mean of the others', each other sample's tag its own mean minus the primary's.
+ */
+const METHYL_DIFF_MIN_CALLS = 5, METHYL_DIFF_MIN_CPGS = 3, METHYL_DIFF_H = 13;
+/** Differences under this many points are drawn grey, at or above METHYL_DIFF_STRONG bold. */
+const METHYL_DIFF_WEAK = 0.1, METHYL_DIFF_STRONG = 0.2;
+interface MethylIslandDiff { start: number; end: number; delta: number; cpgs: number; mean: number; vs: { name: string; mean: number; ref: number; cpgs: number }[] }
+function methylIslandDiffs(ref: { sid: number; name: string; e: MethylEntry }, others: { sid: number; name: string; e: MethylEntry }[]): Map<number, MethylIslandDiff[]> {
+  const out = new Map<number, MethylIslandDiff[]>();
+  const R = ref.e.prefix, isl = ref.e.w?.islands ?? [];
+  if (!R) return out;
+  const beta = (P: MethylPrefix, i: number) => { const t = P.total[3][i + 1] - P.total[3][i]; return t >= METHYL_DIFF_MIN_CALLS ? (P.mod[3][i + 1] - P.mod[3][i]) / t : NaN; };
+  const refRows: MethylIslandDiff[] = [];
+  const otherRows = new Map<number, MethylIslandDiff[]>(others.map(o => [o.sid, []]));
+  for (const [s, e] of isl) {
+    const vs: MethylIslandDiff['vs'] = [];
+    for (const o of others) {
+      const Q = o.e.prefix;
+      if (!Q || o.e.chrom !== ref.e.chrom || o.e.start > s || o.e.end < e) continue;
+      // merge walk over the island's CpGs of both samples
+      let i = methylLower(R.pos, s), j = methylLower(Q.pos, s), n = 0, sr = 0, so = 0;
+      while (i < R.pos.length && j < Q.pos.length && R.pos[i] < e && Q.pos[j] < e) {
+        if (R.pos[i] < Q.pos[j]) i++;
+        else if (R.pos[i] > Q.pos[j]) j++;
+        else { const br = beta(R, i), bo = beta(Q, j); if (!Number.isNaN(br) && !Number.isNaN(bo)) { n++; sr += br; so += bo; } i++; j++; }
+      }
+      if (n < METHYL_DIFF_MIN_CPGS) continue;
+      vs.push({ name: o.name, mean: so / n, ref: sr / n, cpgs: n });
+      otherRows.get(o.sid)!.push({ start: s, end: e, delta: so / n - sr / n, cpgs: n, mean: so / n, vs: [{ name: ref.name, mean: sr / n, ref: so / n, cpgs: n }] });
+    }
+    if (!vs.length) continue;
+    const d = vs.reduce((a, v) => a + (v.ref - v.mean), 0) / vs.length, m = vs.reduce((a, v) => a + v.ref, 0) / vs.length;
+    refRows.push({ start: s, end: e, delta: d, cpgs: Math.max(...vs.map(v => v.cpgs)), mean: m, vs });
+  }
+  out.set(ref.sid, refRows);
+  for (const [sid, rows] of otherRows) out.set(sid, rows);
+  return out;
+}
+/** The confidence threshold of a window as text: one value, or the range of its blocks' when they differ. */
+const methylThrText = (w: MethylWindow) => {
+  const v = w.thresholds.map(t => t.threshold), lo = Math.min(...v), hi = Math.max(...v);
+  return !v.length || lo === hi ? w.threshold.toFixed(2) : `${lo.toFixed(2)}–${hi.toFixed(2)} (one per block)`;
+};
+/** Height of a track's methylation panel: a header, the island differences (several samples), the ribbon, and the difference of the haplotypes when the reads are tagged. */
+const methylPanelH = (e: MethylEntry | undefined, diffRow = false): number => METHYL_GAP + METHYL_HEAD_H + (diffRow ? METHYL_DIFF_H : 0) + METHYL_RIBBON_H + (e?.prefix?.tagged ? METHYL_DELTA_H : 0) + 4;
+
+/**
+ * A read's CpG ticks as three paths (methylated, unmethylated, below the confidence threshold), vertical lines at the
+ * middle of each CpG in bases from the read's start: built once per read, threshold and row height, then moved by
+ * transforms only. Kept on the read object, so they go with the reads.
+ */
+/** a read's ticks, and its calls' positions with running counts per class (`pre[cls][k]`: calls of the class before call k) */
+const methylTickCache = new WeakMap<AlignedRead, { thr: string; h: number; mod: string; unmod: string; low: string; runs: [string, string, string]; pos: Int32Array; pre: [Int32Array, Int32Array, Int32Array] }>();
+/**
+ * Wide views (under METHYL_TICK_FINE_PX_PER_BP pixels per base) draw a read's calls coarser: consecutive calls of one class
+ * within METHYL_RUN_GAP_BP of each other as one rectangle. A 120× window then rasterises a few thousand shapes instead
+ * of a few hundred thousand lines, which a pan frame could not afford; zoomed in, every call is its own line again.
+ */
+const METHYL_TICK_FINE_PX_PER_BP = 0.08, METHYL_RUN_GAP_BP = 100;
+const METHYL_TICK_READS_BUDGET = 400, METHYL_SETTLE_MS = 200;
+function methylReadTicks(r: AlignedRead, thrAt: (pos: number) => number, thr: string, h: number) {
+  const c = methylTickCache.get(r);
+  if (c && c.thr === thr && c.h === h) return c;
+  const parts: string[][] = [[], [], []], runs: string[][] = [[], [], []], me = r.me ?? [];
+  const m = me.length >> 1, at = new Int32Array(m), pre: [Int32Array, Int32Array, Int32Array] = [new Int32Array(m + 1), new Int32Array(m + 1), new Int32Array(m + 1)];
+  let run: { cls: number; a: number; b: number } | null = null;
+  const flush = () => { if (run) { const w = run.b - run.a; runs[run.cls].push(`M${run.a - r.s},0h${w}v${h}h${-w}z`); run = null; } };
+  for (let k = 0; k < me.length; k += 2) {
+    const pos = me[k], cls = callClass(me[k + 1], thrAt(pos)), j = k >> 1;
+    parts[cls].push(`M${pos + 1 - r.s},0v${h}`);
+    at[j] = pos;
+    for (let c = 0; c < 3; c++) pre[c][j + 1] = pre[c][j] + (c === cls ? 1 : 0);
+    if (run && run.cls === cls && pos - run.b <= METHYL_RUN_GAP_BP) run.b = pos + 2;
+    else { flush(); run = { cls, a: pos, b: pos + 2 }; }
+  }
+  flush();
+  const out = { thr, h, mod: parts[0].join(''), unmod: parts[1].join(''), low: parts[2].join(''), runs: runs.map(x => x.join('')) as [string, string, string], pos: at, pre };
+  methylTickCache.set(r, out);
+  return out;
+}
+/** Adds to `n` the calls of a read's ticks (methylReadTicks) at CpGs in [a, b), by class. */
+function methylTicksIn(t: { pos: Int32Array; pre: [Int32Array, Int32Array, Int32Array] }, a: number, b: number, n: number[]) {
+  const lower = (x: number) => { let lo = 0, hi = t.pos.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (t.pos[mid] < x) lo = mid + 1; else hi = mid; } return lo; };
+  const i = lower(a), j = lower(b);
+  for (let c = 0; c < 3; c++) n[c] += t.pre[c][j] - t.pre[c][i];
+}
+
+/** A track's deepest base over [start, end), the opposite strand's included when the strands are split. */
+function trackMaxDepth(t: { coverage: CoverageRun[]; anti?: { coverage: CoverageRun[] } }, start: number, end: number): number {
+  return Math.max(maxDepthIn(t.coverage, start, end), t.anti ? maxDepthIn(t.anti.coverage, start, end) : 0);
+}
+
+/**
+ * The deletion-type arcs of split reads (and clipped reads placed by realignment): the source merges them with the CIGAR
+ * deletions of the same span (`deletions`, by their sources); `splits` holds them in evidence gathered before that.
+ */
+function deletionSplits(sv: StructuralEvidence): SvArc[] {
+  return [...sv.splits, ...sv.deletions.filter(d => Object.entries(d.sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0))];
+}
+
+/** haplotypes 1, 2 (and DRAGEN's higher copy labels): the chip of a consensus row, the band of a group of reads */
+const HAP_COLORS = ['#0369a1', '#be185d', '#4d7c0f', '#92400e'];
+/**
+ * Phase sets of a phased file: a haplotag (HP) only means something within its set (PS), so each set takes a hue of
+ * its own, the same in the reads, the variants' haplotype lanes and the methylation panel: HP 1 the mid tone, HP 2 the
+ * light one, `ink` for text. Sets are numbered in PS order (≈ genomic order), so neighbouring sets differ; reads tagged
+ * without PS are grey. Mid and light tones stay pale enough for the mismatch colours drawn over the reads.
+ */
+interface PsTone { hp: [string, string]; ink: string }
+const PS_TONES: PsTone[] = [
+  { hp: ['#6b93cf', '#b9cff0'], ink: '#1e40af' },
+  { hp: ['#c79a55', '#ecd3a8'], ink: '#92400e' },
+  { hp: ['#9a85c9', '#d6cdee'], ink: '#5b21b6' },
+  { hp: ['#6fae95', '#c3e3d6'], ink: '#065f46' },
+];
+const PS_NONE_TONE: PsTone = { hp: ['#9ca3af', '#d1d5db'], ink: '#374151' };
 /** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
 const READ_DISCORDANT_FILL = '#fcd34d';
+/**
+ * Discordant pairs of genomic DNA by orientation, as IGV colours them ("color by insert size and pair orientation"):
+ * mates facing each other far apart (→ ←, deletion-type), facing away (← →, the junction of a tandem duplication read
+ * across) and on the same strand (→ → or ← ←, inversion-type); read fill and the line joining the mates.
+ */
+type PairClass = 'deletion' | 'duplication' | 'inversion' | 'other';
+const PAIR_CLASS_FILL: Record<PairClass, string> = { deletion: '#fca5a5', duplication: '#86efac', inversion: '#93c5fd', other: READ_DISCORDANT_FILL };
+const PAIR_CLASS_LINE: Record<PairClass, string> = { deletion: '#b91c1c', duplication: '#15803d', inversion: '#2563eb', other: '#d97706' };
+const PAIR_CLASS_LABEL: Record<PairClass, string> = { deletion: 'mates → ← far apart (deletion-type)', duplication: 'mates ← → facing away (tandem duplication-type)', inversion: 'mates on one strand (inversion-type)', other: 'mate elsewhere, or not a proper pair' };
+/** Mates facing away at least this far apart (and twice the median insert) are a duplication's (alignments.ts, OUTWARD_MIN_BP). */
+const OUTWARD_MIN = 300;
+/** Bases the reverse mate of an outward pair may reach past the forward mate's start (alignments.ts, OUTWARD_OVERLAP_BP). */
+const OUTWARD_OVERLAP = 20;
+/** Clip at the outer end of each mate for a pair to be read as one molecule across a junction (alignments.ts, CROSSING_MIN_CLIP). */
+const CROSSING_MIN_CLIP = 10;
+/**
+ * The counts behind a DNA track's structural arcs (StructuralEvidence.diagnostics), for the track label's tooltip: the
+ * records examined, the discordant pairs by class and those left out, the CIGAR insertions and the tandem copies found,
+ * the reference used, and every arc with its support against the minimum drawn. It tells why an expected arc is missing.
+ */
+function svDiagnosticsText(sv: StructuralEvidence, minReads: number): string {
+  const d = sv.diagnostics!;
+  const n = (x: number) => Math.round(x).toLocaleString('en-US');
+  const span = (a: number, b: number) => `${(a + 1).toLocaleString('en-US')}-${b.toLocaleString('en-US')}`;
+  const lines = [
+    `Structural evidence (arcs drawn from ${n(minReads)} reads or pairs):`,
+    `${n(d.records)} records with possible evidence · median insert ${sv.insertMedian != null ? `${n(sv.insertMedian)} bp` : 'unknown'}`,
+    `discordant pairs: ${n(d.pairs.deletion)} deletion-type, ${n(d.pairs.duplication)} duplication-type, ${n(d.pairs.inversion)} inversion-type`,
+  ];
+  if (d.pairsWithDeletion || d.pairsWithInsertion) lines.push(`left out: ${n(d.pairsWithDeletion)} pairs with a deletion ≥ 50 bp in a mate, ${n(d.pairsWithInsertion)} deletion- or inversion-type pairs with an insertion ≥ 50 bp in a mate`);
+  for (const g of d.insertionGroups.slice(0, 6)) lines.push(`insertion of ${n(g.len)} bp at ${n(g.pos + 1)} in ${n(g.reads)} reads (${n(g.bases)} bases read): ${g.copy ? `tandem copy of ${span(g.copy[0], g.copy[1])}` : g.bases < 48 ? 'no sequence to compare' : d.reference ? 'not a copy of the reference nearby' : 'no reference to compare'}`);
+  lines.push(d.reference ? `reference used: ${span(d.reference.start, d.reference.end)}` : 'reference: none fetched');
+  if (d.referenceError) lines.push(`reference not available: ${d.referenceError}`);
+  const arcs: [string, { start: number; end: number; count: number }[]][] = [['deletion', sv.deletions], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []],
+    ...(['deletion', 'duplication', 'inversion'] as const).map(k => [`pairs ${k}-type`, sv.discordant.filter(j => (j.kind ?? 'deletion') === k)] as [string, DiscordantArc[]])];
+  for (const [what, list] of arcs) for (const j of [...list].sort((p, q) => q.count - p.count).slice(0, 4))
+    lines.push(`arc ${what} ${span(j.start, j.end)}: ${n(j.count)}${j.count < minReads ? ' (below the minimum, not drawn)' : ''}`);
+  return lines.join('\n');
+}
+
+/**
+ * What a duplicated or deleted stretch holds of the transcript drawn: the whole exons inside, their coding bases and the
+ * frame the change leaves (a tandem copy of exons 13–14 of LDLR, 141 + 152 = 293 coding bases, shifts it), and the
+ * exons its ends cut. For a tooltip; `approx` when the ends come from pairs (binned, a few hundred bases off).
+ */
+function exonContent(tx: TxModel | null, a: number, b: number, what: 'duplicated' | 'deleted', approx: boolean): string {
+  if (!tx) return '';
+  const whole = tx.exons.filter(e => e.start >= a && e.end <= b).sort((x, y) => x.rank - y.rank);
+  const cut = tx.exons.filter(e => e.start < b && e.end > a && !(e.start >= a && e.end <= b)).sort((x, y) => x.rank - y.rank);
+  const caveat = approx ? ' (ends from the pairs, a few hundred bases uncertain: split reads, when there are any, place them to the base)' : '';
+  if (!whole.length && !cut.length) return `\n${what} stretch: no exon of ${tx.transcriptId}, intronic${caveat}`;
+  const ranks = whole.map(e => e.rank);
+  const run = ranks.length > 1 && ranks[ranks.length - 1] - ranks[0] === ranks.length - 1 ? `exons ${ranks[0]}–${ranks[ranks.length - 1]}` : ranks.length ? `exon${ranks.length > 1 ? 's' : ''} ${ranks.join(', ')}` : '';
+  let coding = 0;
+  if (tx.cdsStart != null && tx.cdsEnd != null) for (const e of whole) coding += Math.max(0, Math.min(e.end, tx.cdsEnd) - Math.max(e.start, tx.cdsStart));
+  const frame = !whole.length ? '' : !coding ? ': no coding base' : coding % 3
+    ? `: ${coding} coding bases, not a multiple of 3, so the reading frame shifts ${what === 'duplicated' ? 'when the copy is spliced in tandem' : 'without them'}`
+    : `: ${coding} coding bases, the frame kept (${coding / 3} codons ${what === 'duplicated' ? 'repeated' : 'lost'})`;
+  return `\n${what} stretch of ${tx.transcriptId}: ${run ? `whole ${run}${frame}` : 'no whole exon'}` +
+    (cut.length ? `; its ends cut exon${cut.length > 1 ? 's' : ''} ${cut.map(e => e.rank).join(', ')}` : '') + caveat;
+}
 const PAIR_LINK_COLOR = '#9ca3af';
 const CLIP_FILL = '#0f766e';          // soft-clipped bases when too small for letters
 const HARD_CLIP_FILL = '#9ca3af';     // hard-clipped stub (bases in the primary record)
@@ -342,21 +1091,39 @@ function modelKindLabel(m: { transcriptId: string; modelKind: string }): string 
 function phaseTitle(p: ExonPhase): string {
   const rem = p.cds % 3;
   const skip = p.hasStart && p.hasStop ? 'holds the whole CDS' : p.hasStart ? 'holds the start codon' : p.hasStop ? 'holds the stop codon' : p.symmetric ? 'skipping keeps the frame' : `skipping shifts the frame (${rem} base${rem === 1 ? '' : 's'} over a multiple of 3)`;
-  return `${p.cds.toLocaleString()} coding bases (3n${rem ? `+${rem}` : ''}) · codon phase ${p.phaseIn} | ${p.phaseOut} · ${skip}`;
+  return `${p.cds.toLocaleString('en-US')} coding bases (3n${rem ? `+${rem}` : ''}) · codon phase ${p.phaseIn} | ${p.phaseOut} · ${skip}`;
 }
 
 /** A neighbouring gene (1-based, from the data source) as a 0-based transcript model; exons ranked in transcription order. */
-function toNeighbourModel(g: GeneModel, chrom: string): TxModel & { geneId: string; biotype: string; isCanonical: boolean } {
+function toNeighbourModel(g: GeneModel, chrom: string): TxModel & { geneId: string; biotype: string; isCanonical: boolean; geneStart: number; geneEnd: number; otherExons: { start: number; end: number }[] } {
   const sorted = [...g.exons].map(e => ({ start: e.start - 1, end: e.end })).sort((a, b) => a.start - b.start);
   const n = sorted.length;
   const exons = sorted.map((e, i) => ({ ...e, rank: g.strand >= 0 ? i + 1 : n - i }));
   const hasCds = g.cds_start != null && g.cds_end != null;
+  // the model spans its own exons; the gene's span (every transcript of it) can reach much further, a longer isoform's
+  // first exon upstream: drawn as an intron line of this model it read as a gene without exons there
+  const geneStart = g.start - 1, geneEnd = g.end;
   return {
     geneName: g.gene_name, transcriptId: g.transcript_id, isMane: false, modelKind: g.is_canonical ? 'canonical' : 'longest', chrom,
-    strand: g.strand < 0 ? -1 : 1, start: g.start - 1, end: g.end, exons,
+    strand: g.strand < 0 ? -1 : 1, start: n ? sorted[0].start : geneStart, end: n ? Math.max(...sorted.map(e => e.end)) : geneEnd, geneStart, geneEnd, exons,
+    otherExons: (g.other_exons ?? []).map(e => ({ start: e.start - 1, end: e.end })),
     cdsStart: hasCds ? (g.cds_start as number) - 1 : null, cdsEnd: hasCds ? (g.cds_end as number) : null,
     geneId: g.gene_id, biotype: g.biotype, isCanonical: g.is_canonical,
   };
+}
+
+/** One end of a fusion junction, snapped to the nearest exon boundary of the models within FUSION_SNAP_BP. */
+type FusionEndAt = { pos: number; gene: string; exon: number | null; role: 'donor' | 'acceptor' | null; strand: number | null; snapped: boolean; model: TxModel | null };
+function fusionEndAt(p: number, models: TxModel[]): FusionEndAt {
+  let best: FusionEndAt | null = null, bestD = FUSION_SNAP_BP + 1;
+  for (const m of models) for (const e of m.exons) for (const [b, side] of [[e.start, 'start'], [e.end, 'end']] as const) {
+    const dist = Math.abs(b - p);
+    if (dist < bestD) { bestD = dist; best = { pos: b, gene: m.geneName, exon: e.rank, role: (m.strand > 0) === (side === 'end') ? 'donor' : 'acceptor', strand: m.strand, snapped: true, model: m }; }
+  }
+  if (best) return best;
+  // inside a gene: its whole span (a neighbour's other transcripts included), not only the model drawn
+  const inside = models.find(m => p >= ((m as { geneStart?: number }).geneStart ?? m.start) && p < ((m as { geneEnd?: number }).geneEnd ?? m.end));
+  return { pos: p, gene: inside?.geneName ?? '', exon: null, role: null, strand: inside?.strand ?? null, snapped: false, model: null };
 }
 
 const frameLabel = (f: FrameInfo) => f.frame === 'in' ? 'in frame' : f.frame === 'out' ? 'out of frame' : f.frame === 'utr' ? 'UTR only' : 'unknown';
@@ -392,9 +1159,11 @@ function renderFrameGlyph(cx: number, cy: number, f: FrameInfo, key: string): JS
 
 export default function SashimiViewer({
   geneName, geneId, chrom, geneStart, geneEnd, sampleId, sampleName, runId, onClose, embedded, onSnapshot,
-  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, onLibraryEvidence, initialSettings, onStateChange, svHints = false,
+  dataSource, hideSamplePicker, allowPrimarySwitch, onPrimaryChange, initialView, initialMark, initialReads, sampleNames, knownVariantsVersion, sampleTypes, sampleStrands, onStrandEvidence, onLibraryEvidence, initialSettings, onStateChange, svHints = true, liftover = null, build = 'GRCh38',
 }: SashimiViewerProps) {
   const init = initialSettings ?? {};
+  // the ruler grows by a line when the other build's coordinates are shown
+  const RULER_H = RULER_BASE_H + (liftover ? LIFT_ROW_H : 0);
   const ds = dataSource;
   const [snapshotState, setSnapshotState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
   const svgRef = useRef<SVGSVGElement>(null);
@@ -447,13 +1216,20 @@ export default function SashimiViewer({
   /** Arc labels of the sample tracks: spliced reads, or the usage of each event against its canonical junction (the Groups view always shows usage). */
   const [arcLabel, setArcLabel] = useState<'reads' | 'usage'>(init.arcLabels ?? 'reads');
   const showUsage = viewMode === 'groups' || arcLabel === 'usage';
-  const [uniqueOnly, setUniqueOnly] = useState(init.uniqueOnly ?? false);
-  const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? 3);
+  const [minMapq, setMinMapq] = useState(init.minMapq ?? 0);
+  const [showSecondary, setShowSecondary] = useState(init.secondary ?? false);
+  const [showStrands, setShowStrands] = useState(init.strands ?? false);
+  const [minJunctionCount, setMinJunctionCount] = useState(init.minJunctionReads ?? MIN_READS_DEFAULT);
+  /** the user typed Min reads: it applies as it is, deep DNA tracks included (sessions from before the flag: a value other than the default) */
+  const [minReadsSet, setMinReadsSet] = useState(init.minJunctionReadsSet ?? (init.minJunctionReads != null && init.minJunctionReads !== MIN_READS_DEFAULT));
+  const setMinReads = useCallback((v: number) => { setMinJunctionCount(v); setMinReadsSet(true); }, []);
   /** In % usage mode, events below this usage are hidden (junctions without a share fall back to Min reads). */
   const [minUsagePct, setMinUsagePct] = useState(init.minUsagePct ?? 1);
   /** Count intron retention in the usage percentages (IR pills, and retention in the canonical arc's denominator). */
   const [includeRetention, setIncludeRetention] = useState(init.intronRetention ?? true);
   const [showReads, setShowReads] = useState(init.reads ?? !!initialReads);
+  const showReadsRef = useRef(showReads);
+  showReadsRef.current = showReads;
   const [readsSampleId, setReadsSampleId] = useState<number | null>(init.readsSample ?? null);
   const [readsAll, setReadsAll] = useState(init.readsAll ?? false); // one reads track under every sample (primary only by default)
   const [collapseReads, setCollapseReads] = useState(init.collapseReads ?? false);
@@ -462,10 +1238,30 @@ export default function SashimiViewer({
   const [consensusMode, setConsensusMode] = useState(init.consensusMode ?? true);
   const [showPairs, setShowPairs] = useState(init.pairs ?? true);
   const [haplotypes, setHaplotypes] = useState<2 | 'any'>(init.haplotypes === 'any' ? 'any' : 2);
+  const [phaseSource, setPhaseSource] = useState<'auto' | 'reads'>(init.phaseSource === 'reads' ? 'reads' : 'auto');
+  const [readsGroup, setReadsGroup] = useState<'none' | 'hp' | 'phase'>(init.readsGroup === 'hp' || init.readsGroup === 'phase' ? init.readsGroup : 'none');
+  const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
-  const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? true);
-  const [minIndelBp, setMinIndelBp] = useState(init.minIndelBp ?? 10);
+  const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
+  const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
+  const [rnaVariants, setRnaVariants] = useState(init.rnaVariants ?? true);
+  const [panelOrder, setPanelOrder] = useState<string[]>(init.panelOrder ?? []);
+  /** a panel being dragged by its grip: its key and where the pointer is (SVG y) */
+  const [panelDrag, setPanelDrag] = useState<{ key: string; y: number } | null>(null);
+  const [showMethyl, setShowMethyl] = useState(init.methylation ?? false);
+  const [seqRef, setSeqRef] = useState<{ chrom: string; start: number; seq: string } | null>(null);
+  /** the last fetch for the strip found no reference (no FASTA, the web APIs unreachable) */
+  const [seqMiss, setSeqMiss] = useState(false);
+  const [showCoverage, setShowCoverage] = useState(init.coverage ?? true);
+  const [methylIslands, setMethylIslands] = useState(init.methylIslands ?? false);
+  /**
+   * Smallest indel called and drawn in long reads: every one. A threshold (formerly the Min indel option, 10 bp) hid
+   * the random homopolymer indels of long reads, but Consensus mode already draws indels only at called sites (3
+   * reads, Min VAF (long)), and it also hid every real indel under its size; homopolymer calls that reach a site are
+   * flagged by the variants track's HP check instead.
+   */
+  const minIndelBp = 1;
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
   const [showSnps, setShowSnps] = useState(init.commonSnps ?? false);
@@ -479,15 +1275,20 @@ export default function SashimiViewer({
   // ---- Data ----
   const [transcript, setTranscript] = useState<TranscriptData | null>(null);
   const [transcriptMissing, setTranscriptMissing] = useState<string | false>(false);
-  const [tracks, setTracks] = useState<TrackData[]>([]);
+  /** the tracks as loaded; `tracks` (below) is what is drawn: with the strands shown, a stranded sample's gene strand */
+  const [rawTracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; haplotypes: 2 | 'any'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; /** collapsed with the strands split, the gene's (ReadsOptions.strands) */ strands?: 'plus' | 'minus'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
+  /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
+  /** `side`: a junction of the gene's strand (sense) or of the opposite one (anti), on the stranded samples (supportFor) */
+  const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string; side?: 'sense' | 'anti' } | null>(null);
+  const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}:${readsSupport.side ?? ''}` : undefined;
   // Per sample, so that "all samples" keeps one reads track under each coverage track
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
   const [readsError, setReadsError] = useState<Record<number, string | undefined>>({});
-  /** Variant sites of DNA tracks without a reads track, from the "variants" chip (every read of the window); nothing is read until the user asks. */
-  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** every read of the window was scanned (the "variants" chip) */ full?: boolean };
+  /** Variant sites of DNA tracks without a reads track, from the "variants" chip (the reads of the window, sampled only past the scan's budget); nothing is read until the user asks. */
+  type DnaSites = { fetched: FetchWindow; minVaf: number; minIndel: number; longVaf: number; sites: VariantSite[]; total: number; error?: string; /** long reads (the homopolymer check is stricter) */ long?: boolean; /** the whole window was scanned (the "variants" chip), not just the reads drawn */ full?: boolean; /** a tile was deeper than the scan's budget: one read in `rate` was read, the counts scaled back */ rate?: number; /** reads over the window carrying a haplotag (HP): the sites have their counts by haplotype */ haplotagged?: number };
   const [dnaSites, setDnaSites] = useState<Record<number, DnaSites>>({});
   const [dnaSitesLoading, setDnaSitesLoading] = useState<Record<number, boolean>>({});
   /** Fraction of the window the running full scan has covered, per sample. */
@@ -507,7 +1308,7 @@ export default function SashimiViewer({
     setPickerSide(r.left + width + 16 > window.innerWidth ? 'right' : 'left');
     toggle(p => !p);
   };
-  // ---- GTEx tissue tracks (median junction reads + exon reads-per-base), chosen from the GTEx tissue list ----
+  // ---- GTEx tissue tracks (median junction reads, exon usage from them), chosen from the GTEx tissue list ----
   const [gtexTracks, setGtexTracks] = useState<TrackData[]>([]);
   const [gtexTissues, setGtexTissues] = useState<GtexTissue[] | null>(null);
   const [gtexError, setGtexError] = useState<string | undefined>();
@@ -517,17 +1318,30 @@ export default function SashimiViewer({
   const gtexIdSeq = useRef(-1);
   const [pickerSearch, setPickerSearch] = useState('');
   const [dragging, setDragging] = useState(false);
-  const [regionSelect, setRegionSelect] = useState<{ startX: number; currentX: number } | null>(null);
+  /** a drag across the plot: Ctrl zooms to it, Shift selects it for the repeat inspector */
+  const [regionSelect, setRegionSelect] = useState<{ startX: number; currentX: number; repeat?: boolean } | null>(null);
+  /** a stretch selected with Shift+drag (0-based half-open), offered to the repeat inspector */
+  const [repeatSel, setRepeatSel] = useState<{ start: number; end: number; busy?: boolean; error?: string } | null>(null);
+  /** the repeat inspector's locus, while it is open */
+  const [inspect, setInspect] = useState<RepeatLocus | null>(null);
   const [hover, setHover] = useState<{ px: number; py: number } | null>(null);
   /** Detail popover opened by clicking a junction arc or an exon (HTML, never exported). */
   const [popover, setPopover] = useState<
     | { kind: 'junction'; key: string; j: JunctionArc; x: number; y: number }
-    | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number }
+    | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number; /** a fusion junction of an RNA track */ fusion?: boolean }
+    /** a junction of the opposite strand of a stranded sample, drawn under the baseline */
+    | { kind: 'anti'; key: string; j: JunctionArc; x: number; y: number }
+    /** split reads of an RNA track continuing on another chromosome (a translocation's fusion junction); `j` marks the breakpoint here */
+    | { kind: 'trans'; key: string; j: JunctionArc; e: ElsewhereLink; x: number; y: number }
     | { kind: 'exon'; exon: { start: number; end: number; rank: number }; x: number; y: number }
+    /** an intron retention pill (usage mode): the intron [start, end) of the model */
+    | { kind: 'retention'; key: string; start: number; end: number; fromExon: number; toExon: number; x: number; y: number }
     | null>(null);
+  /** the bases of the retained intron of the popover, with RETENTION_FLANK exon bases each side (its reading frame) */
+  const [irSeq, setIrSeq] = useState<{ key: string; seq: string | null; error?: string } | null>(null);
   const dragMoved = useRef(false);
   /** Splicing cartoon opened from a junction popover (experimental). */
-  const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string } | null>(null);
+  const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string; /** a fusion transcript: its two partners */ fusion?: { five: FusionEnd; three: FusionEnd } } | null>(null);
   const [cartoonState, setCartoonState] = useState<{ story: SpliceStory | null; loading: string | null; error?: string }>({ story: null, loading: null });
   /** Per-exon depth of every sample of the run (the cohort of the exon-usage statistics), one fetch per gene. */
   const [exonDepths, setExonDepths] = useState<{ key: string; data: ExonUsageResponse | null; error?: string } | null>(null);
@@ -551,6 +1365,37 @@ export default function SashimiViewer({
   const tx: TxModel | null = useMemo(() => (transcript ? toTxModel(transcript) : null), [transcript]);
   const txRef = useRef(tx);
   txRef.current = tx;
+
+  // ---- Strands ----
+  /** a stranded RNA sample, when the strands are shown: its coverage is asked for split by strand */
+  const wantsStrands = useCallback((sid: number) => showStrands && sid > 0 && sampleTypes?.[sid] !== 'dna'
+    && (sampleStrands?.[sid] === 'reverse' || sampleStrands?.[sid] === 'forward'), [showStrands, sampleTypes, sampleStrands]);
+  const wantsStrandsRef = useRef(wantsStrands);
+  wantsStrandsRef.current = wantsStrands;
+  /**
+   * Which strand of the split (reverse rule) is the gene's for a sample: + for a reverse library on a + gene or a forward
+   * library on a − gene. Null when the sample is not split.
+   */
+  const senseOf = useCallback((sid: number): 'plus' | 'minus' | null => {
+    if (!tx || !wantsStrands(sid)) return null;
+    return (sampleStrands?.[sid] === 'reverse') === (tx.strand >= 0) ? 'plus' : 'minus';
+  }, [tx, wantsStrands, sampleStrands]);
+  /**
+   * The supporting reads asked of a sample: on a sample whose strands are shown, a junction's reads of the strand it is
+   * drawn on (the gene's for an arc above the baseline, the other for one below), as its count; every read elsewhere.
+   */
+  const supportFor = useCallback((sid: number): { arc: ArcSupport; key: string } | undefined => {
+    if (!readsSupport || !supportKey) return undefined;
+    const sense = readsSupport.side ? senseOf(sid) : null;
+    const strand = !sense ? undefined : readsSupport.side === 'sense' ? sense : sense === 'plus' ? 'minus' : 'plus';
+    return { arc: strand ? { ...readsSupport.arc, strand } : readsSupport.arc, key: `${supportKey}:${strand ?? ''}` };
+  }, [readsSupport, supportKey, senseOf]);
+  const tracks = useMemo(() => rawTracks.map(t => {
+    const pick = senseOf(t.sampleId);
+    if (!pick || !t.strands) return t;
+    const sense = t.strands[pick], anti = t.strands[pick === 'plus' ? 'minus' : 'plus'];
+    return { ...t, coverage: sense.coverage, junctions: sense.junctions, spanning: sense.spanning ?? t.spanning, anti: { coverage: anti.coverage, junctions: anti.junctions } };
+  }), [rawTracks, senseOf]);
   // a minus-strand gene is drawn 5′→3′ (coordinates decreasing) for RNA; a page of DNA samples only keeps the genomic orientation
   const dnaOnly = tracks.length > 0 && tracks.every(t => sampleTypes?.[t.sampleId] === 'dna');
   const reverse = tx?.strand === -1 && !dnaOnly;
@@ -586,7 +1431,7 @@ export default function SashimiViewer({
   }, [axis]);
 
   const regionStr = useMemo(() => {
-    const fmt = (n: number) => n.toLocaleString();
+    const fmt = (n: number) => n.toLocaleString('en-US');
     return `${currentChrom}:${fmt(viewStart + 1)}-${fmt(viewEnd)} · ${formatBp(viewEnd - viewStart)}`;
   }, [currentChrom, viewStart, viewEnd]);
 
@@ -764,7 +1609,8 @@ export default function SashimiViewer({
   /** Centre the window on a known variant (bands get a 10 % margin, points a 1 kb window at most). */
   // ---- Neighbouring genes: canonical transcript of every other gene overlapping the window ----
   // The data sources cache 500 kb chunks, so panning only costs a request when a new chunk is entered.
-  interface NeighbourModel extends TxModel { geneId: string; biotype: string; isCanonical: boolean }
+  /** a neighbouring gene's drawn model; geneStart / geneEnd: the span of all its transcripts (≥ the model's) */
+  interface NeighbourModel extends TxModel { geneId: string; biotype: string; isCanonical: boolean; geneStart: number; geneEnd: number; otherExons: { start: number; end: number }[] }
   const [neighbours, setNeighbours] = useState<{ chrom: string; start: number; end: number; models: NeighbourModel[] } | null>(null);
   const [neighbourError, setNeighbourError] = useState<string | undefined>();
   const neighbourSeq = useRef(0);
@@ -787,7 +1633,7 @@ export default function SashimiViewer({
   }, [tx, currentChrom, viewStart, viewEnd, currentGeneName]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ---- Exon usage cohort: fetched when a popover first needs it, cached per gene / read filter ----
-  const usageKey = tx ? `${runId}|${tx.transcriptId}|${uniqueOnly ? 'u' : 'a'}` : null;
+  const usageKey = tx ? `${runId}|${tx.transcriptId}|q${minMapq}` : null;
   const usageRequested = useRef<string | null>(null);
   const popoverOpen = popover != null;
   useEffect(() => {
@@ -796,7 +1642,7 @@ export default function SashimiViewer({
     const key = usageKey;
     setExonDepths({ key, data: null });
     const ivs = usageIntervals(tx);
-    ds.getExonUsage(runId, currentChrom, tx.strand, ivs.map(iv => [iv.start, iv.end] as [number, number]), uniqueOnly)
+    ds.getExonUsage(runId, currentChrom, tx.strand, ivs.map(iv => [iv.start, iv.end] as [number, number]), minMapq)
       .then(d => setExonDepths(prev => (prev?.key === key ? { key, data: d } : prev)))
       .catch(e => {
         if (usageRequested.current === key) usageRequested.current = null;   // allow a retry on the next click
@@ -830,29 +1676,30 @@ export default function SashimiViewer({
   useEffect(() => {
     if (!cartoon) { setCartoonState({ story: null, loading: null }); return; }
     let cancelled = false;
-    const { j, model } = cartoon;
+    const { j, model, fusion } = cartoon;
     const others = tracks.flatMap(t => t.junctions);
-    const event = spliceEvent(j, model, others);
     setCartoonState({ story: null, loading: 'fetching the reference sequence…' });
     (async () => {
-      const windows = storyWindows(event);
-      const seqs = await Promise.all(windows.map(([a, b]) => ds.getReference(currentChrom, a, b)));
+      // per chromosome: a translocation's partners lie on two
+      const windows = fusion ? fusionWindows(fusion.five, fusion.three) : storyWindows(spliceEvent(j, model, others)).map(([start, end]) => ({ chrom: currentChrom, start, end }));
+      const seqs = await Promise.all(windows.map(w => ds.getReference(w.chrom, w.start, w.end)));
       if (cancelled) return;
       if (seqs.some(x => x == null)) { setCartoonState({ story: null, loading: null, error: 'No reference sequence available for this gene (set REFERENCE_FASTA or allow access to the UCSC / Ensembl APIs).' }); return; }
-      const seqAt = (a: number, b: number): string => {
-        for (let i = 0; i < windows.length; i++) if (a >= windows[i][0] && b <= windows[i][1]) return seqs[i]!.slice(a - windows[i][0], b - windows[i][0]);
+      const seqAt = (a: number, b: number, chrom = currentChrom): string => {
+        for (let i = 0; i < windows.length; i++) { const w = windows[i]; if (w.chrom === chrom && a >= w.start && b <= w.end) return seqs[i]!.slice(a - w.start, b - w.start); }
         return 'N'.repeat(b - a);
       };
       setCartoonState({ story: null, loading: 'fetching protein domains…' });
-      let features: import('./sashimi/types').ProteinDomain[] = [];
-      if (model.cdsStart != null && model.cdsEnd != null) {
+      const domainsOf = async (m: TxModel): Promise<import('./sashimi/types').ProteinDomain[]> => {
+        if (m.cdsStart == null || m.cdsEnd == null) return [];
         try {
-          features = await ds.getProteinDomains({ transcriptId: model.transcriptId, translationId: model.translationId, chrom: currentChrom, strand: model.strand, exons: model.exons, cdsStart: model.cdsStart, cdsEnd: model.cdsEnd });
-        } catch { features = []; }
-      }
+          return await ds.getProteinDomains({ transcriptId: m.transcriptId, translationId: m.translationId, chrom: m.chrom || currentChrom, strand: m.strand, exons: m.exons, cdsStart: m.cdsStart, cdsEnd: m.cdsEnd });
+        } catch { return []; }
+      };
+      const [features, partnerFeatures] = await Promise.all([domainsOf(fusion ? fusion.five.model : model), fusion ? domainsOf(fusion.three.model) : Promise.resolve([])]);
       if (cancelled) return;
       try {
-        setCartoonState({ story: spliceStory(j, model, others, seqAt, features), loading: null });
+        setCartoonState({ story: fusion ? fusionStory(fusion.five, fusion.three, seqAt, features, partnerFeatures) : spliceStory(j, model, others, seqAt, features), loading: null });
       } catch (e: any) {
         setCartoonState({ story: null, loading: null, error: e?.message || String(e) });
       }
@@ -865,11 +1712,11 @@ export default function SashimiViewer({
     if (!neighbours || neighbours.chrom !== currentChrom || !tx) return [];
     const plotRight = PLOT_LEFT + plotWidth;
     const visible = neighbours.models
-      .filter(m => m.end > viewStart && m.start < viewEnd && m.geneName !== tx.geneName)
-      .sort((a, b) => a.start - b.start);
+      .filter(m => m.geneEnd > viewStart && m.geneStart < viewEnd && m.geneName !== tx.geneName)
+      .sort((a, b) => a.geneStart - b.geneStart);
     const rows: { items: NeighbourModel[]; spans: [number, number][] }[] = [];
     for (const m of visible) {
-      const a = scale.x(m.start), b = scale.x(m.end);
+      const a = scale.x(m.geneStart), b = scale.x(m.geneEnd);
       const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
       const lw = (m.geneName.length + 2) * 5.6 + 10;
       const inside = right - left > lw + 60;
@@ -903,58 +1750,334 @@ export default function SashimiViewer({
     return { model: best.model, info: best.info, foreign: best.foreign };
   }, [tx, neighbours]);
 
-  // ---- Coverage loading (with margin, stale-response protection) ----
-  const viewRef = useRef({ chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly });
-  viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly };
-  const reqSeq = useRef<Map<number, number>>(new Map());
+  /**
+   * Genes at the far end of the junctions that leave the queried gene, by position ("chrom:pos", 0-based: the first
+   * base of the exon reached, or the last one of the exon left), looked up once each; an empty list is no gene there.
+   */
+  const [farGenes, setFarGenes] = useState<Map<string, NeighbourModel[]>>(() => new Map());
+  const farPending = useRef(new Set<string>());
+  /**
+   * A junction with one end inside the queried gene (its displayed model) and the other outside: a read-through or
+   * fusion transcript joining the gene to a neighbour (a deletion, a tandem duplication), or an unannotated first or last
+   * exon. Its share of the reads at the gene's exon end is tiny next to the canonical junction, so it is shown from its
+   * read count (Min reads) rather than its usage share, in its own colour. Null for a junction of the gene (both ends
+   * inside, or annotated in another transcript of it) and for the own junctions of an overlapping neighbour gene.
+   */
+  const longRangeOf = useCallback((j: JunctionArc) => {
+    if (!tx) return null;
+    const startIn = j.start > tx.start && j.start <= tx.end, endIn = j.end >= tx.start && j.end < tx.end;
+    if (startIn === endIn || altJunctionIndex.has(junctionKey(j))) return null;
+    const ctx = junctionContext(j);
+    if (ctx.foreign && (ctx.info.cls === 'canonical' || ctx.info.cls === 'exon_skipping')) return null;
+    const farAtStart = !startIn;
+    const farPos = farAtStart ? j.start - 1 : j.end;
+    const nearInfo = classifyJunction(j, tx);
+    const nearExon = farAtStart ? nearInfo.rightExon : nearInfo.leftExon;
+    const genes = farGenes.get(`${currentChrom}:${farPos}`);
+    // the partner: a gene whose exon boundary the junction reaches, else any gene covering the far end
+    let partner: NeighbourModel | null = null, partnerExon: number | null = null;
+    for (const m of genes ?? []) {
+      const info = classifyJunction(j, m);
+      const ex = farAtStart ? info.leftExon : info.rightExon;
+      if (ex != null && partnerExon == null) { partner = m; partnerExon = ex; }
+      else if (!partner) partner = m;
+    }
+    return { farAtStart, farPos, nearExon, partner, partnerExon, known: genes != null };
+  }, [tx, altJunctionIndex, junctionContext, farGenes, currentChrom]);
+  /**
+   * The two partners of a long-range junction in transcription order, as fusionFrame takes them (the 5′ one's donor, the
+   * 3′ one's acceptor): on one strand, both ends on their gene's exon boundaries. Null otherwise.
+   */
+  const longRangeEnds = useCallback((j: JunctionArc, lr: NonNullable<ReturnType<typeof longRangeOf>>): { five: FusionEnd; three: FusionEnd } | null => {
+    if (!tx || !lr.partner || lr.partner.strand !== tx.strand || lr.partnerExon == null || lr.nearExon == null || lr.partner.geneName === tx.geneName) return null;
+    const left: TxModel = lr.farAtStart ? lr.partner : tx, right: TxModel = lr.farAtStart ? tx : lr.partner;
+    return tx.strand > 0 ? { five: { model: left, pos: j.start }, three: { model: right, pos: j.end } } : { five: { model: right, pos: j.end }, three: { model: left, pos: j.start } };
+  }, [tx]);
+  /** The long-range junction of an arc in words: the two genes in transcription order (5′ partner first), with their exons. */
+  const longRangeLabel = useCallback((j: JunctionArc, lr: NonNullable<ReturnType<typeof longRangeOf>>): string => {
+    const me = `${tx?.geneName ?? 'the gene'}${lr.nearExon != null ? ` exon ${lr.nearExon}` : ' (unannotated site)'}`;
+    const farWhere = `${currentChrom}:${(lr.farPos + 1).toLocaleString('en-US')}`;
+    const other = lr.partner
+      ? `${lr.partner.geneName}${lr.partnerExon != null ? ` exon ${lr.partnerExon}` : ' (inside the gene, off its exon boundaries)'}`
+      : lr.known ? `no annotated gene (${farWhere})` : `${farWhere} (looking up the gene there…)`;
+    const [left, right] = lr.farAtStart ? [other, me] : [me, other];
+    const plus = (tx?.strand ?? 1) > 0;
+    const strand = lr.partner && tx ? (lr.partner.strand === tx.strand ? 'same strand' : 'opposite strand: not a sense read-through') : '';
+    return `long-range junction, leaves ${tx?.geneName ?? 'the gene'}: ${plus ? `${left} → ${right}` : `${right} → ${left}`}` +
+      `${strand ? ` (${strand})` : ''} · read-through or fusion transcript?` +
+      `\nshown from its read count (Min reads), whatever its share of the reads at the exon end (Min usage)`;
+  }, [tx, currentChrom]);
 
-  const fetchWindowFor = (v: { chrom: string; start: number; end: number; uniqueOnly: boolean }): FetchWindow => {
+  /**
+   * A structural arc of an RNA track (split reads, clipped reads placed by realignment) read as a fusion junction. Each
+   * end is drawn on the nearest exon boundary within FUSION_SNAP_BP (the evidence rounds breakpoints to 5 bp, and the
+   * bases the two partners share at a junction let the aligner place it a few bases either way) of the queried gene, a
+   * gene of the view or a gene looked up at the far end, and named after it. The partner whose end is a splice donor
+   * comes first (5′). A deletion-type arc is kept only when it joins two genes (or leaves the gene for no gene): inside
+   * one gene it is splicing, which the junction arcs already show. Arcs under FUSION_MIN_BP (library artefacts) and
+   * those with no end on an exon boundary are left out too. Null when it is left out.
+   */
+  const fusionOf = useCallback((j: SvArc, kind: 'split' | 'duplication' | 'inversion') => {
+    const models: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
+    for (const p of [j.start, j.end]) for (const m of farGenes.get(`${currentChrom}:${p}`) ?? []) if (!models.some(x => x.geneName === m.geneName)) models.push(m);
+    const a = fusionEndAt(j.start, models), b = fusionEndAt(j.end, models);
+    if (kind === 'split' && a.gene === b.gene) return null;
+    // a fusion junction joins parts far apart, and at least one of its ends is a splice site of the model
+    if (Math.abs(b.pos - a.pos) < FUSION_MIN_BP || !(a.snapped || b.snapped)) return null;
+    const known = (p: number) => (p >= viewStart && p < viewEnd) || farGenes.has(`${currentChrom}:${p}`);
+    const name = (e: FusionEndAt) => e.gene
+      ? `${e.gene}${e.exon != null ? ` exon ${e.exon}` : ' (off its exons)'}`
+      : `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')}${known(e.pos) ? ' (no gene)' : ''}`;
+    const rightFirst = b.role === 'donor' || a.role === 'acceptor';
+    const [first, second] = rightFirst ? [b, a] : [a, b];
+    const what = kind === 'inversion' ? 'inversion junction: a fusion transcript across an inversion (the read continues on the other strand)'
+      : kind === 'duplication' ? (a.gene && a.gene === b.gene ? 'duplication-type junction (the read goes back): a back-splice (circular RNA) or a tandem duplication' : 'duplication-type junction (the read goes back): a fusion transcript')
+      : 'deletion-type junction joining two genes: a read-through or fusion transcript';
+    // the reading frame across the junction, from the two partners' coding sequences: a donor of one gene to an acceptor
+    // of another (fusionFrame.ts)
+    const frame = first.role === 'donor' && second.role === 'acceptor' && first.model && second.model && first.gene !== second.gene
+      ? fusionFrame({ model: first.model, pos: first.pos }, { model: second.model, pos: second.pos }) : null;
+    return { start: Math.min(a.pos, b.pos), end: Math.max(a.pos, b.pos), label: `${name(first)} → ${name(second)}`, what, ends: [a, b] as const,
+      oriented: first.role === 'donor' || second.role === 'acceptor', frame,
+      five: frame ? { model: first.model!, pos: first.pos } : null, three: frame ? { model: second.model!, pos: second.pos } : null };
+  }, [tx, neighbours, farGenes, currentChrom, viewStart, viewEnd]);
+  /**
+   * Split reads of an RNA track continuing on another chromosome, read as a fusion junction (a translocation): the end
+   * here snapped on the genes of the view, the far end (where most of the reads continue) on the genes looked up there,
+   * and named as fusionOf names them, the partner whose end is a donor first. Null without the far position (a page
+   * exported before it was kept).
+   */
+  const transOf = useCallback((e: ElsewhereLink) => {
+    if (e.kind !== 'split' || e.farPos == null) return null;
+    const here: TxModel[] = [...(tx ? [tx] : []), ...(neighbours?.chrom === currentChrom ? neighbours.models : [])];
+    const there = farGenes.get(`${e.chrom}:${e.farPos}`);
+    const a = fusionEndAt(e.pos, here), b = fusionEndAt(e.farPos, there ?? []);
+    const where = (x: FusionEndAt, chrom: string) => `${chrom}:${(x.pos + 1).toLocaleString('en-US')}`;
+    const nameA = a.gene ? `${a.gene}${a.exon != null ? ` exon ${a.exon}` : ' (off its exons)'}` : `${where(a, currentChrom)} (no gene)`;
+    const nameB = b.gene ? `${b.gene}${b.exon != null ? ` exon ${b.exon}` : ' (off its exons)'}` : there ? `${where(b, e.chrom)} (no gene)` : `${where(b, e.chrom)} (looking up the gene there…)`;
+    const farFirst = b.role === 'donor' || a.role === 'acceptor';
+    const [first, second] = farFirst ? [b, a] : [a, b];
+    const frame = first.role === 'donor' && second.role === 'acceptor' && first.model && second.model && first.gene !== second.gene
+      ? fusionFrame({ model: first.model, pos: first.pos }, { model: second.model, pos: second.pos }) : null;
+    return {
+      label: farFirst ? `${nameB} (${e.chrom}) → ${nameA}` : `${nameA} → ${nameB} (${e.chrom})`,
+      partner: b.gene || null, partnerChrom: e.chrom, here: a, far: b, oriented: first.role === 'donor' || second.role === 'acceptor', frame,
+      five: frame ? { model: first.model!, pos: first.pos } : null, three: frame ? { model: second.model!, pos: second.pos } : null,
+    };
+  }, [tx, neighbours, farGenes, currentChrom]);
+
+  // ---- Coverage loading (with margin, stale-response protection) ----
+  const viewRef = useRef<{ chrom: string; start: number; end: number; minMapq: number; secondary: boolean; strands?: boolean }>({ chrom: currentChrom, start: viewStart, end: viewEnd, minMapq, secondary: showSecondary });
+  viewRef.current = { chrom: currentChrom, start: viewStart, end: viewEnd, minMapq, secondary: showSecondary };
+  const reqSeq = useRef<Map<number, number>>(new Map());
+  /**
+   * The request in flight per sample. A pan that moves on supersedes it: dropping the answer is not enough,
+   * because the decoding it started keeps the thread for as long as the window is deep. It is aborted instead.
+   */
+  const covAbort = useRef<Map<number, AbortController>>(new Map());
+  const readsAbort = useRef<Map<number, AbortController>>(new Map());
+  const isAbort = (err: unknown) => (err as { name?: string })?.name === 'AbortError';
+
+  // ---- The other build's coordinates (liftover): the pieces of a window three times the view's, fetched again when
+  // the view leaves it ----
+  const [lift, setLift] = useState<{ to: string; chrom: string; start: number; end: number; segs: LiftSegment[] } | null>(null);
+  const [liftStatus, setLiftStatus] = useState<{ loading: boolean; error?: string }>({ loading: false });
+  const [liftCopied, setLiftCopied] = useState(false);
+  useEffect(() => {
+    if (!liftover) { setLift(null); setLiftStatus({ loading: false }); return; }
+    if (lift && lift.to === liftover.to && lift.chrom === currentChrom && lift.start <= viewStart + 1 && lift.end >= viewEnd) return;
+    const ctl = new AbortController();
+    const span = viewEnd - viewStart, start = Math.max(1, viewStart + 1 - span), end = viewEnd + span;
+    const timer = setTimeout(() => {
+      setLiftStatus({ loading: true });
+      liftover.segments(currentChrom, start, end, ctl.signal)
+        .then(segs => { setLift({ to: liftover.to, chrom: currentChrom, start, end, segs }); setLiftStatus({ loading: false }); })
+        .catch(e => { if (!isAbort(e)) setLiftStatus({ loading: false, error: e?.message ?? String(e) }); });
+    }, 300);
+    return () => { clearTimeout(timer); ctl.abort(); };
+  }, [liftover, currentChrom, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** the pieces for the view, when they are the current build's and chromosome's */
+  const liftHere = liftover && lift && lift.to === liftover.to && lift.chrom === currentChrom ? lift.segs : null;
+  /** The known repeat loci (STRchive) of the view, in the view's build: their stretch, 0-based half-open. */
+  const strHere = useMemo(() => {
+    const out: { entry: StrLocus; start: number; end: number }[] = [];
+    for (const entry of STR_LOCI) {
+      if (chromKeyOf(entry.chrom) !== chromKeyOf(currentChrom)) continue;
+      const [start, end] = build === 'GRCh37' ? entry.hg19 : entry.hg38;
+      if (end > viewStart && start < viewEnd) out.push({ entry, start, end });
+    }
+    return out;
+  }, [currentChrom, viewStart, viewEnd, build]);
+  // the sequence strip's bases: the view and as much again on each side, fetched once the view is narrow enough to draw them
+  const seqWanted = viewEnd - viewStart <= SEQ_MAX_BP;
+  useEffect(() => {
+    if (!seqWanted) return;
+    if (seqRef && seqRef.chrom === currentChrom && seqRef.start <= viewStart && seqRef.start + seqRef.seq.length >= viewEnd) return;
+    let live = true;
+    const span = viewEnd - viewStart, a = Math.max(0, viewStart - span), b = viewEnd + span, chrom = currentChrom;
+    const timer = setTimeout(() => {
+      ds.getReference(chrom, a, b)
+        .then(seq => { if (!live) return; if (seq && !/^N*$/.test(seq)) { setSeqRef({ chrom, start: a, seq }); setSeqMiss(false); } else setSeqMiss(true); })
+        .catch(() => { if (live) setSeqMiss(true); });
+    }, 120);
+    return () => { live = false; clearTimeout(timer); };
+  }, [seqWanted, currentChrom, viewStart, viewEnd, ds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Opens the repeat inspector on a known locus (its motifs) or on a stretch picked by hand (the motif of its reference).
+   * The reference around it comes from the source (a FASTA, the network), else from the reads' answer (an exported page).
+   */
+  const openRepeat = useCallback(async (where: { start: number; end: number }, entry?: StrLocus) => {
+    const pad = 2000, a = Math.max(0, where.start - pad), b = where.end + pad;
+    if (!entry) setRepeatSel(p => p && { ...p, busy: true, error: undefined });
+    try {
+      let ref: { start: number; seq: string } | null = null;
+      const s = await ds.getReference(currentChrom, a, b).catch(() => null);
+      if (s && !/^N*$/.test(s)) ref = { start: a, seq: s };
+      if (!ref) {
+        const sid = tracksRef.current.find(t => t.sampleId > 0 && !t.gtex)?.sampleId;
+        if (sid) ref = (await ds.getReads(sid, currentChrom, where.start - REPEAT_FLANK - 50, where.end + REPEAT_FLANK + 50, 0, 50, 'reads', 0, 1, {}).catch(() => null))?.reference ?? null;
+      }
+      if (!ref) throw new Error('no reference sequence for this stretch (add the FASTA, or check the network)');
+      let motif: string | undefined;
+      if (!entry) {
+        const sel = ref.seq.slice(Math.max(0, where.start - ref.start), Math.max(0, where.end - ref.start));
+        const m = detectMotif(sel);
+        if (!m) throw new Error('no tandem repeat in the selection: select the repeat itself');
+        motif = m.motif;
+      }
+      const locus = makeLocus(ref.seq, ref.start, currentChrom, where, entry, motif);
+      if (!locus) throw new Error(entry ? `the ${entry.gene} repeat was not found in the reference here (another build?)` : 'the repeat is too close to the end of the known reference to take its flanks');
+      setInspect(locus);
+      setRepeatSel(null);
+    } catch (e: any) {
+      if (entry) setRepeatSel({ start: where.start, end: where.end, error: e?.message ?? String(e) });
+      else setRepeatSel(p => p && { ...p, busy: false, error: e?.message ?? String(e) });
+    }
+  }, [ds, currentChrom]);
+  /** a 0-based position in the other build, as text (its chromosome when it lands on another one), or null */
+  const liftedText = useCallback((pos0: number, withChrom = false) => {
+    if (!liftHere) return null;
+    const p = liftPos(liftHere, pos0 + 1);
+    if (!p) return null;
+    return `${withChrom || p.chrom.replace(/^chr/i, '') !== currentChrom.replace(/^chr/i, '') ? `${p.chrom}:` : ''}${p.pos.toLocaleString('en-US')}`;
+  }, [liftHere, currentChrom]);
+
+  const fetchWindowFor = (v: { chrom: string; start: number; end: number; minMapq: number; secondary?: boolean }): FetchWindow => {
     const span = v.end - v.start;
     const margin = Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
-    return { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
+    return { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, minMapq: v.minMapq, secondary: !!v.secondary };
   };
-  const covers = (f: FetchWindow | undefined, v: { chrom: string; start: number; end: number; uniqueOnly: boolean }) =>
-    !!f && f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && f.start <= v.start && f.end >= v.end;
+  /** counts split by strand answer a request without the split, not the reverse */
+  const covers = (f: FetchWindow | undefined, v: { chrom: string; start: number; end: number; minMapq: number; secondary?: boolean; strands?: boolean }) =>
+    !!f && f.chrom === v.chrom && f.minMapq === v.minMapq && !!f.secondary === !!v.secondary && (!v.strands || !!f.strands) && f.start <= v.start && f.end >= v.end;
 
   const onLibraryEvidenceRef = useRef(onLibraryEvidence);
   onLibraryEvidenceRef.current = onLibraryEvidence;
   /** DNA samples: no splicing, so no arcs, pills, usage or retention on their tracks. */
   const isDnaSample = useCallback((sid: number) => sampleTypes?.[sid] === 'dna', [sampleTypes]);
-  const isDnaRef = useRef(isDnaSample);
-  isDnaRef.current = isDnaSample;
+  /**
+   * Structural evidence is asked for with the coverage of every sample not known to be RNA. A sample whose type is still
+   * unknown (no aligner in the header) is often recognised as DNA only from the reads of that first coverage: asked for
+   * DNA only, the evidence then needed a second request, and the source, which cannot add it to counts made without it,
+   * read the whole window again. An RNA sample asks for the evidence of an RNA library: split reads and clipped reads
+   * placed by realignment only (its fusion junctions), not the pairs, which introns make look discordant.
+   */
+  const wantsStructuralRef = useRef((sid: number): true | 'rna' => (sampleTypes?.[sid] === 'rna' ? 'rna' : true));
+  wantsStructuralRef.current = (sid: number) => (sampleTypes?.[sid] === 'rna' ? 'rna' : true);
   const isDnaTrack = useCallback((t: TrackData) => !t.gtex && (t.group ? t.group.dna : isDnaSample(t.sampleId)), [isDnaSample]);
+  // the genes at the far end of the long-range junctions shown (at most 20 lookups at a time; cached by the source)
+  useEffect(() => {
+    if (!tx) return;
+    const want: number[] = [];
+    // the far ends of split reads continuing on another chromosome (translocation partners), "chrom:pos"
+    const wantFar: string[] = [];
+    for (const t of tracks) {
+      if (t.gtex || isDnaTrack(t)) continue;
+      for (const j of t.junctions) {
+        if (j.count < minJunctionCount) continue;
+        const lr = longRangeOf(j);
+        const k = lr && `${currentChrom}:${lr.farPos}`;
+        if (lr && !lr.known && !farPending.current.has(k!) && !want.includes(lr.farPos)) want.push(lr.farPos);
+      }
+      if (svHints && t.structural) for (const e of t.structural.elsewhere) {
+        if (e.kind !== 'split' || e.farPos == null || e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
+        const k = `${e.chrom}:${e.farPos}`;
+        if (!farGenes.has(k) && !farPending.current.has(k) && !wantFar.includes(k)) wantFar.push(k);
+      }
+      // the ends of an RNA track's structural arcs outside the genes of the view (fusion partners)
+      if (svHints && t.structural) for (const j of [...deletionSplits(t.structural), ...(t.structural.duplications ?? []), ...(t.structural.inversions ?? [])]) {
+        if (j.count < minJunctionCount) continue;
+        for (const p of [j.start, j.end]) {
+          const k = `${currentChrom}:${p}`;
+          if ((p >= viewStart && p < viewEnd) || farGenes.has(k) || farPending.current.has(k) || want.includes(p)) continue;
+          want.push(p);
+        }
+      }
+    }
+    const jobs = [...want.map(pos => ({ chrom: currentChrom, pos })), ...wantFar.map(k => { const i = k.lastIndexOf(':'); return { chrom: k.slice(0, i), pos: +k.slice(i + 1) }; })];
+    for (const { chrom, pos } of jobs.slice(0, 20)) {
+      const k = `${chrom}:${pos}`;
+      farPending.current.add(k);
+      ds.getRegionGenes(chrom, Math.max(1, pos + 1 - FUSION_SNAP_BP), pos + 1 + FUSION_SNAP_BP, currentGeneName)
+        .then(list => list.map(g => toNeighbourModel(g, chrom)), () => [])
+        .then(models => { farPending.current.delete(k); setFarGenes(prev => new Map(prev).set(k, models)); });
+    }
+  }, [tracks, tx, minJunctionCount, currentChrom, currentGeneName, isDnaTrack, longRangeOf, svHints, viewStart, viewEnd]); // eslint-disable-line react-hooks/exhaustive-deps
   const loadCoverage = useCallback(async (sid: number, sname: string) => {
-    const view = viewRef.current;
-    const win = fetchWindowFor(view);
+    const view = { ...viewRef.current, strands: wantsStrandsRef.current(sid) };
+    const win: FetchWindow = { ...fetchWindowFor(view), strands: view.strands };
     const seq = (reqSeq.current.get(sid) || 0) + 1;
     reqSeq.current.set(sid, seq);
+    covAbort.current.get(sid)?.abort();
+    const ctl = new AbortController();
+    covAbort.current.set(sid, ctl);
     setTracks(prev => {
       const existing = prev.find(t => t.sampleId === sid);
       if (existing) return prev.map(t => t.sampleId === sid ? { ...t, loading: true, error: undefined } : t);
       return [...prev, { sampleId: sid, sampleName: sname, coverage: [], junctions: [], loading: true }];
     });
     try {
-      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.uniqueOnly, boundariesOf(txRef.current),
-        { core: { start: view.start, end: view.end }, maxReads: MAX_READS_PER_TRACK, structural: svHints && isDnaRef.current(sid) });
+      // a deep view is drawn as it fills: each partial answer is exact over the part it covers
+      // A track already complete over the view (a reload for the same window: structural evidence, new exon boundaries)
+      // keeps what it shows until the new answer is complete: its partials would redraw it from the left.
+      const onProgress = (p: SampleCoverage) => {
+        if (reqSeq.current.get(sid) !== seq || !p.window) return;
+        const part: FetchWindow = { ...win, start: p.window.start, end: p.window.end };
+        setTracks(prev => prev.map(t => t.sampleId !== sid || (!t.partial && t.coverage.length && covers(t.fetched, view) && !covers(part, view)) ? t
+          : { ...t, coverage: p.coverage, junctions: p.junctions, spanning: p.spanning, sampled: p.sampled, unavailable: p.unavailable, strands: p.strands, fetched: part, partial: true }));
+      };
+      const data = await ds.getCoverage(sid, win.chrom, win.start, win.end, win.minMapq, boundariesOf(txRef.current),
+        { core: { start: view.start, end: view.end }, maxReads: COVERAGE_MARGIN_READS, structural: svHints && wantsStructuralRef.current(sid), secondary: win.secondary, strands: win.strands, signal: ctl.signal, onProgress });
       if (reqSeq.current.get(sid) !== seq) return; // a newer request superseded this one
       // the source may have read less margin than asked for (deep library): remember what it really covered
       const fetched: FetchWindow = data.window ? { ...win, start: data.window.start, end: data.window.end } : win;
       if (data.spliced) onLibraryEvidenceRef.current?.(sid, { ...data.spliced, multiExon: (txRef.current?.exons.length ?? 0) > 1 });
       setTracks(prev => prev.map(t => t.sampleId === sid ? {
-        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, structural: data.structural, loading: false, error: data.error, fetched,
+        ...t, coverage: data.coverage, junctions: data.junctions, spanning: data.spanning, sampled: data.sampled, unavailable: data.unavailable, structural: data.structural, strands: data.strands, loading: false, error: data.error, fetched, partial: false,
       } : t));
+      // the coverage is counted and kept: the records decoded for it would only serve a reads track, so with none shown
+      // and no other coverage still reading, they are let go now rather than at the libraries' idle timeout
+      if (!showReadsRef.current && covAbort.current.size <= 1) ds.release?.('records');
     } catch (err: any) {
-      if (reqSeq.current.get(sid) !== seq) return;
-      setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, error: err.message } : t));
+      if (reqSeq.current.get(sid) !== seq || isAbort(err)) return;
+      setTracks(prev => prev.map(t => t.sampleId === sid ? { ...t, loading: false, partial: false, error: err.message } : t));
+    } finally {
+      if (covAbort.current.get(sid) === ctl) covAbort.current.delete(sid);
     }
   }, []);
 
-  // ---- Initial load: primary sample + one random comparison ----
+  // ---- Initial load: the samples the view showed (switching views, a session), else primary sample + one random comparison ----
   const didInit = useRef(false);
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    if (sampleId > 0) {
+    // exactly the tracks the view had: a view reduced to one sample stays so (a random comparison came back each time);
+    // a view whose samples are all gone (or that had none, opened before any file) starts as a new view does
+    const kept = (initialSettings?.shownSamples ?? []).filter(sid => !(sampleNames && sampleNames[sid] == null && sid !== sampleId));
+    if (initialSettings?.shownSamples && (kept.length || !initialSettings.shownSamples.length)) {
+      for (const sid of kept) loadCoverage(sid, sampleNames?.[sid] ?? (sid === sampleId ? sampleName : `sample ${sid}`));
+    } else if (sampleId > 0) {
       loadCoverage(sampleId, sampleName);
       ds.getRandomSample(runId, sampleId)
         .then(s => loadCoverage(s.id, s.name))
@@ -997,11 +2120,31 @@ export default function SashimiViewer({
     if (tracks.length === 0) return;
     const timer = setTimeout(() => {
       for (const t of tracksRef.current) {
-        if (!covers(t.fetched, viewRef.current)) loadCoverage(t.sampleId, t.sampleName);
+        if (!covers(t.fetched, { ...viewRef.current, strands: wantsStrandsRef.current(t.sampleId) })) loadCoverage(t.sampleId, t.sampleName);
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [viewStart, viewEnd, currentChrom, uniqueOnly, reloadTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [viewStart, viewEnd, currentChrom, minMapq, showSecondary, reloadTrigger, wantsStrands]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Library orientation: the spliced reads of the gene's own introns, once per sample and gene ----
+  const onStrandEvidenceRef = useRef(onStrandEvidence);
+  onStrandEvidenceRef.current = onStrandEvidence;
+  const strandReported = useRef(new Map<number, string>());
+  useEffect(() => {
+    if (!tx || !onStrandEvidenceRef.current) return;
+    const introns = intronsOf(tx);
+    if (!introns.length) return;
+    const keys = new Set(introns.map(i => i.start * 1e9 + i.end));
+    for (const t of rawTracks) {
+      if (t.sampleId <= 0 || t.gtex || t.group || t.loading || t.partial || isDnaSample(t.sampleId)) continue;
+      if (strandReported.current.get(t.sampleId) === tx.transcriptId) continue;
+      let total = 0, plus = 0;
+      for (const j of t.junctions) if (j.plus != null && keys.has(j.start * 1e9 + j.end)) { total += j.count; plus += j.plus; }
+      if (total < STRAND_EVIDENCE_MIN_READS) continue;
+      strandReported.current.set(t.sampleId, tx.transcriptId);
+      onStrandEvidenceRef.current(t.sampleId, { fraction: tx.strand >= 0 ? plus / total : 1 - plus / total, reads: Math.round(total) });
+    }
+  }, [rawTracks, tx, isDnaSample]);
 
   // ---- Reads track loading (primary sample by default, or every sample; only below the visibility window) ----
   const effectiveReadsSampleId = tracks.some(t => t.sampleId === readsSampleId) ? readsSampleId : (tracks[0]?.sampleId ?? null);
@@ -1009,8 +2152,9 @@ export default function SashimiViewer({
   const addGroup = useCallback(() => setGroups(prev => [...prev, { id: groupIdSeq.current++, name: `Group ${prev.length + 1}`, sampleIds: [] }]), []);
   const renameGroup = useCallback((id: number, name: string) => setGroups(prev => prev.map(g => g.id === id ? { ...g, name } : g)), []);
   const setGroupColor = useCallback((id: number, color: string | undefined) => setGroups(prev => prev.map(g => g.id === id ? { ...g, color } : g)), []);
-  const hideKey = useCallback((j: JunctionArc) => `${currentChrom}:${junctionKey(j)}`, [currentChrom]);
-  const hideArc = useCallback((j: JunctionArc) => { const k = hideKey(j); setHiddenArcs(prev => (prev.includes(k) ? prev : [...prev, k])); setHoverArc(null); }, [hideKey]);
+  /** an arc's key in the hidden arcs and the label sizes; `anti`: the same intron on the opposite strand, a key of its own */
+  const hideKey = useCallback((j: JunctionArc, anti = false) => `${currentChrom}:${anti ? 'anti:' : ''}${junctionKey(j)}`, [currentChrom]);
+  const hideArc = useCallback((j: JunctionArc, anti = false) => { const k = hideKey(j, anti); setHiddenArcs(prev => (prev.includes(k) ? prev : [...prev, k])); setHoverArc(null); }, [hideKey]);
   const hiddenHere = useMemo(() => hiddenArcs.filter(k => k.startsWith(`${currentChrom}:`)).length, [hiddenArcs, currentChrom]);
   const deleteGroup = useCallback((id: number) => setGroups(prev => prev.filter(g => g.id !== id)), []);
   const removeFromGroup = useCallback((id: number, sid: number) => setGroups(prev => prev.map(g => g.id === id ? { ...g, sampleIds: g.sampleIds.filter(x => x !== sid) } : g)), []);
@@ -1032,10 +2176,13 @@ export default function SashimiViewer({
     }
   }, [viewMode, groups, runSamples, loadCoverage]);
 
-  // A sample recognised as DNA after its coverage was loaded: reload once for its structural evidence
+  // A sample recognised as DNA after its coverage was loaded: reload once for its structural evidence. Only when that
+  // evidence is asked for: without structural hints it never comes, `!t.structural` stayed true, and every change of
+  // the sample types (which each reload itself reports) reloaded the DNA tracks again, forever.
   useEffect(() => {
+    if (!svHints) return;
     for (const t of tracksRef.current) if (!t.gtex && isDnaSample(t.sampleId) && !t.structural && !t.loading && t.fetched) loadCoverage(t.sampleId, t.sampleName);
-  }, [sampleTypes, isDnaSample, loadCoverage]);
+  }, [sampleTypes, isDnaSample, loadCoverage, svHints]);
 
   // A new gene model: tracks whose unspliced-read counts miss one of its boundaries reload (sources that never count them are left alone)
   useEffect(() => {
@@ -1050,6 +2197,8 @@ export default function SashimiViewer({
     }
   }, [tx, loadCoverage]);
 
+  /** The reads shown carry haplotags (HP): the file was phased by a tool (WhatsHap, LongPhase, HiPhase, DRAGEN) */
+  const anyHaplotagged = useMemo(() => Object.values(readsData).some(e => (e?.data.haplotags?.tagged ?? 0) > 0), [readsData]);
   /** Samples whose reads are shown, in track order. */
   const readsSampleIds = useMemo(() => !showReads ? [] : readsAll ? tracks.map(t => t.sampleId) : effectiveReadsSampleId == null ? [] : [effectiveReadsSampleId],
     [showReads, readsAll, tracks, effectiveReadsSampleId]);
@@ -1057,31 +2206,149 @@ export default function SashimiViewer({
     if (!readsSampleIds.length) return;
     const v = viewRef.current;
     const span = v.end - v.start;
-    if (span > READS_MAX_VIEW_BP) return;
+    if (span > readsWindow) return;
     const mode = collapseReads ? 'collapsed' : 'reads';
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-    const stale = readsSampleIds.filter(sid => {
-      const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes)) && covers(cur.fetched, v));
-    });
-    if (!stale.length) return;
     // Collapsed groups are computed for the exact window (counts are per window); raw reads get a pan margin
     const margin = collapseReads ? 0 : Math.floor(span * 0.25);
-    const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, uniqueOnly: v.uniqueOnly };
+    const want: FetchWindow = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin, minMapq: v.minMapq, secondary: v.secondary };
+    /**
+     * A window read wider than this one was downsampled to READS_MAX over its whole width: after zooming out and back
+     * in, the view holds only its share of that sample. Reading the new window again gives the view about
+     * min(total / shown, old width / new width) times as many reads; worth it from 1.5×, so a small zoom step or a
+     * window that was not downsampled reads nothing again.
+     */
+    const thin = (cur: ReadsEntry) => {
+      const { shown, total } = cur.data;
+      if (!(shown > 0 && total > shown)) return false;
+      const gain = Math.min(total / shown, (cur.fetched.end - cur.fetched.start) / Math.max(1, want.end - want.start));
+      return gain >= 1.5;
+    };
+    /**
+     * the reads of a DNA track carry their CpG calls while Methylation is on and the view is narrow enough to draw them
+     * (≤ METHYL_READS_MAX_BP): parsing the MM / ML tags of long reads over a wide window would cost the page a pause
+     */
+    const wantMethyl = (sid: number) => showMethyl && mode === 'reads' && span <= METHYL_READS_MAX_BP && isDnaSample(sid) && !!ds.getMethylation;
+    // raw reads grouped by the page's phasing: the source phases the window's reads and says each one's haplotype
+    const wantPhase = mode === 'reads' && readsGroup === 'phase' && !readsSupport;
+    // collapsed reads of a stranded sample with the strands shown: each strand collapsed on its own
+    const strandsFor = (sid: number) => (mode === 'collapsed' ? senseOf(sid) ?? undefined : undefined);
+    const stale = readsSampleIds.filter(sid => {
+      const cur = readsData[sid];
+      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
+        && !(wantMethyl(sid) && !cur.methyl) && !(wantPhase && !cur.phased));
+    });
+    if (!stale.length) return;
     const timer = setTimeout(() => {
       for (const sid of stale) {
         const seq = (readsSeq.current.get(sid) ?? 0) + 1;
         readsSeq.current.set(sid, seq);
+        readsAbort.current.get(sid)?.abort();
+        const ctl = new AbortController();
+        readsAbort.current.set(sid, ctl);
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
-        ds.getReads(sid, want.chrom, want.start, want.end, want.uniqueOnly, READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, haplotypes, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data } })); })
-          .catch((err: any) => { if (readsSeq.current.get(sid) === seq) setReadsError(p => ({ ...p, [sid]: err.message })); })
-          .finally(() => { if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false })); });
+        const sup = mode === 'reads' ? supportFor(sid) : undefined, support = sup?.arc;
+        ds.getReads(sid, want.chrom, want.start, want.end, want.minMapq, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, strands: strandsFor(sid), signal: ctl.signal })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: sup?.key } })); })
+          .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
+          .finally(() => {
+            if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
+            if (readsSeq.current.get(sid) === seq) setReadsLoading(p => ({ ...p, [sid]: false }));
+          });
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, uniqueOnly, readsData, collapseReads, haplotypes, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, minMapq, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, supportFor, readsWindow, readsGroup, showSecondary, senseOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a filter on the supporting reads of an arc belongs to its chromosome
+  useEffect(() => { setReadsSupport(null); }, [currentChrom]);
+
+  // ---- CpG methylation of the long-read DNA tracks (methylation.ts): counted in the worker, kept per sample, and drawn
+  // from prefix sums, so that any zoom or pan inside the counted window costs a few binary searches per pixel ----
+  const [methylData, setMethylData] = useState<Record<number, MethylEntry>>({});
+  const methylAbort = useRef(new Map<number, AbortController>());
+  const methylWasOn = useRef(false);
+  /**
+   * The view is being moved (a pan or zoom frame less than METHYL_SETTLE_MS ago): a reads track with more than
+   * METHYL_TICK_READS_BUDGET coloured reads leaves their CpG calls out until it settles. Such a window (a deep, short-read
+   * long-read library) holds thousands of tick paths whose rows are repacked at every pan frame; redrawing them each
+   * frame halved the frame rate, and the calls are only readable once the view stops anyway.
+   */
+  const [viewMoving, setViewMoving] = useState(false);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!showMethyl) return;
+    setViewMoving(true);
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(() => setViewMoving(false), METHYL_SETTLE_MS);
+    return () => { if (settleTimer.current) clearTimeout(settleTimer.current); };
+  }, [viewStart, viewEnd, showMethyl]);
+  useEffect(() => {
+    if (!showMethyl) {
+      // switched off: stop what runs, forget the counts here and in the worker, and the CpG calls carried by the reads
+      if (!methylWasOn.current) return;
+      methylWasOn.current = false;
+      for (const c of methylAbort.current.values()) c.abort();
+      methylAbort.current.clear();
+      setMethylData({});
+      ds.release?.('methylation');
+      setReadsData(p => Object.values(p).some(e => e.methyl)
+        ? Object.fromEntries(Object.entries(p).map(([k, e]) => [k, e.methyl ? { ...e, methyl: false, data: { ...e.data, reads: e.data.reads.map(({ me: _, ...r }) => r) } } : e]))
+        : p);
+      return;
+    }
+    methylWasOn.current = true;
+    if (!ds.getMethylation) return;
+    const v = viewRef.current, span = v.end - v.start;
+    if (span > METHYL_MAX_VIEW_BP) return;
+    const sids = tracks.filter(t => !t.gtex && !t.group && isDnaSample(t.sampleId)).map(t => t.sampleId);
+    const stale = sids.filter(sid => { const e = methylData[sid]; return !(e && e.chrom === v.chrom && e.start <= v.start && e.end >= v.end); });
+    if (!stale.length) return;
+    // the view and half of it on each side: panning and zooming out a little count nothing new
+    const margin = Math.max(0, Math.floor(Math.min(span * 0.5, (METHYL_MAX_VIEW_BP - span) / 2)));
+    const want = { chrom: v.chrom, start: Math.max(0, v.start - margin), end: v.end + margin };
+    const timer = setTimeout(() => {
+      for (const sid of stale) {
+        methylAbort.current.get(sid)?.abort();
+        const ctl = new AbortController();
+        methylAbort.current.set(sid, ctl);
+        const same = (e?: MethylEntry) => !!e && e.chrom === want.chrom && e.start === want.start && e.end === want.end;
+        // what was counted before stays drawn (where it overlaps) until the new window arrives
+        setMethylData(p => ({ ...p, [sid]: { ...want, w: p[sid]?.chrom === want.chrom ? p[sid]?.w : undefined, prefix: p[sid]?.chrom === want.chrom ? p[sid]?.prefix : undefined, loading: true, progress: 0 } }));
+        ds.getMethylation!(sid, want.chrom, want.start, want.end, {
+          signal: ctl.signal,
+          onProgress: f => setMethylData(p => same(p[sid]) && p[sid].loading ? { ...p, [sid]: { ...p[sid], progress: f } } : p),
+        }).then(w => { if (!ctl.signal.aborted) setMethylData(p => ({ ...p, [sid]: { ...want, w, prefix: methylPrefix(w), loading: false, progress: 1 } })); })
+          .catch((err: any) => { if (!isAbort(err)) setMethylData(p => ({ ...p, [sid]: { ...want, loading: false, progress: 0, error: err?.message ?? String(err) } })); });
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [showMethyl, viewStart, viewEnd, currentChrom, tracks, methylData, isDnaSample, ds]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** the samples whose panel has the two haplotype lanes: the only thing of the counts the track heights depend on */
+  const methylTagged = useMemo(() => Object.entries(methylData).filter(([, e]) => e.prefix?.tagged).map(([k]) => k).join(','), [methylData]);
+  /** the confidence threshold of each sample's counts, the only thing of them the reads colours depend on */
+  const methylThresholds = useMemo(() => Object.entries(methylData).map(([k, e]) => `${k}:${e.w?.thresholds.map(t => `${t.start}=${t.threshold}`).join('/') ?? ''}`).join(','), [methylData]);
+  /** what each panel draws for the current view: O(plot width · log CpGs) per sample, whatever the zoom */
+  const methylDraws = useMemo(() => {
+    const m = new Map<number, MethylDraw | null>();
+    if (!showMethyl) return m;
+    for (const [sid, e] of Object.entries(methylData)) if (e.chrom === currentChrom) m.set(Number(sid), methylDraw(e, scale, viewStart, viewEnd, methylIslands));
+    return m;
+  }, [showMethyl, methylData, scale, viewStart, viewEnd, currentChrom, methylIslands]);
+
+  /** The phase sets met on the chromosome (reads, variant scans, methylation), in PS order: each one's hue (PS_TONES). */
+  const psRank = useMemo(() => {
+    const seen = new Set<number>();
+    for (const e of Object.values(readsData)) if (e?.fetched.chrom === currentChrom) for (const r of e.data.reads) if (r.hp && r.ps != null) seen.add(r.ps);
+    for (const e of Object.values(dnaSites)) if (e.fetched.chrom === currentChrom) for (const st of e.sites) if (st.hap?.ps != null) seen.add(st.hap.ps);
+    for (const e of Object.values(methylData)) if (e.chrom === currentChrom && e.w?.ps) for (const p of e.w.ps) if (!Number.isNaN(p) && p >= 0) seen.add(p);
+    return new Map([...seen].sort((a, b) => a - b).map((p, i) => [p, i]));
+  }, [readsData, dnaSites, methylData, currentChrom]);
+  const psTone = useCallback((ps: number | null | undefined): PsTone => {
+    if (ps == null || Number.isNaN(ps) || ps < 0) return PS_NONE_TONE;
+    const i = psRank.get(ps);
+    return i == null ? PS_NONE_TONE : PS_TONES[i % PS_TONES.length];
+  }, [psRank]);
 
   /** Forgets the variants of a sample: its running scan is stopped and its sites dropped (plain coverage again until the chip is clicked). */
   const forgetVariants = useCallback((sid: number) => {
@@ -1093,7 +2360,43 @@ export default function SashimiViewer({
   }, []);
 
   /**
-   * Scans every read of one or more ranges of the current chromosome for a sample (tile by tile, no read cap, whatever
+   * Overlays switched off let their data go: the variants of every DNA track (scans stopped, sites dropped, the allele
+   * counts kept in the worker released) and the reads of the reads track. They are read again when switched back on;
+   * until then the page holds and redraws nothing for them, so it stays as light as before they were asked for.
+   */
+  const variantsWereOn = useRef(false), rnaVariantsWereOn = useRef(false), readsWereOn = useRef(false);
+  /** the variants of the DNA (or RNA) tracks let go; the worker's counts too once neither kind wants them */
+  const dropVariants = (dna: boolean, other: boolean) => {
+    const sids = new Set([...Object.keys(dnaSites).map(Number), ...dnaSitesAbort.current.keys()]);
+    for (const sid of sids) if (isDnaSample(sid) === dna) { dnaSitesAbort.current.get(sid)?.abort(); forgetVariants(sid); }
+    if (!other) ds.release?.('variants');
+  };
+  useEffect(() => {
+    if (coverageVariants) { variantsWereOn.current = true; return; }
+    if (!variantsWereOn.current) return;
+    variantsWereOn.current = false;
+    dropVariants(true, rnaVariants);
+  }, [coverageVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (rnaVariants) { rnaVariantsWereOn.current = true; return; }
+    if (!rnaVariantsWereOn.current) return;
+    rnaVariantsWereOn.current = false;
+    dropVariants(false, coverageVariants);
+  }, [rnaVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (showReads) { readsWereOn.current = true; return; }
+    if (!readsWereOn.current) return;
+    readsWereOn.current = false;
+    for (const c of readsAbort.current.values()) c.abort();
+    readsAbort.current.clear();
+    for (const [sid, n] of readsSeq.current) readsSeq.current.set(sid, n + 1);   // an answer still on its way is dropped
+    setReadsData({});
+    ds.release?.('records');   // and the decoded records the libraries kept for the next pan
+    setReadsLoading({});
+  }, [showReads]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Scans the reads of one or more ranges of the current chromosome for a sample (tile by tile, sampled only where a tile is deeper than the scan's budget, whatever
    * the width) and stores the sites: replacing what the sample had, or merged into it (`extend`) when the ranges are the
    * parts of the window not scanned yet. The thresholds of the call are the current ones.
    */
@@ -1112,16 +2415,19 @@ export default function SashimiViewer({
     if (!extend) setDnaSites(p => { if (!p[sid]) return p; const { [sid]: _, ...rest } = p; return rest; });
     const live = () => dnaSitesSeq.current.get(sid) === seq;
     const span = ranges.reduce((t, r) => t + (r.end - r.start), 0);
-    const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, signal: ctl.signal };
+    const opts = { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, secondary: v.secondary, signal: ctl.signal };
     (async () => {
       const sites: VariantSite[] = [];
-      let total = 0, done = 0;
+      let total = 0, done = 0, rate = 1, long = false, haplotagged = 0;
       for (const r of ranges) {
-        const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.uniqueOnly, minVaf,
+        const res = await ds.getVariantSites!(sid, v.chrom, r.start, r.end, v.minMapq, minVaf,
           { ...opts, onProgress: f => { if (live()) setDnaSitesProgress(p => ({ ...p, [sid]: (done + f * (r.end - r.start)) / span })); } });
         sites.push(...res.sites); total += res.total; done += r.end - r.start;
+        rate = Math.max(rate, res.sampled?.rate ?? 1);
+        long = long || res.long_reads;
+        haplotagged += res.haplotagged ?? 0;
       }
-      return { sites, total };
+      return { sites, total, rate, long, haplotagged };
     })()
       .then(data => {
         if (!live()) return;
@@ -1129,12 +2435,14 @@ export default function SashimiViewer({
           const old = p[sid];
           const lo = Math.min(...ranges.map(r => r.start)), hi = Math.max(...ranges.map(r => r.end));
           const keep = extend && old && !old.error && old.fetched.chrom === v.chrom;
-          const fetched: FetchWindow = { chrom: v.chrom, uniqueOnly: v.uniqueOnly, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
+          const fetched: FetchWindow = { chrom: v.chrom, minMapq: v.minMapq, secondary: v.secondary, start: keep ? Math.min(old.fetched.start, lo) : lo, end: keep ? Math.max(old.fetched.end, hi) : hi };
           const sites = keep ? [...old.sites, ...data.sites].sort((x, y) => x.pos - y.pos) : data.sites;
-          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true } };
+          const rate = Math.max(data.rate, keep ? old.rate ?? 1 : 1);
+          const haplotagged = (keep ? old.haplotagged ?? 0 : 0) + data.haplotagged;
+          return { ...p, [sid]: { fetched, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites, total: (keep ? old.total : 0) + data.total, full: true, rate: rate > 1 ? rate : undefined, long: data.long, ...(haplotagged ? { haplotagged } : {}) } };
         });
       })
-      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, uniqueOnly: v.uniqueOnly }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
+      .catch((err: any) => { if (live() && err?.name !== 'AbortError') setDnaSites(p => ({ ...p, [sid]: { fetched: { chrom: v.chrom, start: v.start, end: v.end, minMapq: v.minMapq, secondary: v.secondary }, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, sites: [], total: 0, error: err?.message || String(err) } })); })
       .finally(() => { if (live()) { setDnaSitesLoading(p => ({ ...p, [sid]: false })); if (dnaSitesAbort.current.get(sid) === ctl) dnaSitesAbort.current.delete(sid); } });
   }, [minVafPct, minIndelBp, longReadMinVafPct]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1144,13 +2452,11 @@ export default function SashimiViewer({
     for (const k of Object.keys(dnaSites)) { const sid = Number(k); if (!shown.has(sid)) forgetVariants(sid); }
   }, [tracks]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The "variants" chip of a DNA track: scans the whole current window. */
-  const loadAllVariants = useCallback((sid: number) => {
-    const v = viewRef.current;
-    scanVariants(sid, [{ start: v.start, end: v.end }], false);
-  }, [scanVariants]);
 
-  // a scan still running when the viewer unmounts is stopped
-  useEffect(() => () => { for (const c of dnaSitesAbort.current.values()) c.abort(); }, []);
+  // a request still running when the viewer unmounts is stopped, whatever started it
+  useEffect(() => () => {
+    for (const m of [dnaSitesAbort.current, covAbort.current, readsAbort.current]) { for (const c of m.values()) c.abort(); m.clear(); }
+  }, []);
 
   // ---- Mouse interaction ----
   const svgPoint = (e: { clientX: number; clientY: number }) => {
@@ -1161,6 +2467,43 @@ export default function SashimiViewer({
   /** Sequence panel (HTML, never exported): the clipped, inserted and hard-clipped bases of a read, or the consensus of a soft-clip cluster. */
   type SeqItem = { label: string; seq?: string; note?: string; action?: { label: string; run: () => void } };
   const [seqPanel, setSeqPanel] = useState<{ title: string; subtitle?: string; x: number; y: number; items: SeqItem[]; busy?: string; error?: string } | null>(null);
+  /** The evidence of one variant site, from the reads decoded around it (HTML panel, never exported). */
+  const [variantPanel, setVariantPanel] = useState<{ sid: number; name: string; site: VariantSite; long: boolean; x: number; y: number; busy?: boolean; error?: string; ev?: ReadEvidence;
+    /** the reference around the site (an indel's anchor base) and, for an insertion, the inserted bases most reads carry */
+    ref?: { start: number; seq: string } | null; insSeq?: string } | null>(null);
+  /** the coordinate text last copied from the variant panel (a tick on its chip for a moment) */
+  const [variantCopied, setVariantCopied] = useState<string | null>(null);
+  const variantSeq = useRef(0);
+  /** where the variant panel was dragged to: the next ones open there too (until the page is reloaded) */
+  const [variantPanelAt, setVariantPanelAt] = useState<{ left: number; top: number } | null>(null);
+  /** The phasing panel: a site against positions typed in its variant panel (`chr:pos; …`), from the reads. */
+  const [phaseWith, setPhaseWith] = useState('');
+  const [pairPanel, setPairPanel] = useState<{ origin: PairPhaseOrigin; text: string; x: number; y: number } | null>(null);
+  /** picking the phasing panel's sites by clicking them in the variants track, and the last one clicked */
+  const [pairPicking, setPairPicking] = useState(false);
+  const [pairPicked, setPairPicked] = useState<PairPicked | null>(null);
+  /** picking for the phasing panel, for the handlers built in memos (the IR labels) */
+  const pairPickingRef = useRef(false);
+  pairPickingRef.current = !!pairPanel && pairPicking;
+  const openVariantPanel = useCallback(async (sid: number, name: string, site: VariantSite, long: boolean, x: number, y: number) => {
+    const v = viewRef.current, seq = ++variantSeq.current;
+    setVariantPanel({ sid, name, site, long, x, y, busy: true });
+    try {
+      const end = site.pos + (site.kind === 'del' ? site.length : 1);
+      const data = await ds.getReads(sid, v.chrom, Math.max(0, site.pos - 1), end + 1, v.minMapq, 5000, 'reads', 1, 0.01, { secondary: v.secondary });
+      if (variantSeq.current !== seq) return;
+      // an insertion's bases: the sequence most of its reads carry
+      let insSeq: string | undefined;
+      if (site.kind === 'ins') {
+        const n = new Map<string, number>();
+        for (const r of data.reads) r.i.forEach(([p, l], k) => { const b = r.is?.[k]; if (p === site.pos && l === site.length && b) n.set(b, (n.get(b) ?? 0) + 1); });
+        insSeq = [...n].sort((a, b) => b[1] - a[1])[0]?.[0];
+      }
+      setVariantPanel(p => p && { ...p, busy: false, ev: readEvidence(data.reads, site), ref: data.reference ?? null, insSeq });
+    } catch (err: any) {
+      if (variantSeq.current === seq) setVariantPanel(p => p && { ...p, busy: false, error: err?.message ?? String(err) });
+    }
+  }, [ds]);
   const copyText = (text: string) => { try { void navigator.clipboard?.writeText(text); } catch { /* no clipboard */ } };
   const fetchHardClips = useCallback(async (sid: number, r: AlignedRead) => {
     if (!ds.getPrimaryRecord || !r.h) return;
@@ -1169,7 +2512,7 @@ export default function SashimiViewer({
       let found: { seq: string; flags: number; cigar: string } | null = null, where = '';
       for (const part of parseSa(r.sa)) {
         found = await ds.getPrimaryRecord(sid, part.chrom, part.start, r.n);
-        if (found) { where = `${part.chrom}:${(part.start + 1).toLocaleString()}`; break; }
+        if (found) { where = `${part.chrom}:${(part.start + 1).toLocaleString('en-US')}`; break; }
       }
       if (!found) throw new Error('the primary record was not found at the positions the SA tag names');
       const hc = hardClippedBases({ h: r.h, c: r.c, r: r.r, queryLen: queryLength(r) }, found);
@@ -1190,23 +2533,28 @@ export default function SashimiViewer({
     (['left', 'right'] as const).forEach((side, k) => {
       if (!r.c[k]) return;
       const seq = r.cs?.[k];
-      items.push({ label: `${side} soft clip · ${r.c[k]} bp`, seq: seq || undefined, note: seq ? undefined : 'sequence not available' });
+      const partial = !!seq && seq.length < r.c[k];
+      items.push({
+        label: `${side} soft clip · ${r.c[k].toLocaleString('en-US')} bp`, seq: seq || undefined,
+        note: !seq ? 'sequence not available'
+          : partial ? `the ${seq.length.toLocaleString('en-US')} bases next to the alignment only: the source keeps no more of a clip; the rest of a long clip is usually the read's other part` : undefined,
+      });
     });
-    r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString()}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
+    r.i.forEach(([pos, len], k) => items.push({ label: `insertion · ${len} bp after ${chrom}:${pos.toLocaleString('en-US')}`, seq: r.is?.[k] || undefined, note: r.is?.[k] ? undefined : 'sequence not available' }));
     const sa = parseSa(r.sa);
-    for (const p of sa) items.push({ label: 'other part of this read', note: `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand}) · ${p.cigar} · MAPQ ${p.mapq}` });
+    for (const p of sa) items.push({ label: 'other part of this read', note: `${p.chrom}:${(p.start + 1).toLocaleString('en-US')} (${p.strand}) · ${p.cigar} · MAPQ ${p.mapq}` });
     if (r.h && (r.h[0] || r.h[1])) {
       const reachable = !!ds.getPrimaryRecord && sa.length > 0 && !/^read \d+$/.test(r.n);
       items.push({ label: `hard clips · ${r.h[0]} / ${r.h[1]} bp`, note: reachable ? 'the bases sit in the primary record' : 'the bases sit in the primary record, which this page cannot reach',
         action: reachable ? { label: 'Fetch from the primary record', run: () => void fetchHardClips(sid, r) } : undefined });
     }
-    setSeqPanel({ title: r.n, subtitle: `${chrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${r.r ? '−' : '+'} strand · MAPQ ${r.q}${r.f & 2048 ? ' · supplementary record' : ''}`, x, y, items });
+    setSeqPanel({ title: r.n, subtitle: `${chrom}:${(r.s + 1).toLocaleString('en-US')}-${r.e.toLocaleString('en-US')} · ${r.r ? '−' : '+'} strand · MAPQ ${r.q}${r.f & 2048 ? ' · supplementary record' : ''}`, x, y, items });
   }, [ds, fetchHardClips]);   // eslint-disable-line react-hooks/exhaustive-deps
   const openClipConsensus = useCallback((sid: number, pos: number, side: 'left' | 'right', count: number, x: number, y: number) => {
     const v = viewRef.current;
-    const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString()}`;
-    setSeqPanel({ title, subtitle: `${count.toLocaleString()} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
-    ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.uniqueOnly, 5000, 'reads', 1, 0.05, {})
+    const title = `Soft-clip cluster · ${side === 'left' ? 'before' : 'after'} ${v.chrom}:${(pos + (side === 'left' ? 1 : 0)).toLocaleString('en-US')}`;
+    setSeqPanel({ title, subtitle: `${count.toLocaleString('en-US')} reads clipped by ${SV_MIN_CLIP} bases or more`, x, y, items: [], busy: 'reading the clipped reads…' });
+    ds.getReads(sid, v.chrom, Math.max(0, pos - 1), pos + 1, v.minMapq, 5000, 'reads', 1, 0.05, { secondary: v.secondary })
       .then(res => {
         const k = side === 'left' ? 0 : 1;
         const reads = res.reads.filter(r => (side === 'left' ? r.s === pos : r.e === pos) && r.c[k] >= SV_MIN_CLIP);
@@ -1222,15 +2570,22 @@ export default function SashimiViewer({
       .catch((err: any) => setSeqPanel(p => p && { ...p, busy: undefined, error: err.message }));
   }, [ds]);
 
+  /**
+   * The press that started the pan has moved the view: the click that ends it is not a click on what lies under it (a
+   * variant site), so the site marks let the press through to the pan and ignore such a click.
+   */
+  const panMoved = useRef(false);
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const { x } = svgPoint(e);
     setPopover(null); setSeqPanel(null);
-    if (e.ctrlKey || e.metaKey) {
-      setRegionSelect({ startX: x, currentX: x });
+    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+      setRegionSelect({ startX: x, currentX: x, repeat: e.shiftKey && !(e.ctrlKey || e.metaKey) });
+      setRepeatSel(null);
     } else {
       setDragging(true);
       dragStart.current = { x: e.clientX, vStart: scale.vStart, vEnd: scale.vEnd };
+      panMoved.current = false;
     }
     setHover(null);
   }, [scale]);
@@ -1255,6 +2610,7 @@ export default function SashimiViewer({
       }
       if (dragging && dragStart.current) {
         const dx = m.x - dragStart.current.x;
+        if (Math.abs(dx) > 3) panMoved.current = true;
         const vSpan = dragStart.current.vEnd - dragStart.current.vStart;
         const dv = (reverse ? 1 : -1) * (dx / plotWidth) * vSpan;
         setViewFromV(dragStart.current.vStart + dv, dragStart.current.vEnd + dv);
@@ -1270,8 +2626,13 @@ export default function SashimiViewer({
       const x1 = Math.min(regionSelect.startX, regionSelect.currentX);
       const x2 = Math.max(regionSelect.startX, regionSelect.currentX);
       if (x2 - x1 > 5) {
-        const va = scale.pxToV(x1), vb = scale.pxToV(x2);
-        setViewFromV(Math.min(va, vb), Math.max(va, vb));
+        if (regionSelect.repeat) {
+          const a = Math.floor(scale.invert(x1)), b = Math.ceil(scale.invert(x2));
+          setRepeatSel({ start: Math.min(a, b), end: Math.max(a, b) });
+        } else {
+          const va = scale.pxToV(x1), vb = scale.pxToV(x2);
+          setViewFromV(Math.min(va, vb), Math.max(va, vb));
+        }
       }
       setRegionSelect(null);
       return;
@@ -1322,7 +2683,10 @@ export default function SashimiViewer({
   }, []);
 
   // ---- Track management ----
+  /** Samples "Show all" added and has not loaded yet (a track removed meanwhile leaves the set and is not loaded). */
+  const showAllPending = useRef(new Set<number>());
   const removeTrack = useCallback((sid: number) => {
+    showAllPending.current.delete(sid);
     if (sid < 0) { setGtexTracks(prev => prev.filter(t => t.sampleId !== sid)); return; }
     setTracks(prev => prev.filter(t => t.sampleId !== sid));
     reqSeq.current.set(sid, (reqSeq.current.get(sid) || 0) + 1); // drop in-flight responses
@@ -1360,7 +2724,8 @@ export default function SashimiViewer({
   }, [currentGeneName, currentGeneId, gtexTracks, loadGtex]);
   /**
    * Sample tracks followed by the GTEx tissue tracks, as drawn. A tissue track's profile is the usage of
-   * each MANE exon (0–1) computed from the tissue's junction medians at both exon boundaries; tissues
+   * each exon (0–1) computed from the tissue's junction medians at both exon boundaries: the MANE exons, and those
+   * of other transcripts its junctions use; tissues
    * where the gene's median TPM is below GTEX_MIN_TPM show nothing but "low coverage".
    */
   /** One pooled track per sample group: summed coverage, summed junction reads, per-intron shares of every splicing event. */
@@ -1389,13 +2754,24 @@ export default function SashimiViewer({
     const withProfile = gtexTracks.map(t => {
       if (!t.gtex || t.gtex.lowCoverage) return { ...t, coverage: [], junctions: t.gtex?.lowCoverage ? [] : t.junctions };
       if (!tx) return t;
+      // the transcript's exons, and the exons the tissue's own junctions imply outside them (an acceptor followed by a
+      // donor within GTEX_ALT_EXON_MAX_BP: an exon of another transcript, a cryptic exon), each at its usage from the
+      // junction medians at its two boundaries; overlapping ones split at every boundary, the higher usage drawn
+      const segs = tx.exons.map(e => ({ start: e.start, end: e.end }));
+      const inModel = (a: number, b: number) => tx.exons.some(e => e.start < b && e.end > a);
+      const donors = [...new Set(t.junctions.map(j => j.start))].sort((x, y) => x - y);
+      for (const a of new Set(t.junctions.map(j => j.end))) {
+        const b = donors.find(d => d > a);
+        if (b != null && b - a <= GTEX_ALT_EXON_MAX_BP && !inModel(a, b)) segs.push({ start: a, end: b });
+      }
+      const usage = segs.map(sg => exonSiteUsage(sg, t.junctions).usage ?? 0);
+      const cuts = [...new Set(segs.flatMap(sg => [sg.start, sg.end]))].sort((x, y) => x - y);
       const coverage: CoverageRun[] = [];
-      let cursor = tx.exons.length ? tx.exons[0].start : 0;
-      for (const ex of tx.exons) {
-        const u = exonSiteUsage(ex, t.junctions).usage;
-        if (ex.start > cursor) coverage.push({ start: cursor, end: ex.start, depth: 0 });
-        coverage.push({ start: ex.start, end: ex.end, depth: u ?? 0 });
-        cursor = ex.end;
+      for (let k = 0; k + 1 < cuts.length; k++) {
+        const x = cuts[k], y = cuts[k + 1];
+        let d = -1;
+        segs.forEach((sg, i) => { if (sg.start <= x && sg.end >= y) d = Math.max(d, usage[i]); });
+        coverage.push({ start: x, end: y, depth: Math.max(0, d) });
       }
       return { ...t, coverage };
     });
@@ -1435,7 +2811,7 @@ export default function SashimiViewer({
       }
       if (!opened) {
         hintRef.current = undefined;
-        setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString()}`);
+        setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString('en-US')}`);
         setCurrentGeneStart(s); setCurrentGeneEnd(e);
         setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus');
         ax = LINEAR_AXIS;
@@ -1460,6 +2836,32 @@ export default function SashimiViewer({
         setGeneSearchLoading(false);
         return;
       }
+      // On the model in view: a c./n. position or range (c.234, c.*30, c.234+5, c.123_125del),
+      // or an exon by its number (12, exon 12, exons 3-5). Both are read on the transcript that is
+      // drawn, so they only mean anything while one is open; neither can be confused with a gene
+      // symbol or with chr:pos, which is why they are tried here and not before parseLocus.
+      const cdna = parseCdna(query);
+      const exonQ = cdna ? null : parseExonQuery(query);
+      if (cdna || exonQ) {
+        const model = txRef.current;
+        if (!model) {
+          setSearchError(cdna
+            ? 'a c. position is read on a transcript: open a gene first'
+            : 'an exon number is read on a transcript: open a gene first');
+          setGeneSearchLoading(false);
+          return;
+        }
+        const r = cdna ? cdnaGenomicRange(cdna, model) : exonGenomicRange(exonQ!, model);
+        if ('error' in r) { setSearchError(r.error); setGeneSearchLoading(false); return; }
+        // a single base opens the 1 kb window goToLocus gives a point; an exon or a range gets
+        // enough flanking intron to show both of its splice sites
+        const pad = r.end - r.start > 1 ? Math.max(100, Math.round((r.end - r.start) * 0.25)) : 0;
+        await goToLocus({ chrom: model.chrom, start: r.start + 1, end: r.end }, pad);
+        setGeneSearch('');
+        setGeneSearchLoading(false);
+        return;
+      }
+
       const isEnsg = query.toUpperCase().startsWith('ENSG');
       const txData = await ds.getTranscript(query, isEnsg ? query : undefined);
       const model = toTxModel(txData);
@@ -1517,7 +2919,7 @@ export default function SashimiViewer({
   // ======================== Derived rendering data ========================
 
   const globalMaxDepth = useMemo(
-    () => Math.max(1, ...tracks.map(t => maxDepthIn(t.coverage, viewStart, viewEnd))),
+    () => Math.max(1, ...tracks.map(t => trackMaxDepth(t, viewStart, viewEnd))),
     [tracks, viewStart, viewEnd],
   );
 
@@ -1539,48 +2941,18 @@ export default function SashimiViewer({
   const siteLabel = useCallback((st: VariantSite) => {
     const what = st.kind === 'snv' ? `${st.ref}>${st.alt}` : st.kind === 'ins' ? `insertion ${st.alt} bp` : `deletion ${st.alt.slice(1)} bp`;
     const k = knownSnp(st);
-    return `${currentChrom}:${(st.pos + 1).toLocaleString()} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)` +
+    return `${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} · ${what} · ${st.alt_count}/${st.depth} reads (${(st.vaf * 100).toFixed(0)}%)${st.anti ? ' of the gene\'s strand' : ''}` +
+      (st.anti ? `\nopposite strand: ${st.anti.alt}/${st.anti.depth} reads${st.anti.depth ? ` (${Math.round((100 * st.anti.alt) / st.anti.depth)}%)` : ''}` : '') +
       (k ? `\nknown common variant ${k.id} · max AF ${(k.maxAf * 100).toFixed(1)}%` : showSnps && visibleSnps.length ? '\nnot a common variant (dbSNP 155 common)' : '');
   }, [currentChrom, knownSnp, showSnps, visibleSnps.length]);
 
-  type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[]; /** reads of the window are shown (not a placeholder message) */ loaded: boolean };
-  /** One reads track per shown sample (Map in track order); each is drawn under its sample's coverage track. */
-  const readsTracks = useMemo((): Map<number, ReadsTrack> => {
-    const out = new Map<number, ReadsTrack>();
-    if (!showReads) return out;
-    const yOff = 0; // drawn in local coordinates; placed under its sample's coverage track with a translate
-    const span = viewEnd - viewStart;
-    const build = (sid: number): ReadsTrack => {
-    const name = tracks.find(t => t.sampleId === sid)?.sampleName ?? '';
-    const clipId = `sashimi-clip-reads-${sid}`;
-    const frame = (h: number) => <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />;
-    const header = (text: string, color = INK.muted) => (
-      <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
-        <tspan fill={INK.text} fontWeight={700}>{collapseReads ? (haplotypes === 'any' ? 'Consensus reads' : 'Haplotypes') : 'Reads'}</tspan>
-        <tspan fill={color}>{'  '}{name}{name ? ' · ' : ''}{text}</tspan>
-      </text>
-    );
-    const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[], loaded: false });
-
-    if (span > READS_MAX_VIEW_BP) return message(`zoom in below ${formatBp(READS_MAX_VIEW_BP)} to load reads (window is ${formatBp(span)})`);
-    const mode = collapseReads ? 'collapsed' : 'reads';
-    const entry = readsData[sid];
-    const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
-    if (readsError[sid] && !current) return message(readsError[sid]!, UNIQUE_COLOR);
-    if (!current) return message(collapseReads ? (haplotypes === 'any' ? 'collapsing reads…' : 'phasing reads…') : 'loading reads…');
-    // The entry answers the window and the options in force; an older one (a request still running, or one that failed)
-    // keeps its reads on screen while the new answer comes, but its variant sites are not the window's: none go to the coverage.
-    const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, uniqueOnly }) &&
-      entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
-      (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes));
-
-    const ref = current.reference;
-    const sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
-    const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
-    const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
-
-    // Reference segments with sequence: the whole window on a linear axis; only the exons in equal-intron
-    // mode (compressed introns and flanks have no linear scale). Letters appear from 7 px per base.
+  /**
+   * The reference rows over the view, from `top` down: the amino acids of the MANE CDS (codon by codon, once letters
+   * are legible), the transcript strand of a minus-strand gene drawn 5′→3′, and the + strand bases: bars from 1 px per
+   * base, letters from 7 px. Only the exons in equal-intron mode (compressed introns and flanks have no linear scale).
+   * Drawn by the sequence strip under the gene model and above the reads.
+   */
+  const sequenceRows = (ref: { start: number; seq: string } | null | undefined, top: number, aaMinPx = 7) => {
     const segments: [number, number][] = [];
     if (ref) {
       const refEnd = ref.start + ref.seq.length;
@@ -1594,63 +2966,133 @@ export default function SashimiViewer({
       }
     }
     const pxPerBaseOf = (from: number) => Math.abs(scale.x(from + 1) - scale.x(from));
-    const lettersShown = segments.some(([from, to]) => to - from <= 8000 && pxPerBaseOf(from) >= 7);
-    // ---- Amino-acid row (MANE CDS translated codon by codon) above the reference bases, when letters are legible ----
-    const aaRowH = ref && tx && tx.cdsStart != null && lettersShown ? AA_ROW_H : 0;
-    // Minus-strand gene: the transcript-strand bases (complement, read 5′→3′ on the flipped axis) sit above the genomic + strand
+    const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
+    const aaShown = segments.some(([from, to]) => to - from <= SEQ_MAX_BP && pxPerBaseOf(from) >= aaMinPx);
+    // one row of amino acids per coding gene over the view: the gene drawn, then its neighbours (their own models), each
+    // in its own reading frame and orientation
+    const aaModels: TxModel[] = [];
+    if (ref && aaShown) {
+      const cands: TxModel[] = [...(tx ? [tx] : []), ...(axis.kind === 'equal-intron' || neighbours?.chrom !== currentChrom ? [] : neighbours.models)];
+      for (const m of cands) {
+        if (m.cdsStart == null || m.cdsEnd == null || m.cdsEnd <= Math.max(viewStart, ref.start) || m.cdsStart >= Math.min(viewEnd, ref.start + ref.seq.length)) continue;
+        if (aaModels.some(x => x.geneName === m.geneName)) continue;
+        aaModels.push(m);
+      }
+    }
+    const aaRowH = aaModels.length * AA_ROW_H;
     const revRowH = ref && reverse ? READS_SEQ_ROW_H : 0;
     const seqRowH = ref ? READS_SEQ_ROW_H : 0;
-    const bodyTop = yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH;
-    const aaEls: JSX.Element[] = [];
-    if (aaRowH && ref && tx) {
-      const rowY = yOff + READS_HEADER_H + sitesRowH;
+    const els: JSX.Element[] = [];
+    aaModels.forEach((model, row) => {
+      if (!ref) return;
+      const rowY = top + row * AA_ROW_H;
+      const gene = aaModels.length > 1 ? `${model.geneName} · ` : '';
       const seen = new Set<number>();
       for (const [from, to] of segments) {
-        if (to - from > 8000 || pxPerBaseOf(from) < 7) continue;
-        for (const c of codonsInWindow(tx, ref.seq, ref.start, from, to)) {
+        if (to - from > SEQ_MAX_BP || pxPerBaseOf(from) < aaMinPx) continue;
+        for (const c of codonsInWindow(model, ref.seq, ref.start, from, to)) {
           if (seen.has(c.index)) continue;
           seen.add(c.index);
           const fill = c.aa === '*' ? AA_STOP_COLOR : c.index === 1 && c.aa === 'M' ? AA_START_COLOR : AA_FILLS[c.index % 2];
-          const title = c.aa === '*' ? `stop codon (codon ${c.index})` : `${AA_NAMES[c.aa] ?? c.aa}${c.aa !== 'X' ? ` (${c.aa})` : ''} · codon ${c.index}${c.segments.length > 1 ? ' · spans a splice junction' : ''}`;
+          const title = gene + (c.aa === '*' ? `stop codon (codon ${c.index})` : `${AA_NAMES[c.aa] ?? c.aa}${c.aa !== 'X' ? ` (${c.aa})` : ''} · codon ${c.index}${c.segments.length > 1 ? ' · spans a splice junction' : ''}`);
           const spans = c.segments.map(([gs, ge]) => { const a = scale.x(gs), b = scale.x(ge); return { left: Math.min(a, b), w: Math.abs(b - a) }; });
           const widest = spans.reduce((best, sp) => (sp.w > best.w ? sp : best), spans[0]);
-          aaEls.push(
-            <g key={`aa${c.index}`}>
+          els.push(
+            <g key={`aa${row}:${c.index}`}>
               <title>{title}</title>
-              {spans.map((sp, k) => <rect key={k} x={sp.left + 0.5} y={rowY + 2} width={Math.max(1, sp.w - 1)} height={aaRowH - 4} rx={2.5} fill={fill} opacity={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? 0.9 : 0.75} />)}
-              {widest.w >= 9 && <text x={widest.left + widest.w / 2} y={rowY + aaRowH - 4.5} textAnchor="middle" fill={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? '#ffffff' : INK.text} fontSize={10} fontWeight={700}>{c.aa}</text>}
+              {spans.map((sp, k) => <rect key={k} x={sp.left + 0.5} y={rowY + 2} width={Math.max(1, sp.w - 1)} height={AA_ROW_H - 4} rx={2.5} fill={fill} opacity={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? 0.9 : 0.75} />)}
+              {widest.w >= 9 && <text x={widest.left + widest.w / 2} y={rowY + AA_ROW_H - 4.5} textAnchor="middle" fill={c.aa === '*' || (c.index === 1 && c.aa === 'M') ? '#ffffff' : INK.text} fontSize={10} fontWeight={700}>{c.aa}</text>}
             </g>,
           );
         }
       }
-    }
-
-    // ---- Reference row: bars when ≥ 1 px per base, letters when ≥ 7 px. ----
-    const refEls: JSX.Element[] = [];
-    let refNote = '';
+    });
+    let note = '';
     if (ref) {
-      const revY = yOff + READS_HEADER_H + sitesRowH + aaRowH;
-      const rowY = revY + revRowH;
+      const revY = top + aaRowH, rowY = revY + revRowH;
       let drawn = false;
       for (const [from, to] of segments) {
-        if (to - from > 8000) continue;
+        if (to - from > SEQ_MAX_BP) continue;
         const pxPerBase = pxPerBaseOf(from);
         if (pxPerBase < 1) continue;
         drawn = true;
         for (let pos = from; pos < to; pos++) {
           const base = ref.seq[pos - ref.start];
           const { left, w } = basePx(pos);
-          refEls.push(<rect key={`rb${pos}`} x={left} y={rowY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={seqRowH - 4} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
-          if (pxPerBase >= 7) refEls.push(<text key={`rt${pos}`} x={left + w / 2} y={rowY + seqRowH - 5} textAnchor="middle" fill={BASE_COLORS[base] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{base}</text>);
+          els.push(<rect key={`rb${pos}`} x={left} y={rowY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={seqRowH - 4} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
+          if (pxPerBase >= 7) els.push(<text key={`rt${pos}`} x={left + w / 2} y={rowY + seqRowH - 5} textAnchor="middle" fill={BASE_COLORS[base] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{base}</text>);
           if (revRowH) {
             const comp = COMPLEMENT[base] || 'N';
-            refEls.push(<rect key={`vb${pos}`} x={left} y={revY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={revRowH - 4} fill={BASE_COLORS[comp] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
-            if (pxPerBase >= 7) refEls.push(<text key={`vt${pos}`} x={left + w / 2} y={revY + revRowH - 5} textAnchor="middle" fill={BASE_COLORS[comp] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{comp}</text>);
+            els.push(<rect key={`vb${pos}`} x={left} y={revY + 2} width={Math.max(0.5, w - (w > 3 ? 0.5 : 0))} height={revRowH - 4} fill={BASE_COLORS[comp] || BASE_COLORS.N} opacity={pxPerBase >= 7 ? 0.22 : 0.85} />);
+            if (pxPerBase >= 7) els.push(<text key={`vt${pos}`} x={left + w / 2} y={revY + revRowH - 5} textAnchor="middle" fill={BASE_COLORS[comp] || BASE_COLORS.N} fontSize={Math.min(11, pxPerBase * 0.9)} fontWeight={700}>{comp}</text>);
           }
         }
       }
-      if (!drawn) refNote = axis.kind === 'equal-intron' ? 'reference · zoom in to see exon bases (introns are compressed)' : 'reference · zoom in to see bases';
+      if (!drawn) note = axis.kind === 'equal-intron' ? 'reference · zoom in to see exon bases (introns are compressed)' : 'reference · zoom in to see bases';
     }
+    return { aaRowH, aaModels, revRowH, seqRowH, els, note, drawn: els.length > 0 };
+  };
+
+  type ReadsTrack = { height: number; el: JSX.Element; sites: VariantSite[]; /** reads of the window are shown (not a placeholder message) */ loaded: boolean };
+  /** One reads track per shown sample (Map in track order); each is drawn under its sample's coverage track. */
+  const readsTracks = useMemo((): Map<number, ReadsTrack> => {
+    const out = new Map<number, ReadsTrack>();
+    if (!showReads) return out;
+    const yOff = 0; // drawn in local coordinates; placed under its sample's coverage track with a translate
+    const span = viewEnd - viewStart;
+    const build = (sid: number): ReadsTrack => {
+    const name = tracks.find(t => t.sampleId === sid)?.sampleName ?? '';
+    const clipId = `sashimi-clip-reads-${sid}`;
+    const frame = (h: number) => <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />;
+    const filtered = !!readsSupport && !collapseReads;
+    const header = (text: string, color = INK.muted) => (
+      <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
+        <tspan fill={INK.text} fontWeight={700}>{collapseReads ? (haplotypes === 'any' ? 'Consensus reads' : 'Haplotypes') : filtered ? 'Supporting reads' : 'Reads'}</tspan>
+        {filtered && (
+          <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setReadsSupport(null); }}>
+            {'  '}✕ all reads<title>Back to every read of the window</title>
+          </tspan>
+        )}
+        <tspan fill={color}>{'  '}{name}{name ? ' · ' : ''}{text}</tspan>
+      </text>
+    );
+    const message = (text: string, color?: string) => ({ height: 36, el: <g key={`reads${sid}`} fontFamily={FONT}>{frame(36)}{header(text, color)}</g>, sites: [] as VariantSite[], loaded: false });
+
+    if (span > readsWindow) return message(`zoom in below ${formatBp(readsWindow)} to load reads (window is ${formatBp(span)}), or widen the reads window`);
+    const mode = collapseReads ? 'collapsed' : 'reads';
+    const entry = readsData[sid];
+    const current = entry && entry.fetched.chrom === currentChrom && entry.mode === mode ? entry.data : null;
+    if (readsError[sid] && !current) return message(readsError[sid]!, UNIQUE_COLOR);
+    if (!current) return message(collapseReads ? (haplotypes === 'any' ? 'collapsing reads…' : 'phasing reads…') : 'loading reads…');
+    // The entry answers the window and the options in force; an older one (a request still running, or one that failed)
+    // keeps its reads on screen while the new answer comes, but its variant sites are not the window's: none go to the coverage.
+    const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, minMapq, secondary: showSecondary }) &&
+      entry.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) &&
+      entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
+      (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource && entry.strands === (senseOf(sid) ?? undefined)));
+
+    const ref = current.reference;
+    // Strands shown on a stranded sample: a read's strand under the library's orientation, the opposite strand's reads
+    // tinted and packed after the others, the variant sites counted on the gene's strand only (the other's in the tooltip)
+    const sensePick = senseOf(sid);
+    const antiOf = sensePick ? (r: AlignedRead) => (plusStrand(r.f) ? 'plus' : 'minus') !== sensePick : null;
+    let sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
+    if (antiOf && fresh && mode === 'reads') {
+      const senseReads = current.reads.filter(r => !antiOf(r)), antiReads = current.reads.filter(antiOf);
+      const long = !!current.long_reads, minVaf = Math.min(1, Math.max(0, (long ? longReadMinVafPct : minVafPct) / 100));
+      sites = callSites(senseReads, viewStart, viewEnd, ref?.seq ?? null, ref?.start ?? 0, 3, minVaf, 20, long ? minIndelBp : 1);
+      if (sites.length) {
+        const altOf = new Map(callSites(antiReads, viewStart, viewEnd, ref?.seq ?? null, ref?.start ?? 0, 1, 0, 20, long ? minIndelBp : 1).map(x => [`${x.pos}\t${x.kind}\t${x.alt}`, x]));
+        const depthAt = (pos: number) => { let n = 0; for (const r of antiReads) if (r.s <= pos && r.e > pos && r.b.some(([bs, be]) => bs <= pos && be > pos)) n++; return n; };
+        sites = sites.map(st => { const a = altOf.get(`${st.pos}\t${st.kind}\t${st.alt}`); return { ...st, anti: { alt: a?.alt_count ?? 0, depth: a?.depth ?? depthAt(st.pos) } }; });
+      }
+    }
+    const sitesRowH = 0; // stars are drawn in a strip above the sample's sashimi track, not here
+    const basePx = (pos: number) => { const a = scale.x(pos), b = scale.x(pos + 1); return { left: Math.min(a, b), w: Math.max(1, Math.abs(b - a)) }; };
+
+    // no reference rows over the reads: the sequence strip under the gene model shows the bases and amino acids already
+    const aaRowH = 0, revRowH = 0, seqRowH = 0;
+    const bodyTop = yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH;
 
     const refSourceLabel: Record<string, string> = { fasta: 'REFERENCE_FASTA', ensembl: 'Ensembl (server)', browser: 'UCSC API (browser)' };
     const commonInfo = (ref ? ` · reference: ${refSourceLabel[current.reference_source ?? ''] ?? current.reference_source}` : ' · no reference genome (no REFERENCE_FASTA on the server, and the browser could not fetch bases from the UCSC / Ensembl APIs); mismatches only from MD tags') +
@@ -1665,199 +3107,344 @@ export default function SashimiViewer({
           <defs><clipPath id={clipId}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} /></clipPath></defs>
           {frame(height)}
           {header(info, !fresh && readsError[sid] ? UNIQUE_COLOR : undefined)}
-          {aaRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>aa</text>}
-          {revRowH > 0 && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}><title>transcript strand (−): complement of the genomic bases, 5′→3′ left to right</title>ref −</text>}
-          {ref && <text transform={`translate(12, ${yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8}>{revRowH > 0 ? 'ref +' : 'ref'}</text>}
-          {refNote && <text x={PLOT_LEFT + 8} y={yOff + READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH - 5} fill={INK.faint} fontSize={9}>{refNote}</text>}
-          <g clipPath={`url(#${clipId})`}>{aaEls}{refEls}{body}</g>
+          <g clipPath={`url(#${clipId})`}>{body}</g>
         </g>
       ),
     });
 
-    // ======================= Collapsed mode, two haplotypes: phase blocks =======================
-    if (collapseReads && current.phase) {
-      const ph = current.phase;
-      const allSites = ph.sites;
-      const rowStep = GROUP_ROW_H + 4;
-      const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString()}`;
-      const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
-      /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
-      const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
-        const st = allSites[si];
-        const { left, w } = basePx(st.pos);
-        const ww = Math.max(w, 9), cx = left + w / 2;
-        const isAlt = al === 'alt';
-        const letter = st.kind === 'snv' ? (isAlt ? st.alt : st.ref) : (isAlt ? st.alt : '=');
-        const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-        return (
-          <g key={`al${si}`} opacity={muted ? 0.55 : 1}>
-            {title && <title>{title}</title>}
-            <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} strokeDasharray={dashed ? '2 1.5' : undefined} />
-            <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
-          </g>
-        );
-      };
-      const labelEl = (label: string, mid: number, strong: boolean) => {
-        const lw = label.length * 5.6 + 8;
-        return (
-          <g key="label">
-            <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
-            <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={strong ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
-          </g>
-        );
-      };
-      const badgeEl = (text: string, xRight: number, mid: number, strong: boolean) => {
-        const bw = text.length * 5.6 + 10;
-        const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
-        return (
-          <g key="badge">
-            <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
-            <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
-          </g>
-        );
-      };
-      const blocks = ph.blocks.filter(b => b.end > viewStart && b.start < viewEnd);
-      const homIn = ph.hom.filter(si => allSites[si].pos >= viewStart && allSites[si].pos < viewEnd);
-      const unphasedIn = ph.unphased.filter(u => allSites[u.site].pos >= viewStart && allSites[u.site].pos < viewEnd);
-      const rows: JSX.Element[] = [];
-      let ri = 0;
-      const reasonTxt: Record<'no link' | 'conflict', string> = { 'no link': 'no fragment links it to the previous block', conflict: 'the links to the previous block contradict each other (a third haplotype, mosaic alleles or errors)' };
-      for (const b of blocks) {
-        const nFrag = b.support[0] + b.support[1];
-        const a = scale.x(b.start), z = scale.x(b.end);
-        const left = Math.min(a, z), right = Math.max(a, z);
-        const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
-        const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString()}-${b.end.toLocaleString()} · ${b.sites.length} heterozygous sites` +
-          `\nfragments (read + mate): ${b.support[0].toLocaleString()} on H1, ${b.support[1].toLocaleString()} on H2` +
-          (b.ambiguous ? `, ${b.ambiguous.toLocaleString()} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString()} disagreeing with their haplotype at one site or more` : '') +
-          (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
-          (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
-        ([b.h1, b.h2] as const).forEach((hap, hi) => {
+    /**
+     * The collapsed rows of one answer from `bodyTop` down: the whole window, or with the strands split the gene's strand
+     * and then the opposite one's, each phased or grouped on its own reads (ReadsOptions.strands)
+     */
+    type CollapsedAnswer = Pick<ReadsResponse, 'total' | 'shown' | 'sites' | 'groups' | 'phase' | 'haplotypes'>;
+    const collapsedPart = (current: CollapsedAnswer, bodyTop: number): { rows: JSX.Element[]; bodyHeight: number; info: string } | null => {
+      // ======================= Collapsed mode, two haplotypes: consensus rows =======================
+      // From the file's haplotags (HP/PS) or the in-page phasing: each phase set gets one row per haplotype, the consensus
+      // of its reads (covered stretches, the variants at least half of them carry); sets side by side share a lane.
+      if (collapseReads && current.haplotypes) {
+        const hv = current.haplotypes;
+        const ph = current.phase;
+        const rowStep = GROUP_ROW_H + 4;
+        const unit = hv.source === 'tags' ? 'reads' : 'fragments';
+        const sets = hv.sets.filter(st => st.end > viewStart && st.start < viewEnd);
+        const laneEnd: number[] = [], laneOf: number[] = [];
+        for (const st of sets) { let k = laneEnd.findIndex(e => e <= st.start); if (k < 0) { k = laneEnd.length; laneEnd.push(0); } laneEnd[k] = st.end; laneOf.push(k); }
+        const hapsPerLane = laneEnd.map(() => 2);
+        sets.forEach((st, i) => { hapsPerLane[laneOf[i]] = Math.max(hapsPerLane[laneOf[i]], st.haps.length); });
+        const laneTop: number[] = [];
+        let hapRows = 0;
+        for (const n of hapsPerLane) { laneTop.push(hapRows); hapRows += n; }
+        const posTxt = (p: number) => `${currentChrom}:${(p + 1).toLocaleString('en-US')}`;
+        const siteTxt = (x: VariantSite) => x.kind === 'snv' ? `${posTxt(x.pos)} ${x.ref}>${x.alt}` : x.kind === 'ins' ? `${posTxt(x.pos)} insertion of ${x.length} bp` : `${posTxt(x.pos)} deletion of ${x.length} bp`;
+        const rows: JSX.Element[] = [];
+        sets.forEach((st, i) => {
+          const a = scale.x(st.start), z = scale.x(st.end), setLeft = Math.min(a, z);
+          st.haps.forEach((h, hi) => {
+            const row = laneTop[laneOf[i]] + hi;
+            const top = bodyTop + 4 + row * rowStep, mid = top + GROUP_ROW_H / 2;
+            // the set's hue (the file's PS, or the block's rank for the page's own phasing), HP 1 the darker
+            const tone = hv.source === 'tags' ? psTone(st.ps) : PS_TONES[i % PS_TONES.length];
+            const color = h.hap === 1 ? tone.ink : h.hap === 2 ? tone.hp[0] : HAP_COLORS[(h.hap - 1) % HAP_COLORS.length];
+            const parts: JSX.Element[] = [];
+            for (const [cs, ce] of h.covered) {
+              const x1 = scale.x(cs), x2 = scale.x(ce);
+              parts.push(<rect key={`c${cs}`} x={Math.min(x1, x2)} y={top + 3} width={Math.max(1, Math.abs(x2 - x1))} height={GROUP_ROW_H - 6} fill={READ_FILL} rx={1} />);
+            }
+            // splice junctions of the haplotype (RNA): a line across each intron, an arc over the introns of another
+            // junction (an exon skip); in the haplotype's colour where the two haplotypes use it differently
+            const js = (h.junctions ?? []).filter(j => j.end > viewStart && j.start < viewEnd);
+            for (const j of js) {
+              const x1 = scale.x(j.start), x2 = scale.x(j.end), l = Math.min(x1, x2), r = Math.max(x1, x2);
+              const al = st.allelic?.find(a => a.start === j.start && a.end === j.end);
+              const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
+              const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
+              const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
+              const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString('en-US')}): ${j.n.toLocaleString('en-US')} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString('en-US')} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
+                (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
+              const peak = top + 1;
+              parts.push(
+                <g key={`j${j.start}-${j.end}`}><title>{tip}</title>
+                  {nested
+                    ? <path d={`M${l},${mid} Q${(l + r) / 2},${peak - 6} ${r},${mid}`} fill="none" stroke={stroke} strokeWidth={sw} opacity={op} />
+                    : <line x1={l} y1={mid} x2={r} y2={mid} stroke={stroke} strokeWidth={sw} opacity={op} />}
+                  {r - l > 26 && <text x={(l + r) / 2} y={nested ? peak + 1 : mid - 2.5} textAnchor="middle" fill={al ? color : INK.muted} fontSize={8} fontWeight={al ? 700 : 400}>{j.n}</text>}
+                </g>);
+            }
+            for (const x of h.sites) {
+              const tip = `${siteTxt(x)} · carried by ${x.alt_count} of ${x.depth} reads of H${h.hap}`;
+              if (x.kind === 'del') {
+                const x1 = scale.x(x.pos), x2 = scale.x(x.pos + x.length), l = Math.min(x1, x2), w = Math.max(1, Math.abs(x2 - x1));
+                parts.push(<g key={`d${x.pos}-${x.length}`}><title>{tip}</title><rect x={l} y={top + 2} width={w} height={GROUP_ROW_H - 4} fill={INK.bg} /><line x1={l} y1={mid} x2={l + w} y2={mid} stroke="#111827" strokeWidth={2} /></g>);
+              } else if (x.kind === 'ins') {
+                const xi = scale.x(x.pos);
+                parts.push(<g key={`i${x.pos}-${x.length}`}><title>{tip}</title><rect x={xi - 1} y={top + 1} width={2} height={GROUP_ROW_H - 2} fill={INSERTION_COLOR} /></g>);
+              } else {
+                const { left, w } = basePx(x.pos);
+                const ww = Math.max(w, 2);
+                parts.push(
+                  <g key={`m${x.pos}${x.alt}`}><title>{tip}</title>
+                    <rect x={left + w / 2 - ww / 2} y={top + 3} width={ww} height={GROUP_ROW_H - 6} fill={BASE_COLORS[x.alt] || BASE_COLORS.N} />
+                    {w >= 7 && <text x={left + w / 2} y={top + GROUP_ROW_H - 5.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{x.alt}</text>}
+                  </g>);
+              }
+            }
+            const label = `H${h.hap} · ${st.id} · ${h.reads.toLocaleString('en-US')} ${unit}`;
+            const lx = Math.min(plotRight - label.length * 5.4 - 20, Math.max(PLOT_LEFT + 3, setLeft + 3)), lw = label.length * 5.4 + 16;
+            parts.push(
+              <g key="lab">
+                <rect x={lx} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.92} />
+                <rect x={lx + 3} y={mid - 4} width={7} height={8} rx={1.5} fill={color} />
+                <text x={lx + 13} y={mid + 3.5} fill={INK.text} fontSize={9} fontWeight={700}>{label}</text>
+              </g>);
+            const variants = h.sites.map(siteTxt);
+            const title = `H${h.hap} of ${st.id} (${posTxt(st.start)}-${st.end.toLocaleString('en-US')}): consensus of ${h.reads.toLocaleString('en-US')} ${hv.source === 'tags' ? `reads tagged HP ${h.hap}` : 'fragments phased to this haplotype'}` +
+              (h.pc != null ? ` · median PC ${h.pc}` : '') +
+              `\nvariants carried by at least half of them: ${variants.length ? variants.slice(0, 15).join(', ') + (variants.length > 15 ? ` … (${variants.length})` : '') : 'none (reference)'}` +
+              `\ngrey where at least ${HAP_MIN_DEPTH} of its reads cover, blank where fewer` +
+              (sets.length > 1 ? '\nhaplotypes are linked within a phase set, not across: H1 here is unrelated to H1 of another set' : '');
+            rows.push(<g key={`${st.id}h${h.hap}`}><title>{title}</title>{parts}</g>);
+          });
+          if (i > 0) rows.push(<line key={`sep${st.id}`} x1={setLeft} y1={bodyTop + 2} x2={setLeft} y2={bodyTop + 4 + hapRows * rowStep} stroke={INK.faint} strokeWidth={1} strokeDasharray="3 3"><title>{`${st.id} starts: the haplotypes are not linked across this line`}</title></line>);
+        });
+        let ri = hapRows;
+        // heterozygous sites the haplotypes do not split, and (in-page phasing) the unphased ones
+        const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
+        const flagged = [
+          ...hv.notSplit.map(n => ({ pos: n.pos, text: `${posTxt(n.pos)} ${n.alt}: not split by the haplotypes of ${n.set} (alternate allele on ${n.fractions.map(f => `${Math.round(f * 100)} %`).join(' / ')} of the H1 / H2 ${unit}): mis-phased, mosaic, a third haplotype or a collapsed duplication` })),
+          ...(ph ? ph.unphased.map(u => ({ pos: ph.sites[u.site].pos, text: `${posTxt(ph.sites[u.site].pos)} ${ph.sites[u.site].alt} (${(ph.sites[u.site].vaf * 100).toFixed(0)} % of ${ph.sites[u.site].depth} reads): unphased, ${why[u.reason]}` })) : []),
+        ].filter(f => f.pos >= viewStart && f.pos < viewEnd);
+        if (flagged.length) {
           const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
           ri++;
-          const parts: JSX.Element[] = [];
-          parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
-          b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
-          const share = nFrag ? b.support[hi] / nFrag : 0;
-          parts.push(badgeEl(`${b.support[hi].toLocaleString()} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
-          parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
-          const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
-          rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
-        });
+          const parts = flagged.map((f, k) => { const { left, w } = basePx(f.pos); const ww = Math.max(w, 7); return <g key={`f${f.pos}-${k}`}><title>{f.text}</title><rect x={left + w / 2 - ww / 2} y={top + 2} width={ww} height={GROUP_ROW_H - 4} fill={INK.bg} stroke={INK.muted} strokeWidth={1} strokeDasharray="2 1.5" rx={2} /></g>; });
+          const label = `${hv.notSplit.length ? 'not split' : 'unphased'} · ${flagged.length}`;
+          parts.push(<g key="lab"><rect x={PLOT_LEFT + 3} y={mid - 7} width={label.length * 5.6 + 8} height={14} rx={3} fill={INK.bg} opacity={0.9} /><text x={PLOT_LEFT + 7} y={mid + 3.5} fill={INK.muted} fontSize={9} fontWeight={700}>{label}</text></g>);
+          rows.push(<g key="flagged">{parts}</g>);
+        }
+        if (!sets.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{!current.total ? 'no reads in this window' : hv.source === 'tags' ? 'no haplotagged read in this window' : `no phase block in this window (heterozygous sites ${HET_MIN * 100}–${HET_MAX * 100} %, linked by at least 2 fragments)`}</text>);
+        const bodyHeight = Math.max(1, ri) * rowStep + 6;
+        const nAllelic = sets.reduce((n, st) => n + (st.allelic?.filter(a => a.end > viewStart && a.start < viewEnd).length ?? 0), 0);
+        const info = `${hv.source === 'tags' ? 'haplotags of the file (HP, PS)' : 'read-based phasing'} · ${sets.length} phase set${sets.length === 1 ? '' : 's'} · ${hv.assigned.toLocaleString('en-US')} reads on a haplotype, ${hv.unassigned.toLocaleString('en-US')} not` +
+          (hv.checked ? ` · ${hv.checked} heterozygous site${hv.checked === 1 ? '' : 's'} checked: ${hv.notSplit.length} not split, ${hv.conflicting.toLocaleString('en-US')} ${unit} against their haplotype` : '') +
+          (nAllelic ? ` · ${nAllelic} junction${nAllelic === 1 ? '' : 's'} used differently by the haplotypes` : '') +
+          (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
+        return { rows, bodyHeight, info };
       }
-      if (homIn.length) {
-        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
-        ri++;
-        const parts: JSX.Element[] = homIn.map(si => glyph(si, 'alt', top, true, false, `${posTxt(si)} ${alleleTxt(si, 'alt')}: homozygous (${(allSites[si].vaf * 100).toFixed(0)} % of ${allSites[si].depth} reads), on both haplotypes`));
-        parts.push(labelEl(`both haplotypes · ${homIn.length} homozygous`, mid, false));
-        rows.push(<g key="hom">{parts}</g>);
-      }
-      if (unphasedIn.length) {
-        const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
-        ri++;
-        const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
-        const parts: JSX.Element[] = unphasedIn.map(u => glyph(u.site, 'alt', top, true, true, `${posTxt(u.site)} ${alleleTxt(u.site, 'alt')} (${(allSites[u.site].vaf * 100).toFixed(0)} % of ${allSites[u.site].depth} reads): unphased, ${why[u.reason]}`));
-        parts.push(labelEl(`unphased · ${unphasedIn.length}`, mid, false));
-        rows.push(<g key="unphased">{parts}</g>);
-      }
-      if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
-      const bodyHeight = Math.max(1, ri) * rowStep + 6;
-      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const info = `${current.total.toLocaleString()} reads · ${ph.fragments.toLocaleString()} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
-        (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + commonInfo;
-      return wrap(height, info, rows, bodyHeight);
-    }
 
-    // ======================= Collapsed mode: consensus rows =======================
-    if (collapseReads) {
-      // Consensus rows in display order (left to right on the plot) so that the groups of one phase
-      // block sit next to each other; ambiguous buckets follow, the minor bucket last.
-      const leftPx = (g: ReadGroup) => Math.min(...g.blocks.map(([bs, be]) => Math.min(scale.x(bs), scale.x(be))));
-      const rank = { consensus: 0, ambiguous: 1, minor: 2 } as const;
-      const groups: ReadGroup[] = [...(current.groups || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || (a.kind === 'consensus' ? leftPx(a) - leftPx(b) : b.n - a.n));
-      const allSites: VariantSite[] = current.sites || [];
-      const hNum = (id: string) => parseInt(id.slice(1)) || 0;
-      const ambLabel = (g: ReadGroup) => {
-        const ids = [...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b));
-        return ids.length > 3 ? `? · ${ids.length} groups` : `${ids.join('|')} ?`;
-      };
-      const rowStep = GROUP_ROW_H + 4;
-      const bodyHeight = Math.max(1, groups.length) * rowStep + 6;
-      const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
-      const rows = groups.map((g, gi) => {
-        const top = bodyTop + 4 + gi * rowStep, mid = top + GROUP_ROW_H / 2;
-        const isCons = g.kind === 'consensus';
-        const fill = isCons ? READ_FILL : '#e2e5ea';
-        const parts: JSX.Element[] = [];
-        for (const [bs, be] of g.blocks) {
-          const a = scale.x(bs), b = scale.x(be);
-          parts.push(<rect key={`u${bs}`} x={Math.min(a, b)} y={top + 3} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H - 6} fill={fill} opacity={0.4} rx={1} />);
-        }
-        for (const [bs, be] of g.dense) {
-          const a = scale.x(bs), b = scale.x(be);
-          parts.push(<rect key={`d${bs}`} x={Math.min(a, b)} y={top} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H} fill={fill} rx={1.5}
-            strokeDasharray={isCons ? undefined : '3 2'} stroke={isCons ? undefined : INK.faint} strokeWidth={isCons ? 0 : 0.8} />);
-        }
-        for (const [js, je] of g.chain) {
-          parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#6b7280" strokeWidth={1.4} />);
-        }
-        if (!g.chain.length) {
-          for (let k = 0; k + 1 < g.blocks.length; k++) {
-            parts.push(<line key={`c${k}`} x1={scale.x(g.blocks[k][1])} y1={mid} x2={scale.x(g.blocks[k + 1][0])} y2={mid} stroke={INK.faint} strokeWidth={1} strokeDasharray="2 3" />);
-          }
-        }
-        // Alleles at the variable sites
-        const alleleTxt: string[] = [];
-        allSites.forEach((st, si) => {
-          const al = g.alleles[si];
-          if (!al || al === '.') return;
+      // ======================= Collapsed mode, two haplotypes: phase blocks =======================
+      if (collapseReads && current.phase) {
+        const ph = current.phase;
+        const allSites = ph.sites;
+        const rowStep = GROUP_ROW_H + 4;
+        const posTxt = (si: number) => `${currentChrom}:${(allSites[si].pos + 1).toLocaleString('en-US')}`;
+        const alleleTxt = (si: number, al: 'ref' | 'alt') => { const st = allSites[si]; return st.kind === 'snv' ? `${st.ref}>${al === 'alt' ? st.alt : st.ref}` : al === 'alt' ? st.alt : 'ref'; };
+        /** allele glyph of one site on one row (the same drawing as the consensus groups; muted = homozygous or unphased) */
+        const glyph = (si: number, al: 'ref' | 'alt', top: number, muted: boolean, dashed = false, title?: string) => {
+          const st = allSites[si];
           const { left, w } = basePx(st.pos);
           const ww = Math.max(w, 9), cx = left + w / 2;
-          const isAlt = al !== 'ref';
-          const letter = st.kind === 'snv' ? (al === 'alt' ? st.alt : al === 'ref' ? st.ref : al) : (isAlt ? st.alt : '=');
+          const isAlt = al === 'alt';
+          const letter = st.kind === 'snv' ? (isAlt ? st.alt : st.ref) : (isAlt ? st.alt : '=');
           const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-          parts.push(
-            <g key={`al${si}`}>
-              <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} />
+          return (
+            <g key={`al${si}`} opacity={muted ? 0.55 : 1}>
+              {title && <title>{title}</title>}
+              <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} strokeDasharray={dashed ? '2 1.5' : undefined} />
               <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
+            </g>
+          );
+        };
+        const labelEl = (label: string, mid: number, strong: boolean) => {
+          const lw = label.length * 5.6 + 8;
+          return (
+            <g key="label">
+              <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
+              <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={strong ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
+            </g>
+          );
+        };
+        const badgeEl = (text: string, xRight: number, mid: number, strong: boolean) => {
+          const bw = text.length * 5.6 + 10;
+          const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
+          return (
+            <g key="badge">
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
+            </g>
+          );
+        };
+        const blocks = ph.blocks.filter(b => b.end > viewStart && b.start < viewEnd);
+        const homIn = ph.hom.filter(si => allSites[si].pos >= viewStart && allSites[si].pos < viewEnd);
+        const unphasedIn = ph.unphased.filter(u => allSites[u.site].pos >= viewStart && allSites[u.site].pos < viewEnd);
+        const rows: JSX.Element[] = [];
+        let ri = 0;
+        const reasonTxt: Record<'no link' | 'conflict', string> = { 'no link': 'no fragment links it to the previous block', conflict: 'the links to the previous block contradict each other (a third haplotype, mosaic alleles or errors)' };
+        for (const b of blocks) {
+          const nFrag = b.support[0] + b.support[1];
+          const a = scale.x(b.start), z = scale.x(b.end);
+          const left = Math.min(a, z), right = Math.max(a, z);
+          const adjacent = b.sites.slice(0, -1).map((si, k) => { const sj = b.sites[k + 1]; const l = b.links.find(x => (x.a === si && x.b === sj) || (x.a === sj && x.b === si)); return `${posTxt(si).split(':')[1]}–${posTxt(sj).split(':')[1]}: ${l ? `${l.same} same, ${l.diff} opposite` : 'no fragment'}`; });
+          const common = `${b.id}: ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')} · ${b.sites.length} heterozygous sites` +
+            `\nfragments (read + mate): ${b.support[0].toLocaleString('en-US')} on H1, ${b.support[1].toLocaleString('en-US')} on H2` +
+            (b.ambiguous ? `, ${b.ambiguous.toLocaleString('en-US')} fitting both equally` : '') + (b.conflicting ? `, ${b.conflicting.toLocaleString('en-US')} disagreeing with their haplotype at one site or more` : '') +
+            (b.breakBefore ? `\nstarts a new block: ${reasonTxt[b.breakBefore]}` : '') +
+            (adjacent.length ? `\nlinks between neighbouring sites: ${adjacent.join('; ')}` : '');
+          ([b.h1, b.h2] as const).forEach((hap, hi) => {
+            const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+            ri++;
+            const parts: JSX.Element[] = [];
+            parts.push(<rect key="bar" x={left} y={top + 3} width={Math.max(2, right - left)} height={GROUP_ROW_H - 6} fill={READ_FILL} opacity={0.4} rx={1} />);
+            b.sites.forEach((si, k) => parts.push(glyph(si, hap[k], top, false)));
+            const share = nFrag ? b.support[hi] / nFrag : 0;
+            parts.push(badgeEl(`${b.support[hi].toLocaleString('en-US')} fragments · ${(share * 100).toFixed(share < 0.1 ? 1 : 0)}%`, right + 6, mid, true));
+            parts.push(labelEl(`H${hi + 1} · ${b.id}`, mid, true));
+            const alleles = b.sites.map((si, k) => `${posTxt(si)} ${alleleTxt(si, hap[k])}${hap[k] === 'ref' ? ' (ref)' : ''}`).join(', ');
+            rows.push(<g key={`${b.id}h${hi}`}><title>{`H${hi + 1} of ${common}\nalleles: ${alleles}`}</title>{parts}</g>);
+          });
+        }
+        if (homIn.length) {
+          const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+          ri++;
+          const parts: JSX.Element[] = homIn.map(si => glyph(si, 'alt', top, true, false, `${posTxt(si)} ${alleleTxt(si, 'alt')}: homozygous (${(allSites[si].vaf * 100).toFixed(0)} % of ${allSites[si].depth} reads), on both haplotypes`));
+          parts.push(labelEl(`both haplotypes · ${homIn.length} homozygous`, mid, false));
+          rows.push(<g key="hom">{parts}</g>);
+        }
+        if (unphasedIn.length) {
+          const top = bodyTop + 4 + ri * rowStep, mid = top + GROUP_ROW_H / 2;
+          ri++;
+          const why: Record<UnphasedSite['reason'], string> = { low: `below ${HET_MIN * 100} % alternate allele: mosaic, subclonal or errors`, unlinked: 'no fragment links it to another heterozygous site', conflict: 'the links contradict each other' };
+          const parts: JSX.Element[] = unphasedIn.map(u => glyph(u.site, 'alt', top, true, true, `${posTxt(u.site)} ${alleleTxt(u.site, 'alt')} (${(allSites[u.site].vaf * 100).toFixed(0)} % of ${allSites[u.site].depth} reads): unphased, ${why[u.reason]}`));
+          parts.push(labelEl(`unphased · ${unphasedIn.length}`, mid, false));
+          rows.push(<g key="unphased">{parts}</g>);
+        }
+        if (!ri) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>{current.total ? `no heterozygous site in this window (${HET_MIN * 100}–${HET_MAX * 100} % alternate allele, at least 3 reads and ${minVafPct} % of the depth)` : 'no reads in this window'}</text>);
+        const bodyHeight = Math.max(1, ri) * rowStep + 6;
+        const info = `${current.total.toLocaleString('en-US')} reads · ${ph.fragments.toLocaleString('en-US')} fragments · ${ph.het} heterozygous site${ph.het === 1 ? '' : 's'} → ${ph.blocks.length} phase block${ph.blocks.length === 1 ? '' : 's'}` +
+          (ph.unphased.length ? ` · ${ph.unphased.length} unphased` : '') + (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + commonInfo;
+        return { rows, bodyHeight, info };
+      }
+
+      // ======================= Collapsed mode: consensus rows =======================
+      if (collapseReads) {
+        // Consensus rows in display order (left to right on the plot) so that the groups of one phase
+        // block sit next to each other; ambiguous buckets follow, the minor bucket last.
+        const leftPx = (g: ReadGroup) => Math.min(...g.blocks.map(([bs, be]) => Math.min(scale.x(bs), scale.x(be))));
+        const rank = { consensus: 0, ambiguous: 1, minor: 2 } as const;
+        const groups: ReadGroup[] = [...(current.groups || [])].sort((a, b) => rank[a.kind] - rank[b.kind] || (a.kind === 'consensus' ? leftPx(a) - leftPx(b) : b.n - a.n));
+        const allSites: VariantSite[] = current.sites || [];
+        const hNum = (id: string) => parseInt(id.slice(1)) || 0;
+        const ambLabel = (g: ReadGroup) => {
+          const ids = [...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b));
+          return ids.length > 3 ? `? · ${ids.length} groups` : `${ids.join('|')} ?`;
+        };
+        const rowStep = GROUP_ROW_H + 4;
+        const bodyHeight = Math.max(1, groups.length) * rowStep + 6;
+        const rows = groups.map((g, gi) => {
+          const top = bodyTop + 4 + gi * rowStep, mid = top + GROUP_ROW_H / 2;
+          const isCons = g.kind === 'consensus';
+          const fill = isCons ? READ_FILL : '#e2e5ea';
+          const parts: JSX.Element[] = [];
+          for (const [bs, be] of g.blocks) {
+            const a = scale.x(bs), b = scale.x(be);
+            parts.push(<rect key={`u${bs}`} x={Math.min(a, b)} y={top + 3} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H - 6} fill={fill} opacity={0.4} rx={1} />);
+          }
+          for (const [bs, be] of g.dense) {
+            const a = scale.x(bs), b = scale.x(be);
+            parts.push(<rect key={`d${bs}`} x={Math.min(a, b)} y={top} width={Math.max(1, Math.abs(b - a))} height={GROUP_ROW_H} fill={fill} rx={1.5}
+              strokeDasharray={isCons ? undefined : '3 2'} stroke={isCons ? undefined : INK.faint} strokeWidth={isCons ? 0 : 0.8} />);
+          }
+          for (const [js, je] of g.chain) {
+            parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#6b7280" strokeWidth={1.4} />);
+          }
+          if (!g.chain.length) {
+            for (let k = 0; k + 1 < g.blocks.length; k++) {
+              parts.push(<line key={`c${k}`} x1={scale.x(g.blocks[k][1])} y1={mid} x2={scale.x(g.blocks[k + 1][0])} y2={mid} stroke={INK.faint} strokeWidth={1} strokeDasharray="2 3" />);
+            }
+          }
+          // Alleles at the variable sites
+          const alleleTxt: string[] = [];
+          allSites.forEach((st, si) => {
+            const al = g.alleles[si];
+            if (!al || al === '.') return;
+            const { left, w } = basePx(st.pos);
+            const ww = Math.max(w, 9), cx = left + w / 2;
+            const isAlt = al !== 'ref';
+            const letter = st.kind === 'snv' ? (al === 'alt' ? st.alt : al === 'ref' ? st.ref : al) : (isAlt ? st.alt : '=');
+            const color = st.kind === 'snv' ? (BASE_COLORS[letter] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
+            parts.push(
+              <g key={`al${si}`}>
+                <rect x={cx - ww / 2} y={top} width={ww} height={GROUP_ROW_H} fill={isAlt ? color : INK.bg} stroke={isAlt ? color : INK.faint} strokeWidth={isAlt ? 0 : 0.8} rx={2} />
+                <text x={cx} y={top + GROUP_ROW_H - 4.5} textAnchor="middle" fill={isAlt ? '#fff' : INK.muted} fontSize={letter.length > 1 ? 7 : 9} fontWeight={700}>{letter}</text>
+              </g>,
+            );
+            alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
+          });
+          // Support badge just after the last block (or pinned inside the right edge)
+          const xs = g.blocks.flatMap(([bs, be]) => [scale.x(bs), scale.x(be)]);
+          const rightEnd = Math.min(plotRight - 4, Math.max(...xs) + 6);
+          const badge = `${g.n.toLocaleString('en-US')} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
+          const bw = badge.length * 5.6 + 10;
+          const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
+          parts.push(
+            <g key="badge">
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{badge}</text>
             </g>,
           );
-          alleleTxt.push(`${currentChrom}:${(st.pos + 1).toLocaleString()} ${st.kind === 'snv' ? `${st.ref}>${letter}` : `${isAlt ? st.alt : 'ref'}`}${isAlt ? '' : ' (ref)'}`);
+          // Row label at the left edge
+          const label = g.kind === 'minor' ? `minor · ${g.patterns} pattern${g.patterns === 1 ? '' : 's'}` : g.kind === 'ambiguous' ? ambLabel(g) : g.id;
+          const lw = label.length * 5.6 + 8;
+          parts.push(
+            <g key="label">
+              <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
+              <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={isCons ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
+            </g>,
+          );
+          const chainTxt = g.chain.map(([js, je]) => junctionContext({ start: js, end: je, count: g.n }).info.label).join('; ');
+          const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString('en-US')} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString('en-US')} absorbed as compatible` : ''}`
+            : g.kind === 'ambiguous' ? `${g.n.toLocaleString('en-US')} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
+            : `${g.n.toLocaleString('en-US')} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
+            (chainTxt ? `\nsplicing: ${chainTxt}` : '\nsplicing: none (unspliced)') +
+            (alleleTxt.length ? `\nalleles: ${alleleTxt.join(', ')}` : '');
+          return <g key={g.id}><title>{title}</title>{parts}</g>;
         });
-        // Support badge just after the last block (or pinned inside the right edge)
-        const xs = g.blocks.flatMap(([bs, be]) => [scale.x(bs), scale.x(be)]);
-        const rightEnd = Math.min(plotRight - 4, Math.max(...xs) + 6);
-        const badge = `${g.n.toLocaleString()} reads · ${(g.frac * 100).toFixed(g.frac < 0.1 ? 1 : 0)}%`;
-        const bw = badge.length * 5.6 + 10;
-        const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
-        parts.push(
-          <g key="badge">
-            <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#6b7280' : INK.faint} strokeWidth={0.8} />
-            <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{badge}</text>
-          </g>,
-        );
-        // Row label at the left edge
-        const label = g.kind === 'minor' ? `minor · ${g.patterns} pattern${g.patterns === 1 ? '' : 's'}` : g.kind === 'ambiguous' ? ambLabel(g) : g.id;
-        const lw = label.length * 5.6 + 8;
-        parts.push(
-          <g key="label">
-            <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} />
-            <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={isCons ? INK.text : INK.muted} fontSize={9} fontWeight={700}>{label}</text>
-          </g>,
-        );
-        const chainTxt = g.chain.map(([js, je]) => junctionContext({ start: js, end: je, count: g.n }).info.label).join('; ');
-        const title = (g.kind === 'consensus' ? `${g.id}: consensus of ${g.n.toLocaleString()} reads (${(g.frac * 100).toFixed(1)}%)${g.absorbed ? `, ${g.absorbed.toLocaleString()} absorbed as compatible` : ''}`
-          : g.kind === 'ambiguous' ? `${g.n.toLocaleString()} reads compatible with ${[...(g.compatible || [])].sort((a, b) => hNum(a) - hNum(b)).join(', ')} (not informative between them)`
-          : `${g.n.toLocaleString()} reads in ${g.patterns} pattern${g.patterns === 1 ? '' : 's'} below ${minJunctionCount} reads`) +
-          (chainTxt ? `\nsplicing: ${chainTxt}` : '\nsplicing: none (unspliced)') +
-          (alleleTxt.length ? `\nalleles: ${alleleTxt.join(', ')}` : '');
-        return <g key={g.id}><title>{title}</title>{parts}</g>;
-      });
-      if (!groups.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>no reads in this window</text>);
-      const nCons = groups.filter(g => g.kind === 'consensus').length;
-      const info = `${current.total.toLocaleString()} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
-        (current.shown < current.total ? ` (from ${current.shown.toLocaleString()} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
-      return wrap(height, info, rows, bodyHeight);
+        if (!groups.length) rows.push(<text key="none" x={PLOT_LEFT + 8} y={bodyTop + 14} fill={INK.muted} fontSize={10}>no reads in this window</text>);
+        const nCons = groups.filter(g => g.kind === 'consensus').length;
+        const info = `${current.total.toLocaleString('en-US')} reads → ${nCons} consensus group${nCons === 1 ? '' : 's'}` +
+          (current.shown < current.total ? ` (from ${current.shown.toLocaleString('en-US')} sampled reads)` : '') + ` · min ${minJunctionCount} reads` + commonInfo;
+        return { rows, bodyHeight, info };
+      }
+      return null;
+    };
+    if (collapseReads) {
+      const main = collapsedPart(current, bodyTop);
+      if (main) {
+        // each strand's rows in a group of their own: both are keyed alike (block 1h1, H1…)
+        const rows = [<g key="sense">{main.rows}</g>];
+        let bodyHeight = main.bodyHeight, info = main.info;
+        if (current.anti) {
+          // the opposite strand under a band of its own, tinted like its reads
+          const bandTop = bodyTop + main.bodyHeight;
+          const anti = collapsedPart(current.anti, bandTop + ANTI_BAND_H);
+          if (anti) {
+            const label = `opposite strand · ${current.anti.total.toLocaleString('en-US')} read${current.anti.total === 1 ? '' : 's'}`;
+            rows.push(
+              <g key="antiband">
+                <title>{`reads of the strand opposite to ${tx?.geneName ?? 'the gene'} under the library's orientation (${sampleStrands?.[sid] ?? ''}), ${collapseReads && haplotypes !== 'any' ? 'phased' : 'grouped'} on their own: an antisense transcript, or the few % of reads of the wrong strand every stranded library has\n${anti.info.replace(commonInfo, '')}`}</title>
+                <rect x={PLOT_LEFT} y={bandTop + 2} width={plotWidth} height={ANTI_BAND_H + anti.bodyHeight - 2} fill={withAlpha(ANTI_COLOR, 0.05)} />
+                <rect x={PLOT_LEFT} y={bandTop + 2} width={3} height={ANTI_BAND_H + anti.bodyHeight - 2} fill={ANTI_COLOR} />
+                <line x1={PLOT_LEFT} y1={bandTop + 2} x2={plotRight} y2={bandTop + 2} stroke={ANTI_COLOR} strokeWidth={0.8} opacity={0.6} />
+                <text x={PLOT_LEFT + 8} y={bandTop + ANTI_BAND_H - 3} fill={ANTI_COLOR} fontSize={9} fontWeight={700}>▼ {label}</text>
+              </g>,
+              <g key="anti">{anti.rows}</g>,
+            );
+            bodyHeight += ANTI_BAND_H + anti.bodyHeight;
+            info = `gene's strand: ${main.info.replace(commonInfo, '')} · ${label}${commonInfo}`;
+          }
+        }
+        const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
+        return wrap(height, info, rows, bodyHeight);
+      }
     }
 
     // ======================= Raw mode: packed alignments =======================
@@ -1890,17 +3477,28 @@ export default function SashimiViewer({
       ? { s: r.s - r.c[0] - (partsOf[i].length ? r.h?.[0] ?? 0 : 0), e: r.e + r.c[1] + (partsOf[i].length ? r.h?.[1] ?? 0 : 0) }
       : { s: r.s, e: r.e });
     let rows: Int32Array, nRows: number, hidden: number;
-    if (pairMode || splitMode) {
+    // Group by haplotype: the reads of each haplotag (HP 1, HP 2, …), or of each haplotype of the page's phasing (H1, H2),
+    // packed under a label row of their own, untagged or unphased last
+    const byPhase = readsGroup === 'phase';
+    const hapOf = (r: AlignedRead) => (byPhase ? r.ph : r.hp), setOf = (r: AlignedRead) => (byPhase ? r.pb : r.ps);
+    const grouped = readsGroup !== 'none' && visible.some(r => hapOf(r));
+    // grouped by haplotype, a read takes its phase set's hue (HP 1 the mid tone, HP 2 the light one): a haplotag only means
+    // something within its set, so two sets in one group never look alike. The page's own phasing: its block's hue.
+    const blockRank = byPhase ? new Map([...new Set(visible.map(r => r.pb).filter((p): p is number => p != null))].sort((a, b) => a - b).map((p, i) => [p, i])) : null;
+    const phaseFill = (r: AlignedRead): string | null => {
+      if (!grouped) return null;
+      const h = hapOf(r);
+      if (h !== 1 && h !== 2) return null;
+      return (byPhase ? PS_TONES[(blockRank!.get(r.pb!) ?? 0) % PS_TONES.length] : psTone(r.ps)).hp[h - 1];
+    };
+    const strandSplit = !!antiOf && visible.some(antiOf);
+    const groupRows: { row: number; rows: number; hp: number; reads: number; sets: number; anti: boolean; header: boolean }[] = [];
+    if (pairMode || splitMode || grouped || strandSplit) {
       // union-find over the reads: mates and split parts end up in one unit
       const parent = new Int32Array(visible.length); for (let i = 0; i < parent.length; i++) parent[i] = i;
       const find = (i: number): number => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
       const union = (a: number, b: number) => { const x = find(a), y = find(b); if (x !== y) parent[x] = y; };
-      if (pairMode) visible.forEach((r, i) => {
-        if (mateOf[i] >= 0 || r.mp == null || r.mc) return;
-        for (const j of byStart.get(r.mp) ?? []) {
-          if (j !== i && mateOf[j] < 0 && visible[j].mp === r.s && (visible[j].f & 192) !== (r.f & 192)) { mateOf[i] = j; mateOf[j] = i; union(i, j); break; }
-        }
-      });
+      if (pairMode) pairMates(visible).forEach((j, i) => { if (j > i) { mateOf[i] = j; mateOf[j] = i; union(i, j); } });
       if (splitMode) partsOf.forEach((list, i) => { for (const j of list) union(i, j); });
       const unitIndex = new Map<number, number>();
       const units: { s: number; e: number }[] = [];
@@ -1913,22 +3511,91 @@ export default function SashimiViewer({
         else { units[u].s = Math.min(units[u].s, x.s); units[u].e = Math.max(units[u].e, x.e); }
         unitOf[i] = u;
       });
-      const packed = packReads(units, READS_MAX_ROWS);
-      rows = new Int32Array(visible.length); hidden = 0;
-      visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
-      nRows = packed.nRows;
+      if (grouped || strandSplit) {
+        // a unit (pair, split read) takes the haplotag of its first tagged read, and the strand of its first read (its
+        // mates agree under the library's orientation); the gene's strand first, then the opposite one
+        const hpOf = new Int32Array(units.length), antiU = new Uint8Array(units.length), seenU = new Uint8Array(units.length);
+        visible.forEach((r, i) => {
+          const u = unitOf[i];
+          if (grouped) { const h = hapOf(r); if (h && !hpOf[u]) hpOf[u] = h; }
+          if (antiOf && !seenU[u]) { seenU[u] = 1; antiU[u] = antiOf(r) ? 1 : 0; }
+        });
+        const keyOf = (u: number) => antiU[u] * 1e6 + (hpOf[u] || 999999);
+        const keys = [...new Set(units.map((_, u) => keyOf(u)))].sort((a, b) => a - b);
+        rows = new Int32Array(visible.length).fill(-1); hidden = 0;
+        // the rows are shared out when the groups need more than READS_MAX_ROWS together: each in proportion to what it
+        // needs, with a few at least, so that a small group last (the opposite strand, untagged reads) still shows
+        const want = keys.map(k => (grouped || k >= 1e6 ? 1 : 0) + packReads(units.filter((_, u) => keyOf(u) === k), READS_MAX_ROWS).nRows);
+        const sum = want.reduce((x, y) => x + y, 0);
+        const budget = sum <= READS_MAX_ROWS ? want : want.map(w => Math.max(Math.min(w, 8), Math.floor((READS_MAX_ROWS * w) / sum)));
+        let next = 0;
+        keys.forEach((k, ki) => {
+          const anti = k >= 1e6, hp = k % 1e6 === 999999 ? 0 : k % 1e6;
+          // a label row over each haplotype, and over the opposite strand's reads; the gene's strand alone needs none
+          const header = grouped || anti, head = header ? 1 : 0;
+          const members = units.map((_, u) => u).filter(u => keyOf(u) === k);
+          const inGroup = visible.map((_, i) => i).filter(i => keyOf(unitOf[i]) === k);
+          const cap = Math.min(budget[ki], READS_MAX_ROWS - next);
+          if (cap <= head) { hidden += inGroup.length; return; }
+          const packed = packReads(members.map(u => units[u]), cap - head);
+          const rowOfUnit = new Map(members.map((u, j) => [u, packed.rows[j] < 0 ? -1 : next + head + packed.rows[j]]));
+          for (const i of inGroup) { rows[i] = rowOfUnit.get(unitOf[i])!; if (rows[i] < 0) hidden++; }
+          groupRows.push({ row: next, rows: head + packed.nRows, hp, reads: inGroup.length, sets: grouped ? new Set(inGroup.map(i => setOf(visible[i])).filter(x => x != null)).size : 0, anti, header });
+          next += head + packed.nRows;
+        });
+        nRows = next;
+      } else {
+        const packed = packReads(units, READS_MAX_ROWS);
+        rows = new Int32Array(visible.length); hidden = 0;
+        visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
+        nRows = packed.nRows;
+      }
     } else {
       ({ rows, nRows, hidden } = packReads(extOf, READS_MAX_ROWS));
     }
     // discordance: mate elsewhere, not flagged as a proper pair, or (genomic DNA) an insert far above the median
-    const inserts = visible.map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
-    const medianInsert = inserts.length ? inserts[inserts.length >> 1] : 0;
+    // the median insert of the proper pairs shown (the discordant ones would raise it: with only the supporting reads of an
+    // arc shown, 4 kb pairs of a duplication made their own median), else the window's from the structural scan
+    const inserts = visible.filter(r => r.f & 2).map(r => Math.abs(r.tl ?? 0)).filter(t => t > 0).sort((a, b) => a - b);
+    const medianInsert = inserts.length >= 20 ? inserts[inserts.length >> 1] : tracks.find(t => t.sampleId === sid)?.structural?.insertMedian ?? (inserts.length ? inserts[inserts.length >> 1] : 0);
     const dnaTrack = isDnaSample(sid);
-    const discordantOf = (r: AlignedRead): string | null => {
+    /** bases a read skips on the reference inside its alignment (CIGAR D and N): its span minus its aligned blocks */
+    const innerGap = (r: AlignedRead) => { let g = r.e - r.s; for (const [bs, be] of r.b) g -= be - bs; return Math.max(0, g); };
+    const discordantOf = (r: AlignedRead, idx: number): { text: string; cls: PairClass } | null => {
       if (r.mp == null) return null;
-      if (r.mc) return `mate on ${r.mc}:${(r.mp + 1).toLocaleString()}`;
-      if (!(r.f & 2)) return 'not a proper pair';
-      if (dnaTrack && medianInsert > 0 && Math.abs(r.tl ?? 0) > Math.max(1000, 5 * medianInsert)) return `insert ${Math.abs(r.tl!).toLocaleString()} bp, far above the median (${medianInsert.toLocaleString()} bp)`;
+      if (r.mc) return { text: `mate on ${r.mc}:${(r.mp + 1).toLocaleString('en-US')}`, cls: 'other' };
+      // the template length runs across the deletions and introns the two reads carry: those are not a long insert
+      const mate = mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
+      const insert = Math.abs(r.tl ?? 0) - innerGap(r) - (mate ? innerGap(mate) : 0);
+      // a mate carrying a deletion or an insertion of 50 bp or more in its CIGAR: the event is in the alignment (drawn as
+      // such), and the pair's positions, taken without it, would read as another (alignments.ts)
+      // (a mate carrying an insertion keeps only the duplication reading: see alignments.ts)
+      const carriesDel = (x: AlignedRead | null) => !!x && x.d.some(([a, b]) => b - a >= 50);
+      const carriesIns = (x: AlignedRead | null) => !!x && x.i.some(([, l]) => l >= 50);
+      const inAlignment = { text: 'not a proper pair (the event is in the alignment of the pair: a deletion or insertion of 50 bp or more in its CIGAR)', cls: 'other' as PairClass };
+      if (dnaTrack && (carriesDel(r) || carriesDel(mate))) return !(r.f & 2) ? inAlignment : null;
+      const insPair = dnaTrack && (carriesIns(r) || carriesIns(mate));
+      if (dnaTrack) {
+        // orientation first (genomic DNA only: on RNA, mates facing away are back-splicing, circular RNA)
+        const rev = r.r === 1, mateRev = (r.f & 32) !== 0, apart = Math.abs(r.mp - r.s);
+        if (rev === mateRev) return { text: `both mates on the ${rev ? '−' : '+'} strand, ${apart.toLocaleString('en-US')} bp apart: inversion-type`, cls: 'inversion' };
+        // facing away: the reverse mate ends before the forward one starts (its end, not its start: a reverse mate with a
+        // deletion in its CIGAR starts before a forward mate clipped at the junction, and ends past it)
+        const mateEnd = mate ? mate.e : r.mp + (r.e - r.s - innerGap(r));
+        const revStart = rev ? r.s : r.mp, revEnd = rev ? r.e : mateEnd, fwdStart = rev ? r.mp : r.s;
+        // both mates across one junction, each aligned on its own side (forward mate clipped at its start, reverse mate at
+        // its end): the junction goes from the reverse mate's end to the forward mate's start (alignments.ts)
+        if (mate && Math.abs(fwdStart - revEnd) >= 50) {
+          const fwd = rev ? mate : r, rv = rev ? r : mate;
+          if (fwd.c[0] + (fwd.h?.[0] ?? 0) >= CROSSING_MIN_CLIP && rv.c[1] + (rv.h?.[1] ?? 0) >= CROSSING_MIN_CLIP) return fwdStart > revEnd
+            ? { text: `both mates across one junction (forward mate clipped at its start, reverse mate at its end): the molecule jumps ${(fwdStart - revEnd).toLocaleString('en-US')} bp forward, deletion-type`, cls: 'deletion' }
+            : { text: `both mates across one junction (forward mate clipped at its start, reverse mate at its end): the molecule goes back ${(revEnd - fwdStart).toLocaleString('en-US')} bp, the junction of a tandem duplication`, cls: 'duplication' };
+        }
+        if (revStart < fwdStart && revEnd <= fwdStart + OUTWARD_OVERLAP && fwdStart - revStart > Math.max(OUTWARD_MIN, 2 * medianInsert)) return { text: `mates facing away (← →), ${apart.toLocaleString('en-US')} bp apart: the junction of a tandem duplication, read across`, cls: 'duplication' };
+        if (insPair) return !(r.f & 2) ? inAlignment : null;
+        if (medianInsert > 0 && insert > Math.max(1000, 5 * medianInsert)) return { text: `insert ${insert.toLocaleString('en-US')} bp, far above the median (${medianInsert.toLocaleString('en-US')} bp): deletion-type`, cls: 'deletion' };
+      }
+      if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };
       return null;
     };
     const rowH = nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode
@@ -1937,33 +3604,74 @@ export default function SashimiViewer({
     const showLetters = rowH >= 9;
     const readsTop = bodyTop + 2;
 
-    // no exon–intron boundary outline on a DNA track (every read crosses boundaries there); long reads get their noise filters
+    // the reads through an exon–intron boundary are named in their tooltip on RNA tracks only (every read crosses one on a DNA
+    // track); they are not outlined, the IR pills give the retention; long reads get their noise filters
     const modelBoundaries = isDnaSample(sid) ? undefined : boundariesOf(tx);
     const longReads = !!current.long_reads;
     const indelMin = longReads ? minIndelBp : 1;
     // consensus drawing (mismatches and indels only at called sites) for long reads and for every genomic DNA track
-    const consensus = (longReads || isDnaSample(sid)) && consensusMode;
+    const consensus = consensusMode;
     const snvSites = new Set(current.sites.filter(s => s.kind === 'snv').map(s => `${s.pos}\t${s.alt}`));
     const insSites = new Set(current.sites.filter(s => s.kind === 'ins').map(s => s.pos));
     const delSites = new Set(current.sites.filter(s => s.kind === 'del').map(s => s.pos));
-    const nSpan = visible.filter((r, i) => rows[i] >= 0 && readSpansBoundary(r, modelBoundaries)).length;
+    // CpG calls of the reads (Methylation on, narrow view). On a linear axis each read's ticks are built once, relative to
+    // its start (methylReadTicks), and the layer is placed by one transform: a pan or zoom frame then changes two
+    // attributes instead of rebuilding and re-parsing tens of thousands of rectangles
+    const methylOn = showMethyl && !!readsData[sid]?.methyl && viewEnd - viewStart <= METHYL_READS_MAX_BP;
+    // each call against the confidence threshold of its block (methylation.ts), the key naming them for the ticks' cache
+    const methylW = methylData[sid]?.w, methylThrAt = (pos: number) => (methylW ? thresholdAt(methylW, pos) : 0);
+    const methylThrKey = methylW ? methylW.thresholds.map(t => `${t.start}=${t.threshold}`).join('/') : '';
+    const linearAxis = scale.axis.kind === 'linear', tickOrigin = entry?.fetched.start ?? 0;
+    const pxPerBp = linearAxis ? (scale.x(tickOrigin + 10000) - scale.x(tickOrigin)) / 10000 : 0, tickFine = Math.abs(pxPerBp) >= METHYL_TICK_FINE_PX_PER_BP;
+    const meMod: string[] = [], meUnmod: string[] = [], meLow: string[] = [];
+    const meLayer: JSX.Element[] = [], meN = [0, 0, 0];
+    const mmPaths = new Map<string, string[]>(), mmLetters: JSX.Element[] = [];
+    const meDeferred = methylOn && viewMoving && visible.reduce((n, r, i) => n + (rows[i] >= 0 && r.me ? 1 : 0), 0) > METHYL_TICK_READS_BUDGET;
     const readEls = visible.map((r: AlignedRead, idx: number) => {
       const row = rows[idx];
       if (row < 0) return null;
+      if (methylOn && !meDeferred && r.me) {
+        const t0 = readsTop + row * (rowH + 1);
+        if (linearAxis) {
+          const c = methylReadTicks(r, methylThrAt, methylThrKey, rowH);
+          methylTicksIn(c, viewStart, viewEnd, meN);   // the calls in the view, as the panel counts them
+          // two nodes per read at most (the page's cost grows with its nodes): calls below the confidence threshold are
+          // left uncoloured, the read's own grey reading as "no confident call"
+          const [dm, du] = tickFine ? [c.mod, c.unmod] : c.runs, at = `translate(${r.s - tickOrigin},${t0})`, key = r.n + r.s + r.f;
+          if (du) meLayer.push(<path key={`u${key}`} transform={at} d={du} stroke={METHYL_COLORS[0]} fill={tickFine ? 'none' : METHYL_COLORS[0]} vectorEffect="non-scaling-stroke" />);
+          if (dm) meLayer.push(<path key={`m${key}`} transform={at} d={dm} stroke={METHYL_COLORS[METHYL_COLORS.length - 1]} fill={tickFine ? 'none' : METHYL_COLORS[METHYL_COLORS.length - 1]} vectorEffect="non-scaling-stroke" />);
+        } else {
+          // a virtual axis (equal introns): positions are not an affine map of the genome, drawn frame by frame
+          const hh = rowH.toFixed(1);
+          const me: number[] = r.me;
+          for (let k = 0; k < me.length; k += 2) {
+            const pos = me[k];
+            if (pos < viewStart - 2 || pos >= viewEnd) continue;
+            const xa = scale.x(pos), xb = scale.x(pos + 2), mid = (xa + xb) / 2, w = Math.max(1.5, Math.abs(xb - xa) - 0.5);
+            const cls = callClass(me[k + 1], methylThrAt(pos));
+            (cls === 2 ? meLow : cls === 0 ? meMod : meUnmod).push(`M${(mid - w / 2).toFixed(1)},${t0}h${w.toFixed(1)}v${hh}h${(-w).toFixed(1)}z`);
+            if (pos >= viewStart) meN[cls]++;
+          }
+        }
+      }
       const top = readsTop + row * (rowH + 1);
       const mid = top + rowH / 2;
       const forward = r.r === 0;
       const tipX = scale.x(forward ? r.e : r.s);
       const parts: JSX.Element[] = [];
-      const lowMapq = r.q === 0;
+      // an ambiguous placement (MAPQ under LOW_MAPQ, a multi-mapped read) drawn hollow, as IGV draws MAPQ 0 reads
+      const lowMapq = r.q < LOW_MAPQ;
       const spans = readSpansBoundary(r, modelBoundaries);
-      const discordant = pairMode ? discordantOf(r) : null;
-      const fill = discordant ? READ_DISCORDANT_FILL : READ_FILL;
+      const discordant = pairMode ? discordantOf(r, idx) : null;
+      // the colours that say something win (a discordant pair, the opposite strand); the strand colours go to the others
+      const fill = discordant ? PAIR_CLASS_FILL[discordant.cls] : antiOf?.(r) ? ANTI_READ_FILL : readsColor === 'none' ? phaseFill(r) ?? READ_FILL
+        : (readsColor === 'first' && (r.f & 1) && (r.f & 128) ? (r.f & 32) === 0 : r.r === 0) ? READ_FWD_FILL : READ_REV_FILL;
+      const body = lowMapq ? { fill: INK.bg, stroke: fill, strokeWidth: 0.8 } : { fill };
       // the line to the mate, drawn once per pair from the left mate
       const mate = pairMode && mateOf[idx] >= 0 ? visible[mateOf[idx]] : null;
       if (mate && (r.s < mate.s || (r.s === mate.s && idx < mateOf[idx]))) {
         const a = scale.x(Math.min(r.e, mate.e)), b = scale.x(Math.max(r.s, mate.s));
-        if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? SV_COLORS.discordant : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
+        if (Math.abs(b - a) > 0.5) parts.push(<line key="pair" x1={a} y1={mid} x2={b} y2={mid} stroke={discordant ? PAIR_CLASS_LINE[discordant.cls] : PAIR_LINK_COLOR} strokeWidth={discordant ? 1.5 : 1} />);
       }
       // the line to the other parts of a split read, drawn once from the left part (parts that overlap on the reference get none)
       for (const j of partsOf[idx]) {
@@ -1982,19 +3690,30 @@ export default function SashimiViewer({
           const hard = r.h?.[side] ?? 0;
           const from = side === 0 ? r.s - len : r.e;   // genomic start of the soft clip
           if (len) {
+            // A source may keep only the clipped bases next to the alignment (docs/embedded-format.md 3.3): the end of a
+            // left clip, the start of a right one. They are drawn where they are, and only within the view (a long
+            // read's clip can be tens of kb); the rest of the clip, whose bases are not stored, as a plain bar.
+            const known = Math.min(seq.length, len);
+            const kFrom = side === 0 ? r.s - known : r.e;          // genomic start of the stored bases
             if (seq && pxb >= 2.5) {
-              for (let k = 0; k < len; k++) {
-                const pos = from + k, base = seq[k] ?? 'N';
+              for (let pos = Math.max(kFrom, viewStart), end = Math.min(kFrom + known, viewEnd); pos < end; pos++) {
+                const base = seq[pos - kFrom] ?? 'N';
                 const { left, w } = basePx(pos);
                 const same = !!ref && ref.seq[pos - ref.start] === base;
-                parts.push(<rect key={`c${side}${k}`} x={left} y={top} width={Math.max(1, w - (w > 3 ? 0.5 : 0))} height={rowH} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={same ? 0.28 : 0.95} rx={0.5} />);
-                if (showLetters && w >= 7) parts.push(<text key={`ct${side}${k}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+                parts.push(<rect key={`c${side}${pos}`} x={left} y={top} width={Math.max(1, w - (w > 3 ? 0.5 : 0))} height={rowH} fill={BASE_COLORS[base] || BASE_COLORS.N} opacity={same ? 0.28 : 0.95} rx={0.5} />);
+                if (showLetters && w >= 7) parts.push(<text key={`ct${side}${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+              }
+              if (known < len) {
+                const ua = side === 0 ? from : r.e + known, ub = ua + (len - known);
+                const xa = scale.x(ua), xb = scale.x(ub);
+                parts.push(<rect key={`cu${side}`} x={Math.min(xa, xb)} y={top + 1} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 2)} fill={HARD_CLIP_FILL} opacity={0.45} rx={1} />);
               }
             } else {
               const xa = scale.x(from), xb = scale.x(from + len);
               parts.push(<rect key={`c${side}`} x={Math.min(xa, xb)} y={top + 1} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 2)} fill={seq ? CLIP_FILL : HARD_CLIP_FILL} opacity={seq ? 0.6 : 0.45} rx={1} />);
             }
-            clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len} bp${seq ? `: ${seq.length > 40 ? `${seq.slice(0, 40)}…` : seq}` : ''}`);
+            const kept = seq && known < len ? ` (the ${known.toLocaleString('en-US')} bases next to the alignment are stored)` : '';
+            clipTxt.push(`${side === 0 ? 'left' : 'right'} soft clip ${len.toLocaleString('en-US')} bp${kept}${seq ? `: ${seq.length > 40 ? (side === 0 ? `…${seq.slice(-40)}` : `${seq.slice(0, 40)}…`) : seq}` : ''}`);
           }
           if (hard && partsOf[idx].length) {
             const hs = side === 0 ? r.s - len - hard : r.e + len;
@@ -2013,34 +3732,38 @@ export default function SashimiViewer({
           const d = tipRight
             ? `M${left},${top} H${right - 4} L${right},${mid} L${right - 4},${top + rowH} H${left} Z`
             : `M${right},${top} H${left + 4} L${left},${mid} L${left + 4},${top + rowH} H${right} Z`;
-          parts.push(<path key={`b${k}`} d={d} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
+          parts.push(<path key={`b${k}`} d={d} {...body} />);
         } else {
-          parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
+          parts.push(<rect key={`b${k}`} x={left} y={top} width={w} height={rowH} {...body} />);
         }
-        if (spans) parts.push(<rect key={`s${k}`} x={left} y={top} width={w} height={rowH} fill="none" stroke={RETENTION_COLOR} strokeWidth={1.2} />);
         if (k + 1 < r.b.length) {
           const gs = be, ge = r.b[k + 1][0];
           const isDel = r.d.some(dd => dd[0] === gs);
           const g1 = scale.x(gs), g2 = scale.x(ge);
-          // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body
-          const quiet = isDel && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
-          if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} fill={fill} opacity={lowMapq ? 0.35 : 1} />);
+          // a deletion below the long-read threshold, or absent from the called sites in consensus view, is drawn as read body;
+          // one of SV_MIN_DELETION bases or more never is: it is structural evidence, not sequencing noise, and each read of
+          // a large deletion often places its breakpoint a few bases apart (long reads, repeats), so no site gathers them
+          const quiet = isDel && ge - gs < SV_MIN_DELETION && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
+          if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} {...body} />);
           else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
         }
       });
+      // mismatches go to the track's shared paths (one per colour and quality class), not one rectangle each: a
+      // noisy library, or a reference of another build, gives each read hundreds of them
       for (const [pos, base, qual] of r.m) {
+        if (pos < viewStart - 1 || pos > viewEnd) continue;
         if (consensus && !snvSites.has(`${pos}\t${base}`)) continue;
         const { left, w } = basePx(pos);
-        const color = BASE_COLORS[base] || BASE_COLORS.N;
-        const alpha = qual < 10 ? 0.3 : qual < 20 ? 0.6 : 1;
-        parts.push(<rect key={`m${pos}`} x={left} y={top} width={w} height={rowH} fill={color} opacity={alpha} />);
-        if (showLetters && w >= 7) parts.push(<text key={`mt${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
+        const key = `${BASE_COLORS[base] || BASE_COLORS.N}|${qual < 10 ? 0.3 : qual < 20 ? 0.6 : 1}`;
+        const d = `M${left.toFixed(1)},${top}h${w.toFixed(1)}v${rowH}h-${w.toFixed(1)}z`;
+        const l = mmPaths.get(key); if (l) l.push(d); else mmPaths.set(key, [d]);
+        if (showLetters && w >= 7) mmLetters.push(<text key={`mt${idx}:${pos}`} x={left + w / 2} y={top + rowH - 1.5} textAnchor="middle" fill="#fff" fontSize={Math.min(9, w)} fontWeight={700}>{base}</text>);
       }
       r.i.forEach(([pos, len], k) => {
-        if (len < indelMin || (consensus && !insSites.has(pos))) return;
+        if (len < SV_MIN_DELETION && (len < indelMin || (consensus && !insSites.has(pos)))) return;   // large ones always, as deletions
         const x = scale.x(pos);
         const seq = r.is?.[k] ?? '';
-        const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString()}${seq ? `: ${seq}` : ''}`;
+        const label = `insertion of ${len} bp at ${currentChrom}:${pos.toLocaleString('en-US')}${seq ? `: ${seq}` : ''}`;
         const pxb = Math.abs(scale.x(pos + 1) - scale.x(pos));
         if (showInserted && seq && showLetters && pxb >= 4) {
           // the inserted bases written in a box over the insertion point (they have no width on the reference)
@@ -2065,29 +3788,87 @@ export default function SashimiViewer({
           </g>,
         );
       });
-      const title = `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString()}-${r.e.toLocaleString()} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}\n` +
+      // Built on hover, not here: this runs for every drawn read on every pan frame, and the string costs
+      // more than the rectangles around it (a dozen toLocaleString calls and two parseSa passes per read).
+      // The <title> below is empty until the pointer enters the group, well before the browser's tooltip delay.
+      const titleText = () => `${r.n}\n${currentChrom}:${(r.s + 1).toLocaleString('en-US')}-${r.e.toLocaleString('en-US')} · ${forward ? '+' : '−'} strand · MAPQ ${r.q}${r.nh != null ? ` · NH ${r.nh}` : ''}${r.f & 256 ? ' · secondary alignment' : ''}${r.f & 2048 ? ' · supplementary alignment' : ''}${lowMapq ? ` · drawn hollow: MAPQ under ${LOW_MAPQ}, an ambiguous placement` : ''}\n` +
         `${r.b.length - 1 - r.d.length} splice gap${r.b.length - 1 - r.d.length === 1 ? '' : 's'} · ${r.m.length} mismatch${r.m.length === 1 ? '' : 'es'} · ${r.i.length} ins · ${r.d.length} del` +
         `${r.c[0] || r.c[1] ? ` · soft clips ${r.c[0]}/${r.c[1]}` : ''}` +
-        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString()}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString()} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant}` : ''}` : '') +
+        (r.mp != null ? `\nmate ${r.mc ? `on ${r.mc}` : 'at'}:${(r.mp + 1).toLocaleString('en-US')}${r.tl ? ` · insert ${Math.abs(r.tl).toLocaleString('en-US')} bp` : ''}${mate ? ' · drawn on this row, joined by the line' : ''}${discordant ? ` · discordant: ${discordant.text}` : ''}` : '') +
         (spans ? `\nruns unspliced through an exon–intron boundary of the model (≥ ${SPAN_EXON_ANCHOR} exonic and ≥ ${SPAN_INTRON_ANCHOR} intronic bases): counted for intron retention` : '') +
         (clipTxt.length ? `\n${clipTxt.join(' · ')}` : '') +
-        (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString()} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
+        (r.hp ? `\nhaplotag: HP ${r.hp}${r.ps != null ? ` · phase set PS ${r.ps.toLocaleString('en-US')}` : ''}${r.pc != null ? ` · confidence PC ${r.pc}` : ''}` : '') +
+        (r.sa ? `\nsplit read: other part${parseSa(r.sa).length > 1 ? 's' : ''} at ${parseSa(r.sa).map(p => `${p.chrom}:${(p.start + 1).toLocaleString('en-US')} (${p.strand})`).join(', ')}${partsOf[idx].length ? ' · drawn on this row, joined by the dashed line' : ''}` : '') +
         `\nclick for the sequences (clipped, inserted, hard-clipped from the primary record)`;
-      return <g key={r.n + r.s + r.f} onClick={e => { e.stopPropagation(); openReadPanel(sid, r, e); }} style={{ cursor: 'pointer' }}><title>{title}</title>{parts}</g>;
+      return (
+        <g key={r.n + r.s + r.f} style={{ cursor: 'pointer' }}
+          onClick={e => { e.stopPropagation(); openReadPanel(sid, r, e); }}
+          onMouseEnter={e => { const t = e.currentTarget.firstChild as SVGTitleElement | null; if (t) t.textContent = titleText(); }}
+          onMouseLeave={e => { const t = e.currentTarget.firstChild as SVGTitleElement | null; if (t) t.textContent = ''; }}>
+          <title />{parts}
+        </g>
+      );
     });
 
-    const info = `${current.shown.toLocaleString()} of ${current.total.toLocaleString()} reads` +
-      (current.shown < current.total ? ' (downsampled, zoom in for all)' : '') +
-      (hidden ? ` · ${hidden.toLocaleString()} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
-      (modelBoundaries ? ` · ${nSpan.toLocaleString()} drawn read${nSpan === 1 ? '' : 's'} through an exon–intron boundary (teal outline)` : '') +
-      (longReads ? ` · long reads: ${consensus ? 'mismatches and indels at called sites only' : 'every mismatch and indel'}, indels ≥ ${indelMin} bp` : '') +
-      (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString()} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString()} split` : ''}` : ''; })() : '') +
-      (pairMode ? (() => { const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2, d = visible.filter(r => discordantOf(r)).length; return ` · ${n.toLocaleString()} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString()} discordant read${d === 1 ? '' : 's'}` : ''}`; })() : '') + commonInfo;
-    return wrap(height, info, readEls.filter((e): e is JSX.Element => e !== null), bodyHeight);
+    const groupEls = groupRows.filter(g => g.header).map(g => {
+      const top = readsTop + g.row * (rowH + 1), color = !grouped ? ANTI_COLOR : g.hp ? INK.muted : INK.faint;
+      const strandTxt = g.anti ? 'opposite strand' : '';
+      const label = !grouped
+        ? `opposite strand · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}`
+        : `${strandTxt ? `${strandTxt} · ` : ''}${g.hp ? `${byPhase ? 'H' : 'HP '}${g.hp}` : byPhase ? 'unphased' : 'untagged'} · ${g.reads.toLocaleString('en-US')} read${g.reads === 1 ? '' : 's'}${g.sets ? ` · ${g.sets} ${byPhase ? 'block' : 'phase set'}${g.sets === 1 ? '' : 's'}` : ''}`;
+      return (
+        <g key={`grp${g.anti ? 'a' : ''}${g.hp}`}>
+          {!grouped ? <title>{`reads of the strand opposite to ${tx?.geneName ?? 'the gene'} under the library's orientation (${sampleStrands?.[sid] ?? ''}): an antisense transcript, or the few % of reads of the wrong strand every stranded library has`}</title> : <title>{byPhase
+            ? (g.hp ? `reads on haplotype ${g.hp} of the page's read-based phasing: the alleles they carry at the heterozygous sites of their phase block match haplotype ${g.hp} better (H1 of one block is not tied to H1 of the next one: the blocks are listed in the collapsed mode)` : 'reads the phasing leaves unassigned: they cover no phased site, or match both haplotypes alike')
+            : (g.hp ? `reads tagged HP ${g.hp} by the phasing tool: haplotype ${g.hp} within each phase set (PS). Each set has its own hue (HP 1 the darker tone, HP 2 the lighter): HP ${g.hp} of two sets need not be the same chromosome copy` : 'reads without a haplotag: they cover no phased variant, or match both haplotypes equally')}{g.anti ? ', on the strand opposite to the gene' : ''}</title>}
+          <rect x={PLOT_LEFT} y={top} width={plotWidth} height={rowH} fill={color} opacity={0.1} />
+          <rect x={PLOT_LEFT} y={top} width={3} height={g.rows * (rowH + 1) - 1} fill={color} />
+          <text x={PLOT_LEFT + 7} y={top + rowH - 1} fill={INK.text} fontSize={Math.min(9, rowH + 3)} fontWeight={700}>{label}</text>
+        </g>
+      );
+    });
+    const info = (current.supporting && readsSupport
+      ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
+      : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
+      (grouped && !strandSplit ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
+      (strandSplit ? (() => { const a = groupRows.filter(g => g.anti).reduce((n, g) => n + g.reads, 0); return ` · ${a.toLocaleString('en-US')} on the opposite strand (violet, packed last${grouped ? `, grouped by ${byPhase ? 'read-based phasing' : 'haplotag'} within each strand` : ''})`; })() : '') +
+      (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
+      (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
+      (consensus ? " · mismatches and indels at called sites only (Consensus)" : longReads ? " · long reads: every mismatch and indel" : "") +
+      (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString('en-US')} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString('en-US')} split` : ''}` : ''; })() : '') +
+      (pairMode ? (() => {
+        const n = visible.filter((_, i) => mateOf[i] >= 0).length / 2;
+        const by: Record<PairClass, number> = { duplication: 0, deletion: 0, inversion: 0, other: 0 };
+        visible.forEach((r, i) => { const d = discordantOf(r, i); if (d) by[d.cls]++; });
+        const d = by.duplication + by.deletion + by.inversion + by.other;
+        const parts = (['duplication', 'deletion', 'inversion'] as const).filter(k => by[k]).map(k => `${by[k].toLocaleString('en-US')} ${k}-type`);
+        return ` · ${n.toLocaleString('en-US')} pair${n === 1 ? '' : 's'} joined${d ? `, ${d.toLocaleString('en-US')} discordant read${d === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}` : ''}`;
+      })() : '') + commonInfo;
+    const meCalls = meN[0] + meN[1] + meN[2];
+    // the layer's transform: genome (relative to tickOrigin) to pixels; ticks 2 bases wide, at least 1.5 px (runs: their
+    // extent, and a 1.2 px outline so a lone call stays visible)
+    const methylEls = !meCalls ? [] : linearAxis ? [
+      <g key="methyl" pointerEvents="none" transform={`matrix(${pxPerBp},0,0,1,${scale.x(tickOrigin)},0)`} strokeWidth={tickFine ? Math.max(1.5, Math.abs(2 * pxPerBp) - 0.4) : 1.2}>{meLayer}</g>,
+    ] : [
+      <g key="methyl" pointerEvents="none">
+        {meLow.length > 0 && <path d={meLow.join('')} fill="#9ca3af" opacity={0.35} />}
+        {meUnmod.length > 0 && <path d={meUnmod.join('')} fill={METHYL_COLORS[0]} />}
+        {meMod.length > 0 && <path d={meMod.join('')} fill={METHYL_COLORS[METHYL_COLORS.length - 1]} />}
+      </g>,
+    ];
+    const methylInfo = meDeferred ? ' · CpG calls: drawn when the view stops (deep window)' : methylOn ? ` · CpG calls of the reads drawn: ${meCalls ? `${meN[0].toLocaleString('en-US')} methylated (red), ${meN[1].toLocaleString('en-US')} unmethylated (blue)${meN[2] ? `, ${meN[2].toLocaleString('en-US')} below the confidence threshold (not coloured)` : ''}` : 'none (no MM / ML tags)'}`
+      : showMethyl && isDnaSample(sid) && mode === 'reads' && viewEnd - viewStart > METHYL_READS_MAX_BP ? ` · zoom in to ≤ ${formatBp(METHYL_READS_MAX_BP)} for the CpG calls of each read` : '';
+    const mismatchEls = mmPaths.size ? [
+      <g key="mismatches" pointerEvents="none">
+        {[...mmPaths].map(([k, d]) => { const [fill, op] = k.split('|'); return <path key={k} d={d.join('')} fill={fill} opacity={+op} />; })}
+        {mmLetters}
+      </g>,
+    ] : [];
+    return wrap(height, info + methylInfo, [...groupEls, ...readEls.filter((e): e is JSX.Element => e !== null), ...mismatchEls, ...methylEls], bodyHeight);
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, haplotypes, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel]);
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving, psTone]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -2105,14 +3886,14 @@ export default function SashimiViewer({
         if (!uniq.size || rescueAsked.current.get(t.sampleId) === sig) continue;
         rescueAsked.current.set(t.sampleId, sig);
         const sid = t.sampleId;
-        ds.rescueClips!(sid, currentChrom, [...uniq.values()], uniqueOnly).then(found => {
+        ds.rescueClips!(sid, currentChrom, [...uniq.values()], minMapq).then(found => {
           if (!found.length || rescueAsked.current.get(sid) !== sig) return;
           setTracks(prev => prev.map(x => x.sampleId === sid && x.structural ? { ...x, structural: { ...x.structural, rescued: [...(x.structural.rescued ?? []).filter(r => r.own), ...found] } } : x));
         }).catch(() => { /* optional */ });
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [tracks, currentChrom, uniqueOnly, isDnaSample, ds, svHints]);
+  }, [tracks, currentChrom, minMapq, isDnaSample, ds, svHints]);
   /** Some loaded reads are long (ONT, PacBio): the noise controls apply. */
   const anyLongReads = useMemo(() => Object.values(readsData).some(e => e.data.long_reads), [readsData]);
   /** Some loaded reads carry a mate: the Pairs option applies. */
@@ -2137,7 +3918,7 @@ export default function SashimiViewer({
         samples: displayTracks.map(t => t.sampleName),
         primarySample: tracks[0]?.sampleName ?? sampleName,
         options: {
-          equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', uniqueOnly,
+          equalIntrons, allTranscripts: showAllTx, depthAxis, sharedY: depthAxis === 'shared', minMapq, uniqueOnly: minMapq > 0,
           reads: showReads, readsSample: showReads ? readsName : undefined, collapsed: showReads && collapseReads,
           minJunctionReads: minJunctionCount, minVafPct, commonSnpsMinAf: showSnps ? snpMinAf : null,
           aggregate: viewMode === 'groups', arcLabels: showUsage ? 'usage' : 'reads', intronRetention: showUsage ? includeRetention : undefined,
@@ -2155,7 +3936,7 @@ export default function SashimiViewer({
     }
     setTimeout(() => setSnapshotState('idle'), 2500);
   }, [onSnapshot, snapshotState, tracks, effectiveReadsSampleId, readsAll, readsSampleIds, currentGeneName, tx, currentChrom, viewStart, viewEnd, sampleName,
-    equalIntrons, showAllTx, depthAxis, uniqueOnly, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere, viewMode, groups, runSamples]);
+    equalIntrons, showAllTx, depthAxis, minMapq, showReads, collapseReads, minJunctionCount, minVafPct, readsTracks, showSnps, snpMinAf, displayTracks, showKnown, primaryKnownHere, viewMode, groups, runSamples]);
 
   /** width of a pill: its text and the coloured deltas after it */
   const pillWidth = (a: { text: string; deltas: { text: string }[] }) => (a.text.length + a.deltas.reduce((n, d) => n + d.text.length + 1, 0)) * 6 + 10;
@@ -2182,26 +3963,73 @@ export default function SashimiViewer({
     frame: FrameInfo | null;
     /** structural evidence arc of a DNA track */
     sv?: SvKind;
+    /** a junction leaving the queried gene (read-through or fusion transcript?) */
+    longRange?: boolean;
+    /** a fusion junction of an RNA track, from split reads and placed clips */
+    fusion?: boolean;
+    /** an arc of the opposite strand, hanging under the mirrored coverage */
+    below?: boolean;
   }
   interface TrackLayout {
     track: TrackData; idx: number; color: string; yOff: number; juncH: number; yMax: number;
-    paths: { fill: string; stroke: string }; arcs: ArcRender[]; height: number;
+    /** height of the coverage area: COVERAGE_H, or 0 for a DNA track whose coverage layer is off */
+    covH: number;
+    paths: CoveragePaths; arcs: ArcRender[]; height: number;
     /** Height of the variant-site strip at the top of the track (0 when none). */
     strip: number;
+    /** Split reads continuing on another chromosome (RNA): a stem from the breakpoint leaving by the top of the track. */
+    exits: { x: number; e: ElsewhereLink; key: string; label: string; title: string; dir: 1 | -1 }[];
     /** Intron-retention pills on the baseline (usage mode). */
-    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void }[];
+    retention: { x: number; y: number; text: string; title: string; deltas: { text: string; color: string; name: string }[]; color?: string; onClick?: (e: { clientX: number; clientY: number }) => void; hint?: string }[];
     /** variant sites drawn in the strip and as allele bars: from the reads track, or from the "variants" chip scan of a DNA track (none when the Variants toggle is off) */
     sites: VariantSite[];
     /** allele balance of the heterozygous common SNPs of a DNA track */
     balance?: { text: string; title: string; warn: boolean };
+    /** height of the variants track under the coverage of a DNA track (0 when none) */
+    variants: number;
+    /** height of the CpG methylation panel under the variants track, or under the coverage (0 when none) */
+    methyl: number;
+    /** the panel has the row of the CpG-island differences with the other samples */
+    methylDiff: boolean;
+    /** height of the opposite strand's band under the baseline (0 when the strands are not split) */
+    mirror: number;
+    /** the opposite strand's coverage, mirrored under the baseline */
+    antiPaths: CoveragePaths | null;
   }
 
-  const transcriptY = RULER_H;
-  const knownY = transcriptY + transcriptPanelH + TRACK_GAP;
-  const snpY = knownY + (knownPanelH ? knownPanelH + TRACK_GAP : 0);
+  // the sequence strip under the gene model: the rows once bases can be drawn, else one line saying how far to zoom
+  const stripRef = (() => {
+    if (viewEnd - viewStart > SEQ_MAX_BP) return null;
+    if (seqRef && seqRef.chrom === currentChrom && seqRef.start <= viewStart && seqRef.start + seqRef.seq.length >= viewEnd) return seqRef;
+    // no FASTA nor network: the reference a reads window came with (an exported page)
+    for (const e of Object.values(readsData)) {
+      const r = e?.data.reference;
+      if (r && e.fetched.chrom === currentChrom && r.start <= viewStart && r.start + r.seq.length >= viewEnd) return r;
+    }
+    return null;
+  })();
+  const seqRows = sequenceRows(stripRef, 0, 2);
+  const seqPanelH = !seqRows ? 0 : seqRows.drawn ? seqRows.aaRowH + seqRows.revRowH + seqRows.seqRowH + 2 : SEQ_NOTE_H;
   const snpPanelH = showSnps ? SNP_PANEL_H : 0;
-  const altY = snpY + (snpPanelH ? snpPanelH + TRACK_GAP : 0);
-  const tracksTop = altY + (altPanelH ? altPanelH + TRACK_GAP : 0);
+  /** the annotation panels' heights, by their key in the panel order (0: not shown, no room taken) */
+  const annotH: Record<string, number> = { tx: transcriptPanelH, seq: seqPanelH, known: knownPanelH, snps: snpPanelH, alt: altPanelH };
+  /**
+   * The panels under the ruler in the order drawn: the stored order (panels dragged by their grips) of those shown, each
+   * one it does not name at its default place, after the panel that comes before it by default.
+   */
+  const orderKeys = useMemo(() => {
+    const def = [...ANNOT_KEYS, ...displayTracks.map(panelKeyOf)];
+    const present = new Set(def);
+    const out = panelOrder.filter(k => present.has(k));
+    const have = new Set(out);
+    def.forEach((k, i) => {
+      if (have.has(k)) return;
+      let at = 0;
+      for (let j = i - 1; j >= 0; j--) { const p = out.indexOf(def[j]); if (p >= 0) { at = p + 1; break; } }
+      out.splice(at, 0, k); have.add(k);
+    });
+    return out;
+  }, [panelOrder, displayTracks]);
 
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
@@ -2212,6 +4040,29 @@ export default function SashimiViewer({
   /** At least one shown sample track is RNA (or of unknown type): the splicing controls and legend apply. */
   const anyRna = useMemo(() => displayTracks.some(t => !t.gtex && !isDnaTrack(t)) || !displayTracks.some(t => !t.gtex), [displayTracks, isDnaTrack]);
   const anyDna = useMemo(() => displayTracks.some(t => isDnaTrack(t)), [displayTracks, isDnaTrack]);
+  /**
+   * Median target depth of each DNA track, measured once per gene on its first complete coverage and kept while the
+   * window moves inside the gene (a window inside an intron would measure something else); until a new gene is
+   * measured, the track keeps the previous one's.
+   */
+  const svDepthRef = useRef(new Map<number, { gene: string; depth: number }>());
+  const svDepth = useMemo(() => {
+    const gene = `${currentChrom}:${currentGeneStart}-${currentGeneEnd}:${tx?.transcriptId ?? ''}`;
+    const out = new Map<number, number>();
+    for (const t of displayTracks) {
+      if (!isDnaTrack(t)) continue;
+      const prev = svDepthRef.current.get(t.sampleId);
+      if (prev?.gene !== gene && !t.loading && !t.partial && t.fetched && t.fetched.chrom === currentChrom && t.coverage.length) {
+        const depth = medianTargetDepth(t.coverage, tx, t.fetched.start, t.fetched.end);
+        if (depth != null) { svDepthRef.current.set(t.sampleId, { gene, depth }); out.set(t.sampleId, depth); continue; }
+      }
+      if (prev) out.set(t.sampleId, prev.depth);
+    }
+    return out;
+  }, [displayTracks, isDnaTrack, tx, currentChrom, currentGeneStart, currentGeneEnd]);
+  /** Reads a structural hint of this DNA track needs: Min reads as typed, or by default 3, and 20 on a track deeper than 200×. */
+  const svMinReads = useCallback((sid: number) => (!minReadsSet && (svDepth.get(sid) ?? 0) > SV_DEEP_X ? SV_DEEP_MIN_READS : minJunctionCount),
+    [minReadsSet, svDepth, minJunctionCount]);
 
   /**
    * A DNA track whose variants were asked for keeps them in step with the window: when the window moves or widens,
@@ -2220,16 +4071,20 @@ export default function SashimiViewer({
    */
   const scannedTooFar = (f: FetchWindow, v: { start: number; end: number }) => f.end - f.start > Math.max(5_000_000, 4 * (v.end - v.start));
   useEffect(() => {
-    if (!coverageVariants || !ds.getVariantSites) return;
+    if ((!coverageVariants && !rnaVariants) || !ds.getVariantSites) return;
     const v = viewRef.current;
+    if (v.end - v.start > VARIANTS_MAX_VIEW_BP) return;
     const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
     const jobs: { sid: number; ranges: { start: number; end: number }[]; extend: boolean }[] = [];
     for (const t of tracks) {
       const sid = t.sampleId;
       const e = dnaSites[sid];
-      if (!isDnaSample(sid) || !e?.full || e.error || dnaSitesLoading[sid] || readsTracks.get(sid)?.loaded) continue;
+      if (t.gtex || t.group || dnaSitesLoading[sid] || !(isDnaSample(sid) ? coverageVariants : rnaVariants)) continue;
+      // every DNA track is scanned while Variants is on (every RNA track while its Variants pill is): its first window, or again after a failure elsewhere
+      if (!e || (e.error && !covers(e.fetched, v))) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
+      if (!e.full || e.error) continue;
       const f = e.fetched;
-      const same = f.chrom === v.chrom && f.uniqueOnly === v.uniqueOnly && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
+      const same = f.chrom === v.chrom && f.minMapq === v.minMapq && !!f.secondary === !!v.secondary && e.minIndel === minIndelBp && e.longVaf === longReadMinVafPct && e.minVaf <= minVaf;
       if (!same || v.end <= f.start || v.start >= f.end || scannedTooFar(f, v)) { jobs.push({ sid, ranges: [{ start: v.start, end: v.end }], extend: false }); continue; }
       const ranges: { start: number; end: number }[] = [];
       if (v.start < f.start) ranges.push({ start: v.start, end: f.start });
@@ -2239,15 +4094,18 @@ export default function SashimiViewer({
     if (!jobs.length) return;
     const timer = setTimeout(() => { for (const j of jobs) scanVariants(j.sid, j.ranges, j.extend); }, 300);
     return () => clearTimeout(timer);
-  }, [tracks, readsTracks, viewStart, viewEnd, currentChrom, uniqueOnly, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
-  const layouts: TrackLayout[] = useMemo(() => {
-    let y = tracksTop;
+  }, [tracks, viewStart, viewEnd, currentChrom, minMapq, showSecondary, minVafPct, minIndelBp, longReadMinVafPct, dnaSites, dnaSitesLoading, coverageVariants, rnaVariants, isDnaSample, scanVariants]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { layouts, annotY } = useMemo(() => {
+    let y = RULER_H;
     const out: TrackLayout[] = [];
+    const annotY: Record<string, number> = {};
     const plotRight = PLOT_LEFT + plotWidth;
     const hiddenSet = new Set(hiddenArcs);
     /** difference in percentage points with another group, signed */
     const deltaText = (d: number) => (Math.abs(d) < 0.0005 ? '±0 %' : `${d < 0 ? '−' : '+'}${pctLabel(Math.abs(d))}`);
-    displayTracks.forEach((track, idx) => {
+    // the samples with a methylation panel: with two or more, each panel gets the row of the island differences
+    const methylDiffRow = showMethyl && !!ds.getMethylation && displayTracks.filter(t => isDnaTrack(t) && !t.gtex && !t.group).length >= 2;
+    const place = (track: TrackData, idx: number) => {
       const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? TRACK_COLORS[idx % TRACK_COLORS.length];
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
       const trackEvents = trackAgg?.events;
@@ -2258,7 +4116,7 @@ export default function SashimiViewer({
         if (hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)) return false;
         if (track.gtex) return j.count >= 1;
         const ev = trackEvents?.get(junctionKey(j));
-        if (ev && ev.shares.length) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
+        if (ev && ev.shares.length && !longRangeOf(j)) return Math.max(...ev.shares.map(sh => sh.pct)) * 100 >= minUsagePct;
         return j.count >= minJunctionCount;
       };
       const visible = track.junctions.filter(j => passes(j) && j.end > viewStart && j.start < viewEnd);
@@ -2271,12 +4129,16 @@ export default function SashimiViewer({
       const chipSites = (): VariantSite[] => {
         const e = dnaSites[track.sampleId];
         const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-        if (!e || !e.full || e.error || e.fetched.chrom !== currentChrom || e.fetched.uniqueOnly !== uniqueOnly || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
+        if (!e || !e.full || e.error || e.fetched.chrom !== currentChrom || e.fetched.minMapq !== minMapq || !!e.fetched.secondary !== showSecondary || e.minIndel !== minIndelBp || e.longVaf !== longReadMinVafPct || e.minVaf > minVaf) return [];
         const covers = e.fetched.start <= viewStart && e.fetched.end >= viewEnd;
         if (!covers && !dnaSitesLoading[track.sampleId]) return [];
         return e.minVaf === minVaf ? e.sites : e.sites.filter(st => st.vaf >= minVaf);
       };
-      const trackSites: VariantSite[] = dnaTrack && !coverageVariants ? [] : readsBelow?.loaded ? readsBelow.sites : dnaTrack ? chipSites() : [];
+      // a DNA track's sites come from the full scan of its window (the variants track, with their quality evidence); an
+      // RNA track's from the same scan while its Variants pill is on (reads track open or not), else from its reads track.
+      // Strands shown with the reads open: the reads track's, counted on the gene's strand
+      const rnaScan = !dnaTrack && rnaVariants && !(showStrands && readsBelow?.loaded) ? chipSites() : [];
+      const trackSites: VariantSite[] = dnaTrack ? (coverageVariants ? chipSites() : []) : rnaScan.length || !readsBelow?.loaded ? rnaScan : readsBelow.sites;
       // the star strip is an RNA device; a DNA track shows its variants as allele bars on the coverage only
       const strip = !dnaTrack && trackSites.length ? SITES_STRIP_H : 0;
       // allele balance of a DNA track: heterozygous common SNPs (0.2 ≤ VAF ≤ 0.8) against homozygous ones
@@ -2292,14 +4154,15 @@ export default function SashimiViewer({
           balance = {
             text: `  ·  ${het.length} het SNP${het.length === 1 ? '' : 's'}${medDev != null ? `, VAF ${(0.5 - medDev).toFixed(2)}–${(0.5 + medDev).toFixed(2)}` : ''}${imbalance ? ' · allele imbalance?' : noHet ? ' · no heterozygous SNP (LOH / UPD?)' : ''}`,
             warn: imbalance || noHet,
-            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString()} in the window)` : 'every read of the window (variants chip)'}.`,
+            title: `Common SNPs called from the reads in the window: ${known.length} (${het.length} heterozygous with 0.2 ≤ VAF ≤ 0.8, ${hom.length} homozygous alternate)${medDev != null ? `; median deviation of the heterozygous VAFs from 0.5: ${medDev.toFixed(2)}` : ''}.${imbalance ? ' Heterozygous SNPs far from 0.5 across the window: allele imbalance (mosaic deletion or duplication, LOH, contamination) to check.' : noHet ? ' No heterozygous SNP among the common SNPs covered: loss of heterozygosity or uniparental disomy to consider, if the region is normally polymorphic.' : ' Balanced.'} Fractions come from ${readsBelow ? `the drawn reads (up to ${READS_MAX.toLocaleString('en-US')} in the window)` : 'the whole window (variants chip)'}.`,
           };
         }
       }
       void maxLevel;
       // GTEx profiles are median reads per base and can sit well below 10: their axis floors at 0.1.
       // Relative mode draws each sample as a fraction of its own maximum in view (the axis reads 0–100 %).
-      const ownMax = maxDepthIn(track.coverage, viewStart, viewEnd);
+      // both strands on one scale when they are split: the opposite one is mirrored under the baseline, never clipped
+      const ownMax = trackMaxDepth(track, viewStart, viewEnd);
       const yMax = track.gtex ? 1 : (depthAxis === 'relative' || track.group) ? Math.max(1, ownMax) : niceMax(depthAxis === 'shared' ? globalMaxDepth : ownMax);
       // Arcs are first laid out against a baseline at y = 0 and measured; the junction area is then sized to
       // what they and their pills really occupy (rather than a fixed height per nesting level), and everything
@@ -2311,12 +4174,14 @@ export default function SashimiViewer({
         const key = junctionKey(j);
         const dragKey = `${track.sampleId}:${key}`;
         const { model, info, foreign } = junctionContext(j);
-        const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, track.junctions) : null;
+        const lr = track.gtex ? null : longRangeOf(j);
+        // no reading frame across two genes from one model: a fusion's frame needs both partners' coding sequences
+        const frame = model && info.cls !== 'canonical' && !lr ? junctionFrame(j, model, track.junctions) : null;
         const unique = idx === 0 && rnaOthers.length > 0 && !otherTrackJunctionKeys.has(key);
         const agg = trackEvents?.get(key);
         const share = agg?.shares[0];
         const approx = track.sampled ? '≈' : '';
-        const text = agg ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString()}`) : approx + j.count.toLocaleString();
+        const text = agg && !lr ? (share ? pctLabel(share.pct) : `n=${approx}${j.count.toLocaleString('en-US')}`) : approx + j.count.toLocaleString('en-US');
         const labelScale = labelScales[`${currentChrom}:${key}`] ?? 1;
         const deltas = share ? otherGroups.map(o => ({ text: deltaText(share.pct - (o.group!.agg.events.get(key)?.shares[0]?.pct ?? 0)), color: o.group!.color, name: o.sampleName })) : [];
         const x1 = scale.x(j.start), x2 = scale.x(j.end);
@@ -2338,7 +4203,8 @@ export default function SashimiViewer({
           const atStart = (side === 'left') !== reverse;
           const pos = atStart ? j.start : j.end;
           const exon = atStart ? info.leftExon : info.rightExon;
-          return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString()}${exon != null ? ` (exon ${exon})` : ''}`;
+          if (lr && atStart === lr.farAtStart && lr.partner) return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString('en-US')} (${lr.partner.geneName}${lr.partnerExon != null ? ` exon ${lr.partnerExon}` : ''})`;
+          return `continues to ${currentChrom}:${(atStart ? pos + 1 : pos).toLocaleString('en-US')}${exon != null ? ` (exon ${exon})` : ''}`;
         };
         if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: partner('left') };
         else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: partner('right') };
@@ -2347,10 +4213,12 @@ export default function SashimiViewer({
           ? (agg.shares.length
             ? agg.shares.map(sh => `${pctLabel(sh.pct)} ${sh.note}`).join('\n')
             : 'touches no annotated splice site: no share') +
-            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString()} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
+            `\n${AGG_CLASS_LABEL[agg.cls]}${agg.partner ? ' (two arcs paired)' : ''} · ${j.count.toLocaleString('en-US')} ${track.group ? `pooled reads in ${track.group.samplesWith.get(key) ?? 0}/${track.group.loaded} samples` : `spliced read${j.count > 1 ? 's' : ''}`}\n`
           : null;
-        const title = (track.gtex ? `median ${j.count.toLocaleString()} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString()} spliced read${j.count > 1 ? 's' : ''}\n`) +
-          `${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · intron ${formatBp(j.end - j.start)}\n` +
+        const lrEnds = lr ? longRangeEnds(j, lr) : null;
+        const title = (lr ? `${longRangeLabel(j, lr)}\n${lrEnds ? `reading frame: ${fusionFrame(lrEnds.five, lrEnds.three).text}\n` : ''}` : '') + (track.gtex ? `median ${j.count.toLocaleString('en-US')} junction reads per sample (${track.sampleName})\n` : aggText ?? `${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n`) +
+          `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
+          (j.snapped ? `including ${j.snapped.toLocaleString('en-US')} long read${j.snapped > 1 ? 's' : ''} that placed it up to ${JUNCTION_SNAP_BP} bp off (alignment jitter; a site a few bases away used by ${Math.round(100 / JUNCTION_SNAP_RATIO)} % of the reads or more stays its own arc)\n` : '') +
           info.label + (foreign ? ` (${foreign.strand === tx?.strand ? 'same strand as' : 'antisense to'} ${tx?.geneName ?? 'the queried gene'})` : '') +
           (inAlt ? `\nannotated in ${inAlt.slice(0, 4).join(', ')}${inAlt.length > 4 ? ` +${inAlt.length - 4}` : ''}` : '') +
           (frame ? `\nreading frame: ${frameLabel(frame)} · ${frame.text}` : '') +
@@ -2359,15 +4227,16 @@ export default function SashimiViewer({
           deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join('') +
           '\nclick the × on the pill to hide this arc (it still counts in the percentages)';
         return {
-          j, key, dragKey, level, color: unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
-          strokeW: agg ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(j.count) * 0.55), geom, label, edge, offset, frame, apexH, text, deltas, labelScale, labelRange, agg,
+          j, key, dragKey, level, color: lr ? LONG_RANGE_COLOR : unique ? UNIQUE_COLOR : agg?.cls === 'pseudo_exon' ? PSEUDO_EXON_COLOR : color, dashed: info.cls !== 'canonical', unique, title,
+          strokeW: agg && !lr ? 1 + 3.5 * (share?.pct ?? 0) : Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), longRange: !!lr, geom, label, edge, offset, frame, apexH, text, deltas, labelScale, labelRange, agg,
         };
       });
       // Structural evidence of a DNA track, drawn with the same arcs: deletions, split reads, discordant pairs
       if (dnaTrack && track.structural && svHints) {
         const sv = track.structural;
-        const kinds: { list: JunctionArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
-        const all = kinds.flatMap(k => k.list.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
+        const kinds: { list: SvArc[]; kind: SvKind }[] = [{ list: sv.deletions, kind: 'deletion' }, { list: sv.splits, kind: 'split' }, { list: sv.duplications ?? [], kind: 'duplication' }, { list: sv.inversions ?? [], kind: 'inversion' }, { list: sv.discordant, kind: 'discordant' }];
+        const minSv = svMinReads(track.sampleId);
+        const all = kinds.flatMap(k => k.list.filter(j => j.count >= minSv && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(j)}`)).map(j => ({ j, kind: k.kind })));
         const svLevels = layerJunctions(all.map(x => x.j));
         const approx = track.sampled ? '≈' : '';
         for (const { j, kind } of all) {
@@ -2382,26 +4251,105 @@ export default function SashimiViewer({
           const labelX = (visLo + visHi) / 2;
           const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
           let edge: ArcRender['edge'] = null;
-          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString()}` };
-          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString()}` };
-          const size = kind === 'discordant' ? `mates about ${formatBp(j.end - j.start)} apart (ends binned to 500 bp)` : formatBp(j.end - j.start);
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: `continues to ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}` };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: `continues to ${currentChrom}:${j.end.toLocaleString('en-US')}` };
+          const size = kind === 'discordant' ? `${formatBp(j.end - j.start)} between the breakpoints the pairs point to (their outermost reads for a duplication, innermost for a deletion; the breakpoint lies within an insert size of them)` : formatBp(j.end - j.start);
           const placed = (sv.realigned ?? []).filter(x => x.arc.kind === kind && x.arc.start === j.start && x.arc.end === j.end);
           const nPlaced = placed.reduce((n, x) => n + x.count, 0), nHard = placed.reduce((n, x) => n + x.hard, 0);
           const resc = (sv.rescued ?? []).filter(x => x.own && x.kind === kind && x.start === j.start && x.end === j.end);
           const nResc = resc.reduce((n, x) => n + x.count, 0), nRescHard = resc.reduce((n, x) => n + x.hard, 0);
           const nAligned = j.count - nPlaced - nResc;
-          const title = `${SV_LABEL[kind]}: ${approx}${j.count.toLocaleString()} read${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()} · ${size}` +
-            (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString()} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
-              (nPlaced ? ` + ${approx}${nPlaced.toLocaleString()} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString()} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString()} → ${(x.target + 1).toLocaleString()} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
-              (nResc ? ` + ${approx}${nResc.toLocaleString()} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString()} hard-clipped, attached by position` : ''})` : '') : '') +
-            (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString()} bp` : '') +
+          const pairKind = kind === 'discordant' ? ((j as DiscordantArc).kind ?? null) : null;
+          const what = kind === 'discordant' ? (pairKind ? `discordant pairs, ${PAIR_CLASS_LABEL[pairKind]}` : SV_LABEL[kind]) : SV_LABEL[kind];
+          const title = `${what}: ${approx}${j.count.toLocaleString('en-US')} ${kind === 'discordant' ? 'pair' : 'read'}${j.count > 1 ? 's' : ''}\n${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · ${size}` +
+            (nPlaced || nResc ? `\n${approx}${nAligned.toLocaleString('en-US')} ${kind === 'deletion' ? 'read' : 'split read'}${nAligned === 1 ? '' : 's'}${kind === 'deletion' ? ' with the deletion in their CIGAR' : ' (SA tag)'}` +
+              (nPlaced ? ` + ${approx}${nPlaced.toLocaleString('en-US')} clipped read${nPlaced === 1 ? '' : 's'} placed by realignment of the clipped sequence${nHard ? ` (${approx}${nHard.toLocaleString('en-US')} hard-clipped, counted with the soft-clipped reads of their cluster)` : ''}: ${placed.map(x => `clip ${x.side === 'left' ? 'before' : 'after'} ${(x.pos + (x.side === 'left' ? 1 : 0)).toLocaleString('en-US')} → ${(x.target + 1).toLocaleString('en-US')} (${x.strand}), ${x.matched} bases matched`).join('; ')}` : '') +
+              (nResc ? ` + ${approx}${nResc.toLocaleString('en-US')} clipped read${nResc === 1 ? '' : 's'} rescued at this breakpoint (clipped bases matching the reference at the other end, 8 bases or more${nRescHard ? `; ${approx}${nRescHard.toLocaleString('en-US')} hard-clipped, attached by position` : ''})` : '') : '') +
+            (kind === 'discordant' && sv.insertMedian ? `\nmedian insert size of the window: ${sv.insertMedian.toLocaleString('en-US')} bp` : '') +
+            (pairKind === 'duplication' ? `\nmates facing away (← →): the reads at the right end continue at the left end, as across the junction of a tandem duplication of about this stretch (a gain: compare the depth inside the arc with the depth outside)` : '') +
+            (kind === 'duplication' || pairKind === 'duplication' ? exonContent(tx, j.start, j.end, 'duplicated', kind === 'discordant') : '') +
+            ((kind === 'deletion' || pairKind === 'deletion') && j.end - j.start >= 1000 ? exonContent(tx, j.start, j.end, 'deleted', kind === 'discordant') : '') +
+            (kind !== 'discordant' ? svEvidenceText(j, approx) : '') +
             '\nevidence, not a call: open the reads to check it';
-          arcs.push({ j, key, dragKey, level, color: SV_COLORS[kind], dashed: kind !== 'deletion', unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString(), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+          // a deletion is drawn solid when only CIGARs carry it, dashed as soon as split or clipped reads support it
+          const onlyCigar = kind === 'deletion' && !Object.entries((j as SvArc).sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0);
+          arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+        }
+      }
+      // Fusion junctions of an RNA track: its split reads and clipped reads placed by realignment (fusionOf), drawn above
+      // its junction arcs, each end on the exon boundary it names; the pill gives the reads, the popover every sample's
+      if (!dnaTrack && !track.gtex && track.structural && svHints) {
+        const sv = track.structural;
+        const approx = track.sampled ? '≈' : '';
+        const cands = ([['split', deletionSplits(sv)], ['duplication', sv.duplications ?? []], ['inversion', sv.inversions ?? []]] as const)
+          .flatMap(([kind, list]) => list.map(j => ({ j, kind, f: j.count >= minJunctionCount ? fusionOf(j, kind) : null })))
+          .filter(x => x.f && x.f.end > viewStart && x.f.start < viewEnd && !hiddenSet.has(`${currentChrom}:${junctionKey(x.j)}`));
+        const fLevels = layerJunctions(cands.map(x => ({ start: x.f!.start, end: x.f!.end, count: x.j.count })));
+        const base = levels.size ? Math.max(...levels.values()) : 0;
+        for (const { j, kind, f } of cands) {
+          const g = { start: f!.start, end: f!.end, count: j.count };
+          const key = `${kind}:${junctionKey(j)}`, dragKey = `${track.sampleId}:${key}`;
+          const x1 = scale.x(g.start), x2 = scale.x(g.end);
+          const y1 = depthToY(depthAt(track.coverage, g.start - 1)), y2 = depthToY(depthAt(track.coverage, g.end));
+          const level = base + (fLevels.get(junctionKey(g)) || 1);
+          const offset = junctionOffsets[dragKey] || 0;
+          const apexH = Math.max(6, 18 + (level - 1) * JUNC_LEVEL_STEP - offset);
+          const geom = arcGeom(x1, y1, x2, y2, apexH);
+          const lo = Math.min(x1, x2), hi = Math.max(x1, x2), visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
+          const labelX = (visLo + visHi) / 2;
+          const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
+          const endText = (atStart: boolean) => {
+            const e = f!.ends[atStart ? 0 : 1];
+            return `continues to ${currentChrom}:${(atStart ? e.pos + 1 : e.pos).toLocaleString('en-US')}${e.gene ? ` (${e.gene}${e.exon != null ? ` exon ${e.exon}` : ''})` : ''}`;
+          };
+          let edge: ArcRender['edge'] = null;
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: endText(!reverse) };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: endText(reverse) };
+          const snapped = f!.ends.some(e => e.snapped) ? `\nends drawn on the exon boundaries within ${FUSION_SNAP_BP} bp of the evidence (${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')})` : '';
+          const title = `fusion junction? ${f!.label}${f!.oriented ? '' : ' (orientation unknown: no end on a splice site)'}\n${f!.what}\n` +
+            (f!.frame ? `reading frame: ${f!.frame.text} (from the two coding sequences; click for the translation)\n` : '') +
+            `${approx}${j.count.toLocaleString('en-US')} read${j.count > 1 ? 's' : ''}: split reads (SA tags) and reads clipped at the junction whose clipped bases align at the other end` +
+            `\n${currentChrom}:${(g.start + 1).toLocaleString('en-US')}-${g.end.toLocaleString('en-US')} · ${formatBp(g.end - g.start)} apart` + snapped +
+            svEvidenceText(j, approx) + '\nevidence, not a call: open the reads (with Clipped on) to check it; click for the other samples';
+          arcs.push({ j, key, dragKey, level, color: LONG_RANGE_COLOR, dashed: false, unique: false, title, strokeW: Math.min(4.5, 1.5 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH,
+            text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind, fusion: true });
+        }
+      }
+      // The opposite strand of a stranded sample, mirrored under the baseline on the same depth scale, its arcs hanging
+      // under it (laid out against a baseline at y = 0 too, downward positive)
+      const antiDepth = (d: number) => (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
+      if (track.anti) {
+        const anti = track.anti;
+        const list = anti.junctions.filter(j => j.count >= minJunctionCount && j.end > viewStart && j.start < viewEnd && !hiddenSet.has(`${currentChrom}:anti:${junctionKey(j)}`));
+        const aLevels = layerJunctions(list);
+        const approx = track.sampled ? '≈' : '';
+        for (const j of list) {
+          const key = `anti:${junctionKey(j)}`, dragKey = `${track.sampleId}:${key}`;
+          const x1 = scale.x(j.start), x2 = scale.x(j.end);
+          const y1 = antiDepth(depthAt(anti.coverage, j.start - 1)), y2 = antiDepth(depthAt(anti.coverage, j.end));
+          const level = aLevels.get(junctionKey(j)) || 1;
+          // dragged down (offset > 0) hangs deeper
+          const offset = junctionOffsets[dragKey] || 0;
+          const apexH = Math.max(6, 18 + (level - 1) * JUNC_LEVEL_STEP + offset);
+          const geom = arcGeom(x1, y1, x2, y2, apexH, true);
+          const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
+          const visLo = Math.max(lo, PLOT_LEFT), visHi = Math.min(hi, plotRight);
+          const labelX = (visLo + visHi) / 2;
+          const label = visHi - visLo > 26 ? { x: labelX, y: arcYAtX(geom, labelX) } : null;
+          const cont = (atStart: boolean) => `continues to ${currentChrom}:${(atStart ? j.start + 1 : j.end).toLocaleString('en-US')}`;
+          let edge: ArcRender['edge'] = null;
+          if (lo < PLOT_LEFT && hi > PLOT_LEFT) edge = { side: 'left', y: arcYAtX(geom, PLOT_LEFT), title: cont(!reverse) };
+          else if (hi > plotRight && lo < plotRight) edge = { side: 'right', y: arcYAtX(geom, plotRight), title: cont(reverse) };
+          const title = `opposite strand (antisense to ${tx?.geneName ?? 'the gene'}): ${approx}${j.count.toLocaleString('en-US')} spliced read${j.count > 1 ? 's' : ''}\n` +
+            `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')} · intron ${formatBp(j.end - j.start)}\n` +
+            'a transcript of the other strand (antisense gene, readthrough), or reads of the library\'s wrong strand (a few % in any stranded library)\nclick for every sample and the gene of the other strand';
+          arcs.push({ j, key, dragKey, level, color: ANTI_COLOR, dashed: false, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55),
+            geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, below: true });
         }
       }
       // Colliding pills (lower arcs keep their place): a pill first slides along its own arc, alternately left and
       // right of the midpoint, to the nearest free spot, so it stays on the arc even when enlarged; only when the
-      // whole visible arc is taken is it pushed upward.
+      // whole visible arc is taken is it pushed upward (an arc of the opposite strand: downward).
       const placed: { x: number; y: number; w: number; h: number }[] = [];
       for (const a of [...arcs].sort((p, q) => p.level - q.level)) {
         if (!a.label) continue;
@@ -2420,15 +4368,21 @@ export default function SashimiViewer({
           }
           for (let iter = 0; !found && iter < 24; iter++) {
             if (!hits(a.label.x, a.label.y)) break;
-            a.label.y -= h + 3;
+            a.label.y += (a.below ? 1 : -1) * (h + 3);
           }
         }
         placed.push({ x: a.label.x, y: a.label.y, w, h });
       }
       // Highest point of the track content relative to the baseline (negative): the coverage area itself,
       // every arc apex (dragged arcs included, their apex height carries the drag), read-count pill and edge chevron.
-      let top = -COVERAGE_H;
+      let top = -COVERAGE_H, bottom = 0;
       for (const a of arcs) {
+        if (a.below) {
+          bottom = Math.max(bottom, Math.max(a.geom.y1, a.geom.y2) + a.apexH);
+          if (a.label) bottom = Math.max(bottom, a.label.y + (LABEL_H * a.labelScale) / 2);
+          if (a.edge) bottom = Math.max(bottom, a.edge.y + 4);
+          continue;
+        }
         top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH);
         if (a.label) top = Math.min(top, a.label.y - (LABEL_H * a.labelScale) / 2);
         if (a.edge) top = Math.min(top, a.edge.y - 4);
@@ -2436,51 +4390,115 @@ export default function SashimiViewer({
       const juncH = TRACK_LABEL_H + strip + Math.max(JUNC_MIN_H, -top - COVERAGE_H + JUNC_PAD);
       const baseline = y + juncH + COVERAGE_H;
       for (const a of arcs) {
-        a.geom = arcGeom(a.geom.x1, a.geom.y1 + baseline, a.geom.x2, a.geom.y2 + baseline, a.apexH);
+        a.geom = arcGeom(a.geom.x1, a.geom.y1 + baseline, a.geom.x2, a.geom.y2 + baseline, a.apexH, a.below);
         if (a.label) a.label.y += baseline;
         if (a.edge) a.edge.y += baseline;
       }
       const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
+      const antiPaths = track.anti ? buildCoveragePaths(track.anti.coverage, scale, viewStart, viewEnd, baseline, d => baseline + antiDepth(d)) : null;
+      const mirror = track.anti ? Math.ceil(Math.max(MIRROR_MIN_H, bottom, antiDepth(maxDepthIn(track.anti.coverage, viewStart, viewEnd)))) + MIRROR_PAD : 0;
       // intron retention pills: on the baseline at the middle of the visible part of each intron, above the Min % threshold
       const retention: TrackLayout['retention'] = (dnaTrack ? [] : trackAgg?.retention ?? [])
         .filter(r => r.pct * 100 >= minUsagePct && r.pct > 0 && r.end > viewStart && r.start < viewEnd)
         .map(r => {
           const xa = scale.x(Math.max(r.start, viewStart)), xb = scale.x(Math.min(r.end, viewEnd));
           const deltas = otherGroups.map(o => ({ text: deltaText(r.pct - (o.group!.agg.retention.find(x => x.start === r.start && x.end === r.end)?.pct ?? 0)), color: o.group!.color, name: o.sampleName }));
+          const key = `ir:${r.start}-${r.end}`;
           return {
             x: (xa + xb) / 2, y: baseline - LABEL_H / 2 - 3, text: `IR ${pctLabel(r.pct)}`, deltas,
+            hint: '\nclick for its summary: HGVS, reading frame, supporting reads',
+            onClick: (e: { clientX: number; clientY: number }) => {
+              // picking for the phasing panel: the intron's junction, whose use the fragments unspliced through it count against
+              if (pairPickingRef.current) { setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, junction: { start: r.start, end: r.end } })); return; }
+              const p = svgPoint(e);
+              setPopover(prev => (prev?.kind === 'retention' && prev.key === key ? null : { kind: 'retention', key, start: r.start, end: r.end, fromExon: r.fromExon, toExon: r.toExon, x: p.x, y: p.y }));
+            },
             title: `${pctLabel(r.pct)} ${r.note}\n${track.group ? 'reads pooled over the group' : track.sampleName} · unspliced through both boundaries, ≥ 6 aligned bases on the exon side and ≥ 10 on the intron side` +
               deltas.map(d => `\nvs ${d.name}: ${d.text} (difference of the two shares, in points)`).join(''),
           };
         });
       if (dnaTrack && track.structural && svHints) {
         const approx = track.sampled ? '≈' : '';
+        const minSv = svMinReads(track.sampleId);
         for (const c of track.structural.clips) {
-          if (c.count < minJunctionCount || c.pos < viewStart || c.pos > viewEnd) continue;
-          retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString()}`, deltas: [], color: SV_COLORS.clip,
+          if (c.count < minSv || c.pos < viewStart || c.pos > viewEnd) continue;
+          retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.clip,
             onClick: e => { const pt = svgPoint(e); openClipConsensus(track.sampleId, c.pos, c.side, c.count, pt.x, pt.y); },
-            title: `soft-clip cluster: ${approx}${c.count.toLocaleString()} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString()} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
+            title: `soft-clip cluster: ${approx}${c.count.toLocaleString('en-US')} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString('en-US')} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
         for (const x of track.structural.insertions ?? []) {
-          if (x.count < minJunctionCount || x.pos < viewStart || x.pos > viewEnd) continue;
-          retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString()}`, deltas: [], color: SV_COLORS.insertion,
-            title: `insertion: ${approx}${x.count.toLocaleString()} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString()}\nevidence, not a call: open the reads to check it` });
+          if (x.count < minSv || x.pos < viewStart || x.pos > viewEnd) continue;
+          retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.insertion,
+            title: `insertion: ${approx}${x.count.toLocaleString('en-US')} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString('en-US')}\nevidence, not a call: open the reads to check it` });
         }
         for (const e of track.structural.elsewhere) {
-          if (e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
-          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString()}`, deltas: [], color: SV_COLORS.elsewhere,
-            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString()} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString()} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
+          if (e.count < minSv || e.pos < viewStart || e.pos > viewEnd) continue;
+          retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.elsewhere,
+            title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
         }
       }
-      const height = juncH + COVERAGE_H;
-      out.push({ track, idx, color, yOff: y, juncH, yMax, paths, arcs, height, strip, retention, sites: trackSites, balance });
+      const exits: TrackLayout['exits'] = [];
+      if (!dnaTrack && !track.gtex && track.structural && svHints) {
+        const approx = track.sampled ? '≈' : '';
+        // split reads continuing on another chromosome (an interchromosomal fusion partner): a stem leaving by the top
+        for (const e of track.structural.elsewhere) {
+          if (e.kind !== 'split' || e.count < minJunctionCount || e.pos < viewStart || e.pos > viewEnd) continue;
+          const tr = transOf(e);
+          const n = `${approx}${e.count.toLocaleString('en-US')}`;
+          // leaning away from the exon the junction leaves or enters, as an arc would
+          const exonLeft = tr?.here.role ? (tr.here.role === 'donor') === ((tr.here.strand ?? 1) > 0) : true;
+          const dir = ((exonLeft ? 1 : -1) * (reverse ? -1 : 1)) as 1 | -1;
+          exits.push({ x: scale.x(e.pos), e, key: `trans:${e.chrom}:${e.pos}`, dir,
+            label: `${e.chrom}${tr?.partner ? ` · ${tr.partner}` : ''} · ${n}`,
+            title: `${tr ? `${tr.label}\n` : ''}${n} split read${e.count === 1 ? '' : 's'} continuing on ${e.chrom}${e.farPos != null ? ` at ${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}${e.farCount != null && e.farCount < e.count ? ` (${e.farCount} of them there exactly)` : ''}` : ''} from ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')}: an interchromosomal fusion junction?` +
+              `${tr?.frame ? `\nreading frame: ${tr.frame.text}` : ''}\nclick for the partners, the reading frame and the fusion cartoon` });
+        }
+      }
+      const methyl = showMethyl && dnaTrack && !track.gtex && !track.group && !!ds.getMethylation ? methylPanelH(methylData[track.sampleId], methylDiffRow) : 0;
+      const variants = coverageVariants && dnaTrack && !track.gtex && !track.group && !!ds.getVariantSites
+        ? VAR_TRACK_H + ((dnaSites[track.sampleId]?.haplotagged ?? 0) > 0 && trackSites.some(st => st.hap) ? VAR_PHASE_H : 0) : 0;
+      // the coverage layer switched off: a DNA track keeps its label band, then its other layers
+      const hideCov = !showCoverage && dnaTrack && !track.gtex;
+      const covH = hideCov ? 0 : COVERAGE_H, jH = hideCov ? TRACK_LABEL_H : juncH;
+      const height = jH + covH + mirror + variants + methyl;
+      out.push({ track, idx, color, yOff: y, juncH: jH, covH, yMax, paths, arcs: hideCov ? [] : arcs, height, strip, retention: hideCov ? [] : retention, exits: hideCov ? [] : exits, sites: trackSites, balance, variants, methyl, methylDiff: methyl > 0 && methylDiffRow, mirror, antiPaths });
       y += height + SASHIMI_GAP;
       if (readsBelow) y += readsBelow.height + TRACK_GAP;
-    });
-    return out;
-  }, [comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, tracksTop, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, uniqueOnly, svHints]); // eslint-disable-line react-hooks/exhaustive-deps
+    };
+    // the panels in their order: an annotation takes its height, a sample its track (and its reads track); the colours
+    // stay the samples' own (their place among the samples, not on the page)
+    const byKey = new Map(displayTracks.map((t, idx) => [panelKeyOf(t), { t, idx }]));
+    for (const k of orderKeys) {
+      if (k in annotH) { annotY[k] = y; if (annotH[k]) y += annotH[k] + TRACK_GAP; continue; }
+      const e = byKey.get(k);
+      if (e) place(e.t, e.idx);
+    }
+    return { layouts: out, annotY };
+  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, transOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const lastTrackBottom = layouts.length ? layouts[layouts.length - 1].yOff + layouts[layouts.length - 1].height + TRACK_GAP : tracksTop;
+  /**
+   * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
+   * of the others: computed when their counts change, not per frame (the panels only place the tags).
+   */
+  const methylDiffCache = useRef<{ keys: unknown[]; out: Map<number, MethylIslandDiff[]> } | null>(null);
+  const methylDiffs = useMemo(() => {
+    const panels = layouts.filter(L => L.methylDiff).map(L => ({ sid: L.track.sampleId, name: L.track.sampleName, e: methylData[L.track.sampleId] }))
+      .filter((x): x is { sid: number; name: string; e: MethylEntry } => !!x.e?.prefix && x.e.chrom === currentChrom);
+    if (panels.length < 2) return new Map<number, MethylIslandDiff[]>();
+    const keys = panels.flatMap(p => [p.sid, p.e.prefix]);
+    const c = methylDiffCache.current;
+    if (c && c.keys.length === keys.length && c.keys.every((k, i) => k === keys[i])) return c.out;
+    const out = methylIslandDiffs(panels[0], panels.slice(1));
+    methylDiffCache.current = { keys, out };
+    return out;
+  }, [layouts, methylData, currentChrom]);
+
+  const seqY = annotY.seq ?? RULER_H, knownY = annotY.known ?? RULER_H, snpY = annotY.snps ?? RULER_H, altY = annotY.alt ?? RULER_H;
+  const transcriptYAt = annotY.tx ?? RULER_H;
+  // the bottom of the stack: its last sample (in the order drawn) or an annotation panel dragged under the samples
+  const lastLayout = layouts.reduce<TrackLayout | null>((m, L) => (!m || L.yOff > m.yOff ? L : m), null);
+  const annotBottom = Math.max(RULER_H, ...Object.keys(annotH).map(k => (annotH[k] ? (annotY[k] ?? RULER_H) + annotH[k] + TRACK_GAP : RULER_H)));
+  const lastTrackBottom = Math.max(annotBottom, lastLayout ? lastLayout.yOff + lastLayout.height + TRACK_GAP : RULER_H);
   /** Each reads track sits right under the coverage track of its sample. */
   const readsPlacements = [...readsTracks].map(([sid, rt]) => {
     const L = layouts.find(l => l.track.sampleId === sid);
@@ -2488,6 +4506,72 @@ export default function SashimiViewer({
   });
   // A reads track may sit under the last coverage track, so it can extend the stack
   const tracksBottom = readsPlacements.reduce((m, p) => Math.max(m, p.y + p.rt.height + TRACK_GAP), lastTrackBottom);
+
+  /** Each panel shown, in its order, with its extent (a sample with its reads track): what the grips move. */
+  const panelSpans = orderKeys.map(k => {
+    if (k in annotH) return annotH[k] ? { key: k, top: annotY[k], bottom: annotY[k] + annotH[k], name: ANNOT_NAMES[k] ?? k } : null;
+    const L = layouts.find(l => panelKeyOf(l.track) === k);
+    if (!L) return null;
+    const rt = readsPlacements.find(p => p.sid === L.track.sampleId);
+    return { key: k, top: L.yOff, bottom: rt ? rt.y + rt.rt.height : L.yOff + L.height, name: L.track.sampleName };
+  }).filter((x): x is { key: string; top: number; bottom: number; name: string } => !!x);
+  const panelSpansRef = useRef(panelSpans);
+  panelSpansRef.current = panelSpans;
+  const orderKeysRef = useRef(orderKeys);
+  orderKeysRef.current = orderKeys;
+  /** Where a panel dragged to `y` lands: after the last other panel whose middle is above `y` (null: before them all). */
+  const dropAfter = (key: string, y: number) => {
+    let after: string | null = null;
+    for (const sp of panelSpansRef.current) if (sp.key !== key && (sp.top + sp.bottom) / 2 < y) after = sp.key;
+    return after;
+  };
+  const startPanelMove = (key: string, e: React.MouseEvent) => {
+    e.stopPropagation(); e.preventDefault();
+    setPanelDrag({ key, y: svgPoint(e).y });
+    const move = (ev: MouseEvent) => setPanelDrag(d => d && { ...d, y: svgPoint(ev).y });
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      setPanelDrag(null);
+      const after = dropAfter(key, svgPoint(ev).y);
+      const order = orderKeysRef.current.filter(k => k !== key);
+      const first = panelSpansRef.current.find(sp => sp.key !== key)?.key;
+      const at = after != null ? order.indexOf(after) + 1 : first != null ? order.indexOf(first) : 0;
+      order.splice(Math.max(0, at), 0, key);
+      if (order.join('\n') !== orderKeysRef.current.join('\n')) setPanelOrder(order);
+    };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+  };
+  /** A grip at the left of every panel, and while one is dragged, the line where it would land. Never exported. */
+  const renderPanelGrips = () => (
+    <g data-export="skip">
+      {panelSpans.map(sp => {
+        const dragged = panelDrag?.key === sp.key;
+        return (
+          <g key={`grip-${sp.key}`} style={{ cursor: panelDrag ? 'grabbing' : 'grab' }} onMouseDown={e => startPanelMove(sp.key, e)}
+            onDoubleClick={e => { e.stopPropagation(); setPanelOrder([]); }}>
+            <title>{`Drag to move ${sp.name} up or down (with its reads track); double-click a grip to bring back the default order`}</title>
+            <rect x={1} y={sp.top + 1} width={13} height={18} rx={3} fill={dragged ? withAlpha(INK.select, 0.25) : INK.bg} stroke={withAlpha(INK.select, dragged ? 0.9 : 0.35)} strokeWidth={0.8} />
+            {[0, 1, 2].map(r => [0, 1].map(c => <circle key={`${r}${c}`} cx={5.5 + c * 4} cy={sp.top + 5.5 + r * 4.5} r={1.1} fill={INK.select} opacity={0.8} />))}
+          </g>
+        );
+      })}
+      {panelDrag && (() => {
+        const sp = panelSpans.find(x => x.key === panelDrag.key);
+        if (!sp) return null;
+        const after = dropAfter(panelDrag.key, panelDrag.y);
+        const others = panelSpans.filter(x => x.key !== panelDrag.key);
+        const at = after != null ? others.find(x => x.key === after)!.bottom + TRACK_GAP / 2 : (others[0]?.top ?? sp.top) - TRACK_GAP / 2;
+        return (
+          <g pointerEvents="none">
+            <rect x={0} y={sp.top} width={PLOT_LEFT + plotWidth} height={Math.max(0, sp.bottom - sp.top)} fill={withAlpha(INK.select, 0.06)} />
+            <line x1={0} y1={at} x2={PLOT_LEFT + plotWidth} y2={at} stroke={INK.select} strokeWidth={2.5} />
+            <rect x={PLOT_LEFT + 6} y={at - 9} width={sp.name.length * 5.6 + 70} height={16} rx={3} fill={INK.select} />
+            <text x={PLOT_LEFT + 12} y={at + 3} fill="#fff" fontSize={10} fontWeight={600}>{`move ${sp.name} here`}</text>
+          </g>
+        );
+      })()}
+    </g>
+  );
 
 
   /** Legend items (local y), laid out left to right and wrapped into rows that fit the plot width. */
@@ -2506,6 +4590,20 @@ export default function SashimiViewer({
     });
     if (anyRna) line(primaryColor, false, 'canonical junction (consecutive exons)', 'l1');
     if (anyRna) line(primaryColor, true, 'non-canonical (exon skipping, novel site)', 'l2');
+    if (anyRna && layouts.some(L => L.arcs.some(a => a.fusion))) line(LONG_RANGE_COLOR, false, 'fusion junction: split or clipped reads placed across genes (inversion, duplication-type, or joining two genes)', 'l2d');
+    if (anyRna && layouts.some(L => L.arcs.some(a => a.longRange))) line(LONG_RANGE_COLOR, true, 'long-range junction: leaves the gene (read-through or fusion?), shown from Min reads', 'l2c');
+    if (anyRna && layouts.some(L => L.exits.length)) {
+      const label = 'fusion junction with another chromosome: split reads leaving here (partner · reads); click for the frame and the cartoon';
+      items.push({
+        w: 30 + label.length * 5.3 + 14, el: (
+          <g key="ltrans">
+            <path d={`M2,${y + 6} C2,${y} 10,${y - 2} 12,${y - 6}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.8} strokeLinecap="round" />
+            <path d={`M9,${y - 4} L12,${y - 7} L15,${y - 4}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.3} strokeLinecap="round" />
+            <text x={28} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{label}</text>
+          </g>
+        ),
+      });
+    }
     if (anyRna && showUsage) line(PSEUDO_EXON_COLOR, true, `pseudo-exon (alt 3′ in + alt 5′ out, ≤ ${PSEUDO_EXON_MAX_BP} bp, paired)`, 'l2b');
     if (anyRna && showUsage && includeRetention) items.push({
       w: 38 + 'intron retention: unspliced reads through both boundaries, share of the intron\'s reads'.length * 5.3 + 14, el: (
@@ -2542,11 +4640,13 @@ export default function SashimiViewer({
       g(ANTISENSE_COLOR, 'neighbouring gene, antisense', 'ln2');
     }
     if (anyDna && svHints) {
-      line(SV_COLORS.deletion, false, 'deletion inside reads (≥ 50 bp, CIGAR)', 'lsv1');
-      line(SV_COLORS.split, true, 'split reads, deletion-type', 'lsv2');
+      line(SV_COLORS.deletion, false, 'deletion ≥ 50 bp in CIGARs', 'lsv1');
+      line(SV_COLORS.deletion, true, 'deletion also in split or clipped reads (nearby breakpoints merged)', 'lsv2');
       line(SV_COLORS.duplication, true, 'split reads, duplication-type', 'lsv2b');
       line(SV_COLORS.inversion, true, 'split reads, inversion', 'lsv2c');
-      line(SV_COLORS.discordant, true, 'discordant pairs (insert > 5× median or same strand)', 'lsv3');
+      line(PAIR_CLASS_LINE.duplication, true, 'discordant pairs ← → (duplication-type)', 'lsv3');
+      line(PAIR_CLASS_LINE.deletion, true, 'discordant pairs → ← far apart (deletion-type)', 'lsv3b');
+      line(PAIR_CLASS_LINE.inversion, true, 'discordant pairs on one strand (inversion-type)', 'lsv3c');
       items.push({
         w: 250, el: (
           <g key="lsv6">
@@ -2575,7 +4675,97 @@ export default function SashimiViewer({
         ),
       });
     }
+    if (anyDna && coverageVariants) {
+      items.push({
+        w: 176, el: (
+          <g key="lvar1">
+            <rect x={0} y={y - 7} width={5} height={14} fill="#9ca3af" opacity={0.3} /><rect x={0} y={y - 1} width={5} height={8} fill={BASE_COLORS.T} />
+            <text x={9} y={y + 3.5} fill={INK.muted} fontSize={9.5}>variant: bar = allele fraction</text>
+          </g>
+        ),
+      });
+      items.push({
+        w: 20 + 'quality: BQ or homopolymer · MQ · strand · read end'.length * 5.4 + 14, el: (
+          <g key="lvar2">
+            {[0, 1, 2, 3].map(i => <rect key={i} x={i * 4} y={y - 3.5} width={3} height={7} fill={Q_COLORS.good} />)}
+            <text x={20} y={y + 3.5} fill={INK.muted} fontSize={9.5}>quality: BQ or homopolymer · MQ · strand · read end</text>
+          </g>
+        ),
+      });
+      if (layouts.some(L => L.variants > VAR_TRACK_H)) {
+        const txt = 'haplotags: H1 · H2, one hue per phase set · ⫽ sets not linked';
+        items.push({
+          w: 34 + txt.length * 5.4, el: (
+            <g key="lphase">
+              <rect x={0} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[0]} /><rect x={0} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[0].hp[1]} />
+              <rect x={11} y={y - 5} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[0]} /><rect x={11} y={y + 2} width={11} height={3} rx={1.5} fill={PS_TONES[1].hp[1]} />
+              <circle cx={7} cy={y - 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.G} strokeWidth={1.5} /><circle cx={16} cy={y + 3.5} r={3} fill={INK.bg} stroke={BASE_COLORS.A} strokeWidth={1.5} />
+              <text x={28} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{txt}</text>
+            </g>
+          ),
+        });
+      }
+      items.push({
+        w: 196, el: (
+          <g key="lvar3">
+            {(['good', 'warn', 'bad', 'na'] as QLevel[]).map((lv, i) => (
+              <g key={lv} transform={`translate(${i * 48}, 0)`}>
+                <rect x={0} y={y - 3.5} width={3} height={7} fill={Q_COLORS[lv]} />
+                <text x={6} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{lv === 'good' ? 'pass' : lv === 'warn' ? 'check' : lv === 'bad' ? 'flag' : 'n.a.'}</text>
+              </g>
+            ))}
+          </g>
+        ),
+      });
+    }
+    if (anyDna && showMethyl) {
+      items.push({
+        w: 92 + 'CpG 5mC 0 → 100 % (pale: < 3 calls)'.length * 5.4 + 16, el: (
+          <g key="lme1">
+            {METHYL_COLORS.map((c, i) => <rect key={c} x={i * 8} y={y - 5} width={8} height={10} fill={c} />)}
+            <text x={94} y={y + 3.5} fill={INK.muted} fontSize={9.5}>CpG 5mC 0 → 100 % (pale: &lt; {METHYL_MIN_CALLS} calls)</text>
+          </g>
+        ),
+      });
+      items.push({
+        w: 268, el: (
+          <g key="lme2">
+            <rect x={0} y={y - 6} width={4} height={6} fill={PS_TONES[0].ink} /><rect x={5} y={y - 3} width={4} height={3} fill={PS_TONES[0].ink} /><rect x={10} y={y} width={4} height={5} fill={PS_TONES[0].hp[0]} />
+            <line x1={0} y1={y} x2={16} y2={y} stroke={INK.gridStrong} strokeWidth={0.6} />
+            <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>Δ HP1 − HP2</text>
+            <rect x={88} y={y - 6} width={26} height={12} rx={2} fill={METHYL_ASM_COLOR} fillOpacity={0.07} stroke={METHYL_ASM_COLOR} strokeDasharray="3 2" />
+            <text x={119} y={y + 3.5} fill={INK.muted} fontSize={9.5}>allele-specific methylation</text>
+          </g>
+        ),
+      });
+      if (layouts.some(L => L.methylDiff)) items.push({
+        w: 290, el: (
+          <g key="lme4">
+            <rect x={0} y={y - 5.5} width={34} height={11} rx={5.5} fill={METHYL_COLORS[0]} stroke={METHYL_COLORS[0]} />
+            <text x={17} y={y + 3} textAnchor="middle" fill="#fff" fontSize={8} fontWeight={700}>−26 %</text>
+            <text x={40} y={y + 3.5} fill={INK.muted} fontSize={9.5}>CpG-island mean 5mC, primary vs other samples</text>
+          </g>
+        ),
+      });
+      items.push({
+        w: 92, el: (
+          <g key="lme3">
+            <rect x={0} y={y - 1.5} width={16} height={3} rx={1} fill="#16a34a" opacity={0.55} />
+            <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>CpG island</text>
+          </g>
+        ),
+      });
+    }
     if (anyRna && rnaOthers.length > 0) line(UNIQUE_COLOR, false, `only in ${comparedTracks[0].sampleName}`, 'l3');
+    if (layouts.some(L => L.antiPaths)) items.push({
+      w: 300, el: (
+        <g key="lanti">
+          <line x1={0} y1={y - 3} x2={16} y2={y - 3} stroke={INK.gridStrong} strokeWidth={1} />
+          <path d={`M0,${y - 3} L4,${y + 4} L12,${y + 4} L16,${y - 3} z`} fill={withAlpha(ANTI_COLOR, 0.3)} stroke={ANTI_COLOR} strokeWidth={0.8} />
+          <text x={21} y={y + 3.5} fill={INK.muted} fontSize={9.5}>opposite strand, mirrored (coverage, arcs, reads)</text>
+        </g>
+      ),
+    });
     items.push({
       w: 60, el: (
         <g key="l4">
@@ -2620,16 +4810,39 @@ export default function SashimiViewer({
     }
     if (showReads && anyPairs && showPairs) {
       items.push({
-        w: 210, el: (
+        w: 360, el: (
           <g key="lpair">
             <rect x={0} y={y - 4} width={10} height={8} fill={READ_FILL} /><line x1={10} y1={y} x2={24} y2={y} stroke={PAIR_LINK_COLOR} strokeWidth={1} /><rect x={24} y={y - 4} width={10} height={8} fill={READ_FILL} />
             <text x={38} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mates joined</text>
-            <rect x={104} y={y - 4} width={10} height={8} fill={READ_DISCORDANT_FILL} /><line x1={114} y1={y} x2={124} y2={y} stroke={SV_COLORS.discordant} strokeWidth={1.5} />
-            <text x={128} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant pair</text>
+            {(['duplication', 'deletion', 'inversion', 'other'] as const).map((c, i) => (
+              <rect key={c} x={104 + i * 11} y={y - 4} width={10} height={8} fill={PAIR_CLASS_FILL[c]}><title>{PAIR_CLASS_LABEL[c]}</title></rect>
+            ))}
+            <text x={150} y={y + 3.5} fill={INK.muted} fontSize={9.5}>discordant: ← → dup · → ← del · inv · other</text>
           </g>
         ),
       });
     }
+    if (showReads && !collapseReads && readsColor === 'none' && readsGroup !== 'none' && (anyHaplotagged || readsGroup === 'phase')) {
+      const txt = readsGroup === 'phase' ? 'reads: one hue per phase block · H1 darker, H2 lighter' : 'reads: one hue per phase set (PS) · HP 1 darker, HP 2 lighter';
+      items.push({
+        w: 44 + txt.length * 5.4, el: (
+          <g key="lps">
+            {PS_TONES.slice(0, 3).map((t, i) => <g key={i}><rect x={i * 12} y={y - 5} width={10} height={4} rx={1} fill={t.hp[0]} /><rect x={i * 12} y={y + 1} width={10} height={4} rx={1} fill={t.hp[1]} /></g>)}
+            <text x={40} y={y + 3.5} fill={INK.muted} fontSize={9.5}>{txt}</text>
+          </g>
+        ),
+      });
+    }
+    if (showReads && !collapseReads && readsColor !== 'none') items.push({
+      w: 200, el: (
+        <g key="lstrand">
+          <path d={`M0,${y - 4} H10 L14,${y} L10,${y + 4} H0 Z`} fill={READ_FWD_FILL} />
+          <text x={18} y={y + 3.5} fill={INK.muted} fontSize={9.5}>forward</text>
+          <path d={`M74,${y - 4} H64 L60,${y} L64,${y + 4} H74 Z`} fill={READ_REV_FILL} />
+          <text x={78} y={y + 3.5} fill={INK.muted} fontSize={9.5}>reverse{readsColor === 'first' ? ' (read 1 of the pair)' : ''}</text>
+        </g>
+      ),
+    });
     if (showReads) {
       items.push({
         w: 118, el: (
@@ -2733,15 +4946,20 @@ export default function SashimiViewer({
     const baseY = RULER_H - 1;
     const items: JSX.Element[] = [];
     const labelY = baseY - 10;
-    const tick = (x: number, label: string | null, key: string, anchor: 'middle' | 'start' | 'end' = 'middle') => (
-      <g key={key}>
-        <line x1={x} y1={baseY - 6} x2={x} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
-        {label && <text x={x} y={labelY} textAnchor={anchor} fill={INK.muted} fontSize={9.5}>{label}</text>}
-      </g>
-    );
+    /** the labelled ticks, 1-based: the other build's line labels the same ones */
+    const labelled: { x: number; pos: number }[] = [];
+    const tick = (x: number, label: string | null, key: string, anchor: 'middle' | 'start' | 'end' = 'middle', pos?: number) => {
+      if (label && pos != null) labelled.push({ x, pos });
+      return (
+        <g key={key}>
+          <line x1={x} y1={baseY - 6} x2={x} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
+          {label && <text x={x} y={labelY} textAnchor={anchor} fill={INK.muted} fontSize={9.5}>{label}</text>}
+        </g>
+      );
+    };
     if (axis.kind === 'linear') {
       for (const t of niceTicks(viewStart + 1, viewEnd, Math.max(3, Math.floor(plotWidth / 130)))) {
-        items.push(tick(scale.x(t - 0.5), t.toLocaleString(), `t${t}`));
+        items.push(tick(scale.x(t - 0.5), t.toLocaleString('en-US'), `t${t}`, 'middle', t));
       }
     } else if (tx) {
       // Exon boundaries carry the coordinates; introns get a broken-axis mark.
@@ -2754,7 +4972,7 @@ export default function SashimiViewer({
         if (x < PLOT_LEFT || x > plotRight) continue;
         const show = Math.abs(x - lastLabelX) >= 68;
         if (show) lastLabelX = x;
-        items.push(tick(x, show ? b.label.toLocaleString() : null, `b${b.pos}`));
+        items.push(tick(x, show ? b.label.toLocaleString('en-US') : null, `b${b.pos}`, 'middle', b.label));
       }
       for (const intron of intronsOf(tx)) {
         const mx = scale.x((intron.start + intron.end) / 2);
@@ -2770,9 +4988,414 @@ export default function SashimiViewer({
       <g fontFamily={FONT}>
         <line x1={PLOT_LEFT} y1={baseY} x2={plotRight} y2={baseY} stroke={INK.gridStrong} strokeWidth={1} />
         {items}
+        {liftover && renderLiftRow(labelled)}
         <text x={PLOT_LEFT} y={11} fill={INK.faint} fontSize={9} fontWeight={600} letterSpacing={0.4}>
-          {currentChrom.toUpperCase()}{reverse ? '  ·  5′ → 3′ (reverse strand, axis flipped)' : ''}{axis.kind === 'equal-intron' ? '  ·  INTRONS DRAWN AT EQUAL WIDTH' : ''}
+          {currentChrom.toUpperCase()}{liftover ? `  ·  ${liftover.from.toUpperCase()}` : ''}{reverse ? '  ·  5′ → 3′ (reverse strand, axis flipped)' : ''}{axis.kind === 'equal-intron' ? '  ·  INTRONS DRAWN AT EQUAL WIDTH' : ''}
         </text>
+      </g>
+    );
+  };
+
+  /**
+   * The other build's line, between the chromosome label and the ruler: the lift of each labelled tick under it (one
+   * column, two builds), a grey stretch where the view has no counterpart there, the build on the left (× takes the
+   * line away).
+   */
+  const renderLiftRow = (labelled: { x: number; pos: number }[]) => {
+    if (!liftover) return null;
+    const top = LIFT_TOP, textY = top + 10, markY = top + 12;
+    const segs = liftHere;
+    const range = segs ? liftRange(segs, viewStart + 1, viewEnd) : null;
+    const els: JSX.Element[] = [];
+    if (segs) {
+      for (const { x, pos } of labelled) {
+        const p = liftPos(segs, pos);
+        const other = p && p.chrom.replace(/^chr/i, '') !== currentChrom.replace(/^chr/i, '');
+        els.push(
+          <g key={`lt${pos}`}>
+            <title>{`${currentChrom}:${pos.toLocaleString('en-US')} (${liftover.from}) = ${p ? `${p.chrom}:${p.pos.toLocaleString('en-US')}` : 'no counterpart'} (${liftover.to})`}</title>
+            <line x1={x} y1={markY} x2={x} y2={markY + 4} stroke={LIFT_COLOR} strokeWidth={1} opacity={0.7} />
+            <text x={x} y={textY} textAnchor="middle" fill={p ? LIFT_COLOR : INK.faint} fontSize={9.5} fontWeight={other ? 700 : 500}>
+              {p ? `${other ? `${p.chrom}:` : ''}${p.pos.toLocaleString('en-US')}` : '–'}
+            </text>
+          </g>,
+        );
+      }
+      // stretches of the view with no counterpart
+      let at = viewStart + 1;
+      const gaps: [number, number][] = [];
+      for (const sg of segs) {
+        if (sg.from.end < at) continue;
+        if (sg.from.start > at) gaps.push([at, Math.min(viewEnd, sg.from.start - 1)]);
+        at = Math.max(at, sg.from.end + 1);
+        if (at > viewEnd) break;
+      }
+      if (at <= viewEnd) gaps.push([at, viewEnd]);
+      for (const [a, b] of gaps) {
+        if (b < a) continue;
+        const xa = Math.max(PLOT_LEFT, Math.min(scale.x(a - 1), scale.x(b))), xb = Math.min(plotRight, Math.max(scale.x(a - 1), scale.x(b)));
+        if (xb - xa < 0.5) continue;
+        els.push(
+          <rect key={`lg${a}`} x={xa} y={markY + 1} width={xb - xa} height={3} fill={INK.gridStrong} opacity={0.8}>
+            <title>{`${currentChrom}:${a.toLocaleString('en-US')}-${b.toLocaleString('en-US')} has no ${liftover.to} counterpart in Ensembl's assembly map`}</title>
+          </rect>,
+        );
+      }
+    } else {
+      els.push(
+        <text key="ls" x={PLOT_LEFT} y={textY} fill={liftStatus.error ? '#b45309' : INK.faint} fontSize={9.5}>
+          {liftStatus.error ? `${liftover.to} coordinates unavailable: ${liftStatus.error} (Ensembl assembly map, rest.ensembl.org)` : `lifting the window to ${liftover.to} (Ensembl assembly map)…`}
+        </text>,
+      );
+    }
+    const summary = range ? `${liftover.to}: ${range.chrom}:${range.start.toLocaleString('en-US')}-${range.end.toLocaleString('en-US')}${range.partial ? ' (part of the window has no counterpart)' : ''}${range.split ? ' (and pieces elsewhere)' : ''}` : liftover.to;
+    return (
+      <g data-lift="">
+        <line x1={PLOT_LEFT} y1={markY + 4} x2={plotRight} y2={markY + 4} stroke={LIFT_COLOR} strokeWidth={0.8} opacity={0.35} />
+        {els}
+        <g style={liftover.onRemove ? { cursor: 'pointer' } : undefined} onClick={liftover.onRemove ? e => { e.stopPropagation(); liftover.onRemove!(); } : undefined}
+          onMouseDown={e => e.stopPropagation()}>
+          <title>{`${summary}\nThe same ticks in ${liftover.to}, lifted by Ensembl's assembly map; hover the plot for any position.${liftover.onRemove ? '\nClick to remove this line.' : ''}`}</title>
+          <text x={PLOT_LEFT - 6} y={textY} textAnchor="end" fill={LIFT_COLOR} fontSize={9} fontWeight={700}>{liftover.to.replace(/^GRCh/, 'GRCh ')}{liftover.onRemove ? ' ×' : ''}</text>
+        </g>
+      </g>
+    );
+  };
+
+  /**
+   * Where each site of a variants track is drawn, for the view: centre and width of its bar, the width of a base, and
+   * the room its neighbours leave. An SNV or a deletion spans its bases (3 px at least); an insertion, between two
+   * bases, stays thin: 3 px, or 30 % of a base zoomed in. The alleles of one position (two alternate bases, two
+   * deletion lengths, or both) are stacked: `below` is the fraction of the earlier ones, drawn under this one, and the
+   * first (`lead`) carries the position's reference share, label and cells for all of them (`group`).
+   */
+  const variantMarks = (sites: VariantSite[]) => {
+    const bp = Math.abs(scale.x(viewStart + 1) - scale.x(viewStart));
+    const marks = sites.filter(s => s.pos + (s.kind === 'del' ? s.length : 1) > viewStart && s.pos < viewEnd).map(s => {
+      const xa = scale.x(s.pos), xb = scale.x(s.pos + (s.kind === 'del' ? s.length : s.kind === 'ins' ? 0 : 1));
+      const cx = (xa + xb) / 2, w = s.kind === 'ins' ? Math.max(3, 0.3 * bp) : Math.max(3, Math.abs(xb - xa));
+      return { s, cx, w, bp, room: Infinity, below: 0, lead: true, group: [s] };
+    });
+    const stacks = new Map<number, typeof marks>();
+    for (const m of marks) {
+      if (m.s.kind === 'ins') continue;
+      const st = stacks.get(m.s.pos);
+      if (!st) { stacks.set(m.s.pos, [m]); continue; }
+      m.below = st.reduce((a, o) => a + o.s.vaf, 0); m.lead = false;
+      st.push(m); st[0].group.push(m.s);
+    }
+    // the room between positions, not between the alleles of one: a stacked allele has its lead's
+    const leads = marks.filter(m => m.lead).sort((a, b) => a.cx - b.cx);
+    for (let i = 0; i < leads.length; i++) leads[i].room = Math.min(i ? leads[i].cx - leads[i - 1].cx : Infinity, i + 1 < leads.length ? leads[i + 1].cx - leads[i].cx : Infinity);
+    for (const st of stacks.values()) for (const m of st) m.room = st[0].room;
+    return marks.sort((a, b) => a.cx - b.cx);
+  };
+  /** The label of a position's alleles: their fractions (`33`, `33+30`) and, once wide, the changes too. */
+  const siteLabel2 = (group: VariantSite[], pct: (s: VariantSite) => string, unit = '') => ({
+    short: group.map(pct).join('+'),
+    named: group.map(s => `${siteShort(s)} · ${pct(s)}${unit}`).join(' / '),
+  });
+  const siteShort = (s: VariantSite) => s.kind === 'snv' ? `${s.ref}>${s.alt}` : s.kind === 'ins' ? `ins ${s.length} bp` : `del ${s.length} bp`;
+  const siteColor = (s: VariantSite) => s.kind === 'snv' ? (BASE_COLORS[s.alt] || BASE_COLORS.N) : s.kind === 'ins' ? INSERTION_COLOR : DEL_COLOR;
+  /** a site clicked (variants track, or an RNA track's star or allele bar): its panel, or the phasing panel's list while picking */
+  const clickSite = (sid: number, name: string, st: VariantSite, ev: { clientX: number; clientY: number }) => {
+    if (pairPanel && pairPicking) setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, site: st }));
+    else void openVariantPanel(sid, name, st, !!dnaSites[sid]?.long, ev.clientX, ev.clientY);
+  };
+
+  /**
+   * The variants track of a DNA track, under its coverage: the sites of the full scan of the window, each as its
+   * allele-fraction bar and quality cells (see VAR_TRACK_H). Bars, grey reference shares and cells are merged into one
+   * path per colour, so a window of thousands of sites stays a handful of nodes.
+   */
+  const renderVariantTrack = (L: TrackLayout, top: number, clipId: string) => {
+    const sid = L.track.sampleId, e = dnaSites[sid], loading = !!dnaSitesLoading[sid], span = viewEnd - viewStart;
+    const y0 = top + VAR_GAP, barTop = y0 + VAR_HEAD_H, barBottom = barTop + VAR_BAR_H, cellY = barBottom + 3;
+    const marks = variantMarks(L.sites), long = !!e?.long;
+    const bars = new Map<string, string[]>(), refs: string[] = [], cells = new Map<QLevel, string[]>(), labels: JSX.Element[] = [];
+    const push = <K,>(m: Map<K, string[]>, k: K, d: string) => { const l = m.get(k); if (l) l.push(d); else m.set(k, [d]); };
+    const verdicts: Record<QLevel, number> = { good: 0, warn: 0, bad: 0, na: 0 };
+    for (const { s, cx, w, bp, room, below, lead, group } of marks) {
+      const h = Math.max(1, s.vaf * VAR_BAR_H), x = (cx - w / 2).toFixed(1), ww = w.toFixed(1);
+      const bottom = barBottom - Math.min(1, below) * VAR_BAR_H, total = group.reduce((a, o) => a + o.vaf, 0);
+      push(bars, siteColor(s), `M${x},${(bottom - h).toFixed(1)}h${ww}v${h.toFixed(1)}h-${ww}z`);
+      // the reference share of the position, over all its alleles
+      const hAll = Math.min(VAR_BAR_H, group.length > 1 ? total * VAR_BAR_H : h);
+      if (lead && hAll < VAR_BAR_H) refs.push(`M${x},${barTop}h${ww}v${(VAR_BAR_H - hAll).toFixed(1)}h-${ww}z`);
+      const { checks, worst } = cachedChecks(s, long);
+      verdicts[worst]++;
+      if (!lead) continue;
+      // the four cells across the site's bases once they are wider than the cluster, else the cluster centred on it;
+      // stacked alleles share one cell, in the worst colour of their checks
+      const gChecks = group.length > 1 ? group.flatMap(o => cachedChecks(o, long).checks) : checks, gw = group.length > 1 ? worstLevel(gChecks) : worst;
+      const cw = s.kind !== 'ins' && w >= VAR_CELLS_PX ? (w - 3) / 4 : 3, c0 = cw > 3 ? cx - w / 2 : cx - 7.5;
+      if (checks.length && group.length === 1 && room >= VAR_CELLS_PX) checks.forEach((c, k) => push(cells, c.level, `M${(c0 + k * (cw + 1)).toFixed(1)},${cellY}h${cw.toFixed(1)}v${VAR_CELL_H}h-${cw.toFixed(1)}z`));
+      else if (gChecks.length) push(cells, gw, `M${x},${cellY}h${ww}v${VAR_CELL_H}h-${ww}z`);
+      // the label grows with the site (an insertion's with the base it sits on) and names the change once it is wide
+      const size = Math.min(12, Math.max(8, (s.kind === 'ins' ? bp : w) / 3));
+      const { short, named } = group.length > 1 ? siteLabel2(group, o => `${Math.round(o.vaf * 100)}`, ' %') : { short: String(Math.round(s.vaf * 100)), named: `${siteShort(s)} · ${Math.round(s.vaf * 100)} %` };
+      const widthOf = (t: string) => t.length * size * 0.62 + 4;
+      const text = (s.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= Math.max(30, widthOf(short)) ? short : null;
+      if (text) labels.push(<text key={`vl${s.pos}${s.kind}${s.alt}`} x={cx} y={Math.max(barTop - 1, barBottom - hAll - 2)} textAnchor="middle" fontSize={size} fontWeight={700} fill={siteColor(s)} stroke={INK.bg} strokeWidth={2.5} paintOrder="stroke">{text}</text>);
+    }
+    // ---- a phased file: the two haplotype lanes of each phase set, every site on the lane(s) carrying it (sitePhase.ts) ----
+    const phTop = cellY + VAR_CELL_H + 5, phased = L.variants > VAR_TRACK_H;
+    const phaseBack: JSX.Element[] = [], phaseFront: JSX.Element[] = [];
+    let phaseInfo = '';
+    if (phased) {
+      const laneY = [phTop + VAR_PHASE_LANE[0], phTop + VAR_PHASE_LANE[1]], midY = (laneY[0] + laneY[1]) / 2;
+      // the phase sets: their sites over the whole scanned window, so a set reaching beyond the view keeps its extent
+      const sets = new Map<string, { ps: number | null; start: number; end: number; n: number }>();
+      for (const st of L.sites) {
+        if (!st.hap || !(st.hap.depth[0] + st.hap.depth[1])) continue;
+        const k = `${st.hap.ps}`, end = st.pos + (st.kind === 'del' ? st.length : 1), b = sets.get(k);
+        if (!b) sets.set(k, { ps: st.hap.ps, start: st.pos, end, n: 1 }); else { b.start = Math.min(b.start, st.pos); b.end = Math.max(b.end, end); b.n++; }
+      }
+      const blocks = [...sets.values()].sort((a, b) => a.start - b.start);
+      const xr = (a: number, b: number) => { const xa = scale.x(a), xb = scale.x(b); return [Math.min(xa, xb) - 5, Math.max(xa, xb) + 5]; };
+      blocks.forEach((b, i) => {
+        const [x0, x1] = xr(b.start, b.end);
+        if (x1 < PLOT_LEFT || x0 > plotRight) return;
+        const psTxt = b.ps == null ? 'tagged without PS' : `phase set PS ${b.ps.toLocaleString('en-US')}`;
+        phaseBack.push(
+          <g key={`pb${i}`}>
+            <rect x={x0} y={phTop + 1} width={x1 - x0} height={VAR_PHASE_H - 3} rx={3} fill={psTone(b.ps).hp[1]} opacity={0.3} />
+            {[0, 1].map(h => <rect key={h} x={x0 + 2} y={laneY[h] - 2.5} width={Math.max(1, x1 - x0 - 4)} height={5} rx={2.5} fill={psTone(b.ps).hp[h]} />)}
+          </g>,
+        );
+        const lx = Math.max(PLOT_LEFT + 4, x0 + 4), label = b.ps == null ? 'no PS' : `PS ${b.ps.toLocaleString('en-US')}`;
+        if (Math.min(plotRight, x1) - lx >= label.length * 5 + 6) phaseBack.push(<text key={`pt${i}`} x={lx} y={phTop + 10} fill={psTone(b.ps).ink} fontSize={8.5} fontWeight={600}>{label}<title>{`${psTxt}: ${b.n} site${b.n === 1 ? '' : 's'} of the scanned window, ${currentChrom}:${(b.start + 1).toLocaleString('en-US')}-${b.end.toLocaleString('en-US')}`}</title></text>);
+        // between two sets: their haplotypes are not linked
+        const nb = blocks[i + 1];
+        if (nb) {
+          const [, xe] = xr(b.start, b.end), [xs] = xr(nb.start, nb.end), xm = nb.start >= b.end ? (xe + xs) / 2 : xs;
+          if (xm >= PLOT_LEFT && xm <= plotRight) phaseFront.push(
+            <text key={`pk${i}`} x={xm} y={midY + 4} textAnchor="middle" fill="#dc2626" fontSize={12} fontWeight={800} stroke={INK.bg} strokeWidth={3} paintOrder="stroke" style={{ cursor: 'help' }}>
+              ⫽<title>{`Phase sets ${b.ps ?? 'without PS'} and ${nb.ps ?? 'without PS'}: no read linked them, so the phasing tool could not tell which haplotype of one goes with which of the other. H1 here and H1 there need not be the same chromosome copy.`}</title>
+            </text>,
+          );
+        }
+      });
+      // the sites: a mark on the lane(s) carrying the allele; checks and undecided sites between the lanes
+      const shapes = new Map<string, string[]>(), checkD: string[] = [], greyD: string[] = [], qMarks: JSX.Element[] = [];
+      const counts = { h1: 0, h2: 0, both: 0, check: 0, neither: 0, thin: 0, none: 0, flagged: 0 };
+      for (const { s, cx, room } of marks) {
+        const ph = sitePhase(s);
+        if (!ph) { counts.none++; continue; }
+        // a site the quality cells flag as a likely artefact is not phased: a grey dot, whatever its haplotypes
+        if (cachedChecks(s, long).worst === 'bad') { counts.flagged++; greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`); continue; }
+        counts[ph.call]++;
+        const r = Math.max(2.2, Math.min(4.5, (room - 2) / 2.6));
+        const shape = (y: number) => s.kind === 'snv' ? `M${(cx - r).toFixed(1)},${y}a${r},${r} 0 1,0 ${2 * r},0a${r},${r} 0 1,0 ${-2 * r},0z`
+          : s.kind === 'del' ? `M${(cx - r).toFixed(1)},${(y - r).toFixed(1)}h${2 * r}v${2 * r}h${-2 * r}zM${(cx - r * 0.6).toFixed(1)},${y}h${1.2 * r}`
+          : `M${cx.toFixed(1)},${(y - r * 1.15).toFixed(1)}l${r * 1.1},${r * 2}h${-r * 2.2}z`;
+        const lanes = ph.call === 'h1' ? [0] : ph.call === 'h2' ? [1] : ph.call === 'both' ? [0, 1] : [];
+        for (const h of lanes) { const c = siteColor(s), l = shapes.get(c); if (l) l.push(shape(laneY[h])); else shapes.set(c, [shape(laneY[h])]); }
+        if (ph.call === 'check') { const rr = Math.max(3, Math.min(6.5, room / 2.2)); checkD.push(`M${(cx - rr).toFixed(1)},${midY}a${rr},${rr} 0 1,0 ${2 * rr},0a${rr},${rr} 0 1,0 ${-2 * rr},0z`); if (room >= 10) qMarks.push(<text key={`pq${s.pos}${s.kind}${s.alt}`} x={cx} y={midY + 3.5} textAnchor="middle" fill="#dc2626" fontSize={9} fontWeight={800}>!</text>); }
+        else if (ph.call === 'neither') { if (room >= 8) qMarks.push(<text key={`pq${s.pos}${s.kind}${s.alt}`} x={cx} y={midY + 4} textAnchor="middle" fill={INK.muted} fontSize={10} fontWeight={800}>?</text>); else greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`); }
+        else if (ph.call === 'thin') greyD.push(`M${(cx - 1.5).toFixed(1)},${midY - 1.5}h3v3h-3z`);
+      }
+      for (const [c, d] of shapes) phaseFront.push(<path key={`ps${c}`} d={d.join('')} fill={INK.bg} stroke={c} strokeWidth={1.8} />);
+      if (checkD.length) phaseFront.push(<path key="pchk" d={checkD.join('')} fill={INK.bg} stroke="#dc2626" strokeWidth={1.5} strokeDasharray="2.5 1.5" />);
+      if (greyD.length) phaseFront.push(<path key="pgrey" d={greyD.join('')} fill={INK.faint} />);
+      phaseFront.push(...qMarks);
+      phaseInfo = ` · haplotags: ${counts.h1} H1 · ${counts.h2} H2 · ${counts.both} both${counts.check ? ` · ${counts.check} to check` : ''}${counts.neither ? ` · ${counts.neither} neither` : ''}${counts.thin + counts.flagged + counts.none ? ` · ${counts.thin + counts.flagged + counts.none} not phased` : ''}`;
+    }
+    const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
+    const status = span > VARIANTS_MAX_VIEW_BP && !(e && e.fetched.start <= viewStart && e.fetched.end >= viewEnd)
+      ? { text: `zoom in to ≤ ${formatBp(VARIANTS_MAX_VIEW_BP)} for the variants`, color: INK.faint }
+      : e?.error ? { text: `variants: ${e.error}`, color: UNIQUE_COLOR }
+      : !e || (loading && !marks.length) ? { text: `scanning the reads… ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %`, color: INK.faint }
+      : { text: `${marks.length.toLocaleString('en-US')} site${marks.length === 1 ? '' : 's'} ≥ ${Math.round((long ? Math.max(minVaf, longReadMinVafPct / 100) : minVaf) * 100)} %`
+          + (marks.length ? ` · ${verdicts.good} pass · ${verdicts.warn} check · ${verdicts.bad} flagged` : '')
+          + `${e.rate && e.rate > 1 ? ` · sampled 1 in ${e.rate}` : ''}${loading ? ` · scanning ${Math.round((dnaSitesProgress[sid] ?? 0) * 100)} %` : ''}`, color: INK.muted };
+    return (
+      <g key="variants">
+        <line x1={PLOT_LEFT} y1={top + 1} x2={plotRight} y2={top + 1} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />
+        <text transform={`translate(${12}, ${(barTop + cellY + VAR_CELL_H) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>VAF</text>
+        {[1, 0.5].map(f => (
+          <g key={f}>
+            <line x1={PLOT_LEFT - 4} y1={barBottom - f * VAR_BAR_H} x2={PLOT_LEFT} y2={barBottom - f * VAR_BAR_H} stroke={INK.gridStrong} strokeWidth={1} />
+            <text x={PLOT_LEFT - 7} y={barBottom - f * VAR_BAR_H + 3} textAnchor="end" fill={INK.muted} fontSize={8.5}>{f * 100} %</text>
+          </g>
+        ))}
+        <text x={PLOT_LEFT - 7} y={cellY + VAR_CELL_H - 0.5} textAnchor="end" fill={INK.faint} fontSize={7.5}>
+          <title>Quality cells under each site: base quality (SNV) or homopolymer (indel) · mapping quality · strand · read position; green pass, amber check, red likely artefact, grey not judged (too few reads). One cell in the colour of the worst where sites are close.</title>
+          Q
+        </text>
+        {phased && [0, 1].map(h => (
+          <text key={`hl${h}`} x={PLOT_LEFT - 7} y={phTop + VAR_PHASE_LANE[h] + 3} textAnchor="end" fill={h ? INK.muted : INK.text} fontSize={9} fontWeight={800}>
+            <title>{`Haplotype ${h + 1}: the reads tagged HP ${h + 1} by the phasing tool, within each phase set (PS). Each phase set has its own hue (HP 1 the darker tone, HP 2 the lighter), the same as its reads and its methylation. A site sits on this lane when at least ${PHASE_HI * 100} % of the HP ${h + 1} reads carry it and at most ${PHASE_LO * 100} % of the HP ${2 - h} reads do (both lanes: homozygous). Dashed red circle: to check (in part of one haplotype's reads, or on both without being homozygous); ?: on neither haplotype; grey dot: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype. ⫽: two phase sets, not linked to each other.`}</title>
+            H{h + 1}
+          </text>
+        ))}
+        <g clipPath={`url(#${clipId})`}>
+          <line x1={PLOT_LEFT} y1={barBottom - VAR_BAR_H / 2} x2={plotRight} y2={barBottom - VAR_BAR_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="3 3" />
+          <line x1={PLOT_LEFT} y1={barBottom} x2={plotRight} y2={barBottom} stroke={INK.gridStrong} strokeWidth={0.8} />
+          {refs.length > 0 && <path d={refs.join('')} fill="#9ca3af" opacity={0.3} />}
+          {[...bars].map(([c, d]) => <path key={c} d={d.join('')} fill={c} />)}
+          {[...cells].map(([lv, d]) => <path key={lv} d={d.join('')} fill={Q_COLORS[lv]} />)}
+          {labels}
+          {phaseBack}
+          {phaseFront.filter(el => !String(el.key).startsWith('pk'))}
+          {/* a click on a site opens its evidence from the reads */}
+          <rect x={PLOT_LEFT} y={y0} width={plotWidth} height={L.variants - VAR_GAP} fill="transparent" style={{ cursor: marks.length ? (pairPanel && pairPicking ? 'crosshair' : 'pointer') : undefined }}
+            onClick={ev => {
+              ev.stopPropagation();
+              if (panMoved.current) return;
+              const p = svgPoint(ev);
+              let best: (typeof marks)[number] | null = null;
+              for (const m of marks) if (Math.abs(m.cx - p.x) <= Math.max(5, m.w / 2 + 2) && (!best || Math.abs(m.cx - p.x) < Math.abs(best.cx - p.x))) best = m;
+              if (best) clickSite(sid, L.track.sampleName, best.s, ev);
+            }} />
+          {/* the breaks between phase sets keep their explanation on hover */}
+          {phaseFront.filter(el => String(el.key).startsWith('pk'))}
+        </g>
+        <text x={plotRight - 6} y={y0 + VAR_HEAD_H - 3} textAnchor="end" fill={status.color} fontSize={8.5} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">
+          {status.text}{phaseInfo && status.color === INK.muted ? phaseInfo : ''}
+          {phaseInfo && <title>{`Sites in view by haplotype (the file's HP / PS tags): H1, H2, both (homozygous); to check (in part of one haplotype's reads, or on both without being homozygous); neither (the allele in untagged reads or another phase set). Not phased: fewer than ${PHASE_MIN_DEPTH} reads on a haplotype, a site the quality cells flag red, or no tagged read over it.`}</title>}
+        </text>
+        {loading && <rect x={PLOT_LEFT} y={top} width={plotWidth * Math.max(0.02, Math.min(1, dnaSitesProgress[sid] ?? 0))} height={1.5} fill={SNP_INDEL_COLOR} opacity={0.6} />}
+      </g>
+    );
+  };
+
+  /**
+   * The CpG methylation panel of a long-read DNA track, under its coverage: CpG islands and the status in a header,
+   * then one heat lane per haplotype (or one for all reads) with, between them, the difference HP 1 − HP 2 as bars
+   * and the stretches of allele-specific methylation framed across the lanes.
+   */
+  const renderMethylPanel = (L: TrackLayout, top: number, clipId: string) => {
+    const sid = L.track.sampleId, e = methylData[sid], draw = methylDraws.get(sid) ?? null;
+    const y0 = top + METHYL_GAP, span = viewEnd - viewStart;
+    const pct = (f: number) => (Number.isFinite(f) ? `${Math.round(f * 100)} %` : '–');
+    let status: { text: string; color: string; title?: string };
+    if (span > METHYL_MAX_VIEW_BP && !(e && e.start <= viewStart && e.end >= viewEnd)) status = { text: `zoom in to ≤ ${formatBp(METHYL_MAX_VIEW_BP)} for CpG methylation`, color: INK.faint };
+    else if (e?.error) status = { text: `methylation: ${e.error}`, color: UNIQUE_COLOR };
+    else if (!e || (e.loading && !draw)) status = { text: `counting CpG calls… ${Math.round((e?.progress ?? 0) * 100)} %`, color: INK.faint };
+    else if (e.w && !e.w.calls) status = { text: 'no base-modification calls here (the reads carry no MM / ML tags for 5mC)', color: INK.faint };
+    else {
+      const s = draw!.summary, w = e.w!;
+      // HP 1 / HP 2 over the view only within one phase set: over several, the haplotypes are not the same copies
+      const nSets = s.sets;
+      const lanes = e.prefix?.tagged
+        ? `${nSets <= 1 ? `HP1 ${pct(s.frac[1])} · HP2 ${pct(s.frac[2])}${s.calls[0] ? ` · untagged ${pct(s.frac[0])}` : ''}${nSets === 1 && s.ps >= 0 ? ` · PS ${s.ps.toLocaleString('en-US')}` : ''}` : `${nSets} phase sets · 5mC ${pct(s.frac[3])}`} · phased over ${Math.round(draw!.phasedShare * 100)} % of the view`
+        : `5mC ${pct(s.frac[3])}`;
+      status = {
+        text: `${methylIslands ? 'CpG islands only · ' : ''}${lanes} · ${s.cpgs.toLocaleString('en-US')} CpG · ${Math.round(s.calls[3]).toLocaleString('en-US')} calls${w.note ? ' · ≈ see note' : ''}${e.loading ? ` · updating ${Math.round(e.progress * 100)} %` : ''}`,
+        color: INK.muted,
+        title: `${w.note ? `${w.note}\n\n` : ''}5mC at the reference's CpG sites, both strands combined (the − strand call counted at the C of the + strand).\nCalls below the confidence threshold ${methylThrText(w)} (the 10th percentile of the calls, as modkit does, estimated per ${formatBp(METHYL_BLOCK_BP)} block of the chromosome so that a CpG's value never depends on the zoom or on what was viewed before) are left out: ${w.filtered.toLocaleString('en-US')} of ${w.calls.toLocaleString('en-US')} calls (${pct(w.filtered / Math.max(1, w.calls))}).\n5hmC, when called, is not counted as 5mC (its probability is set aside and the rest renormalised, modkit's "traditional" preset).\nEach pixel is the pooled fraction of methylated calls of the CpGs under it, or of the ${METHYL_SMOOTH_CPGS} nearest CpGs (within ${formatBp(METHYL_SMOOTH_MAX_BP)}) when fewer lie under it, so the density follows the zoom; pale where under ${METHYL_MIN_CALLS} calls.\nThe ribbon splits into HP1 (top) and HP2 (bottom) where each haplotype is ${METHYL_PHASED_DEPTH} reads deep or more over the pixel's CpGs (${METHYL_PHASED_DEPTH} calls per CpG), the less covered one holding at least ${METHYL_PHASED_BALANCE * 100} % of the tagged calls, whatever the share of untagged reads, and joins into one band of all reads where the reads are not phased.\nHP 1 and HP 2 are those of one phase set (PS) at a time: each CpG takes the set holding most of its tagged calls, the reads of another set overlapping it count as untagged there, and a pixel or an allele-specific stretch never pools two sets. The thin strip over the ribbon gives the set (its hue, as on the reads and the variant lanes); ⫽ marks where one set ends and another begins: HP 1 on either side need not be the same chromosome copy.`,
+      };
+    }
+    // the island tags: placed from the largest difference down, each where it does not cover one already placed
+    const diffRows = L.methylDiff ? methylDiffs.get(sid) ?? [] : [];
+    const firstDiff = layouts.find(x => x.methylDiff);
+    const diffRef = firstDiff?.track.sampleId === sid, diffRefName = firstDiff?.track.sampleName ?? 'the primary';
+    const diffPills: { d: MethylIslandDiff; cx: number; w: number; text: string; color: string; strong: boolean; title: string }[] = [];
+    if (L.methylDiff) {
+      const placed: [number, number][] = [];
+      for (const d of [...diffRows].filter(r => r.end > viewStart && r.start < viewEnd).sort((p, q) => Math.abs(q.delta) - Math.abs(p.delta))) {
+        const pts = Math.round(d.delta * 100), text = `${pts > 0 ? '+' : pts < 0 ? '−' : '±'}${Math.abs(pts)} %`, w = text.length * 4.9 + 9;
+        const xa = scale.x(d.start), xb = scale.x(d.end), cx = Math.min(Math.max((xa + xb) / 2, PLOT_LEFT + w / 2), plotRight - w / 2);
+        if (placed.some(([l, r]) => cx - w / 2 < r + 2 && cx + w / 2 > l - 2)) continue;
+        placed.push([cx - w / 2, cx + w / 2]);
+        const weak = Math.abs(d.delta) < METHYL_DIFF_WEAK, color = weak ? INK.faint : d.delta < 0 ? METHYL_COLORS[0] : METHYL_COLORS[METHYL_COLORS.length - 1];
+        const where = `CpG island ${currentChrom}:${(d.start + 1).toLocaleString('en-US')}-${d.end.toLocaleString('en-US')} (${formatBp(d.end - d.start)})`;
+        const title = diffRef
+          ? `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC, ${text} against the other samples:\n${d.vs.map(v => `  ${v.name}: ${pct(v.mean)} (${v.ref - v.mean >= 0 ? '+' : '−'}${Math.abs(Math.round((v.ref - v.mean) * 100))} points; ${v.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`).join('\n')}`
+          : `${where}\n${L.track.sampleName}: ${pct(d.mean)} mean 5mC against ${diffRefName}: ${pct(d.vs[0].mean)}, ${text} (${d.cpgs} CpGs covered by ≥ ${METHYL_DIFF_MIN_CALLS} calls in both)`;
+        diffPills.push({ d, cx, w, text, color, strong: Math.abs(d.delta) >= METHYL_DIFF_STRONG, title: `${title}\nmean of the CpGs' 5mC fractions over the CpGs covered in both samples, all reads` });
+      }
+    }
+    const laneLabel = (label: string) => label === 'HP1' ? HAP_COLORS[0] : label === 'HP2' ? HAP_COLORS[1] : INK.muted;
+    // the row of the CpG-island differences (several samples) sits between the header and the ribbon
+    const dH = L.methylDiff ? METHYL_DIFF_H : 0, ry = y0 + dH;
+    const lanesTop = ry + METHYL_HEAD_H, lanesBottom = y0 + L.methyl - METHYL_GAP - 4;
+    return (
+      <g key="methyl">
+        <line x1={PLOT_LEFT} y1={top + 1} x2={plotRight} y2={top + 1} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />
+        <text transform={`translate(${12}, ${(lanesTop + lanesBottom) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8} letterSpacing={0.3}>CpG</text>
+        {draw && (draw.phasedRuns.length ? (
+          <>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H / 2 + 3} textAnchor="end" fill={INK.text} fontSize={8.5} fontWeight={700}>HP1</text>
+            <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_LANE_H * 1.5 + 4} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>HP2</text>
+          </>
+        ) : <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 3} textAnchor="end" fill={INK.muted} fontSize={8.5} fontWeight={700}>5mC</text>)}
+        {dH > 0 && <text x={PLOT_LEFT - 6} y={y0 + METHYL_HEAD_H + METHYL_DIFF_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8}>
+          <title>{diffRef ? 'Mean CpG-island methylation of this sample minus the mean of the other samples' : `Mean CpG-island methylation of this sample minus ${diffRefName}'s (the primary)`}</title>
+          {diffRef ? 'Δ others' : 'Δ prim.'}
+        </text>}
+        {draw?.delta && <text x={PLOT_LEFT - 6} y={ry + METHYL_HEAD_H + METHYL_RIBBON_H + METHYL_DELTA_H / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8.5}>Δ</text>}
+        <g clipPath={`url(#${clipId})`}>
+          {draw?.islands.map(r => (
+            <rect key={`isl${r.start}`} x={r.x0} y={y0 + METHYL_HEAD_H - 4} width={Math.max(1, r.x1 - r.x0)} height={3} rx={1} fill="#16a34a" opacity={0.55}>
+              <title>{`CpG island ${currentChrom}:${(r.start + 1).toLocaleString('en-US')}-${r.end.toLocaleString('en-US')} (${formatBp(r.end - r.start)}; GC ≥ 50 %, observed/expected CpG ≥ 0.6 over ≥ 200 bp, Gardiner-Garden & Frommer 1987)`}</title>
+            </rect>
+          ))}
+          {dH > 0 && diffPills.map(p => (
+            <g key={`dp${p.d.start}`}>
+              <title>{p.title}</title>
+              <line x1={p.cx} y1={y0 + METHYL_HEAD_H - 1} x2={p.cx} y2={y0 + METHYL_HEAD_H + 1.5} stroke={p.color} strokeWidth={1} />
+              <rect x={p.cx - p.w / 2} y={y0 + METHYL_HEAD_H + 1.5} width={p.w} height={METHYL_DIFF_H - 2.5} rx={(METHYL_DIFF_H - 2.5) / 2}
+                fill={diffRef && p.strong ? p.color : INK.bg} stroke={p.color} strokeWidth={p.strong ? 1.2 : 0.8} />
+              <text x={p.cx} y={y0 + METHYL_HEAD_H + METHYL_DIFF_H / 2 + 3} textAnchor="middle" fontSize={8} fontWeight={p.strong ? 700 : 600}
+                fill={diffRef && p.strong ? '#fff' : p.color}>{p.text}</text>
+            </g>
+          ))}
+          {/* allele-specific methylation: a frame across the lanes */}
+          {draw?.asm.map(r => (
+            <rect key={`asm${r.start}`} x={r.x0} y={lanesTop - 1} width={Math.max(2, r.x1 - r.x0)} height={lanesBottom - lanesTop + 2} fill={METHYL_ASM_COLOR} fillOpacity={0.07} stroke={METHYL_ASM_COLOR} strokeWidth={1} strokeDasharray="3 2" rx={2}>
+              <title>{`allele-specific methylation ${currentChrom}:${(r.start + 1).toLocaleString('en-US')}-${r.end.toLocaleString('en-US')}: HP1 − HP2 = ${r.delta > 0 ? '+' : '−'}${Math.round(Math.abs(r.delta) * 100)} points over ${r.cpgs} CpG\n(runs of ≥ ${METHYL_ASM_CPGS} CpGs covered on both haplotypes whose 5mC fractions differ by ≥ ${METHYL_ASM_DELTA * 100} points, ≥ ${METHYL_ASM_MIN_CALLS} calls each): imprinting, X inactivation, allele-specific promoters, or a cis-acting variant`}</title>
+            </rect>
+          ))}
+          {draw && (
+            <g transform={`translate(0, ${ry})`}>
+              <line x1={PLOT_LEFT} y1={METHYL_HEAD_H + METHYL_RIBBON_H / 2} x2={plotRight} y2={METHYL_HEAD_H + METHYL_RIBBON_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="1 3" />
+              {draw.ribbon.map((p, i) => <path key={i} d={p.d} fill={p.color} opacity={p.faint ? 0.35 : 1} />)}
+              {/* the phase set of each split stretch, and the breaks between two sets */}
+              {draw.setRuns.map((r, i) => (
+                <g key={`sr${r.x0}`}>
+                  <rect x={r.x0} y={METHYL_HEAD_H - 3} width={Math.max(1, r.x1 - r.x0)} height={2} fill={psTone(r.ps).hp[0]}>
+                    <title>{r.ps >= 0 ? `phase set PS ${r.ps.toLocaleString('en-US')}: HP 1 and HP 2 here are this set's` : 'reads tagged without a phase set'}</title>
+                  </rect>
+                  {i > 0 && draw.setRuns[i - 1].x1 >= r.x0 - 1 && String(draw.setRuns[i - 1].ps) !== String(r.ps) && (
+                    <text x={r.x0} y={METHYL_HEAD_H + METHYL_RIBBON_H / 2 + 4} textAnchor="middle" fill="#dc2626" fontSize={11} fontWeight={800} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">⫽</text>
+                  )}
+                </g>
+              ))}
+              {/* where the ribbon splits into the two haplotypes and joins again */}
+              {draw.phasedRuns.map(([a, b]) => (
+                <path key={`pr${a}`} d={`M${a},${METHYL_HEAD_H - 0.5}v${METHYL_RIBBON_H + 1}M${b},${METHYL_HEAD_H - 0.5}v${METHYL_RIBBON_H + 1}`} stroke={INK.gridStrong} strokeWidth={0.8} opacity={a <= PLOT_LEFT || b >= plotRight ? 0 : 1} />
+              ))}
+            </g>
+          )}
+          {draw?.delta && (
+            <g transform={`translate(0, ${ry + METHYL_HEAD_H + METHYL_RIBBON_H})`}>
+              {draw.phasedRuns.map(([a, b]) => <rect key={`dr${a}`} x={a} y={1} width={b - a} height={METHYL_DELTA_H - 2} fill={INK.grid} opacity={0.35} />)}
+              <line x1={PLOT_LEFT} y1={METHYL_DELTA_H / 2} x2={plotRight} y2={METHYL_DELTA_H / 2} stroke={INK.gridStrong} strokeWidth={0.6} strokeDasharray={draw.phasedRuns.length ? undefined : '1 3'} />
+              {draw.delta.map(g => (
+                <g key={`dd${g.ps}`}>
+                  {g.up && <path d={g.up} fill={psTone(g.ps).ink} opacity={0.75} />}
+                  {g.down && <path d={g.down} fill={psTone(g.ps).hp[0]} opacity={0.9} />}
+                </g>
+              ))}
+            </g>
+          )}
+          {draw?.asm.filter(r => r.x1 - r.x0 > 70).map(r => {
+            const text = `ASM ${r.delta > 0 ? '+' : '−'}${Math.round(Math.abs(r.delta) * 100)}`, w = text.length * 5 + 10, cx = Math.min(Math.max((r.x0 + r.x1) / 2, PLOT_LEFT + w / 2), plotRight - w / 2);
+            return (
+              <g key={`asml${r.start}`} pointerEvents="none">
+                <rect x={cx - w / 2} y={y0 + 1} width={w} height={METHYL_HEAD_H - 5} rx={4} fill={INK.bg} stroke={METHYL_ASM_COLOR} strokeWidth={0.8} />
+                <text x={cx} y={y0 + METHYL_HEAD_H - 6.5} textAnchor="middle" fill={METHYL_ASM_COLOR} fontSize={7.5} fontWeight={700}>{text}</text>
+              </g>
+            );
+          })}
+        </g>
+        <text x={plotRight - 6} y={y0 + METHYL_HEAD_H - 5} textAnchor="end" fill={status.color} fontSize={8.5} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">
+          {status.title && <title>{status.title}</title>}
+          {status.text}
+        </text>
+        {e?.loading && <rect x={PLOT_LEFT} y={top} width={plotWidth * Math.max(0.02, Math.min(1, e.progress))} height={1.5} fill={METHYL_ASM_COLOR} opacity={0.6} />}
       </g>
     );
   };
@@ -2781,23 +5404,31 @@ export default function SashimiViewer({
     const { track, idx, color, yOff, juncH, yMax, paths, arcs, height } = L;
     const clipId = `sashimi-clip-${track.sampleId}`;
     void L.strip;
-    const baseline = yOff + juncH + COVERAGE_H;
+    const baseline = yOff + juncH + L.covH, covOn = L.covH > 0;
     const depthToY = (d: number) => baseline - (Math.min(d, yMax) / yMax) * (COVERAGE_H - 12);
     const isPrimary = idx === 0 && tracks.length > 1;
     const gtexNote = track.gtex ? `  GTEx ${track.gtex.dataset.replace('gtex_', '')} · n=${track.gtex.tissue.samples}${track.gtex.tpm != null ? ` · median ${track.gtex.tpm < 10 ? track.gtex.tpm.toFixed(2) : track.gtex.tpm.toFixed(0)} TPM` : ''}${track.gtex.lowCoverage ? ' · LOW COVERAGE (TPM < 1)' : ' · exon usage from junction medians'}` : '';
     const gtexWarn = track.gtex ? (track.error || track.gtex.warning || '') : '';
     const relative = (depthAxis === 'relative' || !!track.group) && !track.gtex;
     const groupNote = track.group ? `  ·  ${track.group.loaded}/${track.group.n} sample${track.group.n === 1 ? '' : 's'} pooled` : '';
-    const axisNote = relative ? `  ·  max ${yMax.toLocaleString()}×` : '';
+    const antiMax = track.anti ? maxDepthIn(track.anti.coverage, viewStart, viewEnd) : 0;
+    const axisNote = relative ? (track.anti ? `  ·  max ${maxDepthIn(track.coverage, viewStart, viewEnd).toLocaleString('en-US')}× · opposite ${antiMax.toLocaleString('en-US')}×` : `  ·  max ${yMax.toLocaleString('en-US')}×`) : '';
     const dnaNote = isDnaTrack(track) ? '  ·  DNA' : '';
+    const svDiag = isDnaTrack(track) && svHints && track.structural?.diagnostics ? svDiagnosticsText(track.structural, svMinReads(track.sampleId)) : '';
     const sampledNote = track.sampled ? `  ·  ≈ 1 read in ${track.sampled.rate}` : '';
     const sampledTitle = track.sampled
-      ? `Deep window: ${track.sampled.decoded.toLocaleString()} of ${track.sampled.total.toLocaleString()} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
+      ? `Deep window: ${track.sampled.decoded.toLocaleString('en-US')} of ${track.sampled.total.toLocaleString('en-US')} reads decoded (every ${track.sampled.rate === 2 ? 'other' : `${track.sampled.rate}th`} read${track.group ? ', in the deepest sample' : ''}); depths and counts are scaled back by ${track.sampled.rate} and are estimates. Zoom in for exact counts.`
       : '';
     const labelW = track.sampleName.length * 6.4 + 24 + (isPrimary ? 44 : 0) + gtexNote.length * 5.2 + groupNote.length * 5.2 + axisNote.length * 5.2 + sampledNote.length * 5.2 + dnaNote.length * 5.2 + (L.balance?.text.length ?? 0) * 5.2;
+    /** a request still running: how much of the view it has counted, or that only the margins are left */
+    const loadingText = (t: TrackData): string => {
+      if (!t.partial || !t.fetched) return t.coverage.length ? 'updating…' : 'loading…';
+      const done = Math.max(0, Math.min(viewEnd, t.fetched.end) - Math.max(viewStart, t.fetched.start)) / Math.max(1, viewEnd - viewStart);
+      return done >= 1 ? 'reading the margins…' : `reading the view… ${Math.floor(done * 100)} %`;
+    };
     const status = track.error && track.coverage.length === 0
       ? { text: track.error, color: UNIQUE_COLOR }
-      : track.loading ? { text: track.coverage.length ? 'updating…' : 'loading…', color: INK.faint } : null;
+      : track.loading ? { text: loadingText(track), color: INK.faint } : null;
 
     return (
       <g key={track.sampleId} fontFamily={FONT}>
@@ -2807,6 +5438,8 @@ export default function SashimiViewer({
         {/* Track frame + subtle junction/coverage separator */}
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={height} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
         {L.strip > 0 && <line x1={PLOT_LEFT} y1={yOff + TRACK_LABEL_H + L.strip} x2={plotRight} y2={yOff + TRACK_LABEL_H + L.strip} stroke={INK.grid} strokeWidth={0.8} strokeDasharray="2 3" />}
+        {/* the coverage layer: baseline, depth axis and histogram (a DNA track with it switched off has none) */}
+        {covOn && (<>
         <line x1={PLOT_LEFT} y1={baseline} x2={plotRight} y2={baseline} stroke={INK.gridStrong} strokeWidth={1} />
 
         {/* Depth axis */}
@@ -2816,21 +5449,71 @@ export default function SashimiViewer({
             <g key={v}>
               <line x1={PLOT_LEFT - 4} y1={y} x2={PLOT_LEFT} y2={y} stroke={INK.gridStrong} strokeWidth={1} />
               {v > 0 && <line x1={PLOT_LEFT} y1={y} x2={plotRight} y2={y} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="2 4" />}
-              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{relative ? `${Math.round((v / yMax) * 100)} %` : v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString()}</text>
+              <text x={PLOT_LEFT - 7} y={y + 3} textAnchor="end" fill={INK.muted} fontSize={9}>{relative ? `${Math.round((v / yMax) * 100)} %` : v < 10 && v % 1 ? v.toFixed(v < 1 ? 2 : 1) : v.toLocaleString('en-US')}</text>
             </g>
           );
         })}
         <text transform={`translate(${12}, ${baseline - (COVERAGE_H - 12) / 2}) rotate(-90)`} textAnchor="middle" fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>{track.gtex ? 'exon usage' : relative ? 'depth · % of max' : 'depth'}</text>
+        </>)}
         {track.gtex?.lowCoverage && <text x={PLOT_LEFT + plotWidth / 2} y={baseline - COVERAGE_H / 2 + 4} textAnchor="middle" fill={INK.faint} fontSize={13} fontWeight={600}>low coverage · median {track.gtex.tpm?.toFixed(2)} TPM in {track.sampleName}</text>}
 
         <g clipPath={`url(#${clipId})`}>
-          {paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.26)} stroke="none" />}
-          {paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
+          {/* stretches the source holds no data for: hatched, since they are not a depth of 0 */}
+          {track.unavailable && (() => {
+            const spans = track.unavailable.spans.filter(([a, b]) => b > viewStart && a < viewEnd);
+            if (!spans.length) return null;
+            return (
+              <g data-unavailable="">
+                <defs>
+                  <pattern id={`${clipId}-na`} patternUnits="userSpaceOnUse" width={7} height={7} patternTransform="rotate(45)">
+                    <line x1={0} y1={0} x2={0} y2={7} stroke={INK.gridStrong} strokeWidth={1.4} />
+                  </pattern>
+                </defs>
+                {spans.map(([a, b]) => {
+                  const xa = scale.x(Math.max(a, viewStart)), xb = scale.x(Math.min(b, viewEnd));
+                  return (
+                    <rect key={`na${a}`} x={Math.min(xa, xb)} y={yOff + TRACK_LABEL_H} width={Math.abs(xb - xa)} height={height - TRACK_LABEL_H} fill={`url(#${clipId}-na)`} opacity={0.85}>
+                      <title>{`${track.unavailable!.note} (${currentChrom}:${(a + 1).toLocaleString('en-US')}-${b.toLocaleString('en-US')}). No data, which is not a depth of 0.`}</title>
+                    </rect>
+                  );
+                })}
+              </g>
+            );
+          })()}
+          {/* a stretch the reads say is duplicated (split reads going back, mates facing away), shaded under the depth: its
+              depth should stand about 1.5 times the flanks' (one extra copy of two) */}
+          {covOn && svHints && isDnaTrack(track) && track.structural && (() => {
+            const minSv = svMinReads(track.sampleId);
+            const gains = [...(track.structural.duplications ?? []), ...track.structural.discordant.filter(j => (j as DiscordantArc).kind === 'duplication')]
+              .filter(j => j.count >= minSv && j.end > viewStart && j.start < viewEnd);
+            return gains.map(j => {
+              const x1 = Math.max(PLOT_LEFT, scale.x(j.start)), x2 = Math.min(plotRight, scale.x(j.end));
+              return <rect key={`gain${j.start}-${j.end}`} x={Math.min(x1, x2)} y={baseline - (COVERAGE_H - 12)} width={Math.abs(x2 - x1)} height={COVERAGE_H - 12} fill={PAIR_CLASS_LINE.duplication} opacity={0.07} pointerEvents="none" />;
+            });
+          })()}
+          {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
+              usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
+          {covOn && paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
+          {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
+          {covOn && paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
+          {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
+          {/* the opposite strand, mirrored under the baseline */}
+          {L.antiPaths && (
+            <g data-antisense="">
+              <rect x={PLOT_LEFT} y={baseline} width={plotWidth} height={L.mirror} fill={withAlpha(ANTI_COLOR, 0.035)} />
+              {L.antiPaths.fill && <path d={L.antiPaths.fill} fill={withAlpha(ANTI_COLOR, 0.09)} stroke="none" />}
+              {L.antiPaths.mean && <path d={L.antiPaths.mean} fill={withAlpha(ANTI_COLOR, 0.26)} stroke="none" />}
+              {L.antiPaths.stroke && <path d={L.antiPaths.stroke} fill="none" stroke={ANTI_COLOR} strokeWidth={1.1} strokeLinejoin="round" />}
+              <text x={plotRight - 6} y={baseline + 10} textAnchor="end" fill={ANTI_COLOR} fontSize={9} fontWeight={600} opacity={0.85} pointerEvents="none">
+                ▼ opposite strand{track.anti && !track.anti.coverage.some(r => r.depth > 0 && r.end > viewStart && r.start < viewEnd) ? ' · no reads' : ''}
+              </text>
+            </g>
+          )}
 
           {/* Junction arcs */}
           {arcs.map(a => (
             <g key={a.key}
-              style={{ cursor: junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
+              style={{ cursor: pairPanel && pairPicking && !a.sv ? 'crosshair' : junctionDrag.current?.key === a.dragKey ? 'grabbing' : 'grab' }}
               onMouseEnter={() => setHoverArc(a.dragKey)} onMouseLeave={() => setHoverArc(h => (h === a.dragKey ? null : h))}
               onMouseDown={e => {
                 e.stopPropagation();
@@ -2840,35 +5523,49 @@ export default function SashimiViewer({
               onClick={e => {
                 e.stopPropagation();
                 if (dragMoved.current) return;
+                // picking for the phasing panel: a splice junction (not a structural arc) joins its list
+                if (pairPanel && pairPicking && !a.sv) { setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, junction: { start: a.j.start, end: a.j.end } })); return; }
                 const p = svgPoint(e);
-                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
+                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y, fusion: !!a.fusion } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
               <title>{a.title}</title>
-              <path d={a.geom.d} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
-              <path d={a.geom.d} fill="none" stroke={INK.bg} strokeWidth={a.strokeW + 2} opacity={0.9} />
-              <path d={a.geom.d} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
+              <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
+              <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
                 strokeDasharray={a.dashed ? '5 3.5' : undefined} opacity={0.92} />
             </g>
           ))}
-          {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share */}
-          {L.sites.length > 0 && L.sites.map(st => {
-            const xa = scale.x(st.pos), xb = scale.x(st.pos + 1);
-            let left = Math.min(xa, xb), w = Math.abs(xb - xa);
-            if (w < 3) { left += w / 2 - 1.5; w = 3; }
-            const d = Math.max(depthAt(track.coverage, st.pos), st.depth);
-            const top = depthToY(d), full = baseline - top, altH = full * st.vaf;
-            const colr = st.kind === 'snv' ? (BASE_COLORS[st.alt] || BASE_COLORS.N) : st.kind === 'ins' ? INSERTION_COLOR : '#111827';
-            const pct = `${(st.vaf * 100).toFixed(st.vaf < 0.1 ? 1 : 0)}%`;
-            return (
-              <g key={`vaf${st.pos}${st.kind}`}>
-                <title>{siteLabel(st)}</title>
-                <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />
-                <rect x={left} y={top} width={w} height={Math.max(0, full - altH)} fill="#9ca3af" />
-                <rect x={left} y={baseline - altH} width={w} height={altH} fill={colr} />
-                <text x={left + w / 2} y={top - 5} textAnchor="middle" fontSize={9} fontWeight={700} fill={colr} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{pct}</text>
-              </g>
-            );
-          })}
+          {/* Allele-fraction bars at the variant sites: alt allele in its base colour over the reference share. Placed as
+              on a DNA track's variants (variantMarks): a deletion over its bases, an insertion thin between two, the
+              alleles of one position stacked under one label, which grows with the zoom and shows where there is room */}
+          {L.sites.length > 0 && !isDnaTrack(track) && (() => {
+            const marks = variantMarks(L.sites);
+            const heightOf = new Map<number, { top: number; full: number }>();
+            for (const m of marks) if (m.lead && m.s.kind !== 'ins') {
+              const top = depthToY(Math.max(depthAt(track.coverage, m.s.pos), ...m.group.map(o => o.depth)));
+              heightOf.set(m.s.pos, { top, full: baseline - top });
+            }
+            const pctOf = (o: VariantSite) => `${(o.vaf * 100).toFixed(o.vaf < 0.1 ? 1 : 0)}%`;
+            return marks.map(({ s: st, cx, w, bp, room, below, lead, group }) => {
+              const { top, full } = st.kind === 'ins' ? (() => { const t = depthToY(Math.max(depthAt(track.coverage, st.pos), st.depth)); return { top: t, full: baseline - t }; })() : heightOf.get(st.pos)!;
+              const left = cx - w / 2, altH = full * st.vaf, under = full * Math.min(1, below);
+              const total = group.reduce((a, o) => a + o.vaf, 0);
+              const colr = siteColor(st);
+              const size = Math.min(12, Math.max(9, (st.kind === 'ins' ? bp : w) / 3));
+              const { short, named } = siteLabel2(group, pctOf);
+              const widthOf = (t: string) => t.length * size * 0.62 + 4;
+              const text = !lead ? null : (st.kind === 'ins' ? bp : w) >= 36 && room >= widthOf(named) ? named : room >= widthOf(short) ? short : null;
+              return (
+                <g key={`vaf${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
+                  onClick={ev => { ev.stopPropagation(); if (!panMoved.current) clickSite(track.sampleId, track.sampleName, st, ev); }}>
+                  <title>{`${siteLabel(st)}\nclick for its summary`}</title>
+                  {lead && <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />}
+                  {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#9ca3af" />}
+                  <rect x={left} y={baseline - under - altH} width={w} height={altH} fill={colr} />
+                  {text && <text x={cx} y={top - 5} textAnchor="middle" fontSize={size} fontWeight={700} fill={colr} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{text}</text>}
+                </g>
+              );
+            });
+          })()}
           {/* Read-count pills, drawn after every arc so no stroke paints over a number */}
           {arcs.filter(a => a.label).map(a => {
             const sc = a.labelScale, w = pillWidth(a) * sc, h = LABEL_H * sc;
@@ -2886,7 +5583,7 @@ export default function SashimiViewer({
                 {/* hide button, shown while the arc is under the pointer */}
                 {hoverArc === a.dragKey && (
                   <g pointerEvents="all" style={{ cursor: 'pointer' }} onMouseEnter={() => setHoverArc(a.dragKey)}
-                    onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); hideArc(a.j); }}>
+                    onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); hideArc(a.j, !!a.below); }}>
                     <title>Hide this arc (it still counts in the percentages; "hidden arcs · show" in the toolbar brings it back)</title>
                     <circle cx={hideX} cy={ly} r={6.5} fill={INK.bg} stroke={a.color} strokeWidth={1} />
                     <text x={hideX} y={ly + 3.5} textAnchor="middle" fill={a.color} fontSize={10} fontWeight={700}>×</text>
@@ -2900,7 +5597,7 @@ export default function SashimiViewer({
             const w = pillWidth(r);
             return (
               <g key={`ir-${i}`} onClick={r.onClick ? e => { e.stopPropagation(); r.onClick!(e); } : undefined} style={r.onClick ? { cursor: 'pointer' } : undefined}>
-                <title>{r.title}{r.onClick ? '\nclick for the consensus of the clipped sequences' : ''}</title>
+                <title>{r.title}{r.onClick ? r.hint ?? '\nclick for the consensus of the clipped sequences' : ''}</title>
                 <rect x={r.x - w / 2} y={r.y - LABEL_H / 2} width={w} height={LABEL_H} rx={LABEL_H / 2} fill={INK.bg} stroke={r.color ?? RETENTION_COLOR} strokeWidth={1} />
                 <text x={r.x} y={r.y + 3.5} textAnchor="middle" fill={r.color ?? RETENTION_COLOR} fontSize={9.5} fontWeight={700}>
                   {r.text}
@@ -2909,7 +5606,41 @@ export default function SashimiViewer({
               </g>
             );
           })}
+          {/* Split reads continuing on another chromosome: a thin stem from the breakpoint, leaving by the top of the track,
+              the partner and the reads at its end (labels of close stems stacked on up to three lanes) */}
+          {(() => {
+            const lanes: [number, number][][] = [[], [], []];
+            return [...L.exits].sort((a, b) => a.x - b.x).map(ex => {
+              const w = ex.label.length * 5.6 + 12, x2 = ex.x + ex.dir * 14;
+              const box: [number, number] = ex.dir > 0 ? [x2 - 2, x2 + w] : [x2 - w, x2 + 2];
+              let lane = lanes.findIndex(l => l.every(([a, b]) => box[1] < a - 3 || box[0] > b + 3));
+              if (lane < 0) lane = lanes.length - 1;
+              lanes[lane].push(box);
+              const yTop = yOff + TRACK_LABEL_H + L.strip + 2 + lane * 13;   // under the sample label
+              const d = `M${ex.x},${baseline} C${ex.x},${yTop + (baseline - yTop) * 0.45} ${x2},${yTop + 18} ${x2},${yTop + 4}`;
+              const sw = 1.2 + Math.min(2.2, Math.log10(Math.max(1, ex.e.count)));
+              const open = (e: React.MouseEvent) => {
+                e.stopPropagation();
+                const p = svgPoint(e);
+                setPopover(prev => (prev?.kind === 'trans' && prev.key === ex.key ? null : { kind: 'trans', key: ex.key, e: ex.e, j: { start: ex.e.pos, end: ex.e.pos + 1, count: ex.e.count } as JunctionArc, x: p.x, y: p.y }));
+              };
+              return (
+                <g key={ex.key} style={{ cursor: 'pointer' }} onClick={open} onMouseDown={e => e.stopPropagation()} className="group">
+                  <title>{ex.title}</title>
+                  <path d={d} fill="none" stroke="transparent" strokeWidth={12} />
+                  <path d={d} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={sw} strokeLinecap="round" opacity={0.9} className="group-hover:opacity-100" />
+                  <path d={`M${x2 - 3.5},${yTop + 7} L${x2},${yTop + 2.5} L${x2 + 3.5},${yTop + 7}`} fill="none" stroke={LONG_RANGE_COLOR} strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" />
+                  <circle cx={ex.x} cy={baseline} r={2.2} fill={LONG_RANGE_COLOR} />
+                  <text x={ex.dir > 0 ? x2 + 6 : x2 - 6} y={yTop + 6.5} textAnchor={ex.dir > 0 ? 'start' : 'end'} fill={LONG_RANGE_COLOR} fontSize={9.5} fontWeight={700}
+                    stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{ex.label}</text>
+                </g>
+              );
+            });
+          })()}
         </g>
+
+        {L.variants > 0 && renderVariantTrack(L, baseline, clipId)}
+        {L.methyl > 0 && renderMethylPanel(L, baseline + L.variants, clipId)}
 
         {/* Edge chevrons for arcs continuing beyond the window (drawn outside the clip) */}
         {arcs.filter(a => a.edge).map(a => {
@@ -2920,7 +5651,7 @@ export default function SashimiViewer({
             : `M${plotRight + 1},${y} l6,-4 v8 z`;
           return (
             <g key={`e-${a.key}`}>
-              <title>{`${a.j.count.toLocaleString()} reads · ${e.title}`}</title>
+              <title>{`${a.j.count.toLocaleString('en-US')} reads · ${e.title}`}</title>
               <path d={d} fill={a.color} />
             </g>
           );
@@ -2936,7 +5667,7 @@ export default function SashimiViewer({
             {gtexNote && <tspan fill={INK.faint} fontSize={9}>{gtexNote}</tspan>}
             {groupNote && <tspan fill={INK.faint} fontSize={9}>{groupNote}</tspan>}
             {axisNote && <tspan fill={INK.faint} fontSize={9}>{axisNote}</tspan>}
-            {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)</title></tspan>}
+            {dnaNote && <tspan fill={INK.muted} fontSize={9} fontWeight={600}>{dnaNote}<title>{`Genomic DNA library: depth and reads only, no splicing (junction arcs, usage and retention are not drawn)${svDiag ? `\n\n${svDiag}` : ''}`}</title></tspan>}
             {L.balance && <tspan fill={L.balance.warn ? SNP_INDEL_COLOR : INK.faint} fontSize={9} fontWeight={L.balance.warn ? 700 : 400}>{L.balance.text}<title>{L.balance.title}</title></tspan>}
             {sampledNote && <tspan fill={SNP_INDEL_COLOR} fontSize={9} fontWeight={600}>{sampledNote}<title>{sampledTitle}</title></tspan>}
 
@@ -2963,32 +5694,6 @@ export default function SashimiViewer({
               </g>
             );
           })()}
-          {/* Variants chip (DNA track without its reads track): scan every read of the window and call every site */}
-          {!track.gtex && !track.group && isDnaTrack(track) && coverageVariants && !readsTracks.get(track.sampleId)?.loaded && !!ds.getVariantSites && (() => {
-            const span = viewEnd - viewStart;
-            const entry = dnaSites[track.sampleId];
-            const loading = !!dnaSitesLoading[track.sampleId];
-            const minVaf = Math.min(1, Math.max(0, minVafPct / 100));
-            const done = !!entry?.full && !entry.error && entry.fetched.chrom === currentChrom && entry.fetched.start <= viewStart && entry.fetched.end >= viewEnd
-              && entry.minVaf <= minVaf && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct;
-            const nHere = done ? entry.sites.filter(s => s.pos >= viewStart && s.pos < viewEnd && s.vaf >= minVaf).length : 0;
-            const pct = Math.round((dnaSitesProgress[track.sampleId] ?? 0) * 100);
-            const text = loading ? `variants… ${pct} %` : done ? `variants ✓ ${nHere.toLocaleString()}` : 'variants';
-            const w = text.length * 5.6 + 14;
-            const x = labelW + 4 + 48 + (allowPrimarySwitch && idx > 0 ? 80 : 0);
-            const title = loading ? `Scanning every read of the window (${formatBp(span)}), ${pct} % done. Click to stop and forget the variants.`
-              : done ? `${nHere.toLocaleString()} variant site${nHere === 1 ? '' : 's'} in the window from every read (${entry.total.toLocaleString()} reads scanned, Min VAF ${minVafPct} %). The variants follow the window: moving or widening it scans the new part. Click to forget them (plain coverage).`
-              : `Scan every read of the window (${formatBp(span)}) and call every variant site above Min VAF as allele bars on the coverage; the variants then follow the window. Nothing is read until you ask; the scan runs tile by tile with no read cap, so a wide deep window takes a while and can be stopped.`;
-            return (
-              <g data-export="skip" transform={`translate(${x}, 0)`} style={{ cursor: 'pointer' }}
-                onClick={e => { e.stopPropagation(); if (loading || done) forgetVariants(track.sampleId); else loadAllVariants(track.sampleId); }} onMouseDown={e => e.stopPropagation()}>
-                <title>{title}</title>
-                <rect x={0} y={0} width={w} height={14} rx={7} fill={done ? SNP_INDEL_COLOR : INK.bg} stroke={done || loading ? SNP_INDEL_COLOR : INK.faint} strokeWidth={0.8} />
-                {loading && <rect x={0} y={0} width={Math.max(0, Math.min(w, w * (dnaSitesProgress[track.sampleId] ?? 0)))} height={14} rx={7} fill={SNP_INDEL_COLOR} opacity={0.25} />}
-                <text x={w / 2} y={10} textAnchor="middle" fill={done ? '#fff' : INK.muted} fontSize={8.5} fontWeight={600}>{text}</text>
-              </g>
-            );
-          })()}
         </g>
         {status && !gtexWarn && (
           <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={status.color} fontSize={9.5}>{status.text}</text>
@@ -2997,7 +5702,8 @@ export default function SashimiViewer({
           <g transform={`translate(${PLOT_LEFT + 8}, ${baseline - COVERAGE_H + 30})`}>
             <title>{gtexWarn}</title>
             <rect x={-4} y={-11} width={Math.min(plotWidth - 12, gtexWarn.length * 5.3 + 24)} height={15} rx={3} fill={INK.bg} opacity={0.92} />
-            <text x={0} y={0} fill={UNIQUE_COLOR} fontSize={9}>⚠ {gtexWarn.length > Math.floor((plotWidth - 40) / 5.3) ? gtexWarn.slice(0, Math.floor((plotWidth - 40) / 5.3) - 1) + '…' : gtexWarn}</text>
+            {/* an error in red; a note on partial data (junctions only) in grey */}
+            <text x={0} y={0} fill={track.error ? UNIQUE_COLOR : INK.muted} fontSize={9}>{track.error ? '⚠' : 'ⓘ'} {gtexWarn.length > Math.floor((plotWidth - 40) / 5.3) ? gtexWarn.slice(0, Math.floor((plotWidth - 40) / 5.3) - 1) + '…' : gtexWarn}</text>
           </g>
         )}
 
@@ -3008,6 +5714,34 @@ export default function SashimiViewer({
             <circle cx={plotRight + 16} cy={yOff + 12} r={8} fill={INK.bg} stroke={INK.grid} />
             <text x={plotRight + 16} y={yOff + 15.5} textAnchor="middle" fill={INK.muted} fontSize={12}>×</text>
           </g>
+        )}
+      </g>
+    );
+  };
+
+  /** The sequence strip under the gene model (sequenceRows), or one line saying what it waits for. */
+  const renderSequence = (yOff: number) => {
+    const rows = sequenceRows(stripRef, yOff, 2);
+    const span = viewEnd - viewStart, bars = Math.min(SEQ_MAX_BP, Math.floor(plotWidth));
+    const note = rows.drawn ? '' : span > bars || rows.note
+      ? `reference sequence · zoom in below ${formatBp(bars)} to see the bases${tx?.cdsStart != null ? `, below ${formatBp(Math.floor(plotWidth / 2))} the amino acids` : ''}`
+      : seqMiss ? 'reference sequence unavailable: add the FASTA, or check that the UCSC / Ensembl APIs are reachable' : 'reference sequence · loading…';
+    const label = (y: number, h: number, text: string, title?: string) => h > 0 && (
+      <text x={PLOT_LEFT - 6} y={y + h / 2 + 3} textAnchor="end" fill={INK.faint} fontSize={8.5}>{title && <title>{title}</title>}{text}</text>
+    );
+    return (
+      <g key="sequence" fontFamily={FONT} data-sequence="">
+        <defs><clipPath id="sashimi-clip-seq"><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={seqPanelH} /></clipPath></defs>
+        {rows.drawn ? (
+          <>
+            {rows.aaModels.map((m, i) => <g key={`aal${i}`}>{label(yOff + i * AA_ROW_H, AA_ROW_H, rows.aaModels.length > 1 ? (m.geneName.length > 9 ? `${m.geneName.slice(0, 8)}…` : m.geneName) : 'aa',
+              `amino acids of ${m.geneName}'s ${m === tx ? (tx?.isMane ? 'MANE' : 'shown') : 'representative'} transcript (${m.transcriptId}, ${m.strand > 0 ? '+' : '−'} strand), codon by codon`)}</g>)}
+            {label(yOff + rows.aaRowH, rows.revRowH, 'ref −', 'transcript strand (−): complement of the genomic bases, 5′→3′ left to right')}
+            {label(yOff + rows.aaRowH + rows.revRowH, rows.seqRowH, rows.revRowH ? 'ref +' : 'ref')}
+            <g clipPath="url(#sashimi-clip-seq)">{rows.els}</g>
+          </>
+        ) : (
+          <text x={PLOT_LEFT + 8} y={yOff + SEQ_NOTE_H - 3.5} fill={INK.faint} fontSize={9}>{note}</text>
         )}
       </g>
     );
@@ -3026,10 +5760,13 @@ export default function SashimiViewer({
     const gA = scale.x(tx.start), gB = scale.x(tx.end);
     const gLeft = Math.max(PLOT_LEFT, Math.min(gA, gB)), gRight = Math.min(plotRight, Math.max(gA, gB));
 
-    // Direction chevrons every 56 px along the intron line (5' → 3' after the axis flip)
+    // Direction chevrons every 56 px along the intron line, pointing where the gene's 3′ end lies on screen: always
+    // right after the flip of a minus-strand gene's axis, but left for one drawn on the genomic axis (DNA samples only)
     const arrows: JSX.Element[] = [];
+    const toRight = (tx.strand > 0) !== reverse;
     for (let ax = gLeft + 28; ax < gRight - 8; ax += 56) {
-      arrows.push(<path key={`arr${ax}`} d={`M${ax - 2.5},${midY - 3.5} L${ax + 2.5},${midY} L${ax - 2.5},${midY + 3.5}`} fill="none" stroke={INK.intron} strokeWidth={1.2} />);
+      const d = toRight ? `M${ax - 2.5},${midY - 3.5} L${ax + 2.5},${midY} L${ax - 2.5},${midY + 3.5}` : `M${ax + 2.5},${midY - 3.5} L${ax - 2.5},${midY} L${ax + 2.5},${midY + 3.5}`;
+      arrows.push(<path key={`arr${ax}`} d={d} fill="none" stroke={INK.intron} strokeWidth={1.2} />);
     }
 
     // Exon boxes: CDS at full height, UTR portions at half height
@@ -3112,7 +5849,7 @@ export default function SashimiViewer({
           if (w < 14) return null;
           return (
             <g key={`n${ex.rank}`} style={{ cursor: 'pointer' }} onMouseDown={ev => ev.stopPropagation()} onClick={ev => openExon(ex, ev)}>
-              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp${phases.get(ex.rank) ? ` · ${phaseTitle(phases.get(ex.rank)!)}` : ''} · click for ψ`}</title>
+              <title>{`Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')} · ${ex.end - ex.start} bp${phases.get(ex.rank) ? ` · ${phaseTitle(phases.get(ex.rank)!)}` : ''} · click for ψ`}</title>
               <text x={cx} y={inCds ? midY + 3.5 : midY + 20} textAnchor="middle" fill={inCds ? '#ffffff' : INK.muted} fontSize={8.5} fontWeight={600}>{ex.rank}</text>
             </g>
           );
@@ -3130,8 +5867,18 @@ export default function SashimiViewer({
       const same = tx ? m.strand === tx.strand : true;
       const color = same ? SAME_SENSE_COLOR : ANTISENSE_COLOR;
       const a = scale.x(m.start), b = scale.x(m.end);
-      const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
+      let left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
       const parts: JSX.Element[] = [];
+      // other transcripts of the gene reaching beyond this model: a faint dotted line, no exon of theirs drawn
+      for (const [s0, e0] of [[m.geneStart, m.start], [m.end, m.geneEnd]] as [number, number][]) {
+        if (e0 <= s0) continue;
+        const xa = scale.x(s0), xb = scale.x(e0);
+        const l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+        if (r > l) parts.push(
+          <line key={`ext${s0}`} x1={l} y1={mid} x2={r} y2={mid} stroke={color} strokeWidth={1} strokeDasharray="1.5 3" opacity={0.55}>
+            <title>{`other ${m.geneName} transcripts reach ${currentChrom}:${(s0 + 1).toLocaleString('en-US')}-${e0.toLocaleString('en-US')} (${formatBp(e0 - s0)}); the exons drawn are those of ${m.transcriptId}`}</title>
+          </line>);
+      }
       if (right > left) parts.push(<line key="l" x1={left} y1={mid} x2={right} y2={mid} stroke={color} strokeWidth={1.2} opacity={0.8} />);
       // Chevrons point where the gene's 3′ end lies on screen: its own strand, after the axis flip of the queried gene
       const toRight = (m.strand > 0) !== reverse;
@@ -3145,6 +5892,15 @@ export default function SashimiViewer({
         if (l > plotRight || l + w < PLOT_LEFT) return;
         parts.push(<rect key={key} x={l} y={mid - hh / 2} width={w} height={hh} fill={color} rx={1} />);
       };
+      // the exons of its other transcripts, lighter and thinner, under the model's
+      m.otherExons.forEach((ex, k) => {
+        const xa = scale.x(ex.start), xb = scale.x(ex.end);
+        const l = Math.min(xa, xb), w = Math.max(1, Math.abs(xb - xa));
+        if (l > plotRight || l + w < PLOT_LEFT) return;
+        parts.push(<rect key={`o${k}`} x={l} y={mid - 4} width={w} height={8} fill={color} opacity={0.35} rx={1}>
+          <title>{`exon of another ${m.geneName} transcript (not ${m.transcriptId}): ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')}`}</title>
+        </rect>);
+      });
       m.exons.forEach((ex, k) => {
         if (m.cdsStart == null || m.cdsEnd == null) { box(ex.start, ex.end, 12, `x${k}`); return; }
         const cs = Math.max(ex.start, m.cdsStart), ce = Math.min(ex.end, m.cdsEnd);
@@ -3154,14 +5910,20 @@ export default function SashimiViewer({
       });
       const label = `${m.geneName} ${toRight ? '→' : '←'}`;
       const lw = label.length * 5.6 + 10;
+      // the model out of view (only its gene's other transcripts in it): the name goes on their visible part
+      if (right <= left) {
+        const ga = scale.x(m.geneStart), gb = scale.x(m.geneEnd);
+        left = Math.max(PLOT_LEFT, Math.min(ga, gb)); right = Math.min(plotRight, Math.max(ga, gb));
+      }
       // Name pill: beside a short gene (so its exons stay visible), inside the extent of a long one
       const inside = right - left > lw + 60;
       const lx = inside ? Math.max(PLOT_LEFT + 3, Math.min(left, plotRight - lw - 3))
         : right + 4 + lw <= plotRight ? right + 4 : Math.max(PLOT_LEFT + 3, left - lw - 4);
       const relation = tx ? (same ? `same strand as ${tx.geneName}` : `antisense to ${tx.geneName}`) : '';
       const title = `${m.geneName} · ${m.transcriptId}${m.isCanonical ? (isEnsemblId(m.transcriptId) ? ' (Ensembl canonical)' : ' (RefSeq Select)') : ''} · ${m.biotype}\n` +
-        `${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
-        `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}`;
+        `${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
+        `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}` +
+        (m.geneStart < m.start || m.geneEnd > m.end ? `\nthe gene's other transcripts span ${currentChrom}:${(m.geneStart + 1).toLocaleString('en-US')}-${m.geneEnd.toLocaleString('en-US')} (dotted)` : '');
       return (
         <g key={m.geneId}>
           <title>{title}</title>
@@ -3179,7 +5941,7 @@ export default function SashimiViewer({
     const list = visibleSnps;
     const dense = list.length > SNP_MAX_MARKS;
     const stem = (af: number) => 6 + 18 * Math.min(1, Math.log10(Math.max(af, 0.001) / 0.001) / Math.log10(0.5 / 0.001));
-    const status = snpStatus.error ? snpStatus.error : snpStatus.loading ? 'loading…' : !snps ? '' : `${list.length.toLocaleString()} variant${list.length === 1 ? '' : 's'} with AF ≥ ${(snpMinAf * 100).toFixed(snpMinAf < 0.01 ? 1 : 0)}%${dense ? ' (ticks only, zoom in)' : ''}`;
+    const status = snpStatus.error ? snpStatus.error : snpStatus.loading ? 'loading…' : !snps ? '' : `${list.length.toLocaleString('en-US')} variant${list.length === 1 ? '' : 's'} with AF ≥ ${(snpMinAf * 100).toFixed(snpMinAf < 0.01 ? 1 : 0)}%${dense ? ' (ticks only, zoom in)' : ''}`;
     const marks: JSX.Element[] = [];
     for (const v of list) {
       const xa = scale.x(v.start), xb = scale.x(v.end);
@@ -3273,7 +6035,8 @@ export default function SashimiViewer({
   /** Guide lines / bands of the primary sample's known variants through every track, and small marks on the other samples' tracks. */
   const renderKnownOverlay = () => {
     if (!showKnown) return null;
-    const top = knownY + knownPanelH, bottom = tracksBottom - TRACK_GAP;
+    // through every sample, wherever the panels were dragged: from the known panel's bottom or the highest sample
+    const top = Math.min(knownY + knownPanelH, ...layouts.map(L => L.yOff)), bottom = tracksBottom - TRACK_GAP;
     const guides = primaryKnownHere.map(v => {
       const xa = scale.x(v.start), xb = scale.x(v.end);
       const left = Math.max(PLOT_LEFT, Math.min(xa, xb)), right = Math.min(plotRight, Math.max(xa, xb));
@@ -3331,7 +6094,7 @@ export default function SashimiViewer({
       const label = `${m.id}${m.is_mane ? ' · MANE' : ''}${shown ? ' · shown' : ''}`;
       const lw = label.length * 5.4 + 8 + (shown ? 0 : 12);
       const nNovel = m.exons.filter(ex => !manes.has(`s${ex.start}`) && !manes.has(`e${ex.end}`)).length;
-      const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString()}-${m.end.toLocaleString()} · ${m.exons.length} exons` +
+      const title = `${m.id}${m.name && m.name !== m.id ? ` · ${m.name}` : ''} · ${m.biotype}\n${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.exons.length} exons` +
         (m.cdsStart == null ? ' · non-coding' : '') + (m.is_mane ? '\nsame exon structure as the MANE Select transcript' : shown ? '\nthe model displayed on the top track' : nNovel ? `\n${nNovel} exon${nNovel > 1 ? 's' : ''} absent from the displayed model (amber)` : '') +
         (shown ? '' : '\nclick to display this model as the reference (exon numbering, junction classes, HGVS, usage)');
       return (
@@ -3422,17 +6185,78 @@ export default function SashimiViewer({
         for (const v of knownOnChrom(L.track.sampleId)) if (hit(v)) known.push({ v, sample: L.track.sampleName, off: false });
       }
     }
+    // over a variants track: the site under the pointer, with its checks
+    let variant: { name: string; color: string; site: VariantSite; checks: QCheck[] } | null = null;
+    for (const L of layouts) {
+      if (!L.variants) continue;
+      const top = L.yOff + L.juncH + L.covH;
+      if (hover.py < top || hover.py > top + L.variants) continue;
+      let best: { s: VariantSite; d: number } | null = null;
+      for (const m of variantMarks(L.sites)) { const d = Math.abs(m.cx - hover.px); if (d <= Math.max(5, m.w / 2 + 2) && (!best || d < best.d)) best = { s: m.s, d }; }
+      if (best) variant = { name: L.track.sampleName, color: siteColor(best.s), site: best.s, checks: cachedChecks(best.s, !!dnaSites[L.track.sampleId]?.long).checks };
+    }
     return {
-      x: hover.px, pos, alt, snps: here, known,
+      x: hover.px, pos, alt, snps: here, known, variant,
       cdna: tx ? cdnaPosition(pos, tx) : null,
-      rows: layouts.map(L => ({ name: L.track.sampleName, color: L.color, depth: depthAt(L.track.coverage, pos) })),
+      rows: layouts.map(L => ({ name: L.track.sampleName, color: L.color, depth: depthAt(L.track.coverage, pos), methyl: L.methyl ? methylHover(methylData[L.track.sampleId], L.track.sampleId) : null })),
     };
-  }, [hover, dragging, regionSelect, scale, layouts, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
+    /** the 5mC fractions of the column under the pointer, as the panel draws it (split when phased, all reads when not) */
+    function methylHover(e: MethylEntry | undefined, sid: number) {
+      const S = e && e.chrom === currentChrom ? methylSource(e, methylIslands) : null;
+      if (!S) return null;
+      const P = S.P, x = Math.floor(hover!.px), c = methylCol(S, scale, x);
+      if (!c) return null;
+      const phased = !!methylDraws.get(sid)?.phasedRuns.some(([a, b]) => x >= a && x < b);
+      const lanes = (phased ? [1, 2, ...(c.t[0] ? [0] : [])] : [3]).map(l => ({ label: l === 3 ? (P.tagged ? 'all (not phased)' : '5mC') : l === 0 ? 'other' : `HP${l}`, f: c.f[l], t: c.t[l] }));
+      return { n: c.b - c.a, from: P.pos[c.a], to: P.pos[c.b - 1] + 2, lanes, ps: phased ? c.ps : NaN };
+    }
+  }, [hover, dragging, regionSelect, scale, layouts, methylData, methylDraws, methylIslands, dnaSites, tx, showAllTx, altModels, altY, currentGeneName, currentChrom, showSnps, visibleSnps, showKnown, primaryKnownHere, knownRows, knownY, knownOnChrom, plotRight]);
 
   // ---- Popover content: junction (HGVS, frame, share vs canonical, usage of skipped exons) or exon (depth usage + junction ψ) ----
   interface PopTable { caption?: string; head: string[]; rows: string[][] }
   interface PopStrip { values: { value: number; name: string; color: string | null }[]; median: number | null }
-  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string } | null } | null => {
+  // the fused protein across a fusion junction whose popover is open, from the partners' reference bases (fusionFrame.ts)
+  const [fusionPep, setFusionPep] = useState<{ key: string; pep?: FusionPeptide | null; error?: string } | null>(null);
+  /** The partners of the fusion junction whose popover is open: a structural arc of an RNA track, or a long-range spliced one. */
+  const popoverFusion = useMemo((): { five: FusionEnd; three: FusionEnd; frame: ReturnType<typeof fusionFrame> } | null => {
+    if (popover?.kind === 'structural' && popover.fusion && popover.sv !== 'deletion' && popover.sv !== 'discordant') {
+      const fz = fusionOf(popover.j as SvArc, popover.sv);
+      return fz?.frame && fz.five && fz.three ? { five: fz.five, three: fz.three, frame: fz.frame } : null;
+    }
+    if (popover?.kind === 'junction') {
+      const lr = longRangeOf(popover.j), ends = lr ? longRangeEnds(popover.j, lr) : null;
+      return ends ? { ...ends, frame: fusionFrame(ends.five, ends.three) } : null;
+    }
+    if (popover?.kind === 'trans') {
+      const tr = transOf(popover.e);
+      return tr?.frame && tr.five && tr.three ? { five: tr.five, three: tr.three, frame: tr.frame } : null;
+    }
+    return null;
+  }, [popover, fusionOf, longRangeOf, longRangeEnds, transOf]);
+  useEffect(() => {
+    const fz = popoverFusion;
+    if (!popover || popover.kind === 'exon' || popover.kind === 'retention' || !fz || fz.frame.aBases == null) return;
+    const key = popover.key;
+    if (fusionPep?.key === key) return;
+    setFusionPep({ key });
+    fusionPeptide(fz.five, fz.three, fz.frame, (a, b, chrom) => ds.getReference(chrom, a, b))
+      .then(pep => setFusionPep(prev => (prev?.key === key ? { key, pep } : prev)))
+      .catch(e => setFusionPep(prev => (prev?.key === key ? { key, error: e?.message || String(e) } : prev)));
+  }, [popover, popoverFusion, currentChrom]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** The frame and translation lines of a fusion junction's popover, and its cartoon when one can be drawn. */
+  const fusionLines = (fz: NonNullable<typeof popoverFusion>, key: string): string[] => {
+    const pep = fusionPep?.key === key ? fusionPep : null;
+    const lines = [`fusion transcript: ${fusionHgvs(fz.five, fz.three)}`, `reading frame: ${fz.frame.text}`];
+    if (pep?.pep) {
+      const p = pep.pep;
+      lines.push(`translation: …${p.before}${p.junction ? `[${p.junction}]` : ''}|${p.after}  (${fz.five.model.geneName} | ${fz.three.model.geneName}${p.junction ? '; [ ] the codon across the junction' : ''})`);
+      lines.push(p.text);
+    } else if (fz.frame.aBases != null) lines.push(pep?.error ? `translation: the partners' bases could not be read (${pep.error})` : pep && pep.pep === null ? 'translation: the partners\' bases are not available' : 'translation: reading the partners\' bases…');
+    return lines;
+  };
+  const fusionCartoon = (fz: typeof popoverFusion, j: JunctionArc, label?: string, sampleId?: number) => (fz && fusionStoryPossible(fz.five, fz.three)
+    ? { j, model: fz.five.model, label: label ?? `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`, fusion: { five: fz.five, three: fz.three }, sampleId } : null);
+  const popoverContent = useMemo((): { title: string; subtitle: string; hgvs: string[]; tables: PopTable[]; strip: PopStrip | null; note: string; status?: string; cartoon?: { j: JunctionArc; model: TxModel; label: string; fusion?: { five: FusionEnd; three: FusionEnd }; sampleId?: number } | null } | null => {
     if (!popover) return null;
     const pct = (v: number | null | undefined, d = 0) => (v == null || !Number.isFinite(v) ? '—' : `${(v * 100).toFixed(d)}%`);
     const num = (v: number | null | undefined, d = 1) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
@@ -3466,25 +6290,167 @@ export default function SashimiViewer({
     };
     const exonIdx = (rank: number) => tx ? tx.exons.findIndex(e => e.rank === rank) : -1;
 
+    if (popover.kind === 'trans') {
+      const { e, j } = popover;
+      const tr = transOf(e);
+      const near = (x: ElsewhereLink) => x.kind === 'split' && x.chrom === e.chrom && Math.abs(x.pos - e.pos) <= FUSION_SNAP_BP;
+      const rows = displayTracks.filter(t => t.structural && !isDnaTrack(t)).map(t => {
+        const mine = t.structural!.elsewhere.filter(near);
+        const n = mine.reduce((a, x) => a + x.count, 0);
+        const at = mine.filter(x => x.farPos != null && e.farPos != null && Math.abs(x.farPos - e.farPos) <= FUSION_SNAP_BP).reduce((a, x) => a + (x.farCount ?? 0), 0);
+        return [t.sampleName, n ? `${t.sampled ? '≈' : ''}${n.toLocaleString('en-US')}` : '0', e.farPos != null ? at.toLocaleString('en-US') : '—'];
+      });
+      const lines = ['translocation-type junction: split reads (SA tag) whose other part aligns on another chromosome, a fusion transcript of two genes?'];
+      if (tr && popoverFusion) lines.push(...fusionLines(popoverFusion, popover.key));
+      else if (e.farPos == null) lines.push('the far position is not known (a page exported before it was kept): no partner, no reading frame');
+      else if (tr && !tr.partner && !farGenes.has(`${e.chrom}:${e.farPos}`)) lines.push(`looking up the gene at ${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}…`);
+      else lines.push(tr?.oriented ? 'reading frame: needs a donor of one gene joined to an acceptor of the other, both on exon boundaries' : 'reading frame: unknown, no end of the junction on a splice site');
+      const sid = tracks.find(t => t.structural?.elsewhere.some(near))?.sampleId;
+      return {
+        title: `Fusion junction? ${tr?.label ?? `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} → ${e.chrom}`}`,
+        subtitle: `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} ↔ ${e.farPos != null ? `${e.chrom}:${(e.farPos + 1).toLocaleString('en-US')}` : e.chrom} · between chromosomes`,
+        cartoon: fusionCartoon(popoverFusion, j, `${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} ↔ ${e.chrom}:${((e.farPos ?? 0) + 1).toLocaleString('en-US')}`, sid), hgvs: lines,
+        tables: [{ head: ['sample', 'split reads here to ' + e.chrom, 'of which at the same far position'], rows }],
+        strip: null,
+        note: `Split reads: primary alignments here whose supplementary part (SA tag) lies on ${e.chrom}, counted where they leave or enter this chromosome; the far position is the one most of them reach. Each end is named after the exon boundary within ${FUSION_SNAP_BP} bp of the genes there (the far genes looked up from the UCSC / Ensembl APIs), and the partner whose end is a splice donor comes first (5′). Evidence, not a call: a translocation, or a chimera of the library preparation; check that both partners' ends are splice sites and that the comparison samples do not carry it.`,
+      };
+    }
     if (popover.kind === 'structural') {
       const { j, sv } = popover;
       const rows = displayTracks.filter(t => t.structural).map(t => {
-        const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? t.structural!.splits : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
-        const mine = list.find(x => x.start === j.start && x.end === j.end);
-        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === j.start && x.arc.end === j.end).reduce((n, x) => n + x.count, 0);
-        const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && x.start === j.start && x.end === j.end);
+        const list = sv === 'deletion' ? t.structural!.deletions : sv === 'split' ? deletionSplits(t.structural!) : sv === 'duplication' ? t.structural!.duplications ?? [] : sv === 'inversion' ? t.structural!.inversions ?? [] : t.structural!.discordant;
+        // the same event in another sample: its breakpoints within the merge tolerance, not to the base
+        const mine = sv === 'discordant' ? findPairEvent(list, j as DiscordantArc) : findSvEvent(list, j);
+        const at = mine ?? j;
+        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end).reduce((n, x) => n + x.count, 0);
+        const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && ((x.start === at.start && x.end === at.end) || (!x.own && findSvEvent([x], j))));
         const own = resc.filter(x => x.own).reduce((n, x) => n + x.count, 0), borrowed = resc.filter(x => !x.own).reduce((n, x) => n + x.count, 0);
-        return [t.sampleName, mine ? mine.count.toLocaleString() : '0', placed ? placed.toLocaleString() : '0', own ? own.toLocaleString() : borrowed ? `${borrowed.toLocaleString()} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString()} bp` : '—'];
+        return [t.sampleName, mine ? mine.count.toLocaleString('en-US') : '0', placed ? placed.toLocaleString('en-US') : '0', own ? own.toLocaleString('en-US') : borrowed ? `${borrowed.toLocaleString('en-US')} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString('en-US')} bp` : '—'];
       });
       const size = j.end - j.start;
+      // a fusion junction of an RNA track: its partners, the reading frame across it and the fused protein there
+      const fz = popover.fusion && (sv === 'split' || sv === 'duplication' || sv === 'inversion') ? fusionOf(j as SvArc, sv) : null;
+      if (fz) {
+        const lines = [fz.what];
+        if (fz.frame && popoverFusion) {
+          lines.push(...fusionLines(popoverFusion, popover.key));
+        } else {
+          lines.push(fz.oriented ? 'reading frame: needs a donor of one gene joined to an acceptor of another, both with their model in the view (pan to load the partner gene)' : 'reading frame: unknown, no end of the junction on a splice site');
+        }
+        return {
+          title: `Fusion junction? ${fz.label}`,
+          subtitle: `${currentChrom}:${(fz.start + 1).toLocaleString('en-US')}-${fz.end.toLocaleString('en-US')} · ${formatBp(fz.end - fz.start)} apart${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
+          cartoon: fusionCartoon(popoverFusion, j), hgvs: lines,
+          tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
+          strip: null,
+          note: `Split reads (SA tags) and reads clipped at the junction whose clipped bases align at the other end, on each RNA sample. The reading frame is that of the two partners' models in view: the coding bases the 5′ partner keeps from its start codon against the junction's place in the 3′ partner's coding sequence (in frame when they agree modulo 3); the translation reads the fused sequence from the reference in the 5′ partner's frame across the junction to its first stop, which tells whether the 3′ partner's protein is carried to its own stop codon. Evidence, not a call: the transcript models are the annotated ones, the junction is placed on their exon boundaries (within ${FUSION_SNAP_BP} bp of the reads).`,
+        };
+      }
       return {
-        title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
-        subtitle: sv === 'discordant' ? `mates about ${formatBp(size)} apart · ends binned to 500 bp` : `${formatBp(size)}${sv === 'split' ? ' · breakpoints rounded to 5 bp' : ''}`,
+        title: `${SV_LABEL[sv]} · ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
+        subtitle: sv === 'discordant' ? `${formatBp(size)} between the breakpoints the pairs point to` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
         cartoon: null,
-        hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (one breakpoint pair; an inversion has two)`] : [],
+        hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
         tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
         strip: null,
-        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more; split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs from an insert size above five times the window median (at least 1 kb) or mates on the same strand. Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+        note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; the pairs are grouped in 500 bp bins (neighbouring bins of one class joined) and the arc drawn where their reads place the breakpoints: the outermost reads of the pairs of a duplication, the innermost of a deletion, the median of an inversion (within an insert size of the true breakpoint). Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
+      };
+    }
+    if (popover.kind === 'anti') {
+      const j = popover.j, key = junctionKey(j);
+      const gene = tx?.geneName ?? 'the gene';
+      // the genes of the other strand in the window whose exons the junction joins (the best match), else the one it lies in
+      const score = (i: JunctionInfo) => i.cls === 'canonical' ? 3 : i.cls === 'exon_skipping' ? 2 : i.cls === 'novel' ? 0 : 1;
+      let best: { m: NeighbourModel; info: JunctionInfo; sc: number } | null = null, inside: NeighbourModel | null = null;
+      for (const m of neighbours?.models ?? []) {
+        if (tx && m.strand === tx.strand) continue;
+        if (m.geneEnd <= j.start || m.geneStart >= j.end) continue;
+        if (!inside && m.geneStart <= j.start && m.geneEnd >= j.end) inside = m;
+        const info = classifyJunction(j, m), sc = score(info);
+        if (sc > 0 && (!best || sc > best.sc)) best = { m, info, sc };
+      }
+      // both ends on exon boundaries of other transcripts of that gene
+      const otherTx = (m: NeighbourModel) => m.otherExons.some(e => e.end === j.start) && m.otherExons.some(e => e.start === j.end);
+      const altOf = !best ? (neighbours?.models ?? []).find(m => (!tx || m.strand !== tx.strand) && otherTx(m)) : undefined;
+      const where = best ? `${best.m.geneName} · ${best.info.label}`
+        : altOf ? `${altOf.geneName} · annotated in another of its transcripts`
+        : inside ? `inside ${inside.geneName}, not one of its annotated junctions`
+        : 'no gene annotated on this strand here';
+      const geneLine = best ? [`${best.m.geneName} (${best.m.strand > 0 ? '+' : '−'} strand, antisense to ${gene}) · ${best.m.transcriptId}${best.m.biotype ? ` · ${best.m.biotype.replace(/_/g, ' ')}` : ''}`, best.info.label]
+        : altOf ? [`${altOf.geneName} (${altOf.strand > 0 ? '+' : '−'} strand, antisense to ${gene}) · both ends on exon boundaries of its other transcripts`]
+        : inside ? [`inside ${inside.geneName} (${inside.strand > 0 ? '+' : '−'} strand, ${inside.biotype.replace(/_/g, ' ')}), off its annotated exon boundaries`]
+        : [`no gene annotated on the ${tx ? (tx.strand > 0 ? '−' : '+') : 'other'} strand over this intron${neighbours ? '' : ' (the window\'s genes are not loaded yet)'}`];
+      const lib = (sid: number) => { const k = sampleStrands?.[sid]; return k === 'reverse' ? 'stranded (dUTP)' : k === 'forward' ? 'stranded (forward)' : k === 'unstranded' ? 'unstranded' : 'strand unknown'; };
+      let leaky = 0;
+      const rows = displayTracks.filter(tr => !tr.gtex).map(tr => {
+        if (!tr.anti) {
+          const n = tr.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+          return [tr.sampleName, '—', n ? `${n.toLocaleString('en-US')} (both strands)` : '0', '—', `${lib(tr.sampleId)}: strands not told apart`];
+        }
+        const opp = tr.anti.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+        const sense = tr.junctions.find(k => junctionKey(k) === key)?.count ?? 0;
+        const share = opp + sense > 0 ? opp / (opp + sense) : null;
+        // the gene's own spliced reads read on the wrong strand: a few % of its reads at that intron (LEAK_SHARE)
+        const leak = sense >= 20 && share != null && share < ANTI_LEAK_SHARE;
+        if (leak) leaky++;
+        return [tr.sampleName, opp.toLocaleString('en-US'), sense.toLocaleString('en-US'), pct(share, share != null && share < 0.1 ? 1 : 0), `${lib(tr.sampleId)}${leak ? ` · likely ${gene}'s reads on the wrong strand` : ''}`];
+      });
+      return {
+        title: `Opposite-strand junction ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
+        subtitle: `intron ${formatBp(j.end - j.start)} · antisense to ${gene} · ${where}`,
+        cartoon: null, hgvs: geneLine,
+        tables: [{ head: ['sample', 'opposite strand', `${gene}'s strand`, 'opposite share', 'library'], rows }],
+        strip: null,
+        note: `Spliced reads of this intron on each strand, under each sample's library orientation (Strands). ${leaky ? `Where the opposite strand holds under ${Math.round(ANTI_LEAK_SHARE * 100)} % of the reads of the same intron on ${gene}'s strand, the arc is most likely ${gene}'s own reads read on the wrong strand: stranded protocols leave about 0.5–3 % there. ` : ''}` +
+          `A transcript of the other strand (antisense gene, read-through) has introns of its own, usually with GT…AG read on its strand. No HGVS, reading frame or usage: they belong to ${gene}'s strand. "Supporting reads" lists the opposite strand's reads only.`,
+      };
+    }
+    if (popover.kind === 'retention') {
+      const { start, end, fromExon, toExon } = popover;
+      const L = end - start, model = tx;
+      const h = model ? retentionHgvs(start, end, model) : null;
+      const seqHere = irSeq?.key === popover.key ? irSeq : null;
+      const effect = h && model && seqHere?.seq ? retentionEffect(start, end, seqHere.seq, h, model) : null;
+      const regionNote = !h ? null
+        : h.region === 'cds' ? (effect ? `protein: ${effect.text}` : seqHere?.error ? `reading frame: the intron's bases could not be read (${seqHere.error})` : L > IR_SEQ_MAX_BP ? `reading frame: ${L % 3 === 0 ? 'in frame' : 'frameshift'} (${L.toLocaleString('en-US')} nt); the intron is too long to read for its stop codons` : 'reading frame: reading the intron\'s bases…')
+        : h.region === 'utr5' ? 'in the 5′ UTR: the coding sequence itself is unchanged (an upstream ORF or the start codon\'s context may change)'
+        : h.region === 'utr3' ? 'in the 3′ UTR: after the stop codon, the coding sequence is unchanged (the 3′ UTR and its exon junctions change: a junction more than 50–55 nt after the stop is lost or kept)'
+        : h.region === 'noncoding' ? 'non-coding transcript: no reading frame'
+        : 'across a boundary of the CDS: check the start or stop codon by hand';
+      const hgvsLines = h ? [h.r, `intron ${h.index + 1} of ${h.count} (exon ${fromExon} → exon ${toExon}) · ${currentChrom}:g.${start + 1}_${end} · ${formatBp(L)}`, ...(regionNote ? [regionNote] : [])]
+        : ['no MANE Select model with this intron loaded'];
+      // per sample: the unspliced reads through each boundary (transcript order: 5′ the donor side), the canonical
+      // junction, the share shown, the rMATS-style ratio, and the intron's depth against the junction (IRFinder-style)
+      const plus = (model?.strand ?? 1) > 0;
+      const lo = Math.max(start, viewStart), hi = Math.min(end, viewEnd);
+      const medianDepth = (cov: CoverageRun[]) => {
+        if (hi <= lo) return null;
+        const n = Math.min(201, hi - lo), xs: number[] = [];
+        for (let i = 0; i < n; i++) xs.push(depthAt(cov, lo + Math.floor(((i + 0.5) * (hi - lo)) / n)));
+        xs.sort((a, b) => a - b);
+        return xs[xs.length >> 1];
+      };
+      const fmt0 = (v: number) => (Number.isInteger(v) ? v.toLocaleString('en-US') : v.toFixed(1));
+      const rows = displayTracks.filter(t => !t.gtex && !isDnaTrack(t)).map(t => {
+        const agg = t.group ? t.group.agg : usageEvents.get(t.sampleId);
+        const r = agg?.retention.find(x => x.start === start && x.end === end);
+        if (!r) return [t.sampleName, '—', '—', '—', '—', '—', '—', '—'];
+        const five = plus ? r.rStart : r.rEnd, three = plus ? r.rEnd : r.rStart, R = r.rStart + r.rEnd, C = r.canonical;
+        const d = medianDepth(t.coverage);
+        return [t.sampleName, fmt0(five), fmt0(three), fmt0(C), pctLabel(r.pct), R + 2 * C > 0 ? pctLabel(R / (R + 2 * C)) : '—',
+          d == null ? '—' : fmt0(d), d == null || d + C <= 0 ? '—' : pctLabel(d / (d + C))];
+      });
+      return {
+        title: `Intron retention · ${currentChrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}`,
+        subtitle: `intron ${formatBp(L)} · exon ${fromExon} → exon ${toExon}${h ? ` · ${h.before} | ${h.after}` : ''}`,
+        cartoon: null, hgvs: hgvsLines,
+        tables: [{ head: ['sample', '5′ boundary', '3′ boundary', 'canonical junction', 'IR (shown)', 'IR vs canonical', `intron depth${hi - lo < L ? ' (in view)' : ''}`, 'IR ratio'], rows }],
+        strip: null,
+        note: `5′ / 3′ boundary: reads unspliced through the donor and the acceptor side of the intron, at least ${SPAN_EXON_ANCHOR} aligned bases on the exon side and ${SPAN_INTRON_ANCHOR} on the intron side. ` +
+          'IR (shown) = the mean of the two / the reads competing at the intron (canonical junction, alternative sites, pseudo-exons, skipping), as on the pill. ' +
+          'IR vs canonical = (5′ + 3′) / (5′ + 3′ + 2 × canonical), rMATS-style. ' +
+          'IR ratio = median intron depth / (median intron depth + canonical junction reads), after IRFinder (Middleton et al. 2017, which takes the spliced reads at either end of the intron): depth inside the intron, not only at its ends, so a pre-mRNA or a cryptic exon inside it raises it too. ' +
+          '"Supporting reads" opens the reads track on the reads through either boundary, with their mates. HGVS: the intron inserted between its two exon bases (r. numbering); the reading frame from the intron\'s own bases, not 3′-normalised.',
       };
     }
     if (popover.kind === 'junction') {
@@ -3492,12 +6458,20 @@ export default function SashimiViewer({
       const { model, info, foreign } = junctionContext(j);
       const allJunctions = tracks.flatMap(t => t.junctions);
       const hgvs = model ? junctionHgvs(j, model, allJunctions) : null;
-      const frame = model && info.cls !== 'canonical' ? junctionFrame(j, model, allJunctions) : null;
+      // a long-range junction: the frame is the fusion's, across the two partners (popoverFusion), not one model's
+      const lr = longRangeOf(j);
+      const frame = model && info.cls !== 'canonical' && !lr ? junctionFrame(j, model, allJunctions) : null;
       const key = junctionKey(j);
       const inAlt = altJunctionIndex.get(key);
-      const hgvsLines = hgvs ? [`${model!.transcriptId}: donor ${hgvs.donor} → acceptor ${hgvs.acceptor}`, `${hgvs.effect} · ${hgvs.summary}`] : ['no MANE Select model loaded'];
+      // a long-range junction with both partners known: the fusion's notation (fusionLines), not one gene's c. positions
+      const hgvsLines = lr && popoverFusion ? [] : hgvs ? [`${model!.transcriptId}: donor ${hgvs.donor} → acceptor ${hgvs.acceptor}`, `${hgvs.effect} · ${hgvs.summary}`] : ['no MANE Select model loaded'];
       if (foreign && tx) hgvsLines.unshift(`${foreign.geneName} (${foreign.strand === tx.strand ? 'same strand as' : 'antisense to'} ${tx.geneName}) · ${foreign.transcriptId}`);
       if (frame) hgvsLines.push(`reading frame: ${frameLabel(frame)} · ${frame.text}`);
+      if (lr) {
+        hgvsLines.unshift(longRangeLabel(j, lr).split('\n')[0]);
+        if (popoverFusion) hgvsLines.push(...fusionLines(popoverFusion, popover.key));
+        else hgvsLines.push(lr.partner && lr.partner.strand !== tx?.strand ? 'reading frame: none, the partner gene is on the other strand' : 'reading frame: needs both ends on exon boundaries of two genes with their models loaded');
+      }
       const alts = displayTracks.map(t => {
         const mine = t.junctions.find(k => junctionKey(k) === key);
         const alt = model ? junctionAlternative({ ...j, count: mine?.count ?? 0 }, t.junctions, model) : null;
@@ -3506,7 +6480,7 @@ export default function SashimiViewer({
       const altLabel = alts.find(a => a.alt)?.alt?.label ?? '';
       const tables: PopTable[] = [{
         head: ['sample', 'reads', 'canonical alternative', 'share'],
-        rows: alts.map(a => [a.name, a.count.toLocaleString(), a.alt?.canonical == null ? '—' : num(a.alt.canonical, a.alt.canonical % 1 ? 1 : 0), pct(a.alt?.share)]),
+        rows: alts.map(a => [a.name, a.count.toLocaleString('en-US'), a.alt?.canonical == null ? '—' : num(a.alt.canonical, a.alt.canonical % 1 ? 1 : 0), pct(a.alt?.share)]),
       }];
       // skipped exons of the queried gene: their depth usage
       const strips: PopStrip[] = [];
@@ -3517,17 +6491,18 @@ export default function SashimiViewer({
           const st = stripFor(i); if (st) strips.push(st);
         }
       }
-      const canCartoon = !!model && model.cdsStart != null && ['canonical', 'skip', 'cryptic_exon', 'exonic_site', 'intronic_site'].includes(spliceEvent(j, model, allJunctions).kind);
+      const canCartoon = !lr && !!model && model.cdsStart != null && ['canonical', 'skip', 'cryptic_exon', 'exonic_site', 'intronic_site'].includes(spliceEvent(j, model, allJunctions).kind);
       return {
-        title: `Junction ${currentChrom}:${(j.start + 1).toLocaleString()}-${j.end.toLocaleString()}`,
+        title: `Junction ${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`,
         subtitle: `intron ${formatBp(j.end - j.start)} · ${info.label}${inAlt ? ` · annotated in ${inAlt.slice(0, 3).join(', ')}${inAlt.length > 3 ? '…' : ''}` : ''}`,
-        cartoon: canCartoon ? { j, model: model!, label: info.label } : null,
+        cartoon: lr ? fusionCartoon(popoverFusion, j) : canCartoon ? { j, model: model!, label: info.label } : null,
         hgvs: hgvsLines, tables, strip: strips[0] ?? null,
         note: (altLabel ? `Share = reads of this junction / (reads + ${altLabel}), junction reads only (rMATS-style).` : 'A canonical junction has no single alternative; click an exon for its usage.') +
           (tables.length > 1 ? ' Usage of the skipped exon(s) below is depth-based (see exon panel).' : ''),
         status: tables.length > 1 ? status : undefined,
       };
     }
+    if (popover.kind !== 'exon') return null;
     const ex = popover.exon;
     const cFirst = tx ? cdnaPosition(tx.strand > 0 ? ex.start : ex.end - 1, tx).label : null;
     const cLast = tx ? cdnaPosition(tx.strand > 0 ? ex.end - 1 : ex.start, tx).label : null;
@@ -3536,13 +6511,13 @@ export default function SashimiViewer({
     const iv = u?.interval;
     const psiRows = displayTracks.map(t => ({ name: t.sampleName, ...exonPsi(ex, t.junctions, tx?.strand ?? 1) }));
     const tables: PopTable[] = [
-      usageTable(idx, `Depth-based usage${iv ? ` · ${iv.coding ? 'coding part ' : ''}${currentChrom}:${(iv.start + 1).toLocaleString()}-${iv.end.toLocaleString()}` : ''}`),
+      usageTable(idx, `Depth-based usage${iv ? ` · ${iv.coding ? 'coding part ' : ''}${currentChrom}:${(iv.start + 1).toLocaleString('en-US')}-${iv.end.toLocaleString('en-US')}` : ''}`),
       { caption: 'Junction reads', head: ['sample', 'inclusion 5′', 'inclusion 3′', 'skipping', 'ψ (inclusion)'],
-        rows: psiRows.map(r => [r.name, r.inclusionUp.toLocaleString(), r.inclusionDown.toLocaleString(), r.exclusion.toLocaleString(), pct(r.psi)]) },
+        rows: psiRows.map(r => [r.name, r.inclusionUp.toLocaleString('en-US'), r.inclusionDown.toLocaleString('en-US'), r.exclusion.toLocaleString('en-US'), pct(r.psi)]) },
     ];
     const ph = tx ? exonPhases(tx).find(p => p.rank === ex.rank) : undefined;
     return {
-      title: `Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString()}-${ex.end.toLocaleString()} · ${ex.end - ex.start} bp`,
+      title: `Exon ${ex.rank} · ${currentChrom}:${(ex.start + 1).toLocaleString('en-US')}-${ex.end.toLocaleString('en-US')} · ${ex.end - ex.start} bp`,
       subtitle: (cFirst && cLast ? `${tx!.transcriptId}: ${cFirst}_${cLast.replace(/^[cn]\./, '')}` : '') + (ph ? ` · ${phaseTitle(ph)}` : ''),
       hgvs: [] as string[], tables, strip: idx >= 0 ? stripFor(idx) : null,
       note: `Usage = median depth of the exon / median depth of the gene's other coding exons (${u ? u.refIdx.length : '…'} exons); ± is a delta-method sd from the read counts. ` +
@@ -3550,7 +6525,19 @@ export default function SashimiViewer({
         ' ψ = mean inclusion junction reads / (mean inclusion + skipping reads).',
       status,
     };
-  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf]);
+  }, [popover, tx, tracks, displayTracks, altJunctionIndex, currentChrom, junctionContext, exonDepths, usageKey, usageOf, neighbours, sampleStrands, irSeq, usageEvents, viewStart, viewEnd, isDnaTrack, fusionOf, fusionPep, popoverFusion, longRangeOf, longRangeLabel]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // a retention popover reads the intron's bases (with a few exon bases each side) for its reading frame
+  useEffect(() => {
+    if (popover?.kind !== 'retention') return;
+    const { key, start, end } = popover;
+    if (irSeq?.key === key || end - start > IR_SEQ_MAX_BP) return;
+    let live = true;
+    ds.getReference(currentChrom, start - RETENTION_FLANK, end + RETENTION_FLANK)
+      .then(seq => { if (live) setIrSeq({ key, seq: seq ?? null, ...(seq ? {} : { error: 'no reference available' }) }); })
+      .catch(err => { if (live) setIrSeq({ key, seq: null, error: err?.message ?? String(err) }); });
+    return () => { live = false; };
+  }, [popover, currentChrom, ds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!popover) return;
@@ -3568,323 +6555,506 @@ export default function SashimiViewer({
   const toggleSample = useCallback((s: { id: number; name: string }) => {
     if (tracksRef.current.some(t => t.sampleId === s.id)) removeTrack(s.id); else loadCoverage(s.id, s.name);
   }, [removeTrack, loadCoverage]);
+  /**
+   * Every sample of `list` not shown yet as a track, in the list's order: the tracks appear at once (loading), and their
+   * coverage is read SHOW_ALL_PARALLEL at a time, so that a run of dozens of files does not open them all together.
+   */
+  const showAllSamples = useCallback((list: { id: number; name: string }[]) => {
+    const todo = list.filter(s => !tracksRef.current.some(t => t.sampleId === s.id));
+    if (!todo.length) return;
+    for (const s of todo) showAllPending.current.add(s.id);
+    setTracks(prev => [...prev, ...todo.filter(s => !prev.some(t => t.sampleId === s.id)).map(s => ({ sampleId: s.id, sampleName: s.name, coverage: [], junctions: [], loading: true }))]);
+    let next = 0;
+    const worker = async () => {
+      while (next < todo.length) {
+        const s = todo[next++];
+        // removed meanwhile (primary only, or its own click): not loaded
+        if (!showAllPending.current.delete(s.id)) continue;
+        try { await loadCoverage(s.id, s.name); } catch { /* the track shows its error */ }
+      }
+    };
+    for (let k = 0; k < Math.min(SHOW_ALL_PARALLEL, todo.length); k++) void worker();
+  }, [loadCoverage]);
+  /** Every sample of `list` shown as a track removed (the primary too): an empty plot, or one without the matching samples. */
+  const hideAllSamples = useCallback((list: { id: number }[]) => {
+    const ids = new Set(list.map(s => s.id));
+    for (const tr of tracksRef.current) if (ids.has(tr.sampleId)) removeTrack(tr.sampleId);
+  }, [removeTrack]);
+  /**
+   * "Supporting reads" of an arc's panel: the reads tracks switch to the reads that support it (arcSupport.ts), raw
+   * reads (not collapsed), shown if they were not. Tolerances: long-read junctions counted within JUNCTION_SNAP_BP
+   * (junctionSnap.ts); structural events merge breakpoints within 5 % of their length, 20–100 bp, after 5 bp rounding.
+   */
+  const showSupporting = useCallback((p: { kind: 'junction' | 'anti'; j: JunctionArc } | { kind: 'structural'; j: JunctionArc; sv: SvKind } | { kind: 'retention'; start: number; end: number; fromExon: number; toExon: number }) => {
+    if (p.kind === 'retention') {
+      const pos = `${currentChrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`;
+      setReadsSupport({ arc: { kind: 'retention', start: p.start, end: p.end, tol: 0 }, label: `the reads unspliced through the intron ${pos} (exon ${p.fromExon} → ${p.toExon})`, side: 'sense' });
+      setCollapseReads(false);
+      setShowReads(true);
+      return;
+    }
+    const { j } = p;
+    const pos = `${currentChrom}:${(j.start + 1).toLocaleString('en-US')}-${j.end.toLocaleString('en-US')}`;
+    let arc: ArcSupport, label: string, side: 'sense' | 'anti' | undefined;
+    if (p.kind !== 'structural') {
+      arc = { kind: 'junction', start: j.start, end: j.end, tol: j.snapped ? JUNCTION_SNAP_BP : 0 };
+      // on the samples whose strands are shown, the reads of the strand the arc is drawn on (supportFor)
+      side = p.kind === 'anti' ? 'anti' : 'sense';
+      label = `the junction ${pos}${p.kind === 'anti' ? ' on the opposite strand' : ''}`;
+    } else {
+      const pairKind = p.sv === 'discordant' ? (j as DiscordantArc).kind : undefined;
+      arc = { kind: p.sv, start: j.start, end: j.end, pairKind, tol: Math.min(100, Math.max(20, Math.round(0.05 * (j.end - j.start)))) + 5 };
+      label = p.sv === 'discordant' ? `the ${pairKind ? `${pairKind}-type ` : ''}discordant pairs ${pos}` : `the ${p.sv === 'split' ? 'split-read' : p.sv} arc ${pos}`;
+    }
+    setReadsSupport({ arc, label, side });
+    setCollapseReads(false);
+    setShowReads(true);
+  }, [currentChrom]);
+  /** Back to the primary sample alone. */
+  const showPrimaryOnly = useCallback(() => {
+    for (const tr of tracksRef.current.slice(1)) removeTrack(tr.sampleId);
+  }, [removeTrack]);
 
   // ======================== Main render (always light theme for readability) ========================
 
+  /** the sample tracks shown, in order, as a key (reported to the host with the options) */
+  const shownKey = tracks.filter(t => t.sampleId > 0).map(t => t.sampleId).join(',');
   // Report every option and the navigation to the host (session files, options kept across remounts)
   const onStateChangeRef = useRef(onStateChange);
   onStateChangeRef.current = onStateChange;
   useEffect(() => {
     onStateChangeRef.current?.({
-      equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, uniqueOnly,
+      equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, minMapq,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
-      minJunctionReads: minJunctionCount, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, pairs: showPairs, haplotypes, clippedBases: showClipped, insertedBases: showInserted,
+      minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
+      shownSamples: shownKey ? shownKey.split(',').map(Number) : sampleId > 0 ? [] : undefined,   // none: no file yet
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, uniqueOnly, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, showPairs, haplotypes, showClipped, showInserted, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
     inp: 'bg-white text-gray-800 border-gray-300',
     btn: 'px-2 py-0.5 text-xs rounded border border-gray-200 hover:bg-indigo-50 hover:border-indigo-300 transition-colors',
   };
-  /** Pill-style segmented switch: the active option is a raised white chip with an indigo label. */
-  const Segmented = <T extends string>({ value, onChange, options, disabled, title }: {
-    value: T; onChange: (v: T) => void; disabled?: boolean; title: string;
-    options: { value: T; label: string; icon: JSX.Element; hint?: string }[];
-  }) => (
-    <span title={title} className={`inline-flex items-center rounded-full bg-gray-100 border border-gray-200 p-0.5 text-xs select-none ${disabled ? 'opacity-60' : ''}`}>
-      {options.map(o => {
-        const active = o.value === value;
-        return (
-          <button key={o.value} type="button" disabled={disabled} onClick={() => onChange(o.value)} title={o.hint}
-            className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full transition-all ${active ? 'bg-white text-indigo-700 font-semibold shadow-sm ring-1 ring-indigo-200' : 'text-gray-500 hover:text-gray-800'} disabled:cursor-not-allowed`}>
-            <span className={active ? 'text-indigo-600' : 'text-gray-400'}>{o.icon}</span>{o.label}
-          </button>
-        );
-      })}
-    </span>
-  );
-  const ICON = {
-    reads: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M1.5 9.5c0-4 2-7 4.5-7s4.5 3 4.5 7" /><path d="M1 9.5h10" /></svg>,
-    usage: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><circle cx="3.2" cy="3.2" r="1.7" /><circle cx="8.8" cy="8.8" r="1.7" /><path d="M10 2 2 10" /></svg>,
-    samples: <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="1" y="1.5" width="10" height="2" rx="1" /><rect x="1" y="5" width="10" height="2" rx="1" /><rect x="1" y="8.5" width="10" height="2" rx="1" /></svg>,
-    groups: <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="1" y="1" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="1" width="4.2" height="4.2" rx="1" /><rect x="1" y="6.8" width="4.2" height="4.2" rx="1" /><rect x="6.8" y="6.8" width="4.2" height="4.2" rx="1" /></svg>,
-  };
-  const Toggle = ({ checked, onChange, label, title, disabled }: { checked: boolean; onChange: (v: boolean) => void; label: string; title: string; disabled?: boolean }) => (
-    <label className={`flex items-center gap-1 text-xs ${disabled ? 'text-gray-300' : t.muted} select-none`} title={title}>
-      <input type="checkbox" checked={checked} disabled={disabled} onChange={e => onChange(e.target.checked)} className="accent-indigo-600" />
-      {label}
-    </label>
-  );
+  /** The pickers of the title row (samples, GTEx tissues): one list under a search box. */
+  const pickerList = 'max-h-56 overflow-y-auto';
 
   const content = (
     <div className={embedded ? `${t.bg} ${t.text} w-full` : `${t.bg} ${t.text} rounded-xl shadow-2xl w-full max-w-[95vw] border ${t.border}`}>
-      {/* Header */}
-      <div className={`flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3 border-b ${t.border}`}>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <div>
-            <h2 className="text-lg font-bold leading-tight">{currentGeneName} <span className={`text-sm font-normal ${t.muted}`}>Sashimi plot</span></h2>
-            <p className={`text-xs ${t.muted} font-mono`}>{regionStr}</p>
+      {/* Header: the title row (gene, locus, zoom, search; samples on the right), the sectioned toolbar, and the reads strip when the reads track is on */}
+      <div className="border-b border-slate-200">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3.5 pb-2.5">
+          <div className="flex items-baseline gap-2.5 min-w-0">
+            <h2 className="text-xl font-bold tracking-tight leading-tight text-slate-900">{currentGeneName}</h2>
+            {tx && <span className="text-xs text-slate-500 truncate" title="The transcript model the plot is drawn on">{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons</span>}
           </div>
-          <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1">
-            <input type="text" value={geneSearch} onChange={e => { setGeneSearch(e.target.value); setSearchError(null); }}
-              placeholder="Gene, ENSG or chr:pos…" title="A gene symbol, an ENSG id, or genomic coordinates: chr17:43,094,464 (1 kb window) or chr17:43,000,000-43,100,000; on another chromosome the gene at the locus is opened"
-              className={`${t.inp} w-40 px-2 py-0.5 text-xs rounded border ${searchError ? 'border-red-400' : ''}`} />
-            <button type="submit" disabled={geneSearchLoading} className={t.btn}>{geneSearchLoading ? '…' : 'Go'}</button>
-            {searchError && <span className="text-[10px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}
-          </form>
-          <div className="flex items-center gap-1.5">
-            <button onClick={() => zoomBy(1 / 1.4)} className={`${t.btn} font-bold`} title="Zoom in (Ctrl + scroll up)">+</button>
-            <button onClick={() => zoomBy(1.4)} className={`${t.btn} font-bold`} title="Zoom out (Ctrl + scroll down)">&minus;</button>
-            <button onClick={resetZoom} className={t.btn} title="Reset to the whole gene (or double-click the plot)">Reset</button>
-          </div>
-          {/* the options always start a new line under the title, search and zoom */}
-          <div className="flex flex-wrap items-center gap-3 basis-full">
-            <Toggle checked={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns"
-              title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
-            {equalIntrons && tx && intronsOf(tx).length > 0 && (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`}
-                title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300. Clear the box for the default.`}>
-                Intron width
-                <input type="number" min={10} max={20000} step={10} value={intronWidth ?? ''} placeholder={String(defaultIntronV(tx))}
-                  onChange={e => setIntronWidth(e.target.value === '' ? null : Math.min(20000, Math.max(10, parseInt(e.target.value) || 10)))}
-                  className={`${t.inp} w-20 px-1.5 py-0.5 text-xs rounded border`} />
-                {intronWidth != null && <button onClick={() => setIntronWidth(null)} className="text-gray-400 hover:text-gray-700" title="Back to the default width">×</button>}
-              </label>
-            )}
-            <Toggle checked={showAllTx} onChange={setShowAllTx} label="All transcripts"
-              title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
-            <Toggle checked={showSnps} onChange={setShowSnps} label="Common SNPs"
-              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
-            {showSnps && (
-              <label className={`flex items-center gap-1 ${t.muted}`} title="Minimum allele frequency (highest over the frequency projects) for a variant to be shown">AF ≥
-                <select value={snpMinAf} onChange={e => setSnpMinAf(parseFloat(e.target.value))} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                  {[[0.001, '0.1%'], [0.01, '1%'], [0.05, '5%']].map(([v, l]) => <option key={String(v)} value={v as number}>{l as string}</option>)}
-                </select>
-              </label>
-            )}
-            {primaryKnown.length > 0 && (
-              <span className="flex items-center gap-1">
-                <Toggle checked={showKnown} onChange={setShowKnown} label="Known variants"
-                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants (those not already in the panel)." />
-                {showKnown && (
-                  <select value="" onChange={e => { const v = primaryKnown.find(k => k.id === e.target.value); if (v) jumpToVariant(v); }}
-                    className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
-                    <option value="">go to…</option>
-                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString()}</option>)}
-                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString()} (opens the gene there)</option>)}
-                  </select>
-                )}
-              </span>
-            )}
-            <label className={`flex items-center gap-1 text-xs ${t.muted} select-none`}
-              title="Depth axis. Shared: one axis for all samples (heights comparable). Per sample: each sample scales to its own maximum, rounded to a round number. Relative: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
-              Depth axis
-              <select value={depthAxis} onChange={e => setDepthAxis(e.target.value as DepthAxis)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                <option value="shared">shared</option>
-                <option value="own">per sample</option>
-                <option value="relative">relative (% of max)</option>
-              </select>
-            </label>
-            <Toggle checked={uniqueOnly} onChange={setUniqueOnly} label="Unique reads"
-              title="Count only uniquely mapped reads (NH:1, or MAPQ ≥ 30 when NH is absent) for coverage, junctions and the reads track." />
-            <span className="flex items-center gap-1">
-              <Toggle checked={showReads} onChange={setShowReads} label="Reads"
-                title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(READS_MAX_VIEW_BP)}.`} />
-              {showReads && tracks.length > 1 && (
-                <select value={readsAll ? 'all' : (effectiveReadsSampleId ?? '')}
-                  onChange={e => { if (e.target.value === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(e.target.value)); } }}
-                  className={`${t.inp} px-1 py-0.5 text-xs rounded border`} title="Sample shown in the reads track, or all samples (one reads track under each coverage track; each sample is decoded separately, so it takes longer)">
-                  {tracks.map(tr => <option key={tr.sampleId} value={tr.sampleId}>{tr.sampleName}</option>)}
-                  <option value="all">All samples</option>
-                </select>
-              )}
-              {anyDna && (
-                <Toggle checked={coverageVariants} onChange={setCoverageVariants} label="Variants"
-                  title="DNA tracks: draw the variant sites called from the reads as allele bars on the coverage, from the reads track when it is shown or from the variants chip next to the sample name otherwise. Off: plain coverage, no site." />
-              )}
-              {(showReads || (anyDna && coverageVariants)) && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Minimum alternate-allele fraction for a variant site to be shown (★, allele bar on the coverage) and used to collapse reads. Sites also need at least 3 alternate reads with base quality ≥ 20. On a DNA track without a reads track the sites come from the variants chip next to the sample name.">
-                  Min VAF
-                  <input type="number" min={1} max={100} value={minVafPct} onChange={e => setMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
-                    className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
-                </label>
-              )}
-              {showReads && anyPairs && (
-                <Toggle checked={showPairs} onChange={setShowPairs} label="Pairs"
-                  title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair (mate on another chromosome, not a proper pair, or on genomic DNA an insert above 5 times the median) are amber. Off: every read on its own row." />
-              )}
-              {showReads && !collapseReads && anyClips && (
-                <Toggle checked={showClipped} onChange={setShowClipped} label="Clipped"
-                  title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; the parts of a split read (SA tag) on one row joined by a dashed line, with the hard clips of each part as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); a hard clip whose other part is outside the window is only in the tooltip. Off: the alignment only." />
-              )}
-              {showReads && !collapseReads && anyInserts && (
-                <Toggle checked={showInserted} onChange={setShowInserted} label="Inserted"
-                  title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
-              )}
-              {showReads && (anyLongReads || anyDna) && (
-                <Toggle checked={consensusMode} onChange={setConsensusMode} label="Consensus"
-                  title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: for long reads (ONT, PacBio) and for every genomic DNA track, short reads included. Off: every mismatch and indel of every read." />
-              )}
-              {showReads && anyLongReads && (
-                <>
-                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it).">
-                    Min VAF (long)
-                    <input type="number" min={1} max={100} value={longReadMinVafPct} onChange={e => setLongReadMinVafPct(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
-                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />%
-                  </label>
-                  <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Long reads: insertions and deletions shorter than this are neither drawn in the reads nor called as sites (homopolymer errors); deletions of 50 bp or more are still structural evidence.">
-                    Min indel
-                    <input type="number" min={1} max={200} value={minIndelBp} onChange={e => setMinIndelBp(Math.min(200, Math.max(1, parseInt(e.target.value) || 1)))}
-                      className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />bp
-                  </label>
-                </>
-              )}
-              {showReads && (
-                <Toggle checked={collapseReads} onChange={setCollapseReads} label="Collapse"
-                  title={`Collapse the reads of the window. Haplotypes 2: read-based phasing, the heterozygous sites (★, 25–75 % alternate allele) linked by the reads and their mates into phase blocks of two haplotypes, with the fragments supporting each. Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`} />
-              )}
-              {showReads && collapseReads && (
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern).">
-                  Haplotypes
-                  <select value={haplotypes} onChange={e => setHaplotypes(e.target.value === 'any' ? 'any' : 2)} className={`${t.inp} px-1 py-0.5 text-xs rounded border`}>
-                    <option value={2}>2 (phased)</option>
-                    <option value="any">any (consensus groups)</option>
-                  </select>
-                </label>
-              )}
-            </span>
-            {anyRna && <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'}
-              title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
-              options={[
-                { value: 'reads', label: 'Reads', icon: ICON.reads, hint: 'Spliced reads of each junction' },
-                { value: 'usage', label: 'Usage', icon: ICON.usage, hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
-              ]} />}
-            {!anyRna && (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn.">
-                Min supporting reads
-                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
-                  className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-              </label>
-            )}
-            {anyRna && (showUsage ? (
-              <>
-                <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators.">
-                  Min %
-                  <input type="number" min={0} max={100} step={0.5} value={minUsagePct} onChange={e => setMinUsagePct(Math.min(100, Math.max(0, parseFloat(e.target.value) || 0)))}
-                    className={`${t.inp} w-16 px-1.5 py-0.5 text-xs rounded border`} />
-                </label>
-                <Toggle checked={includeRetention} onChange={setIncludeRetention} label="Intron retention"
-                  title="Count intron retention in the usage percentages: IR pills on the intron baselines, (R5 + R3) / (R5 + R3 + 2·C) from the reads running unspliced through both boundaries, and retention in the canonical arc's denominator. Off: junction-only percentages, no IR pill." />
-              </>
-            ) : (
-              <label className={`flex items-center gap-1 text-xs ${t.muted}`} title="Hide junctions supported by fewer spliced reads">
-                Min reads
-                <input type="number" min={1} value={minJunctionCount} onChange={e => setMinJunctionCount(Math.max(1, parseInt(e.target.value) || 1))}
-                  className={`${t.inp} w-14 px-1.5 py-0.5 text-xs rounded border`} />
-              </label>
-            ))}
-            {hiddenHere > 0 && (
-              <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))} className={`${t.btn} px-2 py-1 text-xs`}
-                title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
-                {hiddenHere} hidden arc{hiddenHere === 1 ? '' : 's'} · show
+          <span className="font-mono text-[12.5px] text-slate-700 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 whitespace-nowrap" title={`The window in view${liftover ? ` (${liftover.from})` : ''}`}>{regionStr}</span>
+          {liftover && (() => {
+            const r = liftHere ? liftRange(liftHere, viewStart + 1, viewEnd) : null;
+            const text = r ? `${r.chrom}:${r.start.toLocaleString('en-US')}-${r.end.toLocaleString('en-US')}` : liftStatus.error ? 'unavailable' : 'lifting…';
+            return (
+              <button type="button" disabled={!r} onClick={() => { if (r) navigator.clipboard?.writeText(`${r.chrom}:${r.start}-${r.end}`).then(() => { setLiftCopied(true); setTimeout(() => setLiftCopied(false), 1200); }).catch(() => {}); }}
+                className="inline-flex items-center gap-1.5 font-mono text-[12.5px] rounded-lg px-2 py-1 whitespace-nowrap border border-teal-200 bg-teal-50 text-teal-800 hover:bg-teal-100 disabled:hover:bg-teal-50"
+                title={r ? `The window in ${liftover.to}, lifted by Ensembl's assembly map${r.partial ? '; part of it has no counterpart there' : ''}${r.split ? '; some of it lands on another sequence' : ''}. Click to copy.` : liftStatus.error ? `${liftover.to} coordinates unavailable: ${liftStatus.error}` : `Lifting the window to ${liftover.to}`}>
+                <span className="font-sans text-[10.5px] font-bold tracking-wide">{liftover.to}</span>{liftCopied ? 'copied' : text}{r?.partial ? ' ≈' : ''}
               </button>
+            );
+          })()}
+          <span className="inline-flex border border-slate-200 rounded-[9px] overflow-hidden bg-white" role="group" aria-label="Zoom">
+            <button onClick={() => zoomBy(1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50" title="Zoom out (Ctrl + scroll down)" aria-label="Zoom out"><Icon name="minus" /></button>
+            <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Zoom in (Ctrl + scroll up)" aria-label="Zoom in"><Icon name="plus" /></button>
+            <button onClick={resetZoom} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Reset to the whole gene (or double-click the plot)" aria-label="Reset the zoom"><Icon name="reset" size={15} /></button>
+          </span>
+          <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1.5">
+            <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[9px] border bg-white text-slate-400 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
+              <Icon name="search" size={14} />
+              <GeneSuggest value={geneSearch} onChange={v => { setGeneSearch(v); setSearchError(null); }} width={320}
+                local={[...(neighbours?.models.map(m => m.geneName) ?? []), currentGeneName]}
+                placeholder="Gene, chr:pos, c.234, exon 12…" ariaLabel="Go to" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
+                  + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
+                  + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.\n`
+                  + 'Gene names are suggested from the third letter (HGNC), the genes of the view first.'}
+                className="w-44 bg-transparent outline-none text-[12.5px] text-slate-800 placeholder:text-slate-400" />
+              <button type="submit" disabled={geneSearchLoading} className="h-6 px-2 rounded-md text-[11.5px] font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">{geneSearchLoading ? '…' : 'Go'}</button>
+            </span>
+            {searchError && <span className="text-[11px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}
+          </form>
+          <div className="flex flex-wrap items-center gap-2 ml-auto">
+            {!hideSamplePicker && (
+              <Segmented value={viewMode} title="One track per sample, or one pooled track per sample group"
+                onChange={v => { if (v === 'groups' && !groups.some(g => g.sampleIds.length)) setShowGroupsDialog(true); else setViewMode(v); }}
+                options={[
+                  { value: 'samples', label: 'Samples', icon: 'users', hint: 'One track per sample' },
+                  { value: 'groups', label: groups.length ? `Groups · ${groups.length}` : 'Groups', icon: 'grid', hint: 'One pooled track per sample group, arcs labelled with % usage' },
+                ]} />
             )}
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {!hideSamplePicker && (
-            <Segmented value={viewMode} title="One track per sample, or one pooled track per sample group"
-              onChange={v => { if (v === 'groups' && !groups.some(g => g.sampleIds.length)) setShowGroupsDialog(true); else setViewMode(v); }}
-              options={[
-                { value: 'samples', label: 'Samples', icon: ICON.samples, hint: 'One track per sample' },
-                { value: 'groups', label: groups.length ? `Groups · ${groups.length}` : 'Groups', icon: ICON.groups, hint: 'One pooled track per sample group, arcs labelled with % usage' },
-              ]} />
-          )}
-          {!hideSamplePicker && (
-            <button onClick={() => setShowGroupsDialog(true)} className={`${t.btn} px-3 py-1 font-medium`} title="Create and edit the sample groups of the aggregate view">Groups…</button>
-          )}
-          {!hideSamplePicker && <div className="relative">
-            <button onClick={e => openDropdown(e, 256, setShowPicker)} className={`${t.btn} px-3 py-1 font-medium ${showPicker ? 'bg-indigo-50 border-indigo-300' : ''}`}
-              title="Samples loaded in the page: click one to show it as a track, click it again to remove the track">
-              {runSamples.length ? `Samples · ${tracks.length}/${runSamples.length} shown` : '+ Add sample'}
-            </button>
-            {showPicker && (
-              <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-64 overflow-hidden`}>
+            {!hideSamplePicker && (
+              <Popover width={288} open={showPicker} onOpenChange={setShowPicker} flush
+                title="Samples loaded in the page: click one to show it as a track, click it again to remove the track"
+                button={<>{runSamples.length ? `${tracks.length} / ${runSamples.length} shown` : '+ Add sample'}<Icon name="chev" size={13} className="text-slate-400" /></>}>
                 <input type="text" value={pickerSearch} onChange={e => setPickerSearch(e.target.value)}
-                  placeholder="Search samples…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
-                <div className={`px-3 py-1 text-[10px] ${t.muted} border-b border-gray-100`}>click to show as a track · click again to remove</div>
-                <div className="max-h-48 overflow-y-auto">
+                  placeholder="Search samples…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
+                <div className="px-3 py-1 text-[10.5px] text-slate-500 border-b border-slate-100">click to show as a track · click again to remove</div>
+                {runSamples.length > 1 && (() => {
+                  const hidden = filteredSamples.filter(s => !tracks.some(x => x.sampleId === s.id)).length;
+                  const shownHere = filteredSamples.length - hidden;
+                  const q = pickerSearch.trim();
+                  return (
+                    <div className="flex flex-wrap items-center gap-1 px-2 py-1.5 border-b border-slate-100">
+                      <button onClick={() => showAllSamples(filteredSamples)} disabled={!hidden}
+                        title={q ? `Show every sample matching "${q}" as a track (${hidden} more), in the list's order` : `Show every loaded sample as a track (${hidden} more), in the list's order`}
+                        className={`${t.btn} px-2 py-0.5 text-[11px] font-medium disabled:opacity-40`}>
+                        {q ? `Show all matching (${hidden})` : `Show all (${hidden})`}
+                      </button>
+                      <button onClick={() => hideAllSamples(filteredSamples)} disabled={!shownHere}
+                        title={q ? `Remove the track of every sample matching "${q}" (${shownHere})` : `Remove every sample track (${shownHere}), the primary too: click a sample, or Show all, to bring tracks back`}
+                        className={`${t.btn} px-2 py-0.5 text-[11px] disabled:opacity-40`}>
+                        {q ? `Hide all matching (${shownHere})` : `Hide all (${shownHere})`}
+                      </button>
+                      <button onClick={showPrimaryOnly} disabled={tracks.length <= 1}
+                        title="Remove every track but the primary one (the first)"
+                        className={`${t.btn} px-2 py-0.5 text-[11px] disabled:opacity-40`}>Primary only</button>
+                    </div>
+                  );
+                })()}
+                <div className={pickerList}>
                   {filteredSamples.length === 0 ? (
-                    <div className={`px-3 py-2 text-xs ${t.muted}`}>{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>
+                    <div className="px-3 py-2 text-xs text-slate-500">{runSamples.length ? 'No sample matches' : 'No samples loaded yet'}</div>
                   ) : filteredSamples.slice(0, 50).map(s => {
                     const idx = tracks.findIndex(x => x.sampleId === s.id);
                     const shown = idx >= 0;
                     return (
                       <button key={s.id} onClick={() => toggleSample(s)}
                         title={shown ? `Shown as track ${idx + 1}${idx === 0 ? ' (primary)' : ''} · click to remove it from the plot` : 'Click to show this sample as a track'}
-                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : `${t.text} hover:bg-gray-50`}`}>
-                        <span className="inline-block w-2.5 h-2.5 rounded-sm shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
+                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : 'text-slate-800 hover:bg-slate-50'}`}>
+                        <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
                         <span className="flex-1 truncate">{s.name}</span>
                         {shown && <span className="text-indigo-600 text-[10px] font-medium">✓ shown</span>}
                       </button>
                     );
                   })}
                 </div>
-              </div>
+              </Popover>
             )}
-          </div>}
-          <div className="relative">
-            <button onClick={e => openDropdown(e, 288, setShowGtexPicker)} className={`${t.btn} px-3 py-1 font-medium`}
-              title="Add a GTEx tissue as a track: median junction read counts (arcs) and median exon reads per base (profile) over all samples of the tissue (GTEx v10, hg38)">+ GTEx tissue</button>
-            {showGtexPicker && (() => {
-              const q = gtexSearch.trim().toLowerCase();
-              const all = gtexTissues || [];
-              const match = (x: GtexTissue) => !q || x.name.toLowerCase().includes(q) || x.site.toLowerCase().includes(q) || x.id.toLowerCase().includes(q);
-              const favs = gtexFavourites.map(id => all.find(x => x.id === id)).filter((x): x is GtexTissue => !!x && match(x));
-              const rest = all.filter(x => match(x) && !gtexFavourites.includes(x.id));
-              const loaded = new Set(gtexTracks.map(g => g.gtex?.tissue.id));
-              const row = (x: GtexTissue) => (
-                <button key={x.id} onClick={() => addGtexTissue(x)} disabled={loaded.has(x.id)}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 flex items-center gap-2 ${t.text} disabled:opacity-40`}>
-                  <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: x.color }} />
-                  <span className="flex-1 truncate">{x.name}</span>
-                  <span className={`${t.muted} text-[10px]`}>n={x.samples}</span>
+            <Popover width={288} open={showGtexPicker} onOpenChange={setShowGtexPicker} flush label="Add a GTEx tissue"
+              title="Add a GTEx tissue as a track: median junction read counts (arcs) over all samples of the tissue, and the usage of each exon (0–1) from those junctions (GTEx v10, v8 when v10 fails; hg38)"
+              button={<><Icon name="globe" size={15} />GTEx</>}>
+              {(() => {
+                const q = gtexSearch.trim().toLowerCase();
+                const all = gtexTissues || [];
+                const match = (x: GtexTissue) => !q || x.name.toLowerCase().includes(q) || x.site.toLowerCase().includes(q) || x.id.toLowerCase().includes(q);
+                const favs = gtexFavourites.map(id => all.find(x => x.id === id)).filter((x): x is GtexTissue => !!x && match(x));
+                const rest = all.filter(x => match(x) && !gtexFavourites.includes(x.id));
+                const loaded = new Set(gtexTracks.map(g => g.gtex?.tissue.id));
+                const row = (x: GtexTissue) => (
+                  <button key={x.id} onClick={() => addGtexTissue(x)} disabled={loaded.has(x.id)}
+                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 flex items-center gap-2 text-slate-800 disabled:opacity-40">
+                    <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: x.color }} />
+                    <span className="flex-1 truncate">{x.name}</span>
+                    <span className="text-slate-500 text-[10px]">n={x.samples}</span>
+                  </button>
+                );
+                return (
+                  <>
+                    <input type="text" value={gtexSearch} onChange={e => setGtexSearch(e.target.value)} placeholder="Search tissues…" autoFocus className="border-b border-slate-200 w-full px-3 py-2 text-xs outline-none" />
+                    <div className="max-h-64 overflow-y-auto">
+                      {gtexError ? <div className="px-3 py-2 text-xs text-red-600">{gtexError}</div>
+                        : !gtexTissues ? <div className="px-3 py-2 text-xs text-slate-500">loading GTEx tissues…</div>
+                        : <>
+                          {favs.length > 0 && <div className="px-3 pt-1.5 text-[10px] uppercase tracking-wide text-slate-500">Favourites</div>}
+                          {favs.map(row)}
+                          {rest.length > 0 && <div className="px-3 pt-1.5 text-[10px] uppercase tracking-wide text-slate-500">All tissues</div>}
+                          {rest.map(row)}
+                          {favs.length + rest.length === 0 && <div className="px-3 py-2 text-xs text-slate-500">No tissue matches</div>}
+                        </>}
+                    </div>
+                  </>
+                );
+              })()}
+            </Popover>
+            {onSnapshot && (
+              <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
+                className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border text-[12.5px] font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                title="Add a screenshot of this plot to the basket, together with the region, the options in effect and the outlier effect it was opened from">
+                <Icon name="camera" size={15} />{snapshotState === 'busy' ? '…' : snapshotState === 'done' ? 'Added to basket' : snapshotState === 'error' ? 'Screenshot failed' : 'Basket'}
+              </button>
+            )}
+            <Popover width={260} title="More: sample groups, SVG of this view" label="More"
+              buttonClass="w-[30px] h-[30px] grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              button={<Icon name="more" size={18} />}>
+              {close => (
+                <>
+                  {!hideSamplePicker && <MenuItem icon="grid" label="Sample groups…" hint="Create and edit the groups of the pooled view" onClick={() => { close(); setShowGroupsDialog(true); }} />}
+                  <MenuItem icon="image" label="Export this view as SVG" hint="Vector, publication-ready" onClick={() => { close(); exportSvg(); }} />
+                </>
+              )}
+            </Popover>
+            {!embedded && <button onClick={onClose} className="w-[30px] h-[30px] grid place-items-center rounded-[9px] text-slate-400 hover:text-red-500 hover:bg-red-50" title="Close" aria-label="Close"><Icon name="x" /></button>}
+          </div>
+        </div>
+
+        {/* The toolbar: ARCS (or STRUCTURE on DNA), SHOW, LAYERS (DNA), DEPTH, and the read filters */}
+        <div className="px-5 pb-3"><Bar>
+          {anyRna && (
+            <Section label="Arcs" tone="indigo" title="Junction arcs: what their pills say, and which are drawn">
+              <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'} label="Arc labels"
+                title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
+                options={[
+                  { value: 'reads', label: 'Reads', icon: 'arc', hint: 'Spliced reads of each junction' },
+                  { value: 'usage', label: 'Usage', icon: 'pct', hint: 'Each arc labelled with its share of the reads competing at its intron, so the labels of one intron add up to 100 %: canonical C, alternative site n, pseudo-exon (A + B) / 2 on both arcs, exon skipping S, intron retention (R5 + R3) / 2 shown as IR pills on the baseline. A skipping arc shows 2·S over the totals of the two introns it spans (the rMATS value when nothing else competes). Tooltips also give each event against the canonical junction alone.' },
+                ]} />
+              {showUsage ? (
+                <>
+                  <Stepper label="min" unit="%" value={minUsagePct} onChange={setMinUsagePct} min={0} max={100} step={0.5} ariaLabel="Min %"
+                    title="Hide events whose usage is below this percentage (junctions without a usage value, touching no annotated splice site, follow Min reads instead). Hidden events still count in the denominators." />
+                  <Pill on={includeRetention} onChange={setIncludeRetention} label="Retention"
+                    title="Count intron retention in the usage percentages: IR pills on the intron baselines, (R5 + R3) / (R5 + R3 + 2·C) from the reads running unspliced through both boundaries, and retention in the canonical arc's denominator. Off: junction-only percentages, no IR pill." />
+                </>
+              ) : (
+                <Stepper label="min" unit="reads" value={minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min reads"
+                  title="Hide junctions supported by fewer spliced reads" />
+              )}
+              {hiddenHere > 0 && (
+                <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
+                  className="inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border border-amber-200 bg-amber-50 text-amber-800 text-[12.5px] font-medium hover:bg-amber-100"
+                  title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
+                  <Icon name="eyeOff" size={14} />{hiddenHere} hidden · show
                 </button>
-              );
+              )}
+            </Section>
+          )}
+          {!anyRna && (() => {
+            const first = displayTracks.find(isDnaTrack);
+            const deep = displayTracks.filter(tr => isDnaTrack(tr) && (svDepth.get(tr.sampleId) ?? 0) > SV_DEEP_X);
+            const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
+              (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
+            return (
+              <Section label="Structure" tone="indigo" title="Structural hints over the DNA coverage">
+                <Stepper label="min" unit="reads" value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min supporting reads"
+                  title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}
+                  after={!minReadsSet
+                    ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
+                    : <button type="button" className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title={`Back to the default: ${autoNote}`}
+                        onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
+              </Section>
+            );
+          })()}
+          <Section label="Show" tone="emerald">
+            {!anyDna && (
+              <Pill on={showReads} onChange={setShowReads} label="Reads" icon="reads"
+                title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).`} />
+            )}
+            {anyRna && (() => {
+              const shownRna = tracks.filter(t => t.sampleId > 0 && !isDnaSample(t.sampleId));
+              const name = (sid: number) => tracks.find(t => t.sampleId === sid)?.sampleName ?? `#${sid}`;
+              const per = shownRna.map(t => `${name(t.sampleId)}: ${sampleStrands?.[t.sampleId] ?? 'orientation not known yet'}`).join('; ');
+              const none = !shownRna.some(t => sampleStrands?.[t.sampleId] === 'reverse' || sampleStrands?.[t.sampleId] === 'forward');
               return (
-                <div className={`absolute top-full ${pickerSide === 'right' ? 'right-0' : 'left-0'} mt-1 bg-white border-gray-200 border rounded-lg shadow-xl z-20 w-72 overflow-hidden`}>
-                  <input type="text" value={gtexSearch} onChange={e => setGtexSearch(e.target.value)} placeholder="Search tissues…" autoFocus className={`${t.inp} border-b w-full px-3 py-2 text-xs`} />
-                  <div className="max-h-64 overflow-y-auto">
-                    {gtexError ? <div className="px-3 py-2 text-xs text-red-600">{gtexError}</div>
-                      : !gtexTissues ? <div className={`px-3 py-2 text-xs ${t.muted}`}>loading GTEx tissues…</div>
-                      : <>
-                        {favs.length > 0 && <div className={`px-3 pt-1.5 text-[10px] uppercase tracking-wide ${t.muted}`}>Favourites</div>}
-                        {favs.map(row)}
-                        {rest.length > 0 && <div className={`px-3 pt-1.5 text-[10px] uppercase tracking-wide ${t.muted}`}>All tissues</div>}
-                        {rest.map(row)}
-                        {favs.length + rest.length === 0 && <div className={`px-3 py-2 text-xs ${t.muted}`}>No tissue matches</div>}
-                      </>}
-                  </div>
-                </div>
+                <Pill on={showStrands} onChange={setShowStrands} label="Strands" icon="strands"
+                  title={`Split each stranded RNA sample by transcript strand: the reads of ${tx?.geneName ?? 'the gene'}'s strand above the baseline (coverage, arcs, usage, variant sites), the opposite strand mirrored under it on the same scale with its own arcs, and its reads tinted violet and grouped after the others. `
+                    + `The strand of a read comes from the library's orientation: reverse (dUTP: read 2 on the transcript's strand, read 1 opposite) or forward (read 1 or the single read on it), detected from the spliced reads of the gene's introns or set on the sample chip. An unstranded sample stays whole.\n${per}${none ? '\nNo shown sample is known to be stranded yet.' : ''}`} />
               );
             })()}
-          </div>
-          {onSnapshot && (
-            <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
-              className={`${t.btn} px-3 py-1 font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : ''}`}
-              title="Add a screenshot of this plot to the basket, together with the region, the options in effect and the outlier effect it was opened from">
-              {snapshotState === 'busy' ? '📷 …' : snapshotState === 'done' ? '✓ Added to basket' : snapshotState === 'error' ? 'Screenshot failed' : '📷 Basket'}
-            </button>
+            {anyRna && !!ds.getVariantSites && (
+              <>
+                <Pill on={rnaVariants} onChange={setRnaVariants} label="Variants" icon="star"
+                  title={`RNA tracks: the variant sites of the window, from a scan of every read (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window), with the reads track open or not. Each site is a star above the track and an allele bar on the coverage (the alternate allele in its base colour over the reference share). Click one for its summary: supporting and reference reads by strand, allele fraction and allelic balance, qualities.`} />
+                {rnaVariants && !showReads && (
+                  <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                    title="Minimum alternate-allele fraction for a variant site to be shown (a star and an allele bar on an RNA track). Sites also need at least 3 alternate reads." />
+                )}
+              </>
+            )}
+            <Pill on={showAllTx} onChange={setShowAllTx} label="All transcripts" icon="tx"
+              title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
+            <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
+              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
+            {showSnps && (
+              <Segmented size="sm" prefix="AF ≥" label="SNP allele frequency" value={String(snpMinAf)} onChange={v => setSnpMinAf(parseFloat(v))}
+                title="Minimum allele frequency of a common variant to be shown (the highest over the frequency projects: gnomAD, 1000 Genomes, TOPMed…)"
+                options={[
+                  { value: '0.001', label: '0.1 %', hint: 'Variants with an allele frequency of 0.1 % or more somewhere: the densest track' },
+                  { value: '0.01', label: '1 %', hint: 'Polymorphisms in the usual sense (1 % or more)' },
+                  { value: '0.05', label: '5 %', hint: 'Common variants only (5 % or more)' },
+                ]} />
+            )}
+            <Pill on={equalIntrons} onChange={toggleEqualIntrons} disabled={!tx || intronsOf(tx).length === 0} label="Equal introns" icon="equal"
+              title="Draw every intron at the same width so exons and junctions dominate the plot. Intronic signal (retention, cryptic exons) is compressed; switch off to inspect it." />
+            {equalIntrons && tx && intronsOf(tx).length > 0 && (
+              <Stepper label="intron" unit="bp" value={intronWidth ?? defaultIntronV(tx)} onChange={v => setIntronWidth(Math.round(v))} min={10} max={20000} step={10} width={46} ariaLabel="Intron width"
+                title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300.`}
+                after={intronWidth != null && <button type="button" onClick={() => setIntronWidth(null)} className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title="Back to the default width">auto</button>} />
+            )}
+            {primaryKnown.length > 0 && (
+              <>
+                <Pill on={showKnown} onChange={setShowKnown} label="Known variants" icon="marker"
+                  title="Variants previously identified in the primary sample (clinical indication, diagnostic conclusion, chromosome-map CNVs / SVs): a panel under the transcript, guide lines through every track, and small marks on the other samples' tracks for their own variants (those not already in the panel)." />
+                {showKnown && (
+                  <Select value="" onChange={id => { const v = primaryKnown.find(k => k.id === id); if (v) jumpToVariant(v); }} ariaLabel="Go to a known variant"
+                    title="Centre the view on one of the known variants; a variant on another chromosome opens the gene at its position (the window alone, in genomic orientation, when no gene is there)">
+                    <option value="">go to…</option>
+                    {primaryKnownHere.map(v => <option key={v.id} value={v.id}>{v.label} · {KNOWN_VARIANT_KIND_NAMES[v.kind]} · {(v.start + 1).toLocaleString('en-US')}</option>)}
+                    {primaryKnown.filter(v => !primaryKnownHere.includes(v) && v.chrom).map(v => <option key={v.id} value={v.id}>{v.label} · {v.chrom} · {(v.start + 1).toLocaleString('en-US')} (opens the gene there)</option>)}
+                  </Select>
+                )}
+              </>
+            )}
+          </Section>
+          {anyDna && (
+              <Section label="Layers" tone="orange" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
+                {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
+                <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px]">
+                  {([
+                    { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
+                    { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
+                    ...(ds.getMethylation ? [{ key: 'M', name: 'Methylation', on: showMethyl, set: setShowMethyl, color: LAYER_COLORS.M, title: `Long-read DNA tracks (ONT, PacBio): CpG methylation from the base-modification tags (MM / ML) of the reads, at the CpG sites of the reference only. A panel under the coverage shows the 5mC fraction per haplotype (HP tags) with their difference and the allele-specific stretches; with the reads track open on ≤ ${formatBp(METHYL_READS_MAX_BP)}, each read's CpGs are coloured too. Counted in the background for views up to ${formatBp(METHYL_MAX_VIEW_BP)}; needs the reference sequence.` }] : []),
+                    { key: 'R', name: 'Reads', on: showReads, set: setShowReads, color: LAYER_COLORS.R, title: `Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).` },
+                  ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map(l => (
+                    <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
+                      onClick={() => l.set(!l.on)}
+                      className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-[7px] text-[12px] font-medium transition-all"
+                      style={l.on ? { background: '#fff', color: '#0f172a', boxShadow: '0 1px 2px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04)' } : { color: '#64748b' }}>
+                      <span className="w-[18px] h-[18px] rounded-[5px] grid place-items-center text-[10.5px] font-bold"
+                        style={l.on ? { background: l.color, color: '#fff' } : { border: `1.5px solid ${l.color}`, color: l.color }}>{l.key}</span>
+                      {l.name}
+                    </button>
+                  ))}
+                </span>
+                {!!ds.getMethylation && showMethyl && (
+                  <Pill on={methylIslands} onChange={setMethylIslands} label="CpG islands only"
+                    title="Methylation panel restricted to the CpG islands of the reference (≥ 200 bp, GC ≥ 50 %, observed/expected CpG ≥ 0.6; Gardiner-Garden & Frommer 1987): only their CpGs are counted in the ribbon, the haplotype difference, the allele-specific stretches and the figures of the header; the rest of the panel stays empty. (With several samples, the mean difference of each island with the primary sample is shown in either mode.)" />
+                )}
+                {!showReads && coverageVariants && (
+                  <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                    title="Minimum alternate-allele fraction for a variant site to be shown (bar in the variants track of a DNA sample). Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+                )}
+              </Section>
           )}
-          <button onClick={exportSvg} className={`${t.btn} px-3 py-1 font-medium`} title="Export the plot as SVG (vector, publication-ready)">SVG</button>
-          {!embedded && <button onClick={onClose} className={`${t.muted} text-2xl leading-none hover:text-red-400 px-2`}>&times;</button>}
-        </div>
+          <Section label="Depth" tone="sky" title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
+            <Segmented value={depthAxis} onChange={setDepthAxis} size="sm" label="Depth axis"
+              title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth."
+              options={[
+                { value: 'shared', label: 'shared', hint: 'One axis for all samples: heights comparable' },
+                { value: 'own', label: 'own', hint: 'Each sample on its own axis, up to a round number above its maximum' },
+                { value: 'relative', label: '% max', hint: 'Each sample as a percentage of its own maximum in view' },
+              ]} />
+          </Section>
+          <Section><Popover width={340} title="Which alignments are counted, in coverage, arcs and the reads track"
+            button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-indigo-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
+            <div className="px-2.5 py-2">
+              <span className="block text-[12.5px] font-semibold text-slate-900">Minimum MAPQ</span>
+              <span className="block text-[11.5px] text-slate-500 leading-snug mt-px mb-1.5">Alignments placed with a lower mapping quality are left out. ≥ 10 keeps the unique reads of STAR and HISAT2; bwa and minimap2 score 0–60.</span>
+              <Segmented size="sm" prefix="MAPQ ≥" label="Minimum MAPQ" value={String(mapqThreshold(minMapq))} onChange={v => setMinMapq(Number(v))}
+                title="Minimum mapping quality (MAPQ) of the alignments counted in coverage, junction arcs, variant sites and the reads track. The scale is the aligner's: STAR gives 255 to unique reads and 3, 1, 0 to reads placed at 2, 3–4, 5 or more loci; HISAT2 gives 60 and 1 or 0; bwa and minimap2 estimate it from 0 to 60 (0: an equally good placement elsewhere). Coverage and arcs are recounted from the window already read; the reads track is read again."
+                options={[
+                  { value: '0', label: 'all', hint: 'Every alignment, whatever its MAPQ' },
+                  { value: '1', label: '1', hint: 'Leaves out MAPQ 0: reads placed at random among equally good hits (STAR: 5 or more loci)' },
+                  { value: '10', label: '10', hint: 'Unique reads for STAR (255) and HISAT2 (60): their multi-mapped reads score 3 or less' },
+                  { value: '20', label: '20', hint: 'bwa / minimap2: about 1 placement in 100 wrong or less' },
+                  { value: '30', label: '30', hint: 'bwa / minimap2: about 1 placement in 1,000 wrong or less' },
+                ]} />
+            </div>
+            <SwitchRow on={showSecondary} onChange={setShowSecondary} label="Secondary alignments"
+              hint="The other placements of multi-mapped reads (flag 0x100), as IGV shows them. Most aligners give them a low MAPQ, so a threshold above leaves many out. The window is read again."
+              title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs, variant sites and the reads track, as IGV does by default. A variant in a paralogue or a pseudogene can then show at both copies. Off: primary and supplementary records only. The minimum MAPQ above applies to them as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so any threshold of 1 or more leaves most out. Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
+            <div className="flex items-center gap-2 mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">
+              <span className="w-[22px] h-[9px] rounded-sm border border-slate-400 bg-white shrink-0" aria-hidden="true" />
+              <span className="flex-1">Reads placed with MAPQ under {LOW_MAPQ} are drawn hollow</span>
+            </div>
+          </Popover></Section>
+        </Bar></div>
+
+        {/* The reads strip: every option of the reads track, shown with it */}
+        {showReads && (
+          <div className="mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2" role="group" aria-label="Reads track options">
+            <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-indigo-700"><Icon name="reads" size={15} />Reads</span>
+            {tracks.length > 1 && (() => {
+              // whose reads: one button, the list of the shown samples in their track colours, and all of them
+              const colorOf = (sid: number) => TRACK_COLORS[Math.max(0, tracks.findIndex(tr => tr.sampleId === sid)) % TRACK_COLORS.length];
+              return (
+                <PickButton prefix="reads of" label="Reads of" value={readsAll ? 'all' : String(effectiveReadsSampleId ?? '')}
+                  onChange={v => { if (v === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(v)); } }}
+                  title="Whose reads the track shows: one sample, in its track colour, or all of them"
+                  options={[
+                    ...tracks.map(tr => ({ value: String(tr.sampleId), label: tr.sampleName, dot: colorOf(tr.sampleId) })),
+                    { value: 'all', label: `all ${tracks.length} samples`, dot: tracks.map(tr => colorOf(tr.sampleId)), divider: true, hint: 'One reads track under each coverage track (each sample is decoded separately, so it takes longer)' },
+                  ]} />
+              );
+            })()}
+            <PickButton prefix="window ≤" label="Reads window" value={String(readsWindow)} onChange={v => setReadsWindow(readsWindowOf(Number(v)))} width={300}
+              title={`Reads window: the widest view whose reads are loaded (IGV's visibility window). Wider views read more of the file each time the view moves, and the track still draws at most ${READS_MAX.toLocaleString('en-US')} reads, sampled over the window: sparser the wider it is.`}
+              options={READS_WINDOW_CHOICES_BP.map((bp, i) => ({ value: String(bp), label: formatBp(bp),
+                hint: i === 0 ? 'the default, as IGV: reads drawn densely' : bp >= 1_000_000 ? 'a large structural variant, long reads: sparser, each move reads more of the file' : 'wider views, reads sampled sparser' }))} />
+            <Segmented value={collapseReads ? 'collapsed' : 'raw'} onChange={v => setCollapseReads(v === 'collapsed')} size="sm" label="Raw or collapsed reads"
+              title={`Raw: every read on its own row. Collapsed: the reads of the window folded into haplotypes. Haplotypes 2: the consensus of each of the two haplotypes (one row each per phase set), from the file's haplotags (HP, PS) when the reads carry them, else from the in-page read-based phasing (the heterozygous sites, ★ 25–75 % alternate allele, linked by the reads and their mates into phase blocks). Haplotypes any: consensus groups, one row per local haplotype × splice pattern with its number of supporting reads (groups below "Min reads" fold into a minor bucket). Variable sites need at least 3 alternate reads and the Min VAF fraction of the depth. Sites never co-covered by a fragment stay apart (no invented phase).`}
+              options={[
+                { value: 'raw', label: 'Raw', hint: 'Every read on its own row' },
+                { value: 'collapsed', label: 'Collapsed', hint: 'The reads folded into haplotypes or consensus groups' },
+              ]} />
+            {!collapseReads && (
+              <Segmented size="sm" prefix="group" label="Group" value={readsGroup} onChange={v => setReadsGroup(v)}
+                title={`Group the reads by haplotype, mates and the parts of a split read kept together. Phased here: the collapsed mode's read-based phasing (two haplotypes per phase block, from the heterozygous sites the reads and their mates share), run on up to ${READS_PHASE_CAP.toLocaleString('en-US')} reads of the window; reads covering no phased site last.${anyHaplotagged ? ' HP tags: the haplotag a phasing tool wrote on them (HP 1, HP 2, …; untagged last), like IGV\'s Group alignments by tag HP.' : ''}`}
+                options={[
+                  { value: 'none' as const, label: 'none', hint: 'Reads packed by position only' },
+                  { value: 'phase' as const, label: 'phased here', hint: 'By haplotype, from the read-based phasing of the window' },
+                  ...(anyHaplotagged || readsGroup === 'hp' ? [{ value: 'hp' as const, label: 'HP tags', hint: 'By the haplotag a phasing tool wrote on the reads' }] : []),
+                ]} />
+            )}
+            {!collapseReads && (
+              <Segmented size="sm" prefix="colour" label="Colour the reads by" value={readsColor} onChange={setReadsColor}
+                title="Colour the reads by strand, as IGV's Color alignments by: forward pink, reverse lavender. Strand: each read's own alignment strand (strand bias, the mates of a proper pair in the two colours). 1st-of-pair: the strand of read 1 of its pair, both mates alike, the fragment's orientation (on a stranded RNA library, the transcript's strand up to the library's rule). Discordant pairs and, with Strands, the opposite strand's reads keep their own colours."
+                options={[
+                  { value: 'none' as const, label: 'none', hint: 'Grey reads' },
+                  { value: 'strand' as const, label: 'strand', hint: "Each read's alignment strand: forward pink, reverse lavender" },
+                  { value: 'first' as const, label: '1st-of-pair', hint: 'The strand of read 1 of the pair, both mates alike (single reads: their own strand)' },
+                ]} />
+            )}
+            {collapseReads && (
+              <Segmented size="sm" prefix="haplotypes" label="Haplotypes" value={String(haplotypes)} onChange={v => setHaplotypes(v === 'any' ? 'any' : 2)}
+                title="2: two haplotypes per phase block, assembled from the variant alleles seen together in the same reads and mates (at least 2 linking fragments, at most 20 % disagreeing). Any: consensus groups, as many as the reads support (haplotype × splice pattern)."
+                options={[
+                  { value: '2', label: '2 phased', hint: 'Two haplotypes per phase block' },
+                  { value: 'any', label: 'any', hint: 'Consensus groups, as many as the reads support (haplotype × splice pattern)' },
+                ]} />
+            )}
+            {collapseReads && haplotypes === 2 && (anyHaplotagged || phaseSource === 'reads') && (
+              <Segmented size="sm" prefix="phase" label="Phase" value={phaseSource} onChange={v => setPhaseSource(v)}
+                title="Where the two haplotypes come from. File tags: the HP (haplotype) and PS (phase set) tags a phasing tool wrote on the reads (WhatsHap or LongPhase haplotag, PacBio HiPhase, DRAGEN), phased from the whole genome's variants; used whenever the window has tagged reads. Reads: the in-page phasing of the window's own reads (blocks break where no read links two heterozygous sites)."
+                options={[
+                  { value: 'auto' as const, label: 'HP tags', hint: "The file's haplotags (HP, PS), phased from the whole genome" },
+                  { value: 'reads' as const, label: 'reads', hint: "The in-page phasing of the window's own reads" },
+                ]} />
+            )}
+            <Sep />
+            {anyPairs && (
+              <Pill size="sm" on={showPairs} onChange={setShowPairs} label="Pairs" icon="pair"
+                title="Draw read pairs: the two mates of a pair share one row and are joined by a line; reads of a discordant pair are coloured by what the pair says, as IGV colours them: on genomic DNA, green when the mates face away from each other (← →, the junction of a tandem duplication), red when they face each other far apart (→ ←, more than 5 times the median insert: a deletion), blue when both are on one strand (an inversion); amber when the mate is on another chromosome or the pair is not proper. Off: every read on its own row." />
+            )}
+            {!collapseReads && anyClips && (
+              <Pill size="sm" on={showClipped} onChange={setShowClipped} label="Clipped" icon="scissors"
+                title="Draw the clipped bases beyond the ends of the reads: soft-clipped bases as letters (or base-coloured bars) dimmed where they match the reference, so a real breakpoint sequence stands out from a run of errors; the parts of a split read (SA tag) on one row joined by a dashed line, with the hard clips of each part as dashed stubs (their bases sit in the read's primary record: click the read to fetch them); a hard clip whose other part is outside the window is only in the tooltip. Off: the alignment only." />
+            )}
+            {!collapseReads && anyInserts && (
+              <Pill size="sm" on={showInserted} onChange={setShowInserted} label="Inserted" icon="insert"
+                title="Write the inserted bases inside the insertion marks when the zoom leaves room (they are always in the tooltip and in the read panel)." />
+            )}
+            <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
+              title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: RNA-seq, genomic DNA and long reads (ONT, PacBio) alike. A rarer change (an RNA-editing site edited in a few reads, a subclonal variant) then shows only with Min VAF lowered, or with Consensus off. Off: every mismatch and indel of every read." />
+            <span className="flex flex-wrap items-center gap-2 ml-auto">
+              <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
+                title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
+              {anyLongReads && (
+                <Stepper label="long reads" unit="%" value={longReadMinVafPct} onChange={v => setLongReadMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF (long)"
+                  title="Long reads: a variant site needs at least this alternate-allele fraction (the short-read Min VAF is too low for their error rate; 20 % keeps random errors out at usual depths, a mosaic study may lower it)." />
+              )}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Plot */}
@@ -3926,7 +7096,7 @@ export default function SashimiViewer({
             const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
             if (right < PLOT_LEFT || left > plotRight) return null;
             const point = locusMark.end - locusMark.start <= 1;
-            const label = point ? `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}` : `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString()}-${locusMark.end.toLocaleString()}`;
+            const label = point ? `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString('en-US')}` : `${locusMark.chrom}:${(locusMark.start + 1).toLocaleString('en-US')}-${locusMark.end.toLocaleString('en-US')}`;
             const w = label.length * 5.6 + 10;
             const lx = Math.min(plotRight - w - 2, Math.max(PLOT_LEFT + 2, (left + right) / 2 - w / 2));
             // left button and hover pass through to the plot (pan, positions); a right click removes the highlight
@@ -3940,15 +7110,16 @@ export default function SashimiViewer({
                   : <rect x={left} y={RULER_H} width={Math.max(1, right - left)} height={legendY - RULER_H} fill={withAlpha(INK.select, 0.08)} stroke={INK.select} strokeWidth={0.8} strokeDasharray="5 3" opacity={0.9} />}
                 <g style={{ cursor: 'context-menu' }}>
                   <title>{`Locus you searched for · right-click to remove the highlight`}</title>
-                  <rect x={lx} y={RULER_H - 40} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
-                  <text x={lx + w / 2} y={RULER_H - 29.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
+                  <rect x={lx} y={2} width={w} height={14} rx={3} fill={INK.select} opacity={0.9} />
+                  <text x={lx + w / 2} y={12.5} textAnchor="middle" fill="#fff" fontSize={9} fontWeight={600}>{label}</text>
                 </g>
               </g>
             );
           })()}
 
           {renderRuler()}
-          {renderTranscript(transcriptY)}
+          {renderTranscript(transcriptYAt)}
+          {seqPanelH > 0 && renderSequence(seqY)}
           {knownPanelH > 0 && renderKnown(knownY)}
           {showSnps && renderSnps(snpY)}
           {showAllTx && renderAltTranscripts(altY)}
@@ -3964,11 +7135,13 @@ export default function SashimiViewer({
               <g key={`sites-${L.track.sampleId}`} fontFamily={FONT}>
                 <text x={PLOT_LEFT + 8} y={cy + 3.5} fill={INK.faint} fontSize={8.5} letterSpacing={0.3}>VARIANT SITES</text>
                 {L.sites.map(st => {
-                  const cx = scale.x(st.pos + 0.5);
+                  // on the site's bar: an insertion's boundary, the middle of a deletion's bases, an SNV's base
+                  const cx = scale.x(st.kind === 'ins' ? st.pos : st.kind === 'del' ? st.pos + st.length / 2 : st.pos + 0.5);
                   if (cx < PLOT_LEFT || cx > plotRight) return null;
                   return (
-                    <g key={`site${st.pos}${st.kind}`}>
-                      <title>{siteLabel(st)}</title>
+                    <g key={`site${st.pos}${st.kind}${st.alt}`} style={{ cursor: pairPanel && pairPicking ? 'crosshair' : 'pointer' }}
+                      onClick={ev => { ev.stopPropagation(); if (!panMoved.current) clickSite(L.track.sampleId, L.track.sampleName, st, ev); }}>
+                      <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                       <line x1={cx} y1={cy + 7} x2={cx} y2={bottom} stroke={STAR_COLOR} strokeWidth={1} strokeDasharray="2 3" opacity={0.75} />
                       {knownSnp(st) && <circle cx={cx} cy={cy} r={9.5} fill="none" stroke={SNP_KNOWN_RING} strokeWidth={1.6} />}
                       <path d={starPath(cx, cy, 7)} fill={STAR_COLOR} stroke="#92400e" strokeWidth={0.8} />
@@ -3979,6 +7152,7 @@ export default function SashimiViewer({
             );
           })}
           {renderKnownOverlay()}
+          {renderPanelGrips()}
           {renderLegend(legendY)}
 
           {tracks.length === 0 && (
@@ -3990,7 +7164,8 @@ export default function SashimiViewer({
             <g data-export="skip" pointerEvents="none">
               <line x1={hoverInfo.x} y1={RULER_H} x2={hoverInfo.x} y2={tracksBottom - TRACK_GAP} stroke={INK.select} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
               {(() => {
-                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString()}`;
+                const lifted = liftover ? liftedText(hoverInfo.pos, true) : null;
+                const txt = `${currentChrom}:${(hoverInfo.pos + 1).toLocaleString('en-US')}${liftover ? ` · ${liftover.to.replace(/^GRCh/, '')}: ${lifted ?? '–'}` : ''}`;
                 const w = txt.length * 6.2 + 12;
                 const x = Math.min(plotRight - w / 2, Math.max(PLOT_LEFT + w / 2, hoverInfo.x));
                 return (
@@ -4007,16 +7182,54 @@ export default function SashimiViewer({
           {regionSelect && (() => {
             const x1 = Math.min(regionSelect.startX, regionSelect.currentX);
             const x2 = Math.max(regionSelect.startX, regionSelect.currentX);
-            return <rect data-export="skip" x={x1} y={0} width={x2 - x1} height={totalHeight} fill={withAlpha(INK.select, 0.12)} stroke={INK.select} strokeWidth={1} strokeDasharray="4 2" />;
+            return <rect data-export="skip" x={x1} y={0} width={x2 - x1} height={totalHeight} fill={withAlpha(regionSelect.repeat ? REPEAT_COLOR : INK.select, 0.12)} stroke={regionSelect.repeat ? REPEAT_COLOR : INK.select} strokeWidth={1} strokeDasharray="4 2" />;
           })()}
+          {/* A stretch picked for the repeat inspector (Shift+drag) */}
+          {repeatSel && (() => {
+            const xa = scale.x(repeatSel.start), xb = scale.x(repeatSel.end), l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+            return r > l ? <rect data-export="skip" x={l} y={RULER_H} width={r - l} height={legendY - RULER_H} fill={withAlpha(REPEAT_COLOR, 0.08)} stroke={REPEAT_COLOR} strokeWidth={1} strokeDasharray="4 2" pointerEvents="none" /> : null;
+          })()}
+          {/* Known repeat loci in view: a pill on the ruler opens the inspector */}
+          {strHere.map(({ entry, start, end }) => {
+            const xa = scale.x(start), xb = scale.x(end), cx = (Math.max(PLOT_LEFT, Math.min(xa, xb)) + Math.min(plotRight, Math.max(xa, xb))) / 2;
+            if (cx < PLOT_LEFT || cx > plotRight) return null;
+            const motif = entry.path[0] ?? entry.ref[0] ?? '';
+            const text = `${entry.gene} ${entry.strand === '-' ? revCompSeq(motif) : motif} repeat · inspect ▸`, w = text.length * 5.7 + 14;
+            const lx = Math.min(plotRight - w, Math.max(PLOT_LEFT, cx - w / 2));
+            return (
+              <g key={entry.id} data-export="skip" style={{ cursor: 'pointer' }} onMouseDown={e => e.stopPropagation()} onClick={e => { e.stopPropagation(); void openRepeat({ start, end }, entry); }}>
+                <title>{`${entry.disease} (${entry.inh}) · ${entry.where}\n${currentChrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')} · STRchive ${entry.id}\nClick to size the repeat in the reads (repeat inspector)`}</title>
+                <line x1={Math.min(xa, xb)} y1={RULER_H - 2} x2={Math.max(xa, xb)} y2={RULER_H - 2} stroke={REPEAT_COLOR} strokeWidth={3} />
+                <rect x={lx} y={2} width={w} height={15} rx={7.5} fill="#fff7ed" stroke={REPEAT_COLOR} />
+                <text x={lx + w / 2} y={13} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#9a3412">{text}</text>
+              </g>
+            );
+          })}
         </svg>
+        {repeatSel && (() => {
+          const xa = scale.x(repeatSel.start), xb = scale.x(repeatSel.end), l = Math.max(PLOT_LEFT, Math.min(xa, xb));
+          return (
+            <div className="absolute z-20 flex items-center gap-2 rounded-lg border border-orange-300 bg-white px-2 py-1 text-[11.5px] shadow-lg" style={{ left: Math.min(l, svgWidth - 360), top: RULER_H + 6 }} onMouseDown={e => e.stopPropagation()}>
+              <span className="font-mono text-slate-600">{currentChrom}:{(repeatSel.start + 1).toLocaleString('en-US')}-{repeatSel.end.toLocaleString('en-US')}</span>
+              <button disabled={repeatSel.busy} onClick={() => void openRepeat({ start: repeatSel.start, end: repeatSel.end })} className="rounded-md bg-orange-600 px-2 py-0.5 font-semibold text-white hover:bg-orange-700 disabled:opacity-50"
+                title="Find the tandem repeat in the selection (its motif from the reference) and size it in every sample's reads">{repeatSel.busy ? 'Looking…' : '⟲ Inspect repeat'}</button>
+              {repeatSel.error && <span className="text-red-700 max-w-[260px]">{repeatSel.error}</span>}
+              <button onClick={() => setRepeatSel(null)} className="text-slate-400 hover:text-slate-700" title="Clear the selection">×</button>
+            </div>
+          );
+        })()}
+        {inspect && (
+          <RepeatInspector locus={inspect} ds={ds} onClose={() => setInspect(null)}
+            samples={tracks.filter(t => t.sampleId > 0 && !t.gtex).map((t, i) => ({ id: t.sampleId, name: t.sampleName, color: TRACK_COLORS[i % TRACK_COLORS.length] }))} />
+        )}
 
         {/* HTML tooltip (crisper text than SVG, never exported) */}
         {hoverInfo && !popover && (
           <div className="pointer-events-none absolute z-20 min-w-[190px] rounded-md border border-gray-200 bg-white/95 px-2.5 py-1.5 text-xs shadow-lg"
             style={{ left: Math.min(hover!.px + 14, svgWidth - 200), top: Math.max(RULER_H + 4, hover!.py - 10) }}>
             <div className="font-mono text-[11px] text-gray-900 leading-5">
-              {currentChrom}:{(hoverInfo.pos + 1).toLocaleString()}
+              {currentChrom}:{(hoverInfo.pos + 1).toLocaleString('en-US')}
+              {liftover && <span className="ml-2" style={{ color: LIFT_COLOR }}>{liftover.to} {liftedText(hoverInfo.pos, true) ?? (liftHere ? 'no counterpart' : '…')}</span>}
               {hoverInfo.alt ? <span className="ml-2 font-semibold text-amber-700">{hoverInfo.alt.label}</span> : hoverInfo.cdna && <span className="ml-2 font-semibold text-indigo-700">{hoverInfo.cdna.label}</span>}
             </div>
             {hoverInfo.known.map(k => (
@@ -4026,6 +7239,31 @@ export default function SashimiViewer({
                 <span className="text-gray-400">{'\n'}{k.off ? 'click the arrow to go there' : 'click the mark to centre the view on it'}</span>
               </div>
             ))}
+            {hoverInfo.variant && (
+              <div className="text-[10px] leading-4 mb-1 border-l-2 pl-1.5" style={{ borderColor: hoverInfo.variant.color }}>
+                <span className="font-semibold" style={{ color: hoverInfo.variant.color }}>{siteShort(hoverInfo.variant.site)}</span>
+                <span className="text-gray-600"> · {hoverInfo.variant.name} · VAF {Math.round(hoverInfo.variant.site.vaf * 100)} % ({hoverInfo.variant.site.alt_count}/{hoverInfo.variant.site.depth})</span>
+                {hoverInfo.variant.checks.map(c => (
+                  <div key={c.key} className="flex items-center gap-1">
+                    <span className="inline-block h-2 w-2 rounded-sm" style={{ background: Q_COLORS[c.level] }} />
+                    <span className="font-semibold text-gray-700 w-7">{c.key}</span><span className="text-gray-600">{c.value}</span>
+                  </div>
+                ))}
+                {(() => {
+                  const ph = sitePhase(hoverInfo.variant.site);
+                  if (!ph) return null;
+                  const color = ph.call === 'h1' || ph.call === 'h2' ? psTone(ph.ps).ink : ph.call === 'check' ? '#dc2626' : '#374151';
+                  return (
+                    <div className="text-gray-600">
+                      <span className="font-semibold" style={{ color }}>{ph.call === 'h1' ? 'H1' : ph.call === 'h2' ? 'H2' : ph.call === 'both' ? 'H1 + H2' : ph.call === 'check' ? 'phase: check' : ph.call === 'neither' ? 'phase: neither' : 'phase: not judged'}</span>
+                      {ph.ps != null && <span className="text-gray-400"> · PS {ph.ps.toLocaleString('en-US')}</span>}
+                      <div>{ph.note.replace(/^[^·]*· /, '')}</div>
+                    </div>
+                  );
+                })()}
+                <div className="text-gray-400">click for the reads' distributions</div>
+              </div>
+            )}
             {hoverInfo.snps.map(v => <div key={v.id + v.start} className="text-[10px] text-blue-700 leading-4 mb-0.5 whitespace-pre-line">{snpText(v)}</div>)}
             {hoverInfo.alt && <div className="text-[10px] text-amber-700 leading-4 mb-0.5">{hoverInfo.alt.id} ({hoverInfo.alt.biotype}) · {hoverInfo.alt.kind === 'cds' ? 'coding' : hoverInfo.alt.kind === 'intron' ? 'intronic' : hoverInfo.alt.kind.replace('utr', "UTR ")}</div>}
             {hoverInfo.cdna && tx && <div className="text-[10px] text-gray-500 leading-4 mb-0.5">{hoverInfo.alt ? `${hoverInfo.cdna.label} on ` : ''}{tx.transcriptId} ({modelKindLabel(tx)}) · {hoverInfo.cdna.kind === 'cds' ? 'coding' : hoverInfo.cdna.kind === 'intron' ? 'intronic' : hoverInfo.cdna.kind.replace('utr', "UTR ")}</div>}
@@ -4033,7 +7271,15 @@ export default function SashimiViewer({
               <div key={r.name} className="flex items-center gap-3 leading-5">
                 <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: r.color }} />
                 <span className="text-gray-700">{r.name}</span>
-                <span className="ml-auto font-mono font-semibold text-gray-900">{r.depth.toLocaleString()}</span>
+                <span className="ml-auto font-mono font-semibold text-gray-900">{r.depth.toLocaleString('en-US')}</span>
+                {r.methyl && (
+                  <span className="font-mono text-[10px] text-gray-600" title={`5mC pooled over ${r.methyl.n} CpG${r.methyl.n === 1 ? '' : 's'} (${formatBp(r.methyl.to - r.methyl.from)}) under the pointer${r.methyl.ps >= 0 ? `; HP 1 and HP 2 of phase set PS ${r.methyl.ps.toLocaleString('en-US')}, other: untagged reads and reads of another set` : ''}`}>
+                    {r.methyl.ps >= 0 && <span className="ml-1.5 text-gray-400">PS {r.methyl.ps.toLocaleString('en-US')}</span>}
+                    {r.methyl.lanes.map(l => (
+                      <span key={l.label} className="ml-1.5"><span style={{ color: l.label === 'HP1' || l.label === 'HP2' ? psTone(r.methyl!.ps).ink : undefined }}>{l.label}</span> {Number.isFinite(l.f) ? `${Math.round(l.f * 100)}%` : '–'}<span className="text-gray-400">/{Math.round(l.t)}</span></span>
+                    ))}
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -4041,6 +7287,181 @@ export default function SashimiViewer({
         {cartoon && (
           <SpliceCartoon story={cartoonState.story} loading={cartoonState.loading} error={cartoonState.error} tx={cartoon.model}
             sampleName={cartoon.sample} sampleColor={cartoon.color} junctionLabel={cartoon.label} onClose={() => setCartoon(null)} />
+        )}
+        {variantPanel && (() => {
+          const { site: s, ev } = variantPanel, color = siteColor(s);
+          const { checks } = cachedChecks(s, variantPanel.long);
+          const rna = !isDnaSample(variantPanel.sid);
+          const mqEdges = [0, 10, 20, 30, 40, 50, 60], mqBins = ['0–9', '10–19', '20–29', '30–39', '40–49', '50–59', '60+'];
+          const endEdges = [0, 10, 25, 50, 100, 500, 2000], endBins = ['<10', '10–24', '25–49', '50–99', '100–499', '500–1,999', '2,000+'];
+          const bqEdges = [0, 10, 20, 30, 40], bqBins = ['<10', '10–19', '20–29', '30–39', '40+'];
+          const fw = (l: { fwd: boolean }[]) => l.filter(o => o.fwd).length;
+          // kept on screen: it scrolls inside when taller than the room under its top
+          const panelTop = variantPanelAt ? Math.max(0, Math.min(variantPanelAt.top, window.innerHeight - 40)) : Math.max(8, Math.min(variantPanel.y + 12, window.innerHeight - 470));
+          const panelLeft = variantPanelAt ? Math.max(-300, Math.min(variantPanelAt.left, window.innerWidth - 60)) : Math.max(8, Math.min(variantPanel.x + 12, window.innerWidth - 384));
+          return (
+            // pinned to the window at the click (the plot's container scrolls and would clip it), kept on screen
+            <div className="fixed z-50 w-[372px] max-w-[95vw] overflow-y-auto rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-variant-panel
+              style={{ left: panelLeft, top: panelTop, maxHeight: window.innerHeight - panelTop - 8 }}
+              // moved by a press anywhere on it but its controls; it keeps that place for the next sites
+              onPointerDown={e => startPanelDrag(e, { left: panelLeft, top: panelTop }, setVariantPanelAt)}
+              onMouseDown={e => e.stopPropagation()}>
+              <div className="flex items-start justify-between gap-2 px-3 pt-2 cursor-move" title="Drag the panel to move it">
+                <div className="min-w-0">
+                  <div className="font-semibold text-gray-900 font-mono truncate">{currentChrom}:{(s.pos + 1).toLocaleString('en-US')} <span style={{ color }}>{siteShort(s)}</span></div>
+                  <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads ({s.q ? 'variant scan' : 'reads shown'})</div>
+                </div>
+                <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
+              </div>
+              {(() => {
+                const forms = variantCoordinates(s, currentChrom, variantPanel.ref ?? null, variantPanel.insSeq, tx);
+                return (
+                  <div className="flex flex-wrap items-center gap-1 px-3 pt-1.5">
+                    <span className="font-semibold text-gray-700 mr-0.5">Copy</span>
+                    {forms.map(f => (
+                      <button key={f.label} type="button" title={`${f.title}: click to copy\n${f.text}`}
+                        onClick={() => { copyText(f.text); setVariantCopied(f.text); window.setTimeout(() => setVariantCopied(c => (c === f.text ? null : c)), 1500); }}
+                        className={`max-w-full truncate rounded border px-1.5 py-0.5 font-mono text-[10.5px] ${variantCopied === f.text ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}>
+                        {variantCopied === f.text ? '✓ copied' : f.text}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+              <form className="flex items-center gap-1.5 px-3 pt-1.5"
+                onSubmit={e => {
+                  e.preventDefault();
+                  if (!phaseWith.trim()) return;
+                  setPairPanel({ origin: { sid: variantPanel.sid, chrom: currentChrom, site: s }, text: phaseWith, x: variantPanel.x, y: variantPanel.y });
+                  setVariantPanel(null);
+                }}>
+                <span className="font-semibold text-gray-700 shrink-0">Phase with</span>
+                <input value={phaseWith} onChange={e => setPhaseWith(e.target.value)} placeholder={rna ? "chr:pos; chr:first-last (junction); …" : "chr:pos; chr:pos:A>G; …"} spellCheck={false}
+                  className="min-w-0 flex-1 border border-gray-300 rounded px-1.5 py-0.5 font-mono text-xs outline-none focus:border-blue-400"
+                  title="Whether this variant and others are on the same haplotype (in cis) or not (in trans), from the reads holding both: positions separated by ; as chr:pos (1-based), pos alone on this chromosome, with an allele chr:pos:A>G (VCF style, indels too) or chr:pos:+2 / -3. A splice junction as chr:first-last (the intron's first and last bases): which copy uses it" />
+                <button type="button" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0" title={rna ? "Pick the other variants, or junction arcs and IR labels, by clicking them in the tracks" : "Pick the other variants by clicking them in the variants track"}
+                  onClick={() => {
+                    setPairPanel({ origin: { sid: variantPanel.sid, chrom: currentChrom, site: s }, text: phaseWith, x: variantPanel.x, y: variantPanel.y });
+                    setPairPicking(true);
+                    setVariantPanel(null);
+                  }}>⌖ Pick</button>
+                <button type="submit" className="rounded border border-gray-300 px-2 py-0.5 hover:bg-gray-50 shrink-0">Phase</button>
+              </form>
+              {rna ? (
+                // an RNA site: a short summary from the reads over it (supporting reads, strands, qualities, the allelic
+                // balance, which expression can tilt), the quality cells in one line
+                <div className="px-3 pb-2 pt-1.5">
+                  {variantPanel.busy && <div className="text-gray-400">reading the reads over the site…</div>}
+                  {variantPanel.error && <div className="text-red-600">{variantPanel.error}</div>}
+                  {ev && (() => {
+                    const nAlt = ev.alt.length, nRef = ev.ref.length, n = nAlt + nRef;
+                    const med = (xs: number[]) => { if (!xs.length) return null; const o = [...xs].sort((p, q) => p - q); return o[o.length >> 1]; };
+                    const frac = n ? nAlt / n : 0, p = binomialHalf(nAlt, n);
+                    const balance = !n ? '–' : p >= 0.01 ? 'balanced (both alleles expressed alike)'
+                      : frac >= 0.9 ? 'nearly the alternate allele alone: monoallelic expression, the reference allele lost or not transcribed?'
+                      : frac <= 0.1 ? 'the alternate allele barely expressed: nonsense-mediated decay, allelic silencing, or a low-level change?'
+                      : `tilted towards the ${frac > 0.5 ? 'alternate' : 'reference'} allele (allelic imbalance)`;
+                    const mq = (l: SiteObs[]) => med(l.map(o => o.mq)), end = (l: SiteObs[]) => med(l.map(o => o.end));
+                    const row = (label: string, value: React.ReactNode, note?: string) => (
+                      <tr><td className="pr-3 py-[1px] text-gray-500 align-top whitespace-nowrap">{label}</td><td className="py-[1px] text-gray-800">{value}{note && <span className="text-gray-400"> {note}</span>}</td></tr>
+                    );
+                    return (
+                      <>
+                        <table className="text-[11px]">
+                          <tbody>
+                            {row('Supporting reads', <b style={{ color }}>{nAlt.toLocaleString('en-US')}</b>, `(${fw(ev.alt)} + strand, ${nAlt - fw(ev.alt)} − strand)`)}
+                            {row('Reference reads', nRef.toLocaleString('en-US'), `(${fw(ev.ref)} +, ${nRef - fw(ev.ref)} −)`)}
+                            {ev.other > 0 && row('Other allele', ev.other.toLocaleString('en-US'))}
+                            {row('Allele fraction', n ? `${(frac * 100).toFixed(frac < 0.1 ? 1 : 0)} %` : '–', `of ${n.toLocaleString('en-US')} reads over the site`)}
+                            {row('Allelic balance', balance, n ? `binomial test against 50 %: p = ${p < 1e-4 ? p.toExponential(1) : p.toFixed(p < 0.01 ? 4 : 2)}` : undefined)}
+                            {row('Mapping quality', `${mq(ev.alt) ?? '–'} / ${mq(ev.ref) ?? '–'}`, '(median, alternate / reference reads)')}
+                            {s.kind === 'snv' && row('Base quality', `${med(ev.alt.map(o => o.bq ?? 0)) ?? '–'}`, '(median of the alternate bases)')}
+                            {row('From a read end', `${end(ev.alt) ?? '–'} / ${end(ev.ref) ?? '–'} bp`, '(median, alternate / reference)')}
+                            {knownSnp(s) && row('Known', 'a common SNP (dbSNP)')}
+                          </tbody>
+                        </table>
+                        {checks.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-gray-600">
+                            {checks.map(c => (
+                              <span key={c.key} className="inline-flex items-center gap-1" title={c.detail}>
+                                <span className="inline-block h-2 w-2 rounded-sm" style={{ background: Q_COLORS[c.level] }} />{c.key}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="mt-1 text-[10px] text-gray-400">The reads decoded at the site (up to 5,000): a spliced read whose intron spans it is not over it. In RNA the allele fraction follows expression as well as the genotype.</div>
+                      </>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <>
+              <div className="px-3 pt-1.5">
+                {checks.map(c => (
+                  <div key={c.key} className="flex items-start gap-1.5 leading-4 mb-0.5">
+                    <span className="mt-[3px] inline-block h-2 w-2 shrink-0 rounded-sm" style={{ background: Q_COLORS[c.level] }} />
+                    <span className="w-8 shrink-0 font-semibold text-gray-700">{c.key}</span>
+                    <span className="text-gray-600">{c.detail}</span>
+                  </div>
+                ))}
+              </div>
+              {(() => {
+                const ph = sitePhase(s), h = s.hap;
+                if (!ph || !h) return null;
+                const untagged = Math.max(0, s.alt_count - h.alt[0] - h.alt[1] - h.otherAlt);
+                const row = (label: string, color: string | undefined, a: number, d: number) => (
+                  <tr><td className="pr-3 font-semibold" style={{ color }}>{label}</td><td className="pr-3 text-right">{a}</td><td className="pr-3 text-right">{d}</td><td className="text-right">{d ? `${Math.round((100 * a) / d)} %` : '–'}</td></tr>
+                );
+                return (
+                  <div className="px-3 pt-1.5 mt-1 border-t border-gray-100">
+                    <div className="text-gray-700"><b>Haplotypes</b> <span className="text-gray-500">(the file's haplotags{h.ps != null ? `, phase set PS ${h.ps.toLocaleString('en-US')}` : ', no PS'})</span></div>
+                    <div className="leading-4" style={{ color: ph.call === 'check' ? '#b91c1c' : undefined }}>{ph.note.split(' · ')[0]}</div>
+                    <table className="mt-1 text-[10px] text-gray-600">
+                      <tbody>
+                        <tr><td className="pr-3" /><td className="pr-3 font-semibold">with allele</td><td className="pr-3 font-semibold">over site</td><td className="font-semibold">share</td></tr>
+                        {row('HP 1', psTone(h.ps).ink, h.alt[0], h.depth[0])}
+                        {row('HP 2', psTone(h.ps).ink, h.alt[1], h.depth[1])}
+                        {h.otherDepth > 0 && row('other set / HP', undefined, h.otherAlt, h.otherDepth)}
+                        <tr><td className="pr-3">untagged</td><td className="pr-3 text-right">{untagged}</td><td className="pr-3 text-right" colSpan={2}><span className="text-gray-400">(with the allele)</span></td></tr>
+                      </tbody>
+                    </table>
+                    <div className="mt-0.5 text-[10px] text-gray-500">HP 1 vs HP 2, Fisher exact test: p = {ph.p < 1e-4 ? ph.p.toExponential(1) : ph.p.toFixed(4)} · on a lane at ≥ {PHASE_HI * 100} % of its reads and ≤ {PHASE_LO * 100} % of the other's; reads spanning the site, the allele whatever its base quality</div>
+                  </div>
+                );
+              })()}
+              <div className="px-3 pb-2 pt-1.5 mt-1 border-t border-gray-100">
+                {variantPanel.busy && <div className="text-gray-400">reading the reads over the site…</div>}
+                {variantPanel.error && <div className="text-red-600">{variantPanel.error}</div>}
+                {ev && (
+                  <>
+                    <div className="text-gray-700">From the reads over the site: <b style={{ color }}>{ev.alt.length} alternate</b> · {ev.ref.length} reference{ev.other ? ` · ${ev.other} other allele` : ''}</div>
+                    <table className="mt-1 text-[10px] text-gray-600">
+                      <tbody>
+                        <tr><td className="pr-3" /><td className="pr-3 font-semibold">+ strand</td><td className="font-semibold">− strand</td></tr>
+                        <tr><td className="pr-3" style={{ color }}>alternate</td><td>{fw(ev.alt)}</td><td>{ev.alt.length - fw(ev.alt)}</td></tr>
+                        <tr><td className="pr-3">reference</td><td>{fw(ev.ref)}</td><td>{ev.ref.length - fw(ev.ref)}</td></tr>
+                      </tbody>
+                    </table>
+                    <MiniHist title="Mapping quality (alternate vs reference reads)" bins={mqBins} alt={histOf(mqEdges, ev.alt.map(o => o.mq))} other={histOf(mqEdges, ev.ref.map(o => o.mq))} color={color} />
+                    {s.kind === 'snv' && <MiniHist title="Base quality of the alternate bases (all counted in the allele fraction; under 20 flagged by BQ)" bins={bqBins} alt={histOf(bqEdges, ev.alt.map(o => o.bq ?? 0))} color={color} />}
+                    <MiniHist title="Distance to the nearer alignment end, bp (alternate vs reference reads)" bins={endBins} alt={histOf(endEdges, ev.alt.map(o => o.end))} other={histOf(endEdges, ev.ref.map(o => o.end))} color={color} />
+                    <div className="mt-1 text-[10px] text-gray-400">Cells: shares over the whole scan of the window. Here: the reads decoded at the site (up to 5,000), alternate bases of every quality, as in the scan's allele fraction.</div>
+                  </>
+                )}
+              </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
+        {pairPanel && (
+          <PairPhasePanel key={`${pairPanel.origin.sid}:${pairPanel.origin.site.pos}:${pairPanel.origin.site.alt}:${pairPanel.text}`} ds={ds} origin={pairPanel.origin} text={pairPanel.text}
+            samples={tracks.map(t => ({ id: t.sampleId, name: t.sampleName }))}
+            knownSites={(sid, chrom) => (dnaSites[sid]?.fetched.chrom === chrom ? dnaSites[sid].sites : [])}
+            minMapq={minMapq} x={pairPanel.x} y={pairPanel.y} siteColor={siteColor} siteShort={siteShort} hpColor={(ps, hp) => psTone(ps).hp[hp === 2 ? 1 : 0]}
+            gene={transcript && transcript.chrom === pairPanel.origin.chrom ? { name: transcript.gene_name, strand: transcript.strand, exons: transcript.exons.map(e => [e.start - 1, e.end] as [number, number]) } : null}
+            reverse={reverse} picking={pairPicking} onPicking={setPairPicking} picked={pairPicked}
+            onClose={() => { setPairPanel(null); setPairPicking(false); }} />
         )}
         {seqPanel && (
           <div className="absolute z-30 w-[560px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs" data-seq-panel
@@ -4076,8 +7497,13 @@ export default function SashimiViewer({
           </div>
         )}
         {popover && popoverContent && (
-          <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs"
-            style={{ left: Math.min(popover.x + 12, Math.max(8, svgWidth - 552)), top: Math.max(RULER_H, popover.y + 12) }}
+          <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs overflow-y-auto"
+            // opened in the lower half of the plot (an arc under the baseline, a low track): above the click, so the plot's
+            // scroll box does not cut it
+            style={{ left: Math.min(popover.x + 12, Math.max(8, svgWidth - 552)),
+              ...(popover.y > totalHeight / 2
+                ? { bottom: totalHeight - popover.y + 20, maxHeight: Math.max(160, popover.y - 8) }
+                : { top: Math.max(RULER_H, popover.y + 12), maxHeight: Math.max(160, totalHeight - popover.y - 12) }) }}
             onMouseDown={e => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-2 px-3 pt-2">
               <div>
@@ -4086,11 +7512,11 @@ export default function SashimiViewer({
               </div>
               <div className="flex items-center gap-2">
                 {popoverContent.cartoon && (
-                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); setCartoon({ j: c.j, model: c.model, label: c.label, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], sample: tracks[Math.max(0, idx)]?.sampleName ?? '' }); }}
-                    className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title="Animated cartoon: splicing, translation, NMD or protein consequence (experimental)">🎬 Cartoon</button>
+                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, si) % TRACK_COLORS.length], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
+                    className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
                 )}
-                {popover.kind !== 'exon' && (() => {
-                  const k = hideKey(popover.j), sc = labelScales[k] ?? 1;
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (() => {
+                  const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;
                   return (
                     <span className="flex items-center gap-1" title="Size of this junction's label, on every track (saved with the session)">
                       <button onClick={() => setLabelScale(k, sc / LABEL_SCALE_STEP)} disabled={sc <= LABEL_SCALE_MIN + 0.01} className={`${t.btn} px-1.5 py-0.5 text-[11px] disabled:opacity-40`} title="Smaller label">A−</button>
@@ -4100,8 +7526,12 @@ export default function SashimiViewer({
                     </span>
                   );
                 })()}
-                {popover.kind !== 'exon' && (
-                  <button onClick={() => { hideArc(popover.j); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
+                {popover.kind !== 'exon' && popover.kind !== 'trans' && (
+                  <button onClick={() => { showSupporting(popover); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px] font-medium`}
+                    title={popover.kind === 'retention' ? `Reads track: only the reads unspliced through either boundary of this intron (at least ${SPAN_EXON_ANCHOR} exon and ${SPAN_INTRON_ANCHOR} intron bases), with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.` : `Reads track: only the reads supporting this arc${popover.kind === 'structural' && popover.sv === 'discordant' ? ' (the discordant pairs of its class, both mates)' : popover.kind === 'anti' ? ' (on a sample whose strands are shown, its reads of the opposite strand only)' : ''}, with their mates, on every sample shown; ${READS_SUPPORT_MAX} at most (every k-th kept past that). The header's ✕ brings every read back.`}>Supporting reads</button>
+                )}
+                {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (
+                  <button onClick={() => { hideArc(popover.j, popover.kind === 'anti'); setPopover(null); }} className={`${t.btn} px-2 py-0.5 text-[11px]`}
                     title="Hide this arc on every track (it still counts in the percentages; the toolbar's hidden-arcs chip brings it back)">Hide arc</button>
                 )}
                 <button onClick={() => setPopover(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close (Esc)">×</button>
@@ -4207,7 +7637,7 @@ export default function SashimiViewer({
         </div>
       )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
-        Drag to pan · Ctrl+drag to zoom into a region · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
+        Drag to pan · Ctrl+drag to zoom into a region · Shift+drag to inspect a repeat · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>
     </div>
   );
