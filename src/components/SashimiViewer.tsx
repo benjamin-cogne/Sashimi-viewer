@@ -489,13 +489,15 @@ const SEQ_NOTE_H = 14;
 const TRACK_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
 const UNIQUE_COLOR = '#e34948';
 const INK = {
-  bg: '#ffffff', text: '#1f2937', muted: '#6b7280', faint: '#9ca3af',
-  grid: '#e5e7eb', gridStrong: '#d1d5db', exon: '#334155', utr: '#94a3b8', intron: '#94a3b8',
-  geneBand: 'rgba(99, 102, 241, 0.035)', select: '#6366f1',
+  bg: '#ffffff', text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8',
+  grid: '#e3e8ee', gridStrong: '#d1d5db', exon: '#1e2a3a', utr: '#94a3b8', intron: '#94a3b8',
+  geneBand: 'rgba(15, 118, 110, 0.035)', select: '#14857a',
 };
+/** Opacity of a track's coverage fill (over the lighter shade of the column's highest depth). */
+const COVERAGE_ALPHA = 0.37;
 const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 // Nucleotide colours follow the IGV convention (A green, C blue, G orange, T red)
-const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#6b7280' };
+const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#5b6b7e' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const READ_FILL = '#c8cdd6';
 /** reads coloured by strand: IGV's colours (igv.js alignmentTrack posStrandColor / negStrandColor) */
@@ -544,8 +546,8 @@ function MiniHist({ title, bins, alt, other, color }: { title: string; bins: str
           return (
             <g key={b}>
               <rect x={x + 2} y={H - fa * H} width={one} height={Math.max(fa ? 1 : 0, fa * H)} fill={color}><title>{`${b}: ${Math.round(fa * 100)} % of the alternate reads (${alt[i]})`}</title></rect>
-              {other && <rect x={x + 3 + one} y={H - fr * H} width={one} height={Math.max(fr ? 1 : 0, fr * H)} fill="#9ca3af"><title>{`${b}: ${Math.round(fr * 100)} % of the reference reads (${other[i]})`}</title></rect>}
-              <text x={x + bw / 2} y={H + 10} textAnchor="middle" fontSize={8} fill="#6b7280">{b}</text>
+              {other && <rect x={x + 3 + one} y={H - fr * H} width={one} height={Math.max(fr ? 1 : 0, fr * H)} fill="#8796a8"><title>{`${b}: ${Math.round(fr * 100)} % of the reference reads (${other[i]})`}</title></rect>}
+              <text x={x + bw / 2} y={H + 10} textAnchor="middle" fontSize={8} fill="#5b6b7e">{b}</text>
             </g>
           );
         })}
@@ -967,7 +969,7 @@ const PS_TONES: PsTone[] = [
   { hp: ['#9a85c9', '#d6cdee'], ink: '#5b21b6' },
   { hp: ['#6fae95', '#c3e3d6'], ink: '#065f46' },
 ];
-const PS_NONE_TONE: PsTone = { hp: ['#9ca3af', '#d1d5db'], ink: '#374151' };
+const PS_NONE_TONE: PsTone = { hp: ['#8796a8', '#d1d5db'], ink: '#374151' };
 /** a read of a discordant pair (mate on another chromosome, not a proper pair, or an insert far above the median) */
 const READ_DISCORDANT_FILL = '#fcd34d';
 /**
@@ -1031,9 +1033,9 @@ function exonContent(tx: TxModel | null, a: number, b: number, what: 'duplicated
   return `\n${what} stretch of ${tx.transcriptId}: ${run ? `whole ${run}${frame}` : 'no whole exon'}` +
     (cut.length ? `; its ends cut exon${cut.length > 1 ? 's' : ''} ${cut.map(e => e.rank).join(', ')}` : '') + caveat;
 }
-const PAIR_LINK_COLOR = '#9ca3af';
+const PAIR_LINK_COLOR = '#8796a8';
 const CLIP_FILL = '#0f766e';          // soft-clipped bases when too small for letters
-const HARD_CLIP_FILL = '#9ca3af';     // hard-clipped stub (bases in the primary record)
+const HARD_CLIP_FILL = '#8796a8';     // hard-clipped stub (bases in the primary record)
 const SPLIT_LINK_COLOR = '#7c3aed';   // line joining the parts of a split read
 /** Same chromosome whatever the "chr" prefix. */
 const sameChromName = (a: string, b: string) => a === b || a.replace(/^chr/i, '') === b.replace(/^chr/i, '');
@@ -1050,7 +1052,7 @@ const ANTISENSE_COLOR = '#7c3aed';
 // Reading-frame glyphs next to the read counts of non-canonical junctions
 const FRAME_IN_COLOR = '#16a34a';
 const FRAME_OUT_COLOR = '#dc2626';
-const FRAME_UTR_COLOR = '#9ca3af';
+const FRAME_UTR_COLOR = '#8796a8';
 const FRAME_GLYPH_R = 6.5;
 // Amino acids: alternating codon fills, start and stop highlighted
 const AA_FILLS = ['#cbd5e1', '#94a3b8'];
@@ -3049,7 +3051,7 @@ export default function SashimiViewer({
       <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
         <tspan fill={INK.text} fontWeight={700}>{collapseReads ? (haplotypes === 'any' ? 'Consensus reads' : 'Haplotypes') : filtered ? 'Supporting reads' : 'Reads'}</tspan>
         {filtered && (
-          <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setReadsSupport(null); }}>
+          <tspan fill="#0c625b" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setReadsSupport(null); }}>
             {'  '}✕ all reads<title>Back to every read of the window</title>
           </tspan>
         )}
@@ -3157,7 +3159,7 @@ export default function SashimiViewer({
               const x1 = scale.x(j.start), x2 = scale.x(j.end), l = Math.min(x1, x2), r = Math.max(x1, x2);
               const al = st.allelic?.find(a => a.start === j.start && a.end === j.end);
               const nested = js.some(o => o !== j && o.start >= j.start && o.end <= j.end);
-              const stroke = al ? color : '#6b7280', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
+              const stroke = al ? color : '#5b6b7e', sw = al ? 2 : 1.2, op = Math.max(0.35, j.psi);
               const pctTxt = (x: number) => `${Math.round(x * 100)} %`;
               const tip = `${junctionContext({ start: j.start, end: j.end, count: j.n }).info.label} (${posTxt(j.start)}-${j.end.toLocaleString('en-US')}): ${j.n.toLocaleString('en-US')} fragment${j.n === 1 ? '' : 's'} of H${h.hap} carry it, ${j.other.toLocaleString('en-US')} go another way at its donor or acceptor (${pctTxt(j.psi)})` +
                 (al ? `\nused differently by the haplotypes: H1 ${pctTxt(al.psi[0])} (${al.n[0]} of ${al.n[0] + al.other[0]}), H2 ${pctTxt(al.psi[1])} (${al.n[1]} of ${al.n[1] + al.other[1]}), Fisher p = ${al.p < 1e-4 ? al.p.toExponential(0) : al.p.toFixed(4)}: a splice change in cis with this haplotype's alleles` : '');
@@ -3268,7 +3270,7 @@ export default function SashimiViewer({
           const bx = Math.min(plotRight - 2 - bw, Math.max(PLOT_LEFT + 2, xRight));
           return (
             <g key="badge">
-              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={strong ? '#5b6b7e' : INK.faint} strokeWidth={0.8} />
               <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{text}</text>
             </g>
           );
@@ -3354,7 +3356,7 @@ export default function SashimiViewer({
               strokeDasharray={isCons ? undefined : '3 2'} stroke={isCons ? undefined : INK.faint} strokeWidth={isCons ? 0 : 0.8} />);
           }
           for (const [js, je] of g.chain) {
-            parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#6b7280" strokeWidth={1.4} />);
+            parts.push(<line key={`j${js}`} x1={scale.x(js)} y1={mid} x2={scale.x(je)} y2={mid} stroke="#5b6b7e" strokeWidth={1.4} />);
           }
           if (!g.chain.length) {
             for (let k = 0; k + 1 < g.blocks.length; k++) {
@@ -3387,7 +3389,7 @@ export default function SashimiViewer({
           const bx = rightEnd + bw > plotRight - 2 ? plotRight - 2 - bw : rightEnd;
           parts.push(
             <g key="badge">
-              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#6b7280' : INK.faint} strokeWidth={0.8} />
+              <rect x={bx} y={mid - 7} width={bw} height={14} rx={7} fill={INK.bg} stroke={isCons ? '#5b6b7e' : INK.faint} strokeWidth={0.8} />
               <text x={bx + bw / 2} y={mid + 3.5} textAnchor="middle" fill={INK.text} fontSize={9} fontWeight={700}>{badge}</text>
             </g>,
           );
@@ -3718,7 +3720,7 @@ export default function SashimiViewer({
           if (hard && partsOf[idx].length) {
             const hs = side === 0 ? r.s - len - hard : r.e + len;
             const xa = scale.x(hs), xb = scale.x(hs + hard);
-            parts.push(<rect key={`h${side}`} x={Math.min(xa, xb)} y={top + 1.5} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 3)} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#6b7280" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />);
+            parts.push(<rect key={`h${side}`} x={Math.min(xa, xb)} y={top + 1.5} width={Math.max(1, Math.abs(xb - xa))} height={Math.max(1, rowH - 3)} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#5b6b7e" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />);
             clipTxt.push(`${side === 0 ? 'left' : 'right'} hard clip ${hard} bp (bases in the primary record)`);
           } else if (hard) clipTxt.push(`${side === 0 ? 'left' : 'right'} hard clip ${hard} bp (bases in the primary record, outside the window)`);
         });
@@ -3745,7 +3747,7 @@ export default function SashimiViewer({
           // a large deletion often places its breakpoint a few bases apart (long reads, repeats), so no site gathers them
           const quiet = isDel && ge - gs < SV_MIN_DELETION && (ge - gs < indelMin || (consensus && !delSites.has(gs)));
           if (quiet) parts.push(<rect key={`g${k}`} x={Math.min(g1, g2)} y={top} width={Math.max(1, Math.abs(g2 - g1))} height={rowH} {...body} />);
-          else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#9ca3af'} strokeWidth={isDel ? 2 : 1} />);
+          else if (Math.abs(g2 - g1) > 0.5) parts.push(<line key={`g${k}`} x1={g1} y1={mid} x2={g2} y2={mid} stroke={isDel ? '#111827' : '#8796a8'} strokeWidth={isDel ? 2 : 1} />);
         }
       });
       // mismatches go to the track's shared paths (one per colour and quality class), not one rectangle each: a
@@ -3851,7 +3853,7 @@ export default function SashimiViewer({
       <g key="methyl" pointerEvents="none" transform={`matrix(${pxPerBp},0,0,1,${scale.x(tickOrigin)},0)`} strokeWidth={tickFine ? Math.max(1.5, Math.abs(2 * pxPerBp) - 0.4) : 1.2}>{meLayer}</g>,
     ] : [
       <g key="methyl" pointerEvents="none">
-        {meLow.length > 0 && <path d={meLow.join('')} fill="#9ca3af" opacity={0.35} />}
+        {meLow.length > 0 && <path d={meLow.join('')} fill="#8796a8" opacity={0.35} />}
         {meUnmod.length > 0 && <path d={meUnmod.join('')} fill={METHYL_COLORS[0]} />}
         {meMod.length > 0 && <path d={meMod.join('')} fill={METHYL_COLORS[METHYL_COLORS.length - 1]} />}
       </g>,
@@ -4679,7 +4681,7 @@ export default function SashimiViewer({
       items.push({
         w: 176, el: (
           <g key="lvar1">
-            <rect x={0} y={y - 7} width={5} height={14} fill="#9ca3af" opacity={0.3} /><rect x={0} y={y - 1} width={5} height={8} fill={BASE_COLORS.T} />
+            <rect x={0} y={y - 7} width={5} height={14} fill="#8796a8" opacity={0.3} /><rect x={0} y={y - 1} width={5} height={8} fill={BASE_COLORS.T} />
             <text x={9} y={y + 3.5} fill={INK.muted} fontSize={9.5}>variant: bar = allele fraction</text>
           </g>
         ),
@@ -4800,7 +4802,7 @@ export default function SashimiViewer({
           <g key="lclip">
             {(['A', 'C', 'G', 'T'] as const).map((b, i) => <rect key={b} x={i * 7} y={y - 5} width={6} height={10} fill={BASE_COLORS[b]} opacity={i < 2 ? 0.95 : 0.28} rx={0.5} />)}
             <text x={32} y={y + 3.5} fill={INK.muted} fontSize={9.5}>clipped bases (dim: same as the reference)</text>
-            <rect x={228} y={y - 4} width={14} height={8} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#6b7280" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />
+            <rect x={228} y={y - 4} width={14} height={8} fill={HARD_CLIP_FILL} opacity={0.25} stroke="#5b6b7e" strokeWidth={0.8} strokeDasharray="2 2" rx={1} />
             <text x={246} y={y + 3.5} fill={INK.muted} fontSize={9.5}>hard clip</text>
             <line x1={296} y1={y} x2={312} y2={y} stroke={SPLIT_LINK_COLOR} strokeWidth={1.2} strokeDasharray="4 2" />
             <text x={315} y={y + 3.5} fill={INK.muted} fontSize={9.5}>split</text>
@@ -5232,7 +5234,7 @@ export default function SashimiViewer({
         <g clipPath={`url(#${clipId})`}>
           <line x1={PLOT_LEFT} y1={barBottom - VAR_BAR_H / 2} x2={plotRight} y2={barBottom - VAR_BAR_H / 2} stroke={INK.grid} strokeWidth={0.6} strokeDasharray="3 3" />
           <line x1={PLOT_LEFT} y1={barBottom} x2={plotRight} y2={barBottom} stroke={INK.gridStrong} strokeWidth={0.8} />
-          {refs.length > 0 && <path d={refs.join('')} fill="#9ca3af" opacity={0.3} />}
+          {refs.length > 0 && <path d={refs.join('')} fill="#8796a8" opacity={0.3} />}
           {[...bars].map(([c, d]) => <path key={c} d={d.join('')} fill={c} />)}
           {[...cells].map(([lv, d]) => <path key={lv} d={d.join('')} fill={Q_COLORS[lv]} />)}
           {labels}
@@ -5492,9 +5494,9 @@ export default function SashimiViewer({
             });
           })()}
           {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
-              usual one (0.10 + 0.18 over it ≈ 0.26); a column holding a dropout keeps only the light shade above it */}
+              usual one (0.09, then COVERAGE_ALPHA over it); a column holding a dropout keeps only the light shade above it */}
           {covOn && paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
-          {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, 0.26)} stroke="none" />}
+          {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, COVERAGE_ALPHA)} stroke="none" />}
           {covOn && paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
           {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
           {/* the opposite strand, mirrored under the baseline */}
@@ -5502,7 +5504,7 @@ export default function SashimiViewer({
             <g data-antisense="">
               <rect x={PLOT_LEFT} y={baseline} width={plotWidth} height={L.mirror} fill={withAlpha(ANTI_COLOR, 0.035)} />
               {L.antiPaths.fill && <path d={L.antiPaths.fill} fill={withAlpha(ANTI_COLOR, 0.09)} stroke="none" />}
-              {L.antiPaths.mean && <path d={L.antiPaths.mean} fill={withAlpha(ANTI_COLOR, 0.26)} stroke="none" />}
+              {L.antiPaths.mean && <path d={L.antiPaths.mean} fill={withAlpha(ANTI_COLOR, COVERAGE_ALPHA)} stroke="none" />}
               {L.antiPaths.stroke && <path d={L.antiPaths.stroke} fill="none" stroke={ANTI_COLOR} strokeWidth={1.1} strokeLinejoin="round" />}
               <text x={plotRight - 6} y={baseline + 10} textAnchor="end" fill={ANTI_COLOR} fontSize={9} fontWeight={600} opacity={0.85} pointerEvents="none">
                 ▼ opposite strand{track.anti && !track.anti.coverage.some(r => r.depth > 0 && r.end > viewStart && r.start < viewEnd) ? ' · no reads' : ''}
@@ -5559,7 +5561,7 @@ export default function SashimiViewer({
                   onClick={ev => { ev.stopPropagation(); if (!panMoved.current) clickSite(track.sampleId, track.sampleName, st, ev); }}>
                   <title>{`${siteLabel(st)}\nclick for its summary`}</title>
                   {lead && <rect x={left - 1} y={top - 1} width={w + 2} height={full + 2} fill={INK.bg} opacity={0.9} />}
-                  {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#9ca3af" />}
+                  {lead && <rect x={left} y={top} width={w} height={Math.max(0, full * (1 - Math.min(1, total)))} fill="#8796a8" />}
                   <rect x={left} y={baseline - under - altH} width={w} height={altH} fill={colr} />
                   {text && <text x={cx} y={top - 5} textAnchor="middle" fontSize={size} fontWeight={700} fill={colr} stroke={INK.bg} strokeWidth={3} paintOrder="stroke">{text}</text>}
                 </g>
@@ -6101,10 +6103,10 @@ export default function SashimiViewer({
         <g key={m.id} style={{ cursor: shown ? 'default' : 'pointer' }} onMouseDown={e => e.stopPropagation()}
           onClick={e => { e.stopPropagation(); if (!shown) chooseModel(m.id); }}>
           <title>{title}</title>
-          <rect x={PLOT_LEFT} y={top} width={plotWidth} height={ALT_TX_ROW_H} fill={shown ? '#4f46e5' : 'transparent'} opacity={shown ? 0.08 : 0} />
+          <rect x={PLOT_LEFT} y={top} width={plotWidth} height={ALT_TX_ROW_H} fill={shown ? '#0f766e' : 'transparent'} opacity={shown ? 0.08 : 0} />
           {parts}
-          <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} stroke={shown ? '#4f46e5' : 'none'} strokeWidth={0.8} />
-          <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={shown ? '#4338ca' : m.is_mane ? INK.text : INK.muted} fontSize={9} fontWeight={m.is_mane || shown ? 700 : 500}>{label}</text>
+          <rect x={PLOT_LEFT + 3} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.9} stroke={shown ? '#0f766e' : 'none'} strokeWidth={0.8} />
+          <text x={PLOT_LEFT + 7} y={mid + 3.5} fill={shown ? '#0c625b' : m.is_mane ? INK.text : INK.muted} fontSize={9} fontWeight={m.is_mane || shown ? 700 : 500}>{label}</text>
           {!shown && (
             <g style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); hideTranscript(m.id); }}>
               <title>{`Remove ${m.id} from the list (undo and "show all" in the panel header; saved with the session)`}</title>
@@ -6127,11 +6129,11 @@ export default function SashimiViewer({
           {nHidden > 0 && (
             <>
               <tspan fill={INK.muted}>{`  ·  ${nHidden} hidden  `}</tspan>
-              <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); undoHideTranscript(); }}>
+              <tspan fill="#0c625b" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); undoHideTranscript(); }}>
                 undo<title>{`Bring back ${hiddenHereTx[nHidden - 1]}`}</title>
               </tspan>
               <tspan fill={INK.muted}>{'  ·  '}</tspan>
-              <tspan fill="#4338ca" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setHiddenTranscripts(prev => prev.filter(id => !hiddenHereTx.includes(id))); }}>
+              <tspan fill="#0c625b" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setHiddenTranscripts(prev => prev.filter(id => !hiddenHereTx.includes(id))); }}>
                 show all<title>Bring back every removed model of this gene</title>
               </tspan>
             </>
@@ -6639,7 +6641,7 @@ export default function SashimiViewer({
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
     inp: 'bg-white text-gray-800 border-gray-300',
-    btn: 'px-2 py-0.5 text-xs rounded border border-gray-200 hover:bg-indigo-50 hover:border-indigo-300 transition-colors',
+    btn: 'px-2 py-0.5 text-xs rounded border border-gray-200 hover:bg-accent-50 hover:border-accent-300 transition-colors',
   };
   /** The pickers of the title row (samples, GTEx tissues): one list under a search box. */
   const pickerList = 'max-h-56 overflow-y-auto';
@@ -6647,7 +6649,7 @@ export default function SashimiViewer({
   const content = (
     <div className={embedded ? `${t.bg} ${t.text} w-full` : `${t.bg} ${t.text} rounded-xl shadow-2xl w-full max-w-[95vw] border ${t.border}`}>
       {/* Header: the title row (gene, locus, zoom, search; samples on the right), the sectioned toolbar, and the reads strip when the reads track is on */}
-      <div className="border-b border-slate-200">
+      <div className="border-b border-slate-200 bg-slate-50">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3.5 pb-2.5">
           <div className="flex items-baseline gap-2.5 min-w-0">
             <h2 className="text-xl font-bold tracking-tight leading-tight text-slate-900">{currentGeneName}</h2>
@@ -6665,13 +6667,13 @@ export default function SashimiViewer({
               </button>
             );
           })()}
-          <span className="inline-flex border border-slate-200 rounded-[9px] overflow-hidden bg-white" role="group" aria-label="Zoom">
+          <span className="inline-flex border border-slate-200 rounded-[6px] overflow-hidden bg-white" role="group" aria-label="Zoom">
             <button onClick={() => zoomBy(1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50" title="Zoom out (Ctrl + scroll down)" aria-label="Zoom out"><Icon name="minus" /></button>
             <button onClick={() => zoomBy(1 / 1.4)} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Zoom in (Ctrl + scroll up)" aria-label="Zoom in"><Icon name="plus" /></button>
             <button onClick={resetZoom} className="w-8 h-[30px] grid place-items-center text-slate-600 hover:bg-slate-50 border-l border-slate-200" title="Reset to the whole gene (or double-click the plot)" aria-label="Reset the zoom"><Icon name="reset" size={15} /></button>
           </span>
           <form onSubmit={e => { e.preventDefault(); navigateToGene(); }} className="flex items-center gap-1.5">
-            <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[9px] border bg-white text-slate-400 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
+            <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[6px] border bg-white text-slate-400 focus-within:border-accent-300 focus-within:ring-2 focus-within:ring-accent-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
               <Icon name="search" size={14} />
               <GeneSuggest value={geneSearch} onChange={v => { setGeneSearch(v); setSearchError(null); }} width={320}
                 local={[...(neighbours?.models.map(m => m.geneName) ?? []), currentGeneName]}
@@ -6680,7 +6682,7 @@ export default function SashimiViewer({
                   + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.\n`
                   + 'Gene names are suggested from the third letter (HGNC), the genes of the view first.'}
                 className="w-44 bg-transparent outline-none text-[12.5px] text-slate-800 placeholder:text-slate-400" />
-              <button type="submit" disabled={geneSearchLoading} className="h-6 px-2 rounded-md text-[11.5px] font-medium text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">{geneSearchLoading ? '…' : 'Go'}</button>
+              <button type="submit" disabled={geneSearchLoading} className="h-6 px-2 rounded-md text-[11.5px] font-medium text-accent-600 hover:bg-accent-50 disabled:opacity-50">{geneSearchLoading ? '…' : 'Go'}</button>
             </span>
             {searchError && <span className="text-[11px] text-red-600 max-w-[260px] truncate" title={searchError}>{searchError}</span>}
           </form>
@@ -6731,10 +6733,10 @@ export default function SashimiViewer({
                     return (
                       <button key={s.id} onClick={() => toggleSample(s)}
                         title={shown ? `Shown as track ${idx + 1}${idx === 0 ? ' (primary)' : ''} · click to remove it from the plot` : 'Click to show this sample as a track'}
-                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-indigo-50 text-indigo-900 font-semibold hover:bg-indigo-100' : 'text-slate-800 hover:bg-slate-50'}`}>
+                        className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-accent-50 text-accent-900 font-semibold hover:bg-accent-100' : 'text-slate-800 hover:bg-slate-50'}`}>
                         <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
                         <span className="flex-1 truncate">{s.name}</span>
-                        {shown && <span className="text-indigo-600 text-[10px] font-medium">✓ shown</span>}
+                        {shown && <span className="text-accent-600 text-[10px] font-medium">✓ shown</span>}
                       </button>
                     );
                   })}
@@ -6753,7 +6755,7 @@ export default function SashimiViewer({
                 const loaded = new Set(gtexTracks.map(g => g.gtex?.tissue.id));
                 const row = (x: GtexTissue) => (
                   <button key={x.id} onClick={() => addGtexTissue(x)} disabled={loaded.has(x.id)}
-                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-indigo-50 flex items-center gap-2 text-slate-800 disabled:opacity-40">
+                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-accent-50 flex items-center gap-2 text-slate-800 disabled:opacity-40">
                     <span className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: x.color }} />
                     <span className="flex-1 truncate">{x.name}</span>
                     <span className="text-slate-500 text-[10px]">n={x.samples}</span>
@@ -6779,13 +6781,13 @@ export default function SashimiViewer({
             </Popover>
             {onSnapshot && (
               <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
-                className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border text-[12.5px] font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
                 title="Add a screenshot of this plot to the basket, together with the region, the options in effect and the outlier effect it was opened from">
                 <Icon name="camera" size={15} />{snapshotState === 'busy' ? '…' : snapshotState === 'done' ? 'Added to basket' : snapshotState === 'error' ? 'Screenshot failed' : 'Basket'}
               </button>
             )}
             <Popover width={260} title="More: sample groups, SVG of this view" label="More"
-              buttonClass="w-[30px] h-[30px] grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+              buttonClass="w-[30px] h-[30px] grid place-items-center rounded-[6px] border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
               button={<Icon name="more" size={18} />}>
               {close => (
                 <>
@@ -6794,14 +6796,14 @@ export default function SashimiViewer({
                 </>
               )}
             </Popover>
-            {!embedded && <button onClick={onClose} className="w-[30px] h-[30px] grid place-items-center rounded-[9px] text-slate-400 hover:text-red-500 hover:bg-red-50" title="Close" aria-label="Close"><Icon name="x" /></button>}
+            {!embedded && <button onClick={onClose} className="w-[30px] h-[30px] grid place-items-center rounded-[6px] text-slate-400 hover:text-red-500 hover:bg-red-50" title="Close" aria-label="Close"><Icon name="x" /></button>}
           </div>
         </div>
 
         {/* The toolbar: ARCS (or STRUCTURE on DNA), SHOW, LAYERS (DNA), DEPTH, and the read filters */}
         <div className="px-5 pb-3"><Bar>
           {anyRna && (
-            <Section label="Arcs" tone="indigo" title="Junction arcs: what their pills say, and which are drawn">
+            <Section label="Arcs" boxed title="Junction arcs: what their pills say, and which are drawn">
               <Segmented value={showUsage ? 'usage' : 'reads'} onChange={setArcLabel} disabled={viewMode === 'groups'} label="Arc labels"
                 title={viewMode === 'groups' ? 'The Groups view always shows % usage.' : 'What the arc pills show.'}
                 options={[
@@ -6821,7 +6823,7 @@ export default function SashimiViewer({
               )}
               {hiddenHere > 0 && (
                 <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
-                  className="inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border border-amber-200 bg-amber-50 text-amber-800 text-[12.5px] font-medium hover:bg-amber-100"
+                  className="inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border border-amber-200 bg-amber-50 text-amber-800 text-[12.5px] font-medium hover:bg-amber-100"
                   title="Arcs hidden by a click on their × (they still count in the percentages). Click to show them again.">
                   <Icon name="eyeOff" size={14} />{hiddenHere} hidden · show
                 </button>
@@ -6834,17 +6836,17 @@ export default function SashimiViewer({
             const autoNote = `Default ${MIN_READS_DEFAULT} reads, ${SV_DEEP_MIN_READS} on a track whose median depth over the covered coding exons is above ${SV_DEEP_X}× (measured once per gene)` +
               (deep.length ? `: ${deep.map(tr => `${tr.sampleName} ${Math.round(svDepth.get(tr.sampleId)!)}×`).join(', ')}.` : '; no track is that deep here.');
             return (
-              <Section label="Structure" tone="indigo" title="Structural hints over the DNA coverage">
+              <Section label="Structure" boxed title="Structural hints over the DNA coverage">
                 <Stepper label="min" unit="reads" value={first ? svMinReads(first.sampleId) : minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min supporting reads"
                   title={`Every shown sample is genomic DNA: no splice junctions, so the usage and retention controls are put away. This threshold is the number of reads a structural hint (deletion inside reads, split reads, soft-clip cluster, discordant pairs) needs to be drawn. ${autoNote} A number typed here applies to every track.`}
                   after={!minReadsSet
                     ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
-                    : <button type="button" className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title={`Back to the default: ${autoNote}`}
+                    : <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to the default: ${autoNote}`}
                         onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
               </Section>
             );
           })()}
-          <Section label="Show" tone="emerald">
+          <Section label="Show" boxed>
             {!anyDna && (
               <Pill on={showReads} onChange={setShowReads} label="Reads" icon="reads"
                 title={`Show the alignments of the primary sample (or of every sample) in a track below its coverage, IGV-style: base mismatches against the reference genome, insertions, deletions and splice gaps. Loads when the window is below ${formatBp(readsWindow)} (the reads window, set in the reads strip).`} />
@@ -6888,7 +6890,7 @@ export default function SashimiViewer({
             {equalIntrons && tx && intronsOf(tx).length > 0 && (
               <Stepper label="intron" unit="bp" value={intronWidth ?? defaultIntronV(tx)} onChange={v => setIntronWidth(Math.round(v))} min={10} max={20000} step={10} width={46} ariaLabel="Intron width"
                 title={`Width given to every intron, in bp-equivalents (one exon base = one unit). Default ${defaultIntronV(tx)}: the median exon length of the model, kept between 80 and 300.`}
-                after={intronWidth != null && <button type="button" onClick={() => setIntronWidth(null)} className="pr-1.5 text-[10.5px] text-indigo-600 hover:underline" title="Back to the default width">auto</button>} />
+                after={intronWidth != null && <button type="button" onClick={() => setIntronWidth(null)} className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title="Back to the default width">auto</button>} />
             )}
             {primaryKnown.length > 0 && (
               <>
@@ -6906,9 +6908,9 @@ export default function SashimiViewer({
             )}
           </Section>
           {anyDna && (
-              <Section label="Layers" tone="orange" title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
+              <Section label="Layers" boxed title="Layers drawn under each DNA track, in this order: C coverage, V variants, M methylation, R reads. Each applies to every DNA sample; off, nothing is read for it and what it held is released (the coverage is kept, only hidden).">
                 {/* the layers under each DNA track, in the order they are drawn: C coverage, V variants, M methylation, R reads */}
-                <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px]">
+                <span role="group" aria-label="Layers" className="inline-flex items-center gap-0.5 rounded-[7px] bg-slate-50 border border-slate-200 p-[3px]">
                   {([
                     { key: 'C', name: 'Coverage', on: showCoverage, set: setShowCoverage, color: LAYER_COLORS.C, title: 'DNA tracks: the coverage histogram (and the structural arcs over it). On by default; off, a DNA track keeps its label band and the layers under it. RNA tracks always show their coverage (the sashimi plot is drawn on it).' },
                     { key: 'V', name: 'Variants', on: coverageVariants, set: setCoverageVariants, color: LAYER_COLORS.V, title: `DNA tracks: a variants track under each coverage, from a scan of every read of the window (in the background, for views up to ${formatBp(VARIANTS_MAX_VIEW_BP)}; it follows the window). Each site is a bar as high as its alternate-allele fraction, with four quality cells under it: base quality (SNV) or homopolymer (indel), mapping quality, strand and read-position bias, green / amber / red. Hover a site for its values, click it for the distributions from the reads.` },
@@ -6917,7 +6919,7 @@ export default function SashimiViewer({
                   ] as { key: string; name: string; on: boolean; set: (v: boolean) => void; color: string; title: string }[]).map(l => (
                     <button key={l.key} type="button" data-layer={l.key} aria-pressed={l.on} aria-label={`${l.name} layer`} title={`${l.name} (${l.on ? 'on' : 'off'}): ${l.title}`}
                       onClick={() => l.set(!l.on)}
-                      className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-[7px] text-[12px] font-medium transition-all"
+                      className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-[4px] text-[12px] font-medium transition-all"
                       style={l.on ? { background: '#fff', color: '#0f172a', boxShadow: '0 1px 2px rgba(15,23,42,.12), 0 0 0 1px rgba(15,23,42,.04)' } : { color: '#64748b' }}>
                       <span className="w-[18px] h-[18px] rounded-[5px] grid place-items-center text-[10.5px] font-bold"
                         style={l.on ? { background: l.color, color: '#fff' } : { border: `1.5px solid ${l.color}`, color: l.color }}>{l.key}</span>
@@ -6935,7 +6937,7 @@ export default function SashimiViewer({
                 )}
               </Section>
           )}
-          <Section label="Depth" tone="sky" title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
+          <Section label="Depth" boxed title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth.">
             <Segmented value={depthAxis} onChange={setDepthAxis} size="sm" label="Depth axis"
               title="Depth axis. Shared: one axis for all samples (heights comparable). Own: each sample scales to its own maximum, rounded to a round number. % max: each sample drawn as a percentage of its own maximum in view, axis 0–100 %, so profiles are comparable whatever their depth."
               options={[
@@ -6945,7 +6947,7 @@ export default function SashimiViewer({
               ]} />
           </Section>
           <Section><Popover width={340} title="Which alignments are counted, in coverage, arcs and the reads track"
-            button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-indigo-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
+            button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
             <div className="px-2.5 py-2">
               <span className="block text-[12.5px] font-semibold text-slate-900">Minimum MAPQ</span>
               <span className="block text-[11.5px] text-slate-500 leading-snug mt-px mb-1.5">Alignments placed with a lower mapping quality are left out. ≥ 10 keeps the unique reads of STAR and HISAT2; bwa and minimap2 score 0–60.</span>
@@ -6971,8 +6973,8 @@ export default function SashimiViewer({
 
         {/* The reads strip: every option of the reads track, shown with it */}
         {showReads && (
-          <div className="mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-2 rounded-xl border border-indigo-100 bg-indigo-50/60 px-3 py-2" role="group" aria-label="Reads track options">
-            <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-indigo-700"><Icon name="reads" size={15} />Reads</span>
+          <div className="mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-2 rounded-xl border border-accent-100 bg-accent-50/60 px-3 py-2" role="group" aria-label="Reads track options">
+            <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-accent-700"><Icon name="reads" size={15} />Reads</span>
             {tracks.length > 1 && (() => {
               // whose reads: one button, the list of the shown samples in their track colours, and all of them
               const colorOf = (sid: number) => TRACK_COLORS[Math.max(0, tracks.findIndex(tr => tr.sampleId === sid)) % TRACK_COLORS.length];
@@ -7230,7 +7232,7 @@ export default function SashimiViewer({
             <div className="font-mono text-[11px] text-gray-900 leading-5">
               {currentChrom}:{(hoverInfo.pos + 1).toLocaleString('en-US')}
               {liftover && <span className="ml-2" style={{ color: LIFT_COLOR }}>{liftover.to} {liftedText(hoverInfo.pos, true) ?? (liftHere ? 'no counterpart' : '…')}</span>}
-              {hoverInfo.alt ? <span className="ml-2 font-semibold text-amber-700">{hoverInfo.alt.label}</span> : hoverInfo.cdna && <span className="ml-2 font-semibold text-indigo-700">{hoverInfo.cdna.label}</span>}
+              {hoverInfo.alt ? <span className="ml-2 font-semibold text-amber-700">{hoverInfo.alt.label}</span> : hoverInfo.cdna && <span className="ml-2 font-semibold text-accent-700">{hoverInfo.cdna.label}</span>}
             </div>
             {hoverInfo.known.map(k => (
               <div key={k.v.id + (k.sample || '')} className="text-[10px] leading-4 mb-1 whitespace-pre-line border-l-2 pl-1.5" style={{ borderColor: KNOWN_VARIANT_COLORS[k.v.kind] }}>
@@ -7474,7 +7476,7 @@ export default function SashimiViewer({
               </div>
               <button onClick={() => setSeqPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close (Esc)">×</button>
             </div>
-            {seqPanel.busy && <div className="px-3 py-1.5 text-indigo-700 flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />{seqPanel.busy}</div>}
+            {seqPanel.busy && <div className="px-3 py-1.5 text-accent-700 flex items-center gap-1.5"><span className="inline-block w-3 h-3 rounded-full border-2 border-accent-500 border-t-transparent animate-spin" />{seqPanel.busy}</div>}
             {seqPanel.error && <div className="px-3 py-1.5 text-red-700">{seqPanel.error}</div>}
             <div className="px-3 pb-2 pt-1 space-y-1.5">
               {seqPanel.items.map((it, i) => (
@@ -7513,7 +7515,7 @@ export default function SashimiViewer({
               <div className="flex items-center gap-2">
                 {popoverContent.cartoon && (
                   <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, si) % TRACK_COLORS.length], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
-                    className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[11px] font-semibold hover:bg-indigo-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
+                    className="px-2 py-0.5 rounded-full bg-accent-600 text-white text-[11px] font-semibold hover:bg-accent-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
                 )}
                 {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (() => {
                   const k = hideKey(popover.j, popover.kind === 'anti'), sc = labelScales[k] ?? 1;
@@ -7538,7 +7540,7 @@ export default function SashimiViewer({
               </div>
             </div>
             {popoverContent.hgvs.length > 0 && (
-              <div className="mx-3 mt-2 rounded bg-indigo-50 px-2 py-1.5 font-mono text-[11px] text-indigo-900">
+              <div className="mx-3 mt-2 rounded bg-accent-50 px-2 py-1.5 font-mono text-[11px] text-accent-900">
                 {popoverContent.hgvs.map((l, i) => <div key={i}>{l}</div>)}
               </div>
             )}
@@ -7561,15 +7563,15 @@ export default function SashimiViewer({
                   <div className="text-[10px] text-gray-500">usage of every sample of the run (grey = controls, coloured = loaded tracks, bar = median)</div>
                   <svg width="100%" viewBox={`0 0 ${W} ${H}`} className="block">
                     <line x1={x(0)} y1={16} x2={x(max)} y2={16} stroke="#d1d5db" strokeWidth={1} />
-                    {[0, 0.5, 1].map(t => <g key={t}><line x1={x(t)} y1={13} x2={x(t)} y2={19} stroke="#9ca3af" strokeWidth={1} /><text x={x(t)} y={28} textAnchor="middle" fontSize={8} fill="#6b7280">{t * 100}%</text></g>)}
+                    {[0, 0.5, 1].map(t => <g key={t}><line x1={x(t)} y1={13} x2={x(t)} y2={19} stroke="#8796a8" strokeWidth={1} /><text x={x(t)} y={28} textAnchor="middle" fontSize={8} fill="#5b6b7e">{t * 100}%</text></g>)}
                     {st.median != null && <line x1={x(st.median)} y1={6} x2={x(st.median)} y2={26} stroke="#374151" strokeWidth={1.5} />}
-                    {st.values.filter(v => !v.color).map((v, i) => <circle key={`c${i}`} cx={x(v.value)} cy={16} r={3} fill="#9ca3af" opacity={0.55}><title>{`${v.name}: ${(v.value * 100).toFixed(0)}%`}</title></circle>)}
+                    {st.values.filter(v => !v.color).map((v, i) => <circle key={`c${i}`} cx={x(v.value)} cy={16} r={3} fill="#8796a8" opacity={0.55}><title>{`${v.name}: ${(v.value * 100).toFixed(0)}%`}</title></circle>)}
                     {st.values.filter(v => v.color).map((v, i) => <circle key={`t${i}`} cx={x(v.value)} cy={16} r={4.5} fill={v.color!} stroke="#fff" strokeWidth={1}><title>{`${v.name}: ${(v.value * 100).toFixed(0)}%`}</title></circle>)}
                   </svg>
                 </div>
               );
             })()}
-            {popoverContent.status && <div className="px-3 pb-1 text-[10px] text-indigo-600">{popoverContent.status}</div>}
+            {popoverContent.status && <div className="px-3 pb-1 text-[10px] text-accent-600">{popoverContent.status}</div>}
             <div className="px-3 pb-2 text-[10px] text-gray-500">{popoverContent.note}</div>
           </div>
         )}
@@ -7630,7 +7632,7 @@ export default function SashimiViewer({
               <span className="ml-auto flex gap-2">
                 <button onClick={() => setShowGroupsDialog(false)} className={`${t.btn} px-3 py-1`}>Close</button>
                 <button onClick={() => { setShowGroupsDialog(false); setViewMode('groups'); }} disabled={!groups.some(g => g.sampleIds.length)}
-                  className="px-3 py-1 text-xs rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700 font-medium">Show groups</button>
+                  className="px-3 py-1 text-xs rounded bg-accent-600 text-white disabled:opacity-40 hover:bg-accent-700 font-medium">Show groups</button>
               </span>
             </div>
           </div>

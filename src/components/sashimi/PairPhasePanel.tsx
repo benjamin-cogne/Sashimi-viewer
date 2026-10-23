@@ -55,7 +55,7 @@ interface Run { sid: number; sites: SiteRow[]; pairs: Map<string, PairCell>; err
 
 const key = (i: number, j: number) => `${i}-${j}`;
 const fmt = (n: number) => n.toLocaleString('en-US');
-export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#9ca3af', hom: '#6b7280', shared: '#0f766e' };
+export const PAIR_COLORS: Record<PairCall, string> = { cis: '#1d4ed8', trans: '#c2410c', conflict: '#b91c1c', few: '#8796a8', hom: '#5b6b7e', shared: '#0f766e' };
 const CALL_WORD: Record<PairCall, string> = { cis: 'in cis', trans: 'in trans', conflict: 'conflicting', few: 'undetermined', hom: 'homozygous', shared: 'both copies' };
 /** a junction's verdict, with the variant it is phased with */
 const JCALL_WORD: Record<JunctionPairResult['call'], string> = { cis: "on the variant's copy", trans: 'on the other copy', shared: 'on both copies', few: 'undetermined', hom: 'homozygous variant' };
@@ -331,7 +331,7 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
   lo = Math.max(0, lo - pad); hi += pad + 1;
   // the view's orientation: a minus-strand gene of an RNA page runs 5′→3′ left to right, its coordinates decreasing
   const xOf = (p: number) => (reverse ? X1 - ((p - lo) / (hi - lo)) * (X1 - X0) : X0 + ((p - lo) / (hi - lo)) * (X1 - X0));
-  const lineColor = (h: 0 | 1) => (tagged ? hpColor(ps, h + 1) : '#9ca3af');
+  const lineColor = (h: 0 | 1) => (tagged ? hpColor(ps, h + 1) : '#8796a8');
   const lineLabel = (h: 0 | 1) => (tagged ? `H${h + 1}` : h === 0 ? `copy with ${sites[0].label}` : 'other copy');
   // markers at least GAP apart: sites a few kb apart on a 100 kb map are spread, each joined to its true position on
   // the axis (and the gene) by a leader line
@@ -362,16 +362,16 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
       <svg width={W} height={H} className="block" style={{ maxWidth: '100%' }}>
         {showGene && (
           <g>
-            <line x1={xOf(Math.max(lo, geneSpan![0]))} y1={GENE_Y} x2={xOf(Math.min(hi, geneSpan![1]))} y2={GENE_Y} stroke="#6b7280" strokeWidth={1} />
+            <line x1={xOf(Math.max(lo, geneSpan![0]))} y1={GENE_Y} x2={xOf(Math.min(hi, geneSpan![1]))} y2={GENE_Y} stroke="#5b6b7e" strokeWidth={1} />
             {exons.map(([s, e], k) => { const xa = xOf(Math.max(lo, s)), xb = xOf(Math.min(hi, e)); return <rect key={k} x={Math.min(xa, xb)} y={GENE_Y - 5} width={Math.max(1.5, Math.abs(xb - xa))} height={10} fill="#1f2937" />; })}
-            <text x={4} y={GENE_Y + 4} fontSize={10} fontWeight={700} fill="#374151">{gene!.name} <tspan fontWeight={400} fill="#9ca3af">{(gene!.strand < 0) !== reverse ? '←' : '→'}</tspan></text>
+            <text x={4} y={GENE_Y + 4} fontSize={10} fontWeight={700} fill="#374151">{gene!.name} <tspan fontWeight={400} fill="#8796a8">{(gene!.strand < 0) !== reverse ? '←' : '→'}</tspan></text>
           </g>
         )}
         {([0, 1] as const).map(h => (
           <g key={h}>
             <line x1={X0} y1={h ? L2 : L1} x2={X1} y2={h ? L2 : L1} stroke={lineColor(h)} strokeWidth={4} strokeLinecap="round" />
             <text x={4} y={(h ? L2 : L1) + 4} fontSize={10} fontWeight={700} fill={tagged ? lineColor(h) : '#4b5563'}>{lineLabel(h)}</text>
-            {tagged && h === 0 && <text x={4} y={L1 + 16} fontSize={8.5} fill="#9ca3af">PS {ps ?? 'none'}</text>}
+            {tagged && h === 0 && <text x={4} y={L1 + 16} fontSize={8.5} fill="#8796a8">PS {ps ?? 'none'}</text>}
           </g>
         ))}
         {[...relay].map(([p, c]) => <rect key={`r${p}`} x={xOf(p) - 0.75} y={(c ? L2 : L1) - 5} width={1.5} height={10} fill="#374151" opacity={0.6}><title>{`heterozygous site ${chrom}:${fmt(p + 1)}, a relay of the reads' phasing`}</title></rect>)}
@@ -419,8 +419,8 @@ function PhaseMap({ sites, pairs, siteColor, siteShort, hpColor, gene, reverse }
         <line x1={X0} y1={AXIS} x2={X1} y2={AXIS} stroke="#d1d5db" />
         {ticks.map((t, k) => (
           <g key={k}>
-            <line x1={xOf(t)} y1={AXIS} x2={xOf(t)} y2={AXIS + 4} stroke="#9ca3af" />
-            <text x={xOf(t)} y={AXIS + 14} fontSize={9} fill="#6b7280" textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}>{k === 0 ? `${chrom}:` : ''}{fmt(t + 1)}</text>
+            <line x1={xOf(t)} y1={AXIS} x2={xOf(t)} y2={AXIS + 4} stroke="#8796a8" />
+            <text x={xOf(t)} y={AXIS + 14} fontSize={9} fill="#5b6b7e" textAnchor={k === 0 ? 'start' : k === 2 ? 'end' : 'middle'}>{k === 0 ? `${chrom}:` : ''}{fmt(t + 1)}</text>
           </g>
         ))}
       </svg>
@@ -462,7 +462,7 @@ function Matrix({ sites, pairs, pick, onPick, siteColor, siteShort }: { sites: S
                 return (
                   <td key={j} className="p-0.5">
                     <button onClick={() => onPick(i, j)} title={tip}
-                      className={`w-[84px] rounded px-1 py-0.5 text-white ${on ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`} style={{ background: call ? PAIR_COLORS[call] : '#e5e7eb', color: call ? '#fff' : '#6b7280' }}>
+                      className={`w-[84px] rounded px-1 py-0.5 text-white ${on ? 'ring-2 ring-offset-1 ring-gray-500' : ''}`} style={{ background: call ? PAIR_COLORS[call] : '#e3e8ee', color: call ? '#fff' : '#5b6b7e' }}>
                       {word}
                     </button>
                   </td>
@@ -533,7 +533,7 @@ function Verdict({ cell, a, b }: { cell: PairCell; a: SiteRow; b: SiteRow }) {
 function Evidence({ res, a, b, siteColor, hpColor }: { res: PairResult; a: SiteRow; b: SiteRow; siteColor: (s: VariantSite) => string; hpColor: (ps: number | null | undefined, hp: number) => string }) {
   const ca = siteColor(a.site!), cb = siteColor(b.site!);
   const counted = new Set(res.counted);
-  const cellStyle = (i: number): React.CSSProperties => ({ color: counted.has(i) ? ([0, 3].includes(i) ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#9ca3af', fontWeight: counted.has(i) ? 700 : 400 });
+  const cellStyle = (i: number): React.CSSProperties => ({ color: counted.has(i) ? ([0, 3].includes(i) ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#8796a8', fontWeight: counted.has(i) ? 700 : 400 });
   const links = (Object.keys(res.links) as LinkKind[]).filter(k => res.links[k]).map(k => `${fmt(res.links[k])} by ${LINK_WORD[k]}`);
   // the reads joined over both sites: their table and fragments; none (sites farther apart than the reads) leaves them out
   const joined = res.fragments.length + res.unknown > 0;
@@ -620,7 +620,7 @@ function TagReads({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow;
   for (const l of shown) {
     const n = Math.max(lines(ta, l.key), lines(tb, l.key)), hgt = n * LINE;
     els.push(<line key={`g${l.key}`} x1={0} y1={y - 3} x2={W} y2={y - 3} stroke="#f3f4f6" />);
-    els.push(<text key={`l${l.key}`} x={4} y={y + 8} fontSize={10} fontWeight={700} fill={l.hp ? '#374151' : '#9ca3af'}>{l.label}</text>);
+    els.push(<text key={`l${l.key}`} x={4} y={y + 8} fontSize={10} fontWeight={700} fill={l.hp ? '#374151' : '#8796a8'}>{l.label}</text>);
     ([[ta, ca, LABEL, onA, a], [tb, cb, LABEL + HALF, onB, b]] as const).forEach(([t, color, x0, mine, row], side) => {
       const c = t.lanes[l.key], total = c.alt + c.ref;
       if (l.hp) els.push(<rect key={`h${l.key}${side}`} x={x0} y={y} width={6} height={hgt - 1} fill={hpColor(t.ps, l.hp)}><title>{`HP ${l.hp} of phase set ${t.ps ?? '(no PS)'}`}</title></rect>);
@@ -631,7 +631,7 @@ function TagReads({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow;
       }
       els.push(<g key={`b${l.key}${side}`}><title>{`${row.label} · ${l.label}: ${c.alt} reads with the allele, ${c.ref} with the reference`}</title>{boxes}</g>);
       els.push(
-        <text key={`n${l.key}${side}`} x={x0 + 10 + AREA + 6} y={y + 8} fontSize={10} fill={total ? '#374151' : '#9ca3af'} fontWeight={mine === l.key ? 700 : 400}>
+        <text key={`n${l.key}${side}`} x={x0 + 10 + AREA + 6} y={y + 8} fontSize={10} fill={total ? '#374151' : '#8796a8'} fontWeight={mine === l.key ? 700 : 400}>
           {total ? `${c.alt} / ${total} alt${total > MAX ? ` (+${total - MAX})` : ''}` : '–'}
         </text>,
       );
@@ -639,7 +639,7 @@ function TagReads({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow;
     y += hgt + 6;
   }
   const head = (row: SiteRow, t: SiteTagReads, color: string, x: number) => (
-    <text x={x + 10} y={12} fontSize={10} fontWeight={700} fill={color}>{row.label} <tspan fill="#6b7280" fontWeight={400}>{row.target.chrom}:{fmt(row.site!.pos + 1)} · PS {t.ps ?? 'none'}</tspan></text>
+    <text x={x + 10} y={12} fontSize={10} fontWeight={700} fill={color}>{row.label} <tspan fill="#5b6b7e" fontWeight={400}>{row.target.chrom}:{fmt(row.site!.pos + 1)} · PS {t.ps ?? 'none'}</tspan></text>
   );
   return (
     <div className="mt-2">
@@ -651,7 +651,7 @@ function TagReads({ res, a, b, ca, cb, hpColor }: { res: PairResult; a: SiteRow;
         <svg width={W} height={y} className="block" style={{ maxWidth: '100%' }}>
           {head(a, ta, ca, LABEL)}
           {head(b, tb, cb, LABEL + HALF)}
-          <line x1={LABEL + HALF - 4} y1={2} x2={LABEL + HALF - 4} y2={y} stroke="#e5e7eb" />
+          <line x1={LABEL + HALF - 4} y1={2} x2={LABEL + HALF - 4} y2={y} stroke="#e3e8ee" />
           {els}
         </svg>
       </div>
@@ -691,7 +691,7 @@ function Fragments({ res, a, b, ca, cb, hpColor, words }: { res: { fragments: Pa
   for (const band of shown) {
     const isCis = band.cell === 0 || band.cell === 3, on = counted.has(band.cell);
     els.push(
-      <text key={`h${band.cell}`} x={4} y={yy + 9} fontSize={10} fontWeight={700} fill={on ? (isCis ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#9ca3af'}>
+      <text key={`h${band.cell}`} x={4} y={yy + 9} fontSize={10} fontWeight={700} fill={on ? (isCis ? PAIR_COLORS.cis : PAIR_COLORS.trans) : '#8796a8'}>
         {band.title} — {band.frags.length} {on ? (isCis ? w.cis : w.trans) : '(not counted)'}{tagsOf(band.frags)}
       </text>,
     );
@@ -705,14 +705,14 @@ function Fragments({ res, a, b, ca, cb, hpColor, words }: { res: { fragments: Pa
           <title>{tip}</title>
           <rect x={XA - 18} y={y - ROW / 2} width={XB - XA + 36} height={ROW} fill="transparent" />
           {f.hp != null && <rect x={XA - 24} y={y - 1.8} width={8} height={3.6} fill={hpColor(f.ps, f.hp)} />}
-          <line x1={XA + 9} y1={y} x2={XB - 9} y2={y} stroke="#6b7280" strokeWidth={0.9} strokeDasharray={LINK_DASH[f.link]} />
+          <line x1={XA + 9} y1={y} x2={XB - 9} y2={y} stroke="#5b6b7e" strokeWidth={0.9} strokeDasharray={LINK_DASH[f.link]} />
           <rect x={XA - 9} y={y - 1.8} width={18} height={3.6} fill={f.a ? ca : REF_FILL} />
           <rect x={XB - 9} y={y - 1.8} width={18} height={3.6} fill={f.b ? cb : REF_FILL} />
         </g>,
       );
     });
     yy += rows.length * ROW;
-    if (band.frags.length > rows.length) { els.push(<text key={`m${band.cell}`} x={XA} y={yy + 8} fontSize={9} fill="#6b7280">+ {band.frags.length - rows.length} more</text>); yy += 11; }
+    if (band.frags.length > rows.length) { els.push(<text key={`m${band.cell}`} x={XA} y={yy + 8} fontSize={9} fill="#5b6b7e">+ {band.frags.length - rows.length} more</text>); yy += 11; }
     yy += 6;
   }
   return (
@@ -720,10 +720,10 @@ function Fragments({ res, a, b, ca, cb, hpColor, words }: { res: { fragments: Pa
       <svg width={W} height={yy} className="block" style={{ maxWidth: '100%' }}>
         <text x={XA} y={11} textAnchor="middle" fontSize={10} fontWeight={700} fill={ca}>{a.label}</text>
         <text x={XB} y={11} textAnchor="middle" fontSize={10} fontWeight={700} fill={cb}>{b.label}</text>
-        <g fontSize={8.5} fill="#6b7280">
-          <line x1={XA + 40} y1={8} x2={XA + 62} y2={8} stroke="#6b7280" /><text x={XA + 66} y={11}>one read</text>
-          <line x1={XA + 118} y1={8} x2={XA + 140} y2={8} stroke="#6b7280" strokeDasharray={LINK_DASH.pair} /><text x={XA + 144} y={11}>two mates</text>
-          <line x1={XA + 200} y1={8} x2={XA + 222} y2={8} stroke="#6b7280" strokeDasharray={LINK_DASH.split} /><text x={XA + 226} y={11}>spliced or split read</text>
+        <g fontSize={8.5} fill="#5b6b7e">
+          <line x1={XA + 40} y1={8} x2={XA + 62} y2={8} stroke="#5b6b7e" /><text x={XA + 66} y={11}>one read</text>
+          <line x1={XA + 118} y1={8} x2={XA + 140} y2={8} stroke="#5b6b7e" strokeDasharray={LINK_DASH.pair} /><text x={XA + 144} y={11}>two mates</text>
+          <line x1={XA + 200} y1={8} x2={XA + 222} y2={8} stroke="#5b6b7e" strokeDasharray={LINK_DASH.split} /><text x={XA + 226} y={11}>spliced or split read</text>
           {res.fragments.some(f => f.hp != null) && <text x={XA - 24} y={11} textAnchor="middle">HP</text>}
         </g>
         {els}

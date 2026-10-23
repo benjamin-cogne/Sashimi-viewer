@@ -2,10 +2,10 @@
  * The controls of the viewer's toolbars: one look for the whole page.
  *
  * - `Segmented`: one choice among a few (Reads | Usage, shared | own | % max), the active option a raised white chip.
- * - `Pill`: an on/off option, tinted indigo when on.
+ * - `Pill`: an on/off option, tinted with the accent when on.
  * - `Stepper`: a number with − / + buttons, typed in place.
  * - `Select`: a native select dressed as a pill, with its key in grey ("window ≤ 100 kb").
- * - `Section`: an uppercase label and the controls it groups, on a pastel panel of its tone; `Sep` a thin rule.
+ * - `Section`: an uppercase label and the controls it groups, on a light panel; `Sep` a thin rule.
  * - `Popover` / `MenuItem` / `SwitchRow`: a panel under a button, closed by a click outside or Escape.
  *
  * They live at module level, not inside the viewer's render: a component declared in a render is a new type on every
@@ -64,8 +64,10 @@ export function Icon({ name, size = 16, className = '' }: { name: keyof typeof I
 }
 
 /** One choice among a few. `size="sm"` for the secondary ones (depth axis, raw / collapsed). */
-export function Segmented<T extends string>({ value, onChange, options, disabled, title, size = 'md', label, prefix }: {
+export function Segmented<T extends string>({ value, onChange, options, disabled, title, size = 'md', label, prefix, onBar }: {
   value: T; onChange: (v: T) => void; disabled?: boolean; title: string; size?: 'sm' | 'md'; label?: string;
+  /** drawn on the dark app bar */
+  onBar?: boolean;
   /** a key in grey inside the switch, before its choices ("AF ≥", "window ≤"): one control instead of a label and a menu */
   prefix?: string;
   /** `dot`: a colour dot (a sample's track colour) before the label, or overlapping dots for a choice covering several */
@@ -74,13 +76,13 @@ export function Segmented<T extends string>({ value, onChange, options, disabled
   const sm = size === 'sm';
   return (
     <span role="radiogroup" aria-label={label ?? title} title={title}
-      className={`inline-flex items-center gap-0.5 rounded-[10px] bg-slate-50 border border-slate-200 p-[3px] select-none ${disabled ? 'opacity-60' : ''}`}>
-      {prefix && <span className={`pl-1.5 pr-1 whitespace-nowrap text-slate-500 ${sm ? 'text-[11px]' : 'text-xs'}`}>{prefix}</span>}
+      className={`inline-flex items-center gap-0.5 rounded-[7px] border p-[3px] select-none ${onBar ? 'bg-bar border-bar-line' : 'bg-slate-50 border-slate-200'} ${disabled ? 'opacity-60' : ''}`}>
+      {prefix && <span className={`pl-1.5 pr-1 whitespace-nowrap ${onBar ? 'text-bar-muted' : 'text-slate-500'} ${sm ? 'text-[11px]' : 'text-xs'}`}>{prefix}</span>}
       {options.map(o => {
         const active = o.value === value;
         return (
           <button key={o.value} type="button" role="radio" aria-checked={active} disabled={disabled} onClick={() => onChange(o.value)} title={o.hint}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-[7px] font-medium transition-all disabled:cursor-not-allowed ${sm ? 'h-[22px] px-2 text-[11.5px]' : 'h-[26px] px-2.5 text-[12.5px]'} ${active ? 'bg-white text-indigo-600 shadow-[0_1px_2px_rgba(15,23,42,.12),0_0_0_1px_rgba(15,23,42,.04)]' : 'text-slate-500 hover:text-slate-800'}`}>
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-[4px] font-medium transition-all disabled:cursor-not-allowed ${sm ? 'h-[22px] px-2 text-[11.5px]' : 'h-[26px] px-2.5 text-[12.5px]'} ${active ? 'bg-white text-accent-600 shadow-[0_1px_2px_rgba(15,23,42,.12),0_0_0_1px_rgba(15,23,42,.04)]' : onBar ? 'text-bar-muted hover:text-bar-text' : 'text-slate-500 hover:text-slate-800'}`}>
             {o.icon && <Icon name={o.icon} size={sm ? 13 : 15} />}
             {o.dot && <Dots colors={Array.isArray(o.dot) ? o.dot : [o.dot]} faded={!active} />}
             <span className="truncate max-w-[150px]">{o.label}</span>
@@ -102,16 +104,16 @@ export function Dots({ colors, faded }: { colors: string[]; faded?: boolean }) {
   );
 }
 
-/** An on/off option: a pill, tinted indigo when on. */
+/** An on/off option: a pill, tinted with the accent when on. */
 export function Pill({ on, onChange, label, title, icon, disabled, badge, size = 'md' }: {
   on: boolean; onChange: (v: boolean) => void; label: string; title: string; icon?: string; disabled?: boolean; badge?: string | number; size?: 'sm' | 'md';
 }) {
   return (
     <button type="button" aria-pressed={on} disabled={disabled} title={title} onClick={() => onChange(!on)}
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap border font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none ${size === 'sm' ? 'h-[26px] px-2 rounded-lg text-xs' : 'h-[30px] px-2.5 rounded-[9px] text-[12.5px]'} ${on ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}>
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap border font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed select-none ${size === 'sm' ? 'h-[26px] px-2 rounded-lg text-xs' : 'h-[30px] px-2.5 rounded-[6px] text-[12.5px]'} ${on ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}>
       {icon && <Icon name={icon} size={size === 'sm' ? 13 : 15} />}
       {label}
-      {badge != null && badge !== 0 && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-indigo-600 text-white">{badge}</span>}
+      {badge != null && badge !== 0 && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{badge}</span>}
     </button>
   );
 }
@@ -126,12 +128,12 @@ export function Stepper({ value, onChange, min, max, step = 1, label, unit, titl
   useEffect(() => { if (parseFloat(text) !== value) setText(String(value)); }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
   const bump = (d: number) => onChange(clamp(Math.round((value + d) * 1000) / 1000));
   return (
-    <span title={title} className="inline-flex items-center h-[30px] border border-slate-200 rounded-[9px] bg-white overflow-hidden text-[12.5px]">
+    <span title={title} className="inline-flex items-center h-[30px] border border-slate-200 rounded-[6px] bg-white overflow-hidden text-[12.5px]">
       {label && <span className="pl-2.5 pr-1.5 text-slate-500 text-xs whitespace-nowrap">{label}</span>}
       <input type="number" value={text} min={min} max={max} step={step} aria-label={ariaLabel ?? label ?? title}
         onChange={e => { setText(e.target.value); const v = parseFloat(e.target.value); if (Number.isFinite(v)) onChange(clamp(v)); }}
         onBlur={() => setText(String(value))}
-        className="text-center font-semibold text-slate-900 bg-transparent outline-none focus:bg-indigo-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        className="text-center font-semibold text-slate-900 bg-transparent outline-none focus:bg-accent-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         style={{ width }} />
       {unit && <span className="pr-1.5 text-slate-500 text-xs whitespace-nowrap">{unit}</span>}
       {after}
@@ -146,7 +148,7 @@ export function Select({ label, value, onChange, children, title, ariaLabel, dot
   label?: string; value: string | number; onChange: (v: string) => void; children: React.ReactNode; title: string; ariaLabel?: string; dot?: string;
 }) {
   return (
-    <label title={title} className="relative inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-7 border border-slate-200 rounded-[9px] bg-white text-[12.5px] text-slate-700 whitespace-nowrap hover:border-slate-300 cursor-pointer">
+    <label title={title} className="relative inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-7 border border-slate-200 rounded-[6px] bg-white text-[12.5px] text-slate-700 whitespace-nowrap hover:border-slate-300 cursor-pointer">
       {dot && <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot }} />}
       {label && <span className="text-slate-500 text-xs">{label}</span>}
       <select value={value} onChange={e => onChange(e.target.value)} aria-label={ariaLabel ?? label ?? title}
@@ -159,26 +161,13 @@ export function Select({ label, value, onChange, children, title, ariaLabel, dot
 }
 
 /**
- * The colour of a toolbar section: a pastel panel and a label in its hue, so the categories read apart at a glance
- * (literal class names: Tailwind keeps only those it sees).
+ * A group of the toolbar: its uppercase label (in the accent) and its controls on a light panel, all groups alike so
+ * that colour stays for the data. A section that is not boxed (Filters) stands apart on the right of its line.
  */
-const TONES = {
-  indigo: { panel: 'bg-indigo-50 border-indigo-200', label: 'text-indigo-600' },
-  emerald: { panel: 'bg-emerald-50 border-emerald-200', label: 'text-emerald-700' },
-  orange: { panel: 'bg-orange-50 border-orange-200', label: 'text-orange-700' },
-  sky: { panel: 'bg-sky-50 border-sky-200', label: 'text-sky-700' },
-} as const;
-export type Tone = keyof typeof TONES;
-
-/**
- * A group of the toolbar: its uppercase label and its controls on a pastel panel of its tone. A section without a
- * label (Filters) stands apart on the right of its line.
- */
-export function Section({ label, title, tone, children }: { label?: string; title?: string; tone?: Tone; children: React.ReactNode }) {
-  const t = tone ? TONES[tone] : null;
+export function Section({ label, title, boxed, children }: { label?: string; title?: string; boxed?: boolean; children: React.ReactNode }) {
   return (
-    <div className={`flex flex-wrap items-center gap-1.5 ${t ? `rounded-xl border px-2 py-1 ${t.panel}` : 'ml-auto'}`} role="group" aria-label={label}>
-      {label && <span className={`text-[10px] font-bold tracking-[.08em] uppercase mr-0.5 pl-0.5 select-none ${t ? t.label : 'text-slate-400'}`} title={title}>{label}</span>}
+    <div className={`flex flex-wrap items-center gap-1.5 ${boxed ? 'rounded-xl border px-2 py-1 bg-[#f1f4f8] border-slate-200' : 'ml-auto'}`} role="group" aria-label={label}>
+      {label && <span className={`text-[10px] font-bold tracking-[.08em] uppercase mr-0.5 pl-0.5 select-none ${boxed ? 'text-accent-600' : 'text-slate-400'}`} title={title}>{label}</span>}
       {children}
     </div>
   );
@@ -220,11 +209,11 @@ export function Popover({ button, children, width = 320, title, open: openProp, 
     <span ref={ref} className="relative inline-flex">
       <button type="button" title={title} aria-haspopup="true" aria-expanded={open} aria-label={label}
         onClick={e => { const r = e.currentTarget.getBoundingClientRect(); setRight(r.left + width + 16 > window.innerWidth); set(!open); }}
-        className={buttonClass ?? `inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[9px] border text-[12.5px] font-medium whitespace-nowrap transition-colors ${open ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}>
+        className={buttonClass ?? `inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium whitespace-nowrap transition-colors ${open ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}>
         {button}
       </button>
       {open && (
-        <div role="dialog" className={`absolute top-full mt-2 ${right ? 'right-0' : 'left-0'} z-30 bg-white border border-slate-200 rounded-[14px] ${flush ? 'overflow-hidden' : 'p-2'} shadow-[0_18px_40px_-12px_rgba(15,23,42,.28),0_2px_6px_rgba(15,23,42,.08)] text-left`}
+        <div role="dialog" className={`absolute top-full mt-2 ${right ? 'right-0' : 'left-0'} z-30 bg-white border border-slate-200 rounded-[11px] ${flush ? 'overflow-hidden' : 'p-2'} shadow-[0_18px_40px_-12px_rgba(15,23,42,.28),0_2px_6px_rgba(15,23,42,.08)] text-left`}
           style={{ width }}>
           {typeof children === 'function' ? children(() => set(false)) : children}
         </div>
@@ -247,7 +236,7 @@ export function PickButton<T extends string>({ prefix, value, onChange, options,
   const shown = q.trim() ? options.filter(o => o.label.toLowerCase().includes(q.trim().toLowerCase())) : options;
   return (
     <Popover width={width} flush title={title} label={label ?? prefix}
-      buttonClass="inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-2 rounded-[9px] border border-slate-200 bg-white text-[12.5px] whitespace-nowrap hover:border-slate-300"
+      buttonClass="inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-2 rounded-[6px] border border-slate-200 bg-white text-[12.5px] whitespace-nowrap hover:border-slate-300"
       button={<>
         <span className="text-slate-500 text-xs">{prefix}</span>
         {cur?.dot && <Dots colors={Array.isArray(cur.dot) ? cur.dot : [cur.dot]} />}
@@ -264,13 +253,13 @@ export function PickButton<T extends string>({ prefix, value, onChange, options,
               const on = o.value === value;
               return (
                 <button key={o.value} type="button" role="option" aria-selected={on} title={o.hint} onClick={() => { onChange(o.value); setQ(''); close(); }}
-                  className={`w-full flex items-start gap-2 px-3 py-1.5 text-xs text-left ${o.divider ? 'border-t border-slate-100' : ''} ${on ? 'bg-indigo-50 text-indigo-900' : 'text-slate-800 hover:bg-slate-50'}`}>
+                  className={`w-full flex items-start gap-2 px-3 py-1.5 text-xs text-left ${o.divider ? 'border-t border-slate-100' : ''} ${on ? 'bg-accent-50 text-accent-900' : 'text-slate-800 hover:bg-slate-50'}`}>
                   {o.dot && <span className="mt-1"><Dots colors={Array.isArray(o.dot) ? o.dot : [o.dot]} /></span>}
                   <span className="flex-1 min-w-0">
                     <span className={`block truncate ${on ? 'font-semibold' : ''}`}>{o.label}</span>
                     {o.hint && <span className="block text-[11px] text-slate-500 leading-snug">{o.hint}</span>}
                   </span>
-                  {on && <Icon name="check" size={13} className="text-indigo-600 mt-0.5" />}
+                  {on && <Icon name="check" size={13} className="text-accent-600 mt-0.5" />}
                 </button>
               );
             })}
@@ -305,7 +294,7 @@ export function SwitchRow({ on, onChange, label, hint, title, disabled }: { on: 
         <span className="block text-[12.5px] font-semibold text-slate-900">{label}</span>
         <span className="block text-[11.5px] text-slate-500 leading-snug mt-px">{hint}</span>
       </span>
-      <span className={`relative w-[30px] h-[18px] rounded-full shrink-0 transition-colors ${on ? 'bg-indigo-600' : 'bg-slate-300'}`}>
+      <span className={`relative w-[30px] h-[18px] rounded-full shrink-0 transition-colors ${on ? 'bg-accent-600' : 'bg-slate-300'}`}>
         <span className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow transition-all ${on ? 'left-[14px]' : 'left-[2px]'}`} />
       </span>
     </button>

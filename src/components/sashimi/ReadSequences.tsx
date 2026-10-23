@@ -30,7 +30,7 @@ export function ReadSequences({ locus, title, reads, sample, onClose }: { locus:
     <div className="mx-5 mb-4 rounded-lg border border-slate-200">
       <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-slate-200 bg-slate-50 rounded-t-lg text-[12px]">
         <b>Read sequences · {title}</b>
-        <button onClick={makeConsensus} disabled={cons?.busy} className="rounded-md bg-indigo-600 px-2.5 py-0.5 font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+        <button onClick={makeConsensus} disabled={cons?.busy} className="rounded-md bg-accent-600 px-2.5 py-0.5 font-semibold text-white hover:bg-accent-700 disabled:opacity-50"
           title={`Consensus of these reads: flanks base by base on the reference, the tract unit by unit (aligned on the read of median size), each position with its support${reads.length > CONSENSUS_MAX_READS ? `; ${CONSENSUS_MAX_READS} of the ${fmt(reads.length)} reads, evenly by size` : ''}`}>
           {cons?.busy ? 'Computing…' : 'Consensus'}
         </button>
@@ -49,7 +49,7 @@ export function ReadSequences({ locus, title, reads, sample, onClose }: { locus:
           <span><span className="px-1 rounded bg-red-100 text-red-800 font-mono">T</span> differs from the reference</span>
           <span><span className="px-1 rounded bg-amber-100 text-amber-900 font-mono">A</span> extra base in the read</span>
           <span><span className="font-mono text-red-700">-</span> base missing</span>
-          <span><span className="font-mono underline decoration-2 decoration-indigo-500">anchor</span></span>
+          <span><span className="font-mono underline decoration-2 decoration-accent-500">anchor</span></span>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-base leading-none" title="Close the sequences">×</button>
         </span>
       </div>
@@ -110,7 +110,7 @@ function ReadCard({ r, locus }: { r: ReadRepeat; locus: RepeatLocus }) {
                 {u.cls === 'x' ? u.unit.toLowerCase() : u.n > 1 ? `(${u.unit})${u.n}` : u.unit}{' '}
               </span>
             ))}
-            <button onClick={() => setBases(v => !v)} className="ml-1 font-sans text-[11px] text-indigo-700 underline">{bases ? 'hide units' : 'every unit'}</button>
+            <button onClick={() => setBases(v => !v)} className="ml-1 font-sans text-[11px] text-accent-700 underline">{bases ? 'hide units' : 'every unit'}</button>
             {bases && <Units runs={runs} k={k} />}
           </div>
           <span className="text-slate-500 pt-px">3′ flank</span>
@@ -140,7 +140,7 @@ function Aligned({ al }: { al: { ref: string; read: string; from: number; anchor
         {cols.map((c, i) => {
           const anchor = al.anchor && c.pos != null && c.pos >= al.anchor[0] && c.pos < al.anchor[1];
           const cls = c.q === ' ' ? '' : c.q === '-' ? 'text-red-700' : c.r === '-' ? 'bg-amber-100 text-amber-900' : c.r !== ' ' && c.r !== c.q ? 'bg-red-100 text-red-800' : 'text-slate-800';
-          return <span key={i} className={`${cls} ${anchor ? 'underline decoration-2 decoration-indigo-500 underline-offset-2' : ''}`}>{c.q}</span>;
+          return <span key={i} className={`${cls} ${anchor ? 'underline decoration-2 decoration-accent-500 underline-offset-2' : ''}`}>{c.q}</span>;
         })} <span className="font-sans text-[10px] text-slate-500">read · {edits} difference{edits === 1 ? '' : 's'}</span>
       </div>
     </div>
@@ -216,9 +216,9 @@ export function ConsensusCard({ c, locus, sample, title, onClose }: { c: RepeatC
     if (last && last.unit === u.unit && last.low === low) last.n++; else runs.push({ unit: u.unit, cls: u.cls, n: 1, low });
   }
   return (
-    <div className="px-3 py-2 text-[11.5px] border-b-2 border-indigo-200 bg-indigo-50/40">
+    <div className="px-3 py-2 text-[11.5px] border-b-2 border-accent-200 bg-accent-50/40">
       <div className="flex flex-wrap items-baseline gap-x-3 text-slate-600">
-        <b className="text-indigo-900">Consensus</b>
+        <b className="text-accent-900">Consensus</b>
         <span>{fmt(c.used)} of the {fmt(c.listed)} reads{c.listed > CONSENSUS_MAX_READS ? ` (${fmt(CONSENSUS_MAX_READS)} at most, evenly by size)` : c.listed > c.used ? ' (reads without a measured tract left out)' : ''}</span>
         <span><b className="text-slate-900">{c.lowerBound ? '≥ ' : ''}{c.size}</b> {locus.motif} · median of the reads {c.medianSize}</span>
         <span>mean support {Math.round(c.meanSupport * 100)} %</span>
@@ -268,8 +268,8 @@ function SupportTrack({ c }: { c: RepeatConsensus }) {
         const d = p.sup.map((v, i) => `${i ? 'L' : 'M'}${(start + ((i + 0.5) / p.sup.length) * w).toFixed(1)},${(H - v * H).toFixed(1)}`).join('');
         return (
           <g key={p.label}>
-            <rect x={start} y={0} width={w} height={H} fill={p.label === 'repeat' ? '#eef2ff' : '#f8fafc'} />
-            {p.sup.length > 0 && <path d={d} fill="none" stroke="#4f46e5" strokeWidth={1} />}
+            <rect x={start} y={0} width={w} height={H} fill={p.label === 'repeat' ? '#ddf1ee' : '#f8fafc'} />
+            {p.sup.length > 0 && <path d={d} fill="none" stroke="#0f766e" strokeWidth={1} />}
             <text x={start + 3} y={H + 10} fontSize={9.5} fill="#64748b">{p.label} · {p.label === 'repeat' ? `${p.sup.length} units` : `${p.sup.length} bp`}</text>
           </g>
         );

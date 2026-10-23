@@ -174,14 +174,16 @@ function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unm
 
 /** The project mark (docs/logo): three exons, canonical arcs, and a dashed red arc skipping the middle exon. */
 function Logo({ size = 28 }: { size?: number }) {
+  // exons and canonical arcs in a light teal: the mark sits on the dark app bar
+  const ink = '#93d2c9';
   return (
     <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden="true" className="shrink-0">
-      <path d="M11 46 Q21.5 14 32 46 M32 46 Q42.5 14 53 46" fill="none" stroke="#3730a3" strokeWidth="3.5" strokeLinecap="round" />
-      <path d="M11 46 Q32 -26 53 46" fill="none" stroke="#dc2626" strokeWidth="3.5" strokeLinecap="round" strokeDasharray="5 4" />
-      <path d="M18 51 H25 M39 51 H46" stroke="#3730a3" strokeWidth="2.5" strokeLinecap="round" />
-      <rect x="4" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
-      <rect x="25" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
-      <rect x="46" y="46" width="14" height="10" rx="1.5" fill="#3730a3" />
+      <path d="M11 46 Q21.5 14 32 46 M32 46 Q42.5 14 53 46" fill="none" stroke={ink} strokeWidth="3.5" strokeLinecap="round" />
+      <path d="M11 46 Q32 -26 53 46" fill="none" stroke="#f87171" strokeWidth="3.5" strokeLinecap="round" strokeDasharray="5 4" />
+      <path d="M18 51 H25 M39 51 H46" stroke={ink} strokeWidth="2.5" strokeLinecap="round" />
+      <rect x="4" y="46" width="14" height="10" rx="1.5" fill={ink} />
+      <rect x="25" y="46" width="14" height="10" rx="1.5" fill={ink} />
+      <rect x="46" y="46" width="14" height="10" rx="1.5" fill={ink} />
     </svg>
   );
 }
@@ -974,27 +976,27 @@ function App() {
   /** The gene / locus search, with the genome build in it: in the app bar, folded or not. */
   const searchForm = (
     <form onSubmit={e => { e.preventDefault(); open(); }} onKeyDown={e => { if (e.key === 'Enter') forceNewView.current = e.shiftKey; }}
-      className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-slate-50 border border-slate-200 pl-1.5 pr-1 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100">
-      <Segmented size="sm" prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
+      className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-bar-ctrl border border-bar-line pl-1.5 pr-1 focus-within:border-accent-300 focus-within:ring-2 focus-within:ring-accent-300/30">
+      <Segmented size="sm" onBar prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
         title={`Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other build asks first: its coordinates over the views', or everything moved to it.`}
         options={(['GRCh38', 'GRCh37'] as GenomeBuild[]).map(b => ({
           value: b, label: b.slice(4), hint: `${b} / ${b === 'GRCh38' ? 'hg38' : 'hg19'}${liftTo === b && b !== build ? ` · its coordinates shown over the ruler (click for the options)` : ''}${filesBuild === b ? ' · the build of the files' : ''}`,
           dot: liftTo === b && b !== build ? '#0f766e' : undefined,
         }))} />
-      <Icon name="search" size={15} className="text-slate-400" />
+      <Icon name="search" size={15} className="text-bar-muted" />
       <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
         title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
-        className="flex-1 min-w-0 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400" />
-      <button type="submit" disabled={busy || !gene.trim()} onClick={e => { forceNewView.current = e.shiftKey; }} title="Open the gene or the locus: its view when it has one already, a new one with Shift" className="h-7 px-3 rounded-lg text-xs font-semibold bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">{busy ? '…' : 'Open'}</button>
+        className="flex-1 min-w-0 bg-transparent outline-none text-sm text-bar-text placeholder:text-bar-muted" />
+      <button type="submit" disabled={busy || !gene.trim()} onClick={e => { forceNewView.current = e.shiftKey; }} title="Open the gene or the locus: its view when it has one already, a new one with Shift" className="h-7 px-3 rounded-lg text-xs font-semibold bg-accent-600 text-white disabled:opacity-40 hover:bg-accent-700">{busy ? '…' : 'Open'}</button>
     </form>
   );
   /** The registered views as tabs: click one to reopen it, × to forget it. */
   const viewTabs = views.map(v => (
     <span key={v.id} onClick={() => activateTab(v.id)}
-      className={`inline-flex items-center gap-1.5 h-7 pl-2.5 pr-1.5 rounded-lg text-xs font-medium border cursor-pointer whitespace-nowrap ${v.id === activeId ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
+      className={`inline-flex items-center gap-1.5 h-7 pl-2.5 pr-1.5 rounded-lg text-xs font-medium border cursor-pointer whitespace-nowrap ${v.id === activeId ? 'bg-accent-600 border-accent-600 text-white' : 'bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300'}`}
       title={`${v.opened.geneName} · ${fmtLocus(v.opened.chrom, v.opened.view?.start ?? v.opened.start, v.opened.view?.end ?? v.opened.end)}${v.id === activeId ? ' · shown' : ' · click to reopen with its options'}`}>
       {v.label}
-      <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={`w-4 h-4 grid place-items-center rounded ${v.id === activeId ? 'text-slate-400 hover:text-white' : 'text-slate-400 hover:text-red-500'}`} title="Forget this view" aria-label="Forget this view"><Icon name="x" size={12} /></button>
+      <button onClick={e => { e.stopPropagation(); closeTab(v.id); }} className={`w-4 h-4 grid place-items-center rounded ${v.id === activeId ? 'text-accent-100 hover:text-white' : 'text-bar-muted hover:text-red-400'}`} title="Forget this view" aria-label="Forget this view"><Icon name="x" size={12} /></button>
     </span>
   ));
   // the DEV banner can be dismissed; remembered in this browser for this build (a new dev build shows it again), and the
@@ -1003,12 +1005,12 @@ function App() {
   const [devHidden, setDevHidden] = useState(() => { try { return !!DEV && localStorage.getItem(devKey) === '1'; } catch { return false; } });
   const hideDevBanner = () => { setDevHidden(true); try { localStorage.setItem(devKey, '1'); } catch { /* private mode: hidden for this visit only */ } };
   const versionPill = (
-    <span className="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold leading-none bg-indigo-50 text-indigo-600" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
+    <span className="px-1.5 py-0.5 rounded-full text-[10.5px] font-semibold leading-none bg-bar-ctrl text-accent-300" title={`Sashimi viewer ${VERSION}${DEV ? ' · development build' : ''}`}>{VERSION_SHORT}{DEV ? ' · dev' : ''}</span>
   );
   const brandNote = 'Files are read in your browser and never uploaded. Gene models (RefSeq, UCSC API) and reference bases come from the network unless you add a FASTA.';
 
   return (
-    <div className="min-h-screen bg-[#f6f7fb] text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
+    <div className="min-h-screen bg-page text-gray-900" onDragOver={e => e.preventDefault()} onDrop={onDrop}>
       {DEV && !devHidden && (
         <div className="px-5 py-1.5 text-xs font-semibold text-white flex flex-wrap items-center gap-x-3 gap-y-1"
           style={{ background: 'repeating-linear-gradient(135deg, #b91c1c 0 14px, #dc2626 14px 28px)' }}>
@@ -1018,31 +1020,31 @@ function App() {
           <button onClick={hideDevBanner} className="w-5 h-5 grid place-items-center rounded hover:bg-white/20" title="Hide this banner (for this build, in this browser; the version pill still says dev)" aria-label="Hide the DEV banner"><Icon name="x" size={12} /></button>
         </div>
       )}
-      <header className="bg-white border-b border-slate-200">
+      <header className="bg-bar border-b border-bar-line">
         {/* Row 1: brand, samples (or the views when the panel is folded), search, session and export. Row 2: views, known variants, the clinical note. */}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-2.5">
           <div className="flex items-center gap-2.5 shrink-0" title={brandNote}>
             <Logo size={30} />
-            <h1 className="text-base font-bold tracking-tight leading-tight text-slate-900">Sashimi viewer</h1>
+            <h1 className="text-base font-bold tracking-tight leading-tight text-bar-text">Sashimi viewer</h1>
             {versionPill}
           </div>
           {!panelHidden ? (
             <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
               {samples.map((s, i) => (
-                <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-indigo-50 border-indigo-200 text-slate-900' : 'bg-white border-slate-200 text-slate-700 hover:border-indigo-300 cursor-pointer'}`}
+                <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-accent-50 border-accent-200 text-slate-900' : 'bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300 cursor-pointer'}`}
                   title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
                   onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
                   onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
-                  {i === 0 && <span className="text-indigo-600" title="primary sample"><Icon name="star" size={13} /></span>}
-                  {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
+                  {i === 0 && <span className="text-accent-600" title="primary sample"><Icon name="star" size={13} /></span>}
+                  {s.pending && <span className="inline-block w-2.5 h-2.5 rounded-full border-2 border-accent-500 border-t-transparent animate-spin" title="Opening the file: reading its header and index…" />}
                   {renaming?.id === s.id ? (
                     <input autoFocus value={renaming.value} onChange={e => setRenaming({ id: s.id, value: e.target.value })}
                       onBlur={() => renameSample(s.id, renaming.value)}
                       onKeyDown={e => { if (e.key === 'Enter') renameSample(s.id, renaming.value); else if (e.key === 'Escape') setRenaming(null); }}
-                      onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-indigo-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
+                      onClick={e => e.stopPropagation()} className="w-32 px-1 py-0 text-xs rounded border border-accent-300 bg-white text-gray-900" title="Enter to confirm, Esc to cancel" />
                   ) : <span className="font-medium">{s.name}</span>}
                   <button onClick={e => { e.stopPropagation(); cycleLibrary(s.id); }}
-                    className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.pending ? 'bg-indigo-100 text-indigo-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-100 text-slate-700' : s.lib?.type === 'rna' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}
+                    className={`px-1 rounded-[5px] text-[9.5px] font-bold tracking-wide leading-4 ${s.pending ? 'bg-accent-100 text-accent-700 animate-pulse' : s.lib?.type === 'dna' ? 'bg-slate-100 text-slate-700' : s.lib?.type === 'rna' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}
                     title={`${s.lib?.type === 'dna' ? 'Genomic DNA' : s.lib?.type === 'rna' ? 'RNA-seq' : 'Library type not determined yet (treated as RNA)'} · ${s.lib?.note ?? 'decided from the header and the first gene opened'} · click to switch (RNA-seq shows junction arcs and usage; DNA shows depth and reads only)`}>
                     {s.pending ? '…' : libBadge(s.lib)}
                   </button>
@@ -1054,14 +1056,14 @@ function App() {
                     </button>
                   )}
                   <span className="hidden group-hover:inline-flex items-center">
-                    <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-slate-400 hover:text-indigo-600 px-0.5" title="Rename">✎</button>
+                    <button onClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }} className="text-slate-400 hover:text-accent-600 px-0.5" title="Rename">✎</button>
                     <button onClick={e => { e.stopPropagation(); removeSample(s.id); }} className="text-slate-400 hover:text-red-500" title="Remove" aria-label="Remove"><Icon name="x" size={13} /></button>
                   </span>
                 </span>
               ))}
               {fasta && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference FASTA: ${fasta.fa.name}`}>ref · {fasta.fa.name}</span>}
               <Popover width={300} title="Add alignment files, a run folder or a reference FASTA (or drop them anywhere on the page)"
-                buttonClass="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12.5px] border border-dashed border-slate-300 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 whitespace-nowrap"
+                buttonClass="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12.5px] border border-dashed border-bar-line text-bar-muted hover:text-bar-text hover:border-accent-300 whitespace-nowrap"
                 button={<><Icon name="plus" size={13} />{samples.length ? 'Add' : 'Add files'}</>}>
                 {close => (
                   <>
@@ -1075,21 +1077,21 @@ function App() {
                 )}
               </Popover>
               {intake && (
-                <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-xs border border-indigo-200 bg-indigo-50 text-indigo-800" role="status" data-intake>
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                <span className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-xs border border-accent-200 bg-accent-50 text-accent-800" role="status" data-intake>
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-accent-500 border-t-transparent animate-spin" />
                   {intake}
                 </span>
               )}
               {samples.some(s => s.pending) && (
-                <span className="flex items-center gap-1 text-xs text-indigo-700" role="status">
-                  <span className="inline-block w-3 h-3 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin" />
+                <span className="flex items-center gap-1 text-xs text-bar-muted" role="status">
+                  <span className="inline-block w-3 h-3 rounded-full border-2 border-accent-500 border-t-transparent animate-spin" />
                   Processing {samples.filter(s => s.pending).length === 1 ? 'the file' : `${samples.filter(s => s.pending).length} files`}…
                 </span>
               )}
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-1.5 min-w-0" title="Registered views: click one to reopen it, × to forget it; the search box opens a new one">
-              {views.length === 0 ? <span className="text-xs text-slate-400">no view yet: open a gene or a locus</span> : viewTabs}
+              {views.length === 0 ? <span className="text-xs text-bar-muted">no view yet: open a gene or a locus</span> : viewTabs}
             </div>
           )}
           {searchForm}
@@ -1098,26 +1100,26 @@ function App() {
               {/* a session file (JSON) records the files by name, the samples, the FASTA, the views and every option: saved and loaded with one button each */}
               <Popover width={340} label="Save session"
                 title="Download the session as a JSON file: the alignment files by name (and path in the run folder), the sample names and order, the FASTA, every view with its gene, window and options, the groups and the known variants. Load it later and add the same files again."
-                buttonClass={`inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border text-[12.5px] font-medium whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:bg-slate-50 ${!samples.length && !opened ? 'opacity-40 pointer-events-none' : ''}`}
+                buttonClass={`inline-flex items-center gap-1.5 h-8 px-3 rounded-[6px] border text-[12.5px] font-medium whitespace-nowrap bg-bar-ctrl border-bar-line text-bar-text hover:bg-bar-line ${!samples.length && !opened ? 'opacity-40 pointer-events-none' : ''}`}
                 button={<><Icon name="download" size={15} />Save session</>}>
                 {close => (
                   <form className="p-1 space-y-2" onSubmit={e => { e.preventDefault(); close(); saveSession(); }}>
                     <label className="block text-[11.5px] text-slate-500">File name
                       <input value={sessionName} onChange={e => { setSessionName(e.target.value); setSessionNameEdited(true); }} spellCheck={false} autoFocus
-                        className="mt-1 w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white font-mono text-slate-800 outline-none focus:border-indigo-300" title="File name of the session to save (.json)" />
+                        className="mt-1 w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white font-mono text-slate-800 outline-none focus:border-accent-300" title="File name of the session to save (.json)" />
                     </label>
-                    <button type="submit" className="w-full inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700"><Icon name="download" size={14} />Download</button>
+                    <button type="submit" className="w-full inline-flex justify-center items-center gap-1.5 h-8 rounded-lg text-xs font-medium bg-accent-600 text-white hover:bg-accent-700"><Icon name="download" size={14} />Download</button>
                   </form>
                 )}
               </Popover>
-              <label className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] border border-slate-200 bg-white text-slate-700 text-[12.5px] font-medium whitespace-nowrap hover:bg-slate-50 cursor-pointer"
+              <label className="inline-flex items-center gap-1.5 h-8 px-3 rounded-[6px] border border-bar-line bg-bar-ctrl text-bar-text text-[12.5px] font-medium whitespace-nowrap hover:bg-bar-line cursor-pointer"
                 title="Load a session JSON file, then add the alignment files it names (or let the page reopen them from the remembered run folder)">
                 <Icon name="upload" size={15} />Load session
                 <input type="file" accept=".json,application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) loadSession(f); e.target.value = ''; }} />
               </label>
               <Popover width={320} title="Export the views: a self-contained HTML page with the data embedded, or every view on one SVG page"
-                buttonClass="inline-flex items-center gap-1.5 h-8 px-3 rounded-[9px] text-[12.5px] font-semibold bg-indigo-600 text-white shadow-[0_1px_2px_rgba(79,70,229,.35)] hover:bg-indigo-700"
-                button={<><Icon name="download" size={15} />Export<Icon name="chev" size={13} className="text-indigo-200" /></>}>
+                buttonClass="inline-flex items-center gap-1.5 h-8 px-3 rounded-[6px] text-[12.5px] font-semibold bg-accent-600 text-white shadow-[0_1px_2px_rgba(0,0,0,.3)] hover:bg-accent-500"
+                button={<><Icon name="download" size={15} />Export<Icon name="chev" size={13} className="text-accent-100" /></>}>
                 {close => (
                   <>
                     <MenuItem icon="file" label={busy ? 'Export HTML…' : 'Export HTML'} disabled={busy || !opened || pageIsUnbuilt()} onClick={() => { close(); setExportDialog({ window: 'margin', readsCap: 'shown' }); }}
@@ -1131,7 +1133,7 @@ function App() {
               </Popover>
             </>}
             <button onClick={togglePanel} aria-label={panelHidden ? 'Show the upper panel' : 'Hide the upper panel'}
-              className="w-8 h-8 grid place-items-center rounded-[9px] border border-slate-200 bg-white text-slate-500 hover:bg-slate-50"
+              className="w-8 h-8 grid place-items-center rounded-[6px] border border-bar-line bg-bar-ctrl text-bar-muted hover:bg-bar-line hover:text-bar-text"
               title={panelHidden ? 'Show the upper panel again (files, session, known variants)' : 'Fold the panel away (files, session, known variants): the logo, the views and the search box stay on one line, so the plot takes the rest of the window'}>
               <Icon name={panelHidden ? 'panelDown' : 'panelUp'} size={16} />
             </button>
@@ -1143,23 +1145,23 @@ function App() {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 pb-2.5">
             {views.length > 1 && (
               <div className="flex flex-wrap items-center gap-1.5" title="Registered views: each gene or locus opened from the search box is kept as a tab with its own options. Click one to reopen it, × to forget it. Views are saved with the session and in the HTML export.">
-                <span className="text-[10px] font-bold tracking-[.08em] uppercase text-slate-400 mr-0.5">Views</span>
+                <span className="text-[10px] font-bold tracking-[.08em] uppercase text-bar-muted mr-0.5">Views</span>
                 {viewTabs}
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
               <Popover width={420} title="Add a variant of interest, drawn on every view"
-                buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 whitespace-nowrap"
-                button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-slate-400" /></>}>
+                buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
+                button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-bar-muted" /></>}>
                 <form onSubmit={e => { e.preventDefault(); addKnown(); }} className="p-1 space-y-2">
                   <input value={knownLocus} onChange={e => { setKnownLocus(e.target.value); setKnownError(null); }} placeholder="chr17:43,094,464" spellCheck={false} autoFocus aria-label="Variant locus"
-                    className={`w-full border rounded-lg px-2 py-1.5 text-xs bg-white font-mono outline-none ${knownError ? 'border-red-400' : 'border-slate-200 focus:border-indigo-300'}`}
+                    className={`w-full border rounded-lg px-2 py-1.5 text-xs bg-white font-mono outline-none ${knownError ? 'border-red-400' : 'border-slate-200 focus:border-accent-300'}`}
                     title="Where the variant is: chr:position, chr:start-end, an HGVS genomic notation (chr17:g.43094464A>G, NC_000017.11:g.43094464A>G) or a VCF-like line (chr17 43094464 A G)" />
                   <div className="flex gap-2">
                     <input value={knownLabel} onChange={e => setKnownLabel(e.target.value)} placeholder="label, e.g. BRCA1 p.Glu23Asp" aria-label="Variant label"
-                      className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white outline-none focus:border-indigo-300"
+                      className="flex-1 border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white outline-none focus:border-accent-300"
                       title="Text drawn next to the variant (gene and change, sample, anything); the locus itself when empty" />
-                    <button type="submit" disabled={!knownLocus.trim()} className="px-3 rounded-lg text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40">Add</button>
+                    <button type="submit" disabled={!knownLocus.trim()} className="px-3 rounded-lg text-xs font-medium bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-40">Add</button>
                   </div>
                   {knownError && <div className="text-[11.5px] text-red-600">{knownError}</div>}
                 </form>
@@ -1172,30 +1174,30 @@ function App() {
                 </span>
               ))}
             </div>
-            <p className="ml-auto text-[11px] font-medium text-amber-700" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
+            <p className="ml-auto text-[11px] font-medium text-amber-300" role="note">⚠ Check the HGVS nomenclature, the predicted transcript, amino-acid changes and the NMD verdict before anything from it goes into a clinical report.</p>
           </div>
         )}
       </header>
       {pendingSession && (() => {
         const { matched, missing } = matchSession(pendingSession.file, samples);
         return (
-          <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-accent-200 bg-accent-50 text-accent-900 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="font-semibold">Session {pendingSession.name}</span>
             <span>{matched.length}/{pendingSession.file.samples.length} files present{missing.length ? ` · missing: ${missing.map(m => m.file).join(', ')}` : ''}</span>
             {missing.length > 0 && reopenState?.ready && (
-              <button onClick={() => reopenSession(pendingSession.file, true)} className="px-2 py-0.5 rounded bg-indigo-600 text-white hover:bg-indigo-700 font-medium">Reopen the files</button>
+              <button onClick={() => reopenSession(pendingSession.file, true)} className="px-2 py-0.5 rounded bg-accent-600 text-white hover:bg-accent-700 font-medium">Reopen the files</button>
             )}
             {missing.length > 0 && !reopenState?.ready && (
               <span className="flex items-center gap-1.5">
                 {pendingSession.file.folder ? <>drop the folder <b>{pendingSession.file.folder}</b> on the page, or</> : 'drop the files on the page, or'}
-                <button onClick={chooseFolder} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">{pendingSession.file.folder ? 'Choose the folder' : 'Choose a folder'}</button>
-                <button onClick={chooseFiles} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Choose files</button>
-                <span className="text-indigo-500">(the files stay on this computer; a browser dialog mentioning an upload only grants this page read access)</span>
+                <button onClick={chooseFolder} className="px-2 py-0.5 rounded border border-accent-300 bg-white hover:bg-accent-100 font-medium">{pendingSession.file.folder ? 'Choose the folder' : 'Choose a folder'}</button>
+                <button onClick={chooseFiles} className="px-2 py-0.5 rounded border border-accent-300 bg-white hover:bg-accent-100 font-medium">Choose files</button>
+                <span className="text-accent-500">(the files stay on this computer; a browser dialog mentioning an upload only grants this page read access)</span>
               </span>
             )}
-            {reopenState?.note && <span className="text-indigo-600">{reopenState.note}</span>}
-            {matched.length > 0 && missing.length > 0 && <button onClick={() => applySession(pendingSession.file)} className="px-2 py-0.5 rounded border border-indigo-300 bg-white hover:bg-indigo-100 font-medium">Open with the files present</button>}
-            <button onClick={() => setPendingSession(null)} className="text-indigo-500 hover:text-indigo-800" title="Forget this session">×</button>
+            {reopenState?.note && <span className="text-accent-600">{reopenState.note}</span>}
+            {matched.length > 0 && missing.length > 0 && <button onClick={() => applySession(pendingSession.file)} className="px-2 py-0.5 rounded border border-accent-300 bg-white hover:bg-accent-100 font-medium">Open with the files present</button>}
+            <button onClick={() => setPendingSession(null)} className="text-accent-500 hover:text-accent-800" title="Forget this session">×</button>
           </div>
         );
       })()}
@@ -1208,7 +1210,7 @@ function App() {
       {(notes.length > 0 || error || (opened && !samples.length)) && (
         <div className="px-5 py-2 text-xs space-y-0.5">
           {opened && !samples.length && (
-            <div className="text-indigo-800">
+            <div className="text-accent-800">
               {LINK ? `${describeLink(LINK)} · ` : ''}No alignment yet: add the BAM or CRAM files (with their index) with the button above, or drop them on the page. They stay on this computer.
             </div>
           )}
@@ -1228,8 +1230,8 @@ function App() {
         </div>
       )}
       {!opened ? (
-        <div className="m-6 p-10 border-2 border-dashed border-indigo-300 rounded-2xl bg-white text-center">
-          <div className="text-xl font-semibold text-indigo-700">Drop a run folder, BAM / CRAM files, or a session file anywhere on this page</div>
+        <div className="m-6 p-10 border-2 border-dashed border-accent-300 rounded-2xl bg-white text-center">
+          <div className="text-xl font-semibold text-accent-700">Drop a run folder, BAM / CRAM files, or a session file anywhere on this page</div>
           <div className="text-sm text-gray-600 mt-2 max-w-2xl mx-auto">
             Add each alignment with its index (<code>.bam</code> + <code>.bai</code>, or <code>.cram</code> + <code>.crai</code>). The first file is the primary sample, the others are comparison samples; click a sample chip (or "make primary" on its track) to switch.
             CRAM needs the reference: add an indexed FASTA (<code>.fa</code> + <code>.fai</code>, bgzipped with <code>.gzi</code>) or let the page fetch it from the UCSC API.
@@ -1243,7 +1245,7 @@ function App() {
           </div>
         </div>
       ) : (
-        <div className="p-4"><div className="bg-white border border-slate-200 rounded-[14px] shadow-[0_1px_2px_rgba(15,23,42,.06)]">
+        <div className="p-4"><div className="bg-white border border-slate-200 rounded-[11px] overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,.06)]">
           <SashimiViewer key={viewerKey} geneName={shown!.geneName} geneId={shown!.geneId} chrom={shown!.chrom} geneStart={shown!.start} geneEnd={shown!.end}
             sampleId={samples[0]?.id ?? 0} sampleName={samples[0]?.name ?? ''} runId={0} darkMode={false} onClose={() => { if (activeId != null) closeTab(activeId); }} embedded dataSource={ds} allowPrimarySwitch onPrimaryChange={makePrimary} initialView={shown!.view} initialMark={shown!.mark} initialReads={shown!.reads} sampleNames={sampleNames} knownVariantsVersion={knownSeq.current} sampleTypes={sampleTypes} onLibraryEvidence={onLibraryEvidence} sampleStrands={sampleStrands} onStrandEvidence={onStrandEvidence} liftover={liftover} build={build}
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
@@ -1253,7 +1255,7 @@ function App() {
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
             <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-200">
-              <span className="inline-block w-5 h-5 rounded-full border-[3px] border-indigo-500 border-t-transparent animate-spin shrink-0" />
+              <span className="inline-block w-5 h-5 rounded-full border-[3px] border-accent-500 border-t-transparent animate-spin shrink-0" />
               <div>
                 <div className="font-bold text-sm">{exportProgress.title}</div>
                 <div className="text-[11px] text-gray-500 mt-0.5">The data of every registered view is read from the files and written into one page. The download starts when it is finished: keep this tab open.</div>
@@ -1262,7 +1264,7 @@ function App() {
             <div className="px-4 py-3 space-y-2">
               <div className="text-gray-700 truncate" title={exportProgress.step}>{exportProgress.step}</div>
               <div className="h-2 rounded-full bg-gray-200 overflow-hidden">
-                <div className="h-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${Math.round(100 * Math.min(1, exportProgress.done / Math.max(1, exportProgress.total)))}%` }} />
+                <div className="h-full bg-accent-600 transition-[width] duration-300" style={{ width: `${Math.round(100 * Math.min(1, exportProgress.done / Math.max(1, exportProgress.total)))}%` }} />
               </div>
               <div className="text-[11px] text-gray-500">{Math.min(exportProgress.done, exportProgress.total)} of {exportProgress.total} step{exportProgress.total === 1 ? '' : 's'}</div>
             </div>
@@ -1291,8 +1293,8 @@ function App() {
                     : `Genes, reads and positions do not move. A second line over the ruler gives the ${b} position of each tick, the pointer gives both builds for any base, and the view's header shows its ${b} window (click to copy it). Lifted by Ensembl's assembly map (rest.ensembl.org): only the chromosome and the window's coordinates are sent.`}</div>
                 </button>
                 <button onClick={() => void switchAnnotation(b)}
-                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border-2 border-indigo-500 bg-indigo-50/60 hover:bg-indigo-50' : 'border border-gray-300 hover:bg-gray-50'}`}>
-                  <div className="font-semibold text-[12.5px]">Move everything to {b}{filesOnB && <span className="ml-2 text-[10.5px] font-medium text-indigo-700">recommended: the files are on {b}</span>}</div>
+                  className={`w-full text-left rounded-lg px-3 py-2 ${filesOnB ? 'border-2 border-accent-500 bg-accent-50/60 hover:bg-accent-50' : 'border border-gray-300 hover:bg-gray-50'}`}>
+                  <div className="font-semibold text-[12.5px]">Move everything to {b}{filesOnB && <span className="ml-2 text-[10.5px] font-medium text-accent-700">recommended: the files are on {b}</span>}</div>
                   <div className="text-[11px] text-gray-600 mt-0.5">For files aligned on {b}. Gene models, known SNPs, GTEx and the searches use {b}; each open view is lifted to its {b} window and reopened with its options.</div>
                   {filesBuild && filesBuild !== b && <div className="text-[11px] text-red-700 mt-1">Your files are on {filesBuild}: on {b} the genes would no longer match the reads.</div>}
                 </button>
@@ -1345,7 +1347,7 @@ function App() {
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
         <span>·</span>
-        <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-indigo-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
+        <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-accent-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>
         <span>CC BY-NC 4.0</span>
         {DEV && <span className="text-red-700 font-semibold">DEV build {DEV.branch}{DEV.sha ? ` @ ${DEV.sha}` : ''}</span>}
