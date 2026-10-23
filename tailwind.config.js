@@ -20,7 +20,7 @@ export default {
           600: '#0f766e', 700: '#0c625b', 800: '#0a4f4a', 900: '#083d3a', 950: '#052b29',
         },
         bar: { DEFAULT: '#13253b', ctrl: '#1f3249', line: '#34475f', text: '#f1f5f9', muted: '#a3b5c9' },
-        page: '#e6ebf1',
+        page: '#ccdaf4',
       },
       borderRadius: { lg: '6px', xl: '9px' },
     },
