@@ -59,7 +59,7 @@ export function GeneSuggest({ value, onChange, local = [], className, placeholde
           {list.map((s, i) => (
             <button key={s.symbol} type="button" role="option" aria-selected={i === active}
               onMouseDown={e => e.preventDefault()} onClick={() => pick(s)} onMouseEnter={() => setActive(i)}
-              className={`w-full flex items-baseline gap-2 px-3 py-1.5 text-left ${i === active ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}>
+              className={`w-full flex items-baseline gap-2 px-3 py-1.5 text-left ${i === active ? 'bg-accent-50' : 'hover:bg-slate-50'}`}>
               <span className="font-semibold text-[12.5px] text-slate-900 shrink-0">{s.symbol}</span>
               <span className="flex-1 min-w-0 truncate text-[11.5px] text-slate-500">
                 {s.via ? <span className="text-amber-700">{s.via.kind === 'previous' ? 'previously' : 'alias'} {s.via.text} · </span> : null}
