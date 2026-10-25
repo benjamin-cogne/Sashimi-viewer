@@ -19,6 +19,8 @@ import {
 import type { ExonPhase } from './sashimi/geometry';
 import { fusionFrame, fusionHgvs, fusionPeptide, type FusionEnd, type FusionPeptide } from './sashimi/fusionFrame';
 import SpliceCartoon from './sashimi/SpliceCartoon';
+import SvCartoon from './sashimi/SvCartoon';
+import { junctionsOfEvidence } from './sashimi/svModel';
 import { fusionStory, fusionStoryPossible, fusionWindows, spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
@@ -1330,7 +1332,7 @@ export default function SashimiViewer({
   /** Detail popover opened by clicking a junction arc or an exon (HTML, never exported). */
   const [popover, setPopover] = useState<
     | { kind: 'junction'; key: string; j: JunctionArc; x: number; y: number }
-    | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number; /** a fusion junction of an RNA track */ fusion?: boolean }
+    | { kind: 'structural'; key: string; j: JunctionArc; sv: SvKind; x: number; y: number; /** a fusion junction of an RNA track */ fusion?: boolean; /** the DNA track the arc belongs to */ sampleId?: number }
     /** a junction of the opposite strand of a stranded sample, drawn under the baseline */
     | { kind: 'anti'; key: string; j: JunctionArc; x: number; y: number }
     /** split reads of an RNA track continuing on another chromosome (a translocation's fusion junction); `j` marks the breakpoint here */
@@ -1345,6 +1347,21 @@ export default function SashimiViewer({
   /** Splicing cartoon opened from a junction popover (experimental). */
   const [cartoon, setCartoon] = useState<{ j: JunctionArc; model: TxModel; label: string; color: string; sample: string; /** a fusion transcript: its two partners */ fusion?: { five: FusionEnd; three: FusionEnd } } | null>(null);
   const [cartoonState, setCartoonState] = useState<{ story: SpliceStory | null; loading: string | null; error?: string }>({ story: null, loading: null });
+  /** Structural arcs of one DNA track picked with shift-click (their drag keys), and the SV cartoon opened on them. */
+  const [svPicked, setSvPicked] = useState<{ sampleId: number; keys: string[] } | null>(null);
+  const [svCartoon, setSvCartoon] = useState<{ sampleId: number; keys: string[] } | null>(null);
+  const pickSvArc = useCallback((sampleId: number, key: string) => setSvPicked(prev => {
+    if (!prev || prev.sampleId !== sampleId) return { sampleId, keys: [key] };
+    const keys = prev.keys.includes(key) ? prev.keys.filter(k => k !== key) : [...prev.keys, key];
+    return keys.length ? { sampleId, keys } : null;
+  }), []);
+  /** The toolbar chip of the picked arcs: opens the SV cartoon on them, or unpicks them. */
+  const svPickedChip = () => svPicked && (
+    <span className="inline-flex items-center h-[30px] rounded-[6px] border border-accent-200 bg-accent-50 text-accent-800 text-[12.5px] font-medium overflow-hidden" title="Structural arcs picked with shift-click on one DNA track: they are read as the junctions of one event">
+      <button onClick={() => setSvCartoon({ sampleId: svPicked.sampleId, keys: svPicked.keys })} className="inline-flex items-center gap-1.5 h-full px-2.5 hover:bg-accent-100" title="Animated cartoon: the chromosome rebuilt from the picked junctions, the segments lost or copied, and the copy number of each against the read depth (experimental)">🎬 {svPicked.keys.length} arc{svPicked.keys.length > 1 ? 's' : ''} picked · rebuild the SV</button>
+      <button onClick={() => setSvPicked(null)} className="h-full px-2 border-l border-accent-200 text-accent-600 hover:bg-accent-100" title="Unpick the arcs" aria-label="Unpick the arcs">×</button>
+    </span>
+  );
   /** Per-exon depth of every sample of the run (the cohort of the exon-usage statistics), one fetch per gene. */
   const [exonDepths, setExonDepths] = useState<{ key: string; data: ExonUsageResponse | null; error?: string } | null>(null);
   const [junctionOffsets, setJunctionOffsets] = useState<Record<string, number>>({});
@@ -3944,6 +3961,8 @@ export default function SashimiViewer({
   const pillWidth = (a: { text: string; deltas: { text: string }[] }) => (a.text.length + a.deltas.reduce((n, d) => n + d.text.length + 1, 0)) * 6 + 10;
   interface ArcRender {
     j: JunctionArc; key: string; dragKey: string; level: number; color: string; dashed: boolean; unique: boolean;
+    /** a structural arc of a DNA track: its sample (shift-click picks it for the SV cartoon) */
+    sampleId?: number;
     title: string; strokeW: number; geom: ReturnType<typeof arcGeom>;
     label: { x: number; y: number } | null;
     edge: { side: 'left' | 'right'; y: number; title: string } | null;
@@ -4275,7 +4294,7 @@ export default function SashimiViewer({
             '\nevidence, not a call: open the reads to check it';
           // a deletion is drawn solid when only CIGARs carry it, dashed as soon as split or clipped reads support it
           const onlyCigar = kind === 'deletion' && !Object.entries((j as SvArc).sources ?? {}).some(([k, n]) => k !== 'cigar' && n > 0);
-          arcs.push({ j, key, dragKey, level, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
+          arcs.push({ j, key, dragKey, level, sampleId: track.sampleId, color: pairKind ? PAIR_CLASS_LINE[pairKind] : SV_COLORS[kind], dashed: !onlyCigar, unique: false, title, strokeW: Math.min(4.5, 1 + Math.log2(Math.max(1, j.count)) * 0.55), geom, label, edge, offset, apexH, text: approx + j.count.toLocaleString('en-US'), deltas: [], labelScale: labelScales[`${currentChrom}:${key}`] ?? 1, labelRange: [visLo, visHi], frame: null, sv: kind });
         }
       }
       // Fusion junctions of an RNA track: its split reads and clipped reads placed by realignment (fusionOf), drawn above
@@ -5527,10 +5546,13 @@ export default function SashimiViewer({
                 if (dragMoved.current) return;
                 // picking for the phasing panel: a splice junction (not a structural arc) joins its list
                 if (pairPanel && pairPicking && !a.sv) { setPairPicked(q => ({ n: (q?.n ?? 0) + 1, chrom: currentChrom, junction: { start: a.j.start, end: a.j.end } })); return; }
+                // shift-click on a structural arc of a DNA track: picked for the SV cartoon (several arcs make one event)
+                if (a.sv && !a.fusion && a.sampleId != null && e.shiftKey) { pickSvArc(a.sampleId, a.dragKey); return; }
                 const p = svgPoint(e);
-                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y, fusion: !!a.fusion } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
+                setPopover(prev => (prev && prev.kind !== 'exon' && prev.key === a.key ? null : a.below ? { kind: 'anti', key: a.key, j: a.j, x: p.x, y: p.y } : a.sv ? { kind: 'structural', key: a.key, j: a.j, sv: a.sv, x: p.x, y: p.y, fusion: !!a.fusion, sampleId: a.sampleId } : { kind: 'junction', key: a.key, j: a.j, x: p.x, y: p.y }));
               }}>
               <title>{a.title}</title>
+              {svPicked && svPicked.keys.includes(a.dragKey) && <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke={a.color} strokeWidth={a.strokeW + 9} strokeLinecap="round" opacity={0.25} />}
               <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke="transparent" strokeWidth={Math.max(a.strokeW + 8, 12)} />
               <path d={arcPathIn(a.geom, PLOT_LEFT - ARC_EDGE_PX, plotRight + ARC_EDGE_PX)} fill="none" stroke={a.color} strokeWidth={a.strokeW} strokeLinecap="round"
                 strokeDasharray={a.dashed ? '5 3.5' : undefined} opacity={0.92} />
@@ -6821,6 +6843,7 @@ export default function SashimiViewer({
                 <Stepper label="min" unit="reads" value={minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min reads"
                   title="Hide junctions supported by fewer spliced reads" />
               )}
+              {svPickedChip()}
               {hiddenHere > 0 && (
                 <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
                   className="inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border border-amber-200 bg-amber-50 text-amber-800 text-[12.5px] font-medium hover:bg-amber-100"
@@ -6843,6 +6866,7 @@ export default function SashimiViewer({
                     ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
                     : <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to the default: ${autoNote}`}
                         onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
+                              {svPickedChip()}
               </Section>
             );
           })()}
@@ -7286,6 +7310,26 @@ export default function SashimiViewer({
             ))}
           </div>
         )}
+        {svCartoon && (() => {
+          const track = tracks.find(t => t.sampleId === svCartoon.sampleId);
+          if (!track?.structural) return null;
+          // the chromosome is drawn over the stretch the sample's coverage covers (the fetched window, clipped to its reads: the
+          // depth of the flanks is the reference level, and a margin without any read would drag it to zero)
+          const fetched = track.fetched ? { start: track.fetched.start, end: track.fetched.end } : { start: viewStart, end: viewEnd };
+          const covered = track.coverage.filter(r => r.depth > 0);
+          const win = { start: Math.max(fetched.start, covered.length ? covered[0].start : fetched.start), end: Math.min(fetched.end, covered.length ? covered[covered.length - 1].end : fetched.end) };
+          const hidden = (j: { start: number; end: number }) => hiddenArcs.includes(`${currentChrom}:${junctionKey(j)}`);
+          const candidates = junctionsOfEvidence(track.structural, currentChrom, svMinReads(track.sampleId), hidden).filter(j => Math.min(j.a.pos, j.b.pos) > win.start && Math.max(j.a.pos, j.b.pos) < win.end);
+          const initial = candidates.filter(j => svCartoon.keys.includes(`${track.sampleId}:${j.key}`)).map(j => j.id);
+          const idx = tracks.indexOf(track);
+          const controls = tracks.filter(t => t !== track && isDnaTrack(t) && !t.group && !t.gtex && t.coverage.length > 0).map(t => ({ name: t.sampleName, coverage: t.coverage }));
+          const models: TxModel[] = [...(tx ? [tx] : []), ...(altModels ?? []).filter(m => !tx || m.name !== tx.transcriptId).map(m => ({
+            geneName: currentGeneName, transcriptId: m.name, isMane: m.is_mane, modelKind: 'chosen' as const, chrom: currentChrom, strand: (m.strand < 0 ? -1 : 1) as 1 | -1, start: m.start, end: m.end,
+            exons: m.exons.map((e, i) => ({ start: e.start, end: e.end, rank: m.strand < 0 ? m.exons.length - i : i + 1 })), cdsStart: m.cdsStart, cdsEnd: m.cdsEnd }))];
+          return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build}
+            sample={{ name: track.sampleName, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], coverage: track.coverage, sampled: !!track.sampled }} controls={controls}
+            onClose={() => setSvCartoon(null)} />;
+        })()}
         {cartoon && (
           <SpliceCartoon story={cartoonState.story} loading={cartoonState.loading} error={cartoonState.error} tx={cartoon.model}
             sampleName={cartoon.sample} sampleColor={cartoon.color} junctionLabel={cartoon.label} onClose={() => setCartoon(null)} />
@@ -7513,6 +7557,10 @@ export default function SashimiViewer({
                 {popoverContent.subtitle && <div className="text-gray-500">{popoverContent.subtitle}</div>}
               </div>
               <div className="flex items-center gap-2">
+                {popover.kind === 'structural' && !popover.fusion && popover.sampleId != null && (
+                  <button onClick={() => { const sid = popover.sampleId!; setSvCartoon({ sampleId: sid, keys: [...new Set([...(svPicked?.sampleId === sid ? svPicked.keys : []), `${sid}:${popover.key}`])] }); setPopover(null); }}
+                    className="px-2 py-0.5 rounded-full bg-accent-600 text-white text-[11px] font-semibold hover:bg-accent-700" title="Animated cartoon: the chromosome rebuilt from this junction (and the arcs picked with shift-click), the segments lost or copied, and the copy number of each against the read depth (experimental)">🎬 Rebuild the SV</button>
+                )}
                 {popoverContent.cartoon && (
                   <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, si) % TRACK_COLORS.length], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-accent-600 text-white text-[11px] font-semibold hover:bg-accent-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
