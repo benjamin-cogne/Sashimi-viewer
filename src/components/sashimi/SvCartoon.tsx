@@ -9,7 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CoverageRun } from './types';
 import type { TxModel } from './geometry';
 import { formatBp } from './geometry';
-import { reconstruct, checkDepth, segmentContent, breakpointSite, exonRun, draftNotation, SV_DEPTH_MARGIN_BP, SV_DEPTH_MIN_BINS, SV_FIT_MIN_COPIES, SV_FIT_Z, SV_MOSAIC_MIN, SV_MOSAIC_MAX, SV_FLANK_MIN_BINS,
+import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathText, type RankedPath, checkDepth, segmentContent, breakpointSite, exonRun, draftNotation, SV_DEPTH_MARGIN_BP, SV_DEPTH_MIN_BINS, SV_FIT_MIN_COPIES, SV_FIT_Z, SV_MOSAIC_MIN, SV_MOSAIC_MAX, SV_FLANK_MIN_BINS,
   type SvJunction, type SvSegment, type SvPiece, type SegmentDepth } from './svModel';
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
@@ -110,14 +110,18 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   tRef.current = t;
 
   const chosen = useMemo(() => candidates.filter(j => selected.has(j.id)), [candidates, selected]);
+  // several junctions leaving one breakend give several paths: ranked by the depth, the best shown unless one is picked
+  const [pathKey, setPathKey] = useState<string | null>(null);
+  useEffect(() => setPathKey(null), [chosen]);
+  const ranked = useMemo(() => rankPaths(reconstructAll([{ chrom, start: win.start, end: win.end }], chosen), { name: sample.name, coverage: sample.coverage }, useControls ? controls : [], { zygosity, flankCopies: copies }),
+    [chosen, chrom, win.start, win.end, sample, controls, useControls, zygosity, copies]);
   const story = useMemo(() => {
-    const rec = reconstruct([{ chrom, start: win.start, end: win.end }], chosen);
-    const depth = checkDepth(rec, { name: sample.name, coverage: sample.coverage }, useControls ? controls : [], { zygosity, flankCopies: copies });
+    const { rec, depth } = ranked.find(r => r.rec.choice.join(',') === pathKey) ?? ranked[0];
     const scene = layout(rec);
     const notation = draftNotation(rec, build);
     const depthOf = new Map(depth.segments.map(d => [d.seg.id, d]));
     return { rec, depth, scene, notation, depthOf };
-  }, [chosen, chrom, win.start, win.end, sample, controls, useControls, zygosity, copies, build]);
+  }, [ranked, pathKey, build]);
   const { scene, rec, depth } = story;
   const segColorMap = useMemo(() => segmentColors(rec), [rec]);
   const loaders = useMemo<SvGeneLoaders>(() => ({ ...geneLoaders, fallback: models.map(m => ({
@@ -278,7 +282,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
           </span>
         </div>
 
-        <Details rec={rec} depth={depth} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} notation={story.notation} chrom={chrom} />
+        <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} notation={story.notation} chrom={chrom} />
         {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
       </div>
     </div>
@@ -435,8 +439,8 @@ function Caption({ t, scene, rec, depth, chosen, zygosity }: { t: number; scene:
 
 // ======================== Details ========================
 
-function Details({ rec, depth, candidates, selected, onToggle, models, notation, chrom }: {
-  rec: ReturnType<typeof reconstruct>; depth: ReturnType<typeof checkDepth>; candidates: SvJunction[]; selected: Set<string>; onToggle: (id: string) => void; models: TxModel[];
+function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, notation, chrom }: {
+  rec: ReturnType<typeof reconstruct>; depth: ReturnType<typeof checkDepth>; ranked: RankedPath[]; onPath: (key: string) => void; candidates: SvJunction[]; selected: Set<string>; onToggle: (id: string) => void; models: TxModel[];
   notation: ReturnType<typeof draftNotation>; chrom: string;
 }) {
   const side = (e: SvJunction['a']) => (e.side === 'tail' ? '▸' : '◂');
@@ -494,6 +498,27 @@ function Details({ rec, depth, candidates, selected, onToggle, models, notation,
         </div>
       </div>
       <div>
+        {ranked.length > 1 && (
+          <div className="mb-2">
+            <div className="text-[10.5px] font-semibold text-gray-700 mb-0.5">{ranked.length} possible paths · junctions share a breakend</div>
+            <div className="space-y-0.5">
+              {ranked.map((r, i) => {
+                const key = r.rec.choice.join(','), on = r.rec === rec;
+                return (
+                  <button key={key} onClick={() => onPath(key)} className={`w-full text-left rounded px-1.5 py-1 border ${on ? 'border-accent-400 bg-accent-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                    <div className="font-mono text-[11px]">{pathText(r.rec) || 'no rearranged chromosome'}</div>
+                    <div className="text-[10.5px] text-gray-600">
+                      {i === 0 && <span className="text-emerald-700 font-semibold">best fit · </span>}
+                      <span className={r.misfits ? 'text-red-600' : 'text-emerald-700'}>{r.assessed ? (r.misfits ? `depth misfits ${r.misfits} of ${r.assessed} segments (${r.depth.segments.filter(d => d.fits === false).map(d => d.seg.letter).join(', ')})` : `depth fits all ${r.assessed} segments`) : 'depth not assessable'}</span>
+                      {r.rec.unplaced.length > 0 && <> · leaves out {r.rec.unplaced.map(j => `${j.id} (${j.reads})`).join(', ')}</>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-[10.5px] text-gray-500 mt-0.5">Ranked by the segments whose depth does not fit, then the reads left out, then the summed deviation. The junctions left out by the best path may belong to a second version of the rearrangement (another derivative, or a subclone): their share of the reads at the shared breakend is a rough fraction.</div>
+          </div>
+        )}
         <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Rebuilt chromosome{rec.ders.length > 1 ? 's' : ''}</div>
         {rec.ders.filter(d => d.rearranged || rec.ders.length === 1).map(d => (
           <div key={d.name} className="mb-1.5">
@@ -518,6 +543,7 @@ function Details({ rec, depth, candidates, selected, onToggle, models, notation,
             </ul>
           </div>
         )}
+        {rec.merged.length > 0 && <div className="text-[10.5px] text-gray-600 mt-1">Breakends within {SV_BREAKEND_CLUSTER_BP} bp taken as one breakpoint: {rec.merged.join('; ')}.</div>}
         {rec.warnings.map((w, i) => <div key={i} className="text-[11px] text-amber-800 mt-1">⚠ {w}</div>)}
         <div className="text-[10.5px] text-gray-500 mt-1.5">Breakpoints come from the reads, rounded to 5 bp (pairs alone: within an insert size); check them in the alignments before anything goes into a report. The scene draws segment widths on a log scale.</div>
       </div>

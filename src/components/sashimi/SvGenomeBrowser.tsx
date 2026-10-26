@@ -102,7 +102,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const len = chromLength(build as GenomeBuild, chrom) ?? Infinity;
     return { start: Math.max(0, Math.min(eventWin.start, bps[0] - near)), end: Math.min(Math.max(len, eventWin.end), Math.max(eventWin.end, bps[bps.length - 1] + near)) };
   }, [eventWin.start, eventWin.end, bpKey, near, build, chrom]); // eslint-disable-line react-hooks/exhaustive-deps
-  const rec = useMemo(() => (win === eventWin ? eventRec : reconstruct([{ chrom, start: win.start, end: win.end }], eventRec.junctions)), [eventRec, win]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rec = useMemo(() => (win === eventWin ? eventRec : reconstruct([{ chrom, start: win.start, end: win.end }], eventRec.junctions, eventRec.choice)), [eventRec, win]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the NM_ models of the window
   useEffect(() => {

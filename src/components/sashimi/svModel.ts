@@ -70,12 +70,73 @@ export interface SvPiece { seg: SvSegment; reversed: boolean; /** how the piece 
 export interface SvDerivative { chrom: string; name: string; pieces: SvPiece[]; /** "22pter → 9qter" when it ends on another chromosome */ ends: string; rearranged: boolean }
 export interface SvReconstruction {
   segs: SvSegment[]; byChr: Record<string, SvSegment[]>; chrs: string[];
-  ders: SvDerivative[]; lost: SvSegment[]; warnings: string[]; junctions: SvJunction[];
+  ders: SvDerivative[]; lost: SvSegment[]; warnings: string[];
+  /** the junctions, their breakends moved onto the shared breakpoints (see clusterBreakends) */
+  junctions: SvJunction[];
+  /** the breakpoints made of several breakends a few bases apart: "end of A: J1 10,489,766 · J2 10,489,771 → 10,489,766" */
+  merged: string[];
+  /** at each breakend several unused junctions leave, the branch taken (0: the most reads) and the number of branches */
+  choice: number[]; options: number[];
+  /** junctions the walk could not place: they share a breakend with a junction it took */
+  unplaced: SvJunction[];
 }
 
 const chrNum = (c: string) => c.replace(/^chr/i, '');
+const fmt = (n: number) => n.toLocaleString('en-US');
 
-export function reconstruct(windows: { chrom: string; start: number; end: number }[], junctions: SvJunction[]): SvReconstruction {
+/** Breakends of different junctions closer than this are one breakpoint: the scatter of split reads at one junction,
+ *  microhomology, and the few bases of templated sequence MMBIR / FoSTeS leave at complex breakpoints. The same ceiling
+ *  as the merging of arcs (SV_MERGE_MAX_BP); a fragment shorter than this between two breakpoints is not resolved. */
+export const SV_BREAKEND_CLUSTER_BP = 100;
+/** Paths tried when several junctions share a breakend (each choice doubles them). */
+export const SV_MAX_PATHS = 64;
+
+/**
+ * Breakends of the selected junctions that lie within SV_BREAKEND_CLUSTER_BP of each other (on one chromosome) are put
+ * on one position, the read-weighted median of the group, so that one breakpoint seen by several junctions cuts the
+ * chromosome once. The two breakends of one junction are never put together.
+ */
+export function clusterBreakends(junctions: SvJunction[], tol = SV_BREAKEND_CLUSTER_BP): { junctions: SvJunction[]; groups: { chrom: string; pos: number; members: { j: SvJunction; end: 'a' | 'b'; pos: number }[] }[] } {
+  type M = { j: SvJunction; end: 'a' | 'b'; pos: number };
+  const byChrom = new Map<string, M[]>();
+  for (const j of junctions) for (const end of ['a', 'b'] as const) {
+    const e = j[end];
+    if (!byChrom.has(e.chrom)) byChrom.set(e.chrom, []);
+    byChrom.get(e.chrom)!.push({ j, end, pos: e.pos });
+  }
+  const groups: { chrom: string; pos: number; members: M[] }[] = [];
+  for (const [chrom, list] of byChrom) {
+    list.sort((x, y) => x.pos - y.pos);
+    let cur: M[] = [];
+    const close = () => {
+      if (!cur.length) return;
+      // read-weighted median position
+      const w = cur.map(m => ({ pos: m.pos, w: Math.max(1, m.j.reads) })).sort((x, y) => x.pos - y.pos);
+      const half = w.reduce((a, b) => a + b.w, 0) / 2;
+      let acc = 0, pos = w[0].pos;
+      for (const x of w) { acc += x.w; if (acc >= half) { pos = x.pos; break; } }
+      groups.push({ chrom, pos, members: cur }); cur = [];
+    };
+    for (const m of list) {
+      if (cur.length && (m.pos - cur[0].pos > tol || cur.some(c => c.j === m.j))) close();
+      cur.push(m);
+    }
+    close();
+  }
+  const moved = new Map<SvJunction, SvJunction>();
+  for (const g of groups) for (const m of g.members) {
+    const j = moved.get(m.j) ?? { ...m.j, a: { ...m.j.a }, b: { ...m.j.b } };
+    j[m.end].pos = g.pos; moved.set(m.j, j);
+  }
+  return { junctions: junctions.map(j => moved.get(j) ?? j), groups };
+}
+
+/**
+ * The rearranged chromosomes of a set of junctions. Where several junctions leave one breakend (only one can follow it
+ * on a chromosome), `choice` picks which (0: the best-supported); `reconstructAll` lists every path.
+ */
+export function reconstruct(windows: { chrom: string; start: number; end: number }[], input: SvJunction[], choice: number[] = []): SvReconstruction {
+  const { junctions, groups } = clusterBreakends(input);
   const chrs = windows.map(w => w.chrom);
   const segs: SvSegment[] = [];
   const byChr: Record<string, SvSegment[]> = {};
@@ -90,6 +151,12 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
   }
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   segs.forEach((s, k) => { s.letter = k < letters.length ? letters[k] : `S${k + 1}`; });
+  const merged = groups.filter(g => new Set(g.members.map(m => m.pos)).size > 1 || g.members.length > 1).map(g => {
+    const left = byChr[g.chrom]?.find(x => x.end === g.pos), right = byChr[g.chrom]?.find(x => x.start === g.pos);
+    const where = left && right ? `${left.letter}|${right.letter}` : fmt(g.pos);
+    const spread = new Set(g.members.map(m => m.pos)).size > 1 ? ` (breakends ${fmt(Math.min(...g.members.map(m => m.pos)))}–${fmt(Math.max(...g.members.map(m => m.pos)))}, taken at ${fmt(g.pos)})` : '';
+    return `${where}: ${[...new Set(g.members.map(m => m.j.id))].join(', ')}${spread}`;
+  });
   const keyOf = (e: Breakend): string | null => {
     const list = byChr[e.chrom];
     if (!list) return null;
@@ -102,11 +169,13 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
     const ka = keyOf(j.a), kb = keyOf(j.b);
     if (!ka || !kb) { warnings.push(`${j.id} reaches outside the window and was left out.`); continue; }
     if (!at.has(ka)) at.set(ka, []); at.get(ka)!.push({ j, other: kb });
-    if (!at.has(kb)) at.set(kb, []); at.get(kb)!.push({ j, other: ka });
+    if (ka !== kb) { if (!at.has(kb)) at.set(kb, []); at.get(kb)!.push({ j, other: ka }); }
   }
-  for (const [k, list] of at) if (list.length > 1) warnings.push(`${list.map(x => x.j.id).join(' and ')} join the same breakend (${k.endsWith('t') ? 'end' : 'start'} of ${segs[+k.split(':')[0]].letter}): only one can be on a chromosome; the first is taken.`);
+  // the best-supported junction first at a shared breakend
+  for (const list of at.values()) list.sort((x, y) => y.j.reads - x.j.reads);
   const used = new Set<string>(), seen = new Set<number>();
   const ders: SvDerivative[] = [];
+  const taken: number[] = [], options: number[] = [];
   for (const chr of chrs) {
     const s0 = byChr[chr][0];
     if (!s0 || seen.has(s0.id)) continue;
@@ -121,7 +190,9 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
       const copy = visits.get(seg.id) ?? 0; visits.set(seg.id, copy + 1);
       pieces.push({ seg, reversed, via, copy });
       const exit = `${seg.id}:${reversed ? 'h' : 't'}`;
-      const next = (at.get(exit) ?? []).find(x => !used.has(x.j.id));
+      const open = (at.get(exit) ?? []).filter(x => !used.has(x.j.id));
+      let next = open[0];
+      if (open.length > 1) { const k = Math.min(open.length - 1, choice[taken.length] ?? 0); next = open[k]; taken.push(k); options.push(open.length); }
       if (next) { used.add(next.j.id); via = next.j; key = next.other; continue; }
       const list = byChr[seg.chrom];
       if (!reversed) { if (seg.i + 1 < list.length) { key = `${list[seg.i + 1].id}:h`; via = 'ref'; continue; } }
@@ -133,10 +204,33 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
     const last = pieces[pieces.length - 1];
     ders.push({ chrom: chr, pieces, rearranged, name: rearranged ? `der(${chrNum(chr)})` : chrNum(chr), ends: last && last.seg.chrom !== chr ? `${chrNum(chr)}pter → ${chrNum(last.seg.chrom)}qter` : '' });
   }
-  for (const j of junctions) if (!used.has(j.id) && !warnings.some(w => w.startsWith(j.id))) warnings.push(`${j.id} is on no rebuilt chromosome: its breakends were already joined by another junction.`);
+  const unplaced = junctions.filter(j => !used.has(j.id) && !warnings.some(w => w.startsWith(j.id)));
+  const sideOf = (k: string) => `${k.endsWith('t') ? 'end' : 'start'} of ${segs[+k.split(':')[0]].letter}`;
+  for (const j of unplaced) {
+    const ka = keyOf(j.a)!, kb = keyOf(j.b)!;
+    const rivals = [...new Set([ka, kb].flatMap(k => (at.get(k) ?? []).filter(x => x.j !== j && used.has(x.j.id)).map(x => `${x.j.id} at the ${sideOf(k)} (${x.j.reads} reads against ${j.reads})`)))];
+    warnings.push(`${j.id} (${j.reads} read${j.reads > 1 ? 's' : ''}) is on no rebuilt chromosome${rivals.length ? `: ${rivals.join(' and ')} took its breakend` : ''}. A breakend joined two ways points to two versions of the rearrangement (a second derivative, or cells that differ), or to a small piece the breakpoints cannot resolve.`);
+  }
   const lost = segs.filter(s => !seen.has(s.id));
-  return { segs, byChr, chrs, ders, lost, warnings, junctions };
+  return { segs, byChr, chrs, ders, lost, warnings, junctions, merged, choice: taken, options, unplaced };
 }
+
+/** Every path through the shared breakends (at most SV_MAX_PATHS), the best-supported first. */
+export function reconstructAll(windows: { chrom: string; start: number; end: number }[], junctions: SvJunction[]): SvReconstruction[] {
+  const out: SvReconstruction[] = [];
+  const todo: number[][] = [[]];
+  while (todo.length && out.length < SV_MAX_PATHS) {
+    const prefix = todo.shift()!;
+    const rec = reconstruct(windows, junctions, prefix);
+    out.push(rec);
+    // the branch points past the prefix took option 0: try every other option there
+    for (let i = prefix.length; i < rec.choice.length; i++) for (let k = 1; k < rec.options[i]; k++) todo.push([...rec.choice.slice(0, i), k]);
+  }
+  return out;
+}
+
+/** Path text: "A · C′ · E" for each rebuilt chromosome. */
+export const pathText = (rec: SvReconstruction): string => rec.ders.filter(d => d.rearranged).map(d => `${d.name} = ${d.pieces.map(p => p.seg.letter + (p.reversed ? '′' : '')).join(' · ')}`).join('; ');
 
 // ======================== Depth ========================
 
@@ -251,6 +345,21 @@ export function checkDepth(rec: SvReconstruction, sample: DepthSample, controls:
     : how === 'flanks' ? `median depth of the flanks (outside every selected breakpoint), taken as ${flankCopies} copies`
     : `median depth of the whole window (the flanks hold fewer than ${SV_FLANK_MIN_BINS} bins), taken as ${flankCopies} copies`;
   return { segments, verdict, reference: { how, depth: level, controls: ctrlRuns.map(c => c.name), note }, flankCopies, zygosity, binBp };
+}
+
+export interface RankedPath { rec: SvReconstruction; depth: DepthCheck; misfits: number; assessed: number; unplacedReads: number; score: number }
+/**
+ * The paths through shared breakends, ranked by the read depth: first the fewest segments whose depth does not fit,
+ * then the fewest junction reads left off the rebuilt chromosomes, then the smallest sum of squared deviations
+ * (each in units of its fit tolerance).
+ */
+export function rankPaths(recs: SvReconstruction[], sample: DepthSample, controls: DepthSample[], opts: { zygosity: 'het' | 'hom'; flankCopies: number }): RankedPath[] {
+  return recs.map(rec => {
+    const depth = checkDepth(rec, sample, controls, opts);
+    const assessed = depth.segments.filter(d => d.fits != null);
+    const score = assessed.reduce((a, d) => a + ((d.observed! - d.expected) / Math.max(SV_FIT_MIN_COPIES, SV_FIT_Z * d.se!)) ** 2, 0);
+    return { rec, depth, misfits: assessed.filter(d => !d.fits).length, assessed: assessed.length, unplacedReads: rec.unplaced.reduce((a, j) => a + j.reads, 0), score };
+  }).sort((x, y) => x.misfits - y.misfits || x.unplacedReads - y.unplacedReads || x.score - y.score);
 }
 
 // ======================== Annotation ========================
