@@ -8,8 +8,10 @@
  * chosen PanelApp panel.
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import type { SvReconstruction } from './svModel';
-import { geneStory, dosageReading, dosageScoreText, ranksText, toDer, LOEUF_INTOLERANT, PLI_INTOLERANT,
+import { reconstruct, type SvReconstruction } from './svModel';
+import { chromLength } from '../../standalone/assembly';
+import type { GenomeBuild } from '../../standalone/ensembl';
+import { geneStory, dosageReading, dosageScoreText, ranksText, toDer, LOEUF_INTOLERANT, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
   type SvGene, type SvTranscript, type GeneAnnotations, type GenePanel, type Domain, type GeneImpact, type Chain, type Fragment, type DerLayout, type DosageScore, type Constraint, type ImpactKind } from './svGenes';
 import { IMPACT, KIND_COLOR } from './svColors';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary, type LoadedPanel } from '../../standalone/panelapp';
@@ -17,7 +19,7 @@ import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary
 const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const VW = 1200, X0 = 112, X1 = 1186;
-const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, TAD_H = 58, BAND_H = 20, RULER_H = 18, RIB_H = 118;
+const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H = 20, RULER_H = 18, RIB_H = 118;
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -75,7 +77,7 @@ const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, na
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, flankCopies, zygosity, build, loaders }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders }: Props) {
   const [mode, setMode] = useState<'mane' | 'all'>('mane');
   const [txs, setTxs] = useState<{ list: SvTranscript[]; loading: boolean; error?: string; source: string }>({ list: [], loading: true, source: '' });
   const [ann, setAnn] = useState<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[]; loading: boolean }>({ dosage: new Map(), constraint: new Map(), notes: [], loading: false });
@@ -84,10 +86,23 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
   const [hover, setHover] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number; gene: string } | null>(null);
   const [showUnchanged, setShowUnchanged] = useState(false);
+  const [showNear, setShowNear] = useState(false);
   const [view, setView] = useState({ z: 1, pan: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; pan: number } | null>(null);
+  const [near, setNear] = useState<number>(() => store.get<number>('sashimi.svNear') ?? NEAR_BREAKPOINT_DEFAULT);
+
+  // the region shown: the event's window, widened to `near` on each side of the outermost breakpoints (clamped to the
+  // chromosome), so the genes a position effect could reach are there; the same junctions cut it (same segments, longer flanks)
+  const bpKey = eventRec.junctions.flatMap(j => [j.a, j.b]).filter(e => e.chrom === chrom).map(e => e.pos).sort((a, b) => a - b).join(',');
+  const win = useMemo(() => {
+    const bps = bpKey ? bpKey.split(',').map(Number) : [];
+    if (!bps.length || near <= 0) return eventWin;
+    const len = chromLength(build as GenomeBuild, chrom) ?? Infinity;
+    return { start: Math.max(0, Math.min(eventWin.start, bps[0] - near)), end: Math.min(Math.max(len, eventWin.end), Math.max(eventWin.end, bps[bps.length - 1] + near)) };
+  }, [eventWin.start, eventWin.end, bpKey, near, build, chrom]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rec = useMemo(() => (win === eventWin ? eventRec : reconstruct([{ chrom, start: win.start, end: win.end }], eventRec.junctions)), [eventRec, win]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the NM_ models of the window
   useEffect(() => {
@@ -111,10 +126,12 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
   }, [symbols.join(','), chrom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const domains = useMemo(() => (domainsFile ? parseDomainsBed(domainsFile.text).get(chrom.startsWith('chr') ? chrom : `chr${chrom}`) ?? [] : []), [domainsFile, chrom]);
-  const story = useMemo(() => geneStory(rec, genes, win, { flankCopies, zygosity, domains }), [rec, genes, win, flankCopies, zygosity, domains]);
+  const story = useMemo(() => geneStory(rec, genes, win, { flankCopies, zygosity, domains, near }), [rec, genes, win, flankCopies, zygosity, domains, near]);
   const panel = useMemo(() => (panelData ? toPanel(panelData) : null), [panelData]);
   const annotations: GeneAnnotations = useMemo(() => ({ dosage: ann.dosage, constraint: ann.constraint, panel }), [ann, panel]);
   const impactOf = useMemo(() => new Map(story.genes.map(g => [g.gene.symbol, g])), [story]);
+  /** in a crowded view, the genes that keep their label: every changed gene, and the nearby ones worth a look */
+  const worthLabel = (gi: GeneImpact | undefined) => !!gi && gi.kind !== 'unaffected' && (gi.kind !== 'nearby' || notable(gi, annotations));
 
   // ---- geometry ----
   const ders = story.ders.filter(d => d.rearranged);
@@ -136,7 +153,16 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  }, [txs.loading]);
+  /** The view showing [lo, hi) of the reference over `frac` of the width. */
+  const fitView = (lo: number, hi: number, frac = 1) => {
+    const base = (pos: number) => X0 + ((X1 - X0) - winLen * k) / 2 + (pos - win.start) * k;
+    const a0 = base(lo), b0 = base(hi), z2 = Math.max(1, Math.min(200, (X1 - X0) * frac / Math.max(1, b0 - a0)));
+    return z2 <= 1 ? { z: 1, pan: 0 } : { z: z2, pan: (X0 + X1) / 2 - X0 - ((a0 + b0) / 2 - X0) * z2 };
+  };
+  const eventView = () => fitView(eventWin.start, eventWin.end);
+  // open on the event; zooming out shows the genes around it
+  useEffect(() => { setView(eventView()); }, [win.start, win.end, ders.map(d => d.length).join()]); // eslint-disable-line react-hooks/exhaustive-deps
   const zoomTo = (lo: number, hi: number) => {
     const a = refX(lo), b = refX(hi); const base = (x: number) => (x - X0 - pan) / z + X0;
     const a0 = base(a), b0 = base(b), z2 = Math.max(1, Math.min(200, (X1 - X0) * 0.7 / Math.max(1, b0 - a0)));
@@ -146,23 +172,33 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
   // ---- layout of the reference genes ----
   const shown = (g: SvGene) => (mode === 'mane' ? [g.principal] : g.transcripts);
   const labelW = (s: string) => s.length * 6.4 + 16;
-  function pack<T extends { x0: number; x1: number; h: number }>(items: T[]): { items: (T & { lane: number })[]; laneY: number[]; height: number } {
-    const lanes: number[] = [], laneH: number[] = [];
-    const placed = [...items].sort((a, b) => a.x0 - b.x0).map(it => {
-      let lane = lanes.findIndex(end => end + 8 < it.x0);
-      if (lane < 0) { lane = lanes.length; lanes.push(-Infinity); laneH.push(0); }
-      lanes[lane] = it.x1; laneH[lane] = Math.max(laneH[lane], it.h);
-      return { ...it, lane };
-    });
+  /**
+   * Genes in lanes, each with its label; when that would take more than MAX_LANES lanes (a gene-dense region seen whole),
+   * glyphs alone are packed (sharing a lane past the cap) and only the genes worth a label keep it (`compact`).
+   */
+  function pack<T extends { x0: number; x1: number; xg: number; h: number }>(items: T[]): { items: (T & { lane: number; compact: boolean })[]; laneY: number[]; height: number } {
+    const run = (ext: (it: T) => number, cap: number) => {
+      const lanes: number[] = [], laneH: number[] = [];
+      const placed = [...items].sort((a, b) => a.x0 - b.x0).map(it => {
+        let lane = lanes.findIndex(end => end + 8 < it.x0);
+        if (lane < 0 && lanes.length < cap) { lane = lanes.length; lanes.push(-Infinity); laneH.push(0); }
+        if (lane < 0) lane = lanes.indexOf(Math.min(...lanes));
+        lanes[lane] = Math.max(lanes[lane], ext(it)); laneH[lane] = Math.max(laneH[lane], it.h);
+        return { ...it, lane };
+      });
+      return { placed, laneH };
+    };
+    let r = run(it => it.x1, Infinity), compact = false;
+    if (r.laneH.length > MAX_LANES) { r = run(it => it.xg, MAX_LANES); compact = true; }
     const laneY: number[] = []; let y = 0;
-    for (const h of laneH) { laneY.push(y); y += h + LANE_GAP; }
-    return { items: placed, laneY, height: Math.max(26, y) };
+    for (const h of r.laneH) { laneY.push(y); y += h + LANE_GAP; }
+    return { items: r.placed.map(it => ({ ...it, compact })), laneY, height: Math.max(26, y) };
   }
   const inView = (a: number, b: number) => Math.max(a, b) >= X0 - 2 && Math.min(a, b) <= X1 + 2;
-  const refItems = pack(genes.filter(g => inView(refX(g.start), refX(g.end))).map(g => { const a = Math.max(X0 + 2, refX(Math.max(g.start, win.start))), b = refX(Math.min(g.end, win.end)); return { g, x0: a, x1: Math.max(b, a + labelW(g.symbol)), h: LABEL_H + shown(g).length * TX_H }; }));
+  const refItems = pack(genes.filter(g => inView(refX(g.start), refX(g.end))).map(g => { const a = Math.max(X0 + 2, refX(Math.max(g.start, win.start))), b = refX(Math.min(g.end, win.end)); return { g, x0: a, x1: Math.max(b, a + labelW(g.symbol)), xg: Math.max(b, a + 3), h: LABEL_H + shown(g).length * TX_H }; }));
 
   // ---- layout of the rebuilt chromosome's genes: one block per chain (a fusion's two partners in one block) ----
-  interface DerBlock { der: DerLayout; chains: Chain[]; genes: string[]; label: string; x0: number; x1: number; h: number; fusion: GeneImpact['principal']['fusions'][number] | null }
+  interface DerBlock { der: DerLayout; chains: Chain[]; genes: string[]; label: string; x0: number; x1: number; xg: number; h: number; fusion: GeneImpact['principal']['fusions'][number] | null }
   const derBlocks = useMemo(() => {
     const keep = (c: Chain) => c.parts.every(p => (mode === 'mane' ? p.tx === impactOf.get(p.tx.gene)?.gene.principal : true));
     const out = new Map<DerLayout, DerBlock[]>();
@@ -189,7 +225,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
       // in "all NM" mode the transcripts of one gene over the same span share a block
       const same = list.find(b => b.genes.join() === geneList.join() && Math.abs(b.x0 - x0) < 2 && Math.abs(b.x1 - x1) < 2);
       if (same) { same.chains.push(c); same.h += TX_H; continue; }
-      list.push({ der: d, chains: [c], genes: geneList, label, x0, x1: Math.max(x1, x0 + labelW(label) + (fusion ? 70 : 0)), h: LABEL_H + TX_H, fusion });
+      list.push({ der: d, chains: [c], genes: geneList, label, x0, x1: Math.max(x1, x0 + labelW(label) + (fusion ? 70 : 0)), xg: Math.max(x1, x0 + 3), h: LABEL_H + TX_H, fusion });
     }
     return out;
   }, [story, mode, view, k]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -253,7 +289,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: z > 1 ? (drag.current ? 'grabbing' : 'grab') : 'default', fontFamily: FONT }} className="block select-none"
       onMouseDown={e => { if (e.button === 0) drag.current = { x: e.clientX, pan: view.pan }; }}
       onMouseMove={e => { const d = drag.current; if (!d || z <= 1) return; const r = svgRef.current!.getBoundingClientRect(); setView(v => ({ ...v, pan: d.pan + ((e.clientX - d.x) / r.width) * VW })); }}
-      onMouseUp={() => { drag.current = null; }} onMouseLeave={() => { drag.current = null; leave(); }} onDoubleClick={() => setView({ z: 1, pan: 0 })}>
+      onMouseUp={() => { drag.current = null; }} onMouseLeave={() => { drag.current = null; leave(); }} onDoubleClick={() => setView(eventView())}>
       <defs>
         <clipPath id="svb-clip"><rect x={X0 - 2} y={0} width={X1 - X0 + 4} height={H} /></clipPath>
         <pattern id="svb-lost" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fef2f2" /><line x1="0" y1="0" x2="0" y2="6" stroke={C.lost} strokeWidth="1.6" /></pattern>
@@ -278,7 +314,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
         {/* breakpoints through the reference */}
         {rec.segs.filter(s => !s.first).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={domains.length ? yRefTad : yRefGenes} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={1} strokeDasharray="3 3" opacity={0.55} />)}
         {/* reference genes */}
-        {refItems.items.map(({ g, lane }) => {
+        {refItems.items.map(({ g, lane, compact }) => {
           const gi = impactOf.get(g.symbol); const col = IMPACT[gi?.kind ?? 'unaffected'].color;
           const yy = yRefGenes + refItems.laneY[lane];
           const lostGene = gi?.kind === 'deleted';
@@ -286,7 +322,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
           return (
             <g key={`rg${g.symbol}`} opacity={dim(g.symbol)} onMouseEnter={enter(g.symbol)} onMouseMove={enter(g.symbol)} onMouseLeave={leave} style={{ cursor: 'pointer' }} onClick={() => zoomTo(g.start, g.end)}>
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
-              <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={gi && gi.kind !== 'unaffected' ? 700 : 500} fontStyle="italic" fill={col}>{g.symbol}</text>
+              {(!compact || worthLabel(gi)) && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={gi && gi.kind !== 'unaffected' ? 700 : 500} fontStyle="italic" fill={col}>{g.symbol}</text>}
               {shown(g).map((t, i) => <g key={t.id}>{txGlyph(t, refX, yy + LABEL_H + 6 + i * TX_H, col, `r${t.id}`)}</g>)}
               {lostGene && <line x1={refX(g.start)} x2={refX(g.end)} y1={yy + LABEL_H + 6} y2={yy + LABEL_H + 6} stroke={C.lost} strokeWidth={2.2} opacity={0.6} />}
             </g>
@@ -351,7 +387,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
                 return (
                   <g key={`dg${bi}`} opacity={dim(b.genes)} onMouseEnter={enter(b.genes[0])} onMouseMove={enter(b.genes[0])} onMouseLeave={leave} style={{ cursor: 'pointer' }}>
                     {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
-                    <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>
+                    {(!b.compact || isFusion || worthLabel(gi)) && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>}
                     {isFusion && b.fusion && <g>
                       <rect x={lx + labelW(b.label) - 4} y={yy + 1} width={b.fusion.kind === 'in-frame' ? 52 : b.fusion.kind === 'promoter-swap' ? 74 : 66} height={12} rx={6} fill={b.fusion.kind === 'in-frame' ? '#7c3aed' : '#ede9fe'} />
                       <text x={lx + labelW(b.label) + 2} y={yy + 10} fontSize={9} fontWeight={700} fill={b.fusion.kind === 'in-frame' ? '#fff' : '#6d28d9'}>{b.fusion.kind === 'in-frame' ? 'in frame' : b.fusion.kind === 'promoter-swap' ? 'promoter swap' : b.fusion.kind === 'out-of-frame' ? 'out of frame' : b.fusion.kind === 'five-cds-whole' ? '3′ UTR join' : 'frame ?'}</text>
@@ -404,10 +440,12 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
   );
 
   // ---- gene table ----
-  const touched = story.genes.filter(g => g.kind !== 'unaffected');
+  const nearby = story.genes.filter(g => g.kind === 'nearby');
+  const touched = [...story.genes.filter(g => g.kind !== 'unaffected' && g.kind !== 'nearby'), ...nearby.filter(g => notable(g, annotations))];
+  const nearOthers = nearby.filter(g => !notable(g, annotations));
   const unchanged = story.genes.filter(g => g.kind === 'unaffected');
   const rowsOf = (list: GeneImpact[]) => [...list].sort((a, b) => b.rank - a.rank || (panel?.genes.get(b.gene.symbol.toUpperCase())?.confidence ?? 0) - (panel?.genes.get(a.gene.symbol.toUpperCase())?.confidence ?? 0) || (ann.dosage.get(b.gene.symbol)?.hi ?? -1) - (ann.dosage.get(a.gene.symbol)?.hi ?? -1));
-  const findings = useMemo(() => summary(story.genes, annotations), [story, annotations]);
+  const findings = useMemo(() => summary(story.genes, annotations, near), [story, annotations, near]);
 
   return (
     <div className="mt-2 border-t border-gray-200 pt-3" style={{ fontFamily: FONT }}>
@@ -423,9 +461,16 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
         </label>
         {domainsFile && <button onClick={() => { setDomainsFile(null); store.set('sashimi.svDomains', null); }} className="text-gray-400 hover:text-red-600" title="Remove the domains">×</button>}
+        <label className="inline-flex items-center gap-1 text-gray-600" title={`Without chromatin domains, an intact gene within this distance of a breakpoint is reported as a possible position effect, and the genes that far around the event are fetched (zoom out to see them). TADs average about 1 Mb; position effects have been documented 1.3 Mb from a breakpoint (SOX9) and further.${domains.length ? ' With domains loaded, the domains are used instead.' : ''}`}>
+          near a breakpoint ≤
+          <select value={near} onChange={e => { const v = Number(e.target.value); setNear(v); store.set('sashimi.svNear', v); }} className="border rounded px-1 py-0.5">
+            {[0, 250e3, 500e3, 1e6, 2e6, 3e6].map(v => <option key={v} value={v}>{v === 0 ? 'off' : v >= 1e6 ? `${v / 1e6} Mb` : `${v / 1e3} kb`}</option>)}
+          </select>
+          {domains.length > 0 && <span className="text-gray-400">(TADs used instead)</span>}
+        </label>
         <span className="ml-auto flex items-center gap-1">
-          {[['−', () => setView(v => ({ z: Math.max(1, v.z / 1.5), pan: v.z / 1.5 <= 1 ? 0 : v.pan / 1.5 }))], ['+', () => setView(v => ({ z: Math.min(200, v.z * 1.5), pan: v.pan * 1.5 - ((X0 + X1) / 2 - X0) * 0.5 }))], ['fit', () => setView({ z: 1, pan: 0 })]].map(([l, f]) => (
-            <button key={l as string} onClick={f as () => void} className="w-7 h-6 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 font-semibold">{l as string}</button>
+          {[['−', () => setView(v => ({ z: Math.max(1, v.z / 1.5), pan: v.z / 1.5 <= 1 ? 0 : v.pan / 1.5 }))], ['+', () => setView(v => ({ z: Math.min(200, v.z * 1.5), pan: v.pan * 1.5 - ((X0 + X1) / 2 - X0) * 0.5 }))], ['event', () => setView(eventView())], [near > 0 ? `±${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`}` : 'all', () => setView({ z: 1, pan: 0 })]].map(([l, f]) => (
+            <button key={l as string} onClick={f as () => void} className="min-w-[28px] px-1.5 h-6 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 font-semibold" title={l === 'event' ? 'Fit the event (double-click on the figure)' : l === '−' || l === '+' ? 'Zoom (or Ctrl + wheel)' : 'The whole region: the event and the genes around it'}>{l as string}</button>
           ))}
         </span>
       </div>
@@ -456,7 +501,7 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
       </div>
       {/* legend */}
       <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gray-500">
-        {(['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)}
+        {(['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'nearby', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)}
         <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· scroll with Ctrl to zoom, drag to pan, click a gene to zoom on it, double-click to fit</span>
@@ -470,28 +515,45 @@ export default function SvGenomeBrowser({ rec, chrom, window: win, segColors, fl
           </tr></thead>
           <tbody>
             {rowsOf(touched).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
+            {showNear && rowsOf(nearOthers).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
             {showUnchanged && rowsOf(unchanged).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
           </tbody>
         </table>
-        {unchanged.length > 0 && <button onClick={() => setShowUnchanged(v => !v)} className="mt-1 text-[11px] text-accent-700 hover:underline">{showUnchanged ? 'hide' : 'show'} the {unchanged.length} unchanged gene{unchanged.length > 1 ? 's' : ''}</button>}
+        <div className="flex flex-wrap gap-x-4">
+          {nearOthers.length > 0 && <button onClick={() => setShowNear(v => !v)} className="mt-1 text-[11px] text-accent-700 hover:underline">{showNear ? 'hide' : 'show'} the {nearOthers.length} other gene{nearOthers.length > 1 ? 's' : ''} near a breakpoint (not in the panel, not dosage-sensitive, not LoF-intolerant)</button>}
+          {unchanged.length > 0 && <button onClick={() => setShowUnchanged(v => !v)} className="mt-1 text-[11px] text-accent-700 hover:underline">{showUnchanged ? 'hide' : 'show'} the {unchanged.length} unchanged gene{unchanged.length > 1 ? 's' : ''}</button>}
+        </div>
         {!touched.length && !txs.loading && <div className="text-gray-400 text-xs py-2">No gene of the window is changed by the selected junctions.</div>}
         <div className="text-[10.5px] text-gray-500 mt-2 leading-4">
           Genes: {txs.source || '—'}{txs.error ? <span className="text-amber-700"> · {txs.error}</span> : null}. {ann.loading ? 'Annotations loading… ' : ann.notes.length ? `${ann.notes.join(' · ')}. ` : ''}
           Copies count the {zygosity === 'het' ? `${flankCopies - 1} intact homologue${flankCopies - 1 === 1 ? '' : 's'} and the rearranged one` : 'rearranged homologues'}; a fusion needs both partners on the same strand of the rebuilt chromosome, its frame is read from the coding phases of the two exons joined (breakpoints in introns); a breakpoint inside an exon leaves the frame undetermined.
           LoF-intolerant: LOEUF &lt; {LOEUF_INTOLERANT.v4} (gnomAD v4; &lt; {LOEUF_INTOLERANT['v2.1.1']} for v2.1.1) or pLI ≥ {PLI_INTOLERANT}, as gnomAD suggests for Mendelian cases when a hard threshold is needed. ClinGen scores: 3 sufficient, 2 some, 1 little, 0 no evidence, 30 autosomal recessive, 40 dosage sensitivity unlikely.
-          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged.' : ''}
+          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged, whatever the size.' : near > 0 ? ` No domains loaded: intact genes within ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`} of a breakpoint are listed as a possible position effect; those in the panel, with a ClinGen score of 2 or 3, or LoF-intolerant are shown first, the others folded.` : ''}
         </div>
       </div>
     </div>
   );
 }
 
+// ======================== Genes worth a look ========================
+
+/** In the chosen panel, a ClinGen haploinsufficiency or triplosensitivity score of 2 or 3, or LoF-intolerant in gnomAD. */
+function notable(g: GeneImpact, a: GeneAnnotations): boolean {
+  const d = a.dosage.get(g.gene.symbol), c = a.constraint.get(g.gene.symbol);
+  return !!a.panel?.genes.has(g.gene.symbol.toUpperCase()) || [2, 3].includes(d?.hi ?? -1) || [2, 3].includes(d?.ts ?? -1)
+    || (c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? LOEUF_INTOLERANT.v4)) || (c?.pli != null && c.pli >= PLI_INTOLERANT);
+}
+
 // ======================== Key findings ========================
 
-function summary(genes: GeneImpact[], a: GeneAnnotations): { title: string; color: string; genes: { symbol: string; note?: string }[] }[] {
+function summary(genes: GeneImpact[], a: GeneAnnotations, near: number): { title: string; color: string; genes: { symbol: string; note?: string }[] }[] {
   const note = (g: GeneImpact) => {
     const d = a.dosage.get(g.gene.symbol), c = a.constraint.get(g.gene.symbol), p = a.panel?.genes.get(g.gene.symbol.toUpperCase());
-    return [p ? `${CONF[p.confidence].label} in panel` : '', d?.hi === 3 && g.principal.copies < g.principal.refCopies ? 'HI 3' : '', d?.ts === 3 && g.kind === 'duplicated' ? 'TS 3' : '', c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? 0.45) ? `LOEUF ${c.loeuf.toFixed(2)}` : ''].filter(Boolean).join(', ') || undefined;
+    const positional = g.kind === 'nearby' || g.kind === 'domain' || g.kind === 'moved';
+    return [p ? `${CONF[p.confidence].label} in panel` : '',
+      d?.hi != null && [2, 3].includes(d.hi) && (g.principal.copies < g.principal.refCopies || positional) ? `HI ${d.hi}` : '',
+      d?.ts != null && [2, 3].includes(d.ts) && (g.kind === 'duplicated' || positional) ? `TS ${d.ts}` : '',
+      c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? 0.45) ? `LOEUF ${c.loeuf.toFixed(2)}` : ''].filter(Boolean).join(', ') || undefined;
   };
   const out: { title: string; color: string; genes: { symbol: string; note?: string }[] }[] = [];
   const add = (title: string, color: string, list: GeneImpact[]) => { if (list.length) out.push({ title, color, genes: list.map(g => ({ symbol: g.gene.symbol, note: note(g) })) }); };
@@ -503,6 +565,11 @@ function summary(genes: GeneImpact[], a: GeneAnnotations): { title: string; colo
   add('Gain of a whole copy:', '#15803d', genes.filter(g => g.kind === 'duplicated'));
   add('Chromatin domain changed:', '#b45309', genes.filter(g => g.kind === 'domain'));
   add('Intact, inverted or moved:', '#2563eb', genes.filter(g => g.kind === 'moved'));
+  const nb = genes.filter(g => g.kind === 'nearby');
+  if (nb.length) {
+    const hot = nb.filter(g => notable(g, a));
+    out.push({ title: `Near a breakpoint (≤ ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`}), ${nb.length} gene${nb.length > 1 ? 's' : ''}${hot.length ? ', of which:' : ': none in the panel, dosage-sensitive or LoF-intolerant'}`, color: IMPACT.nearby.color, genes: hot.map(g => ({ symbol: g.gene.symbol, note: [note(g), g.nearest ? `${Math.round(g.nearest.distance / 1000)} kb` : ''].filter(Boolean).join(', ') })) });
+  }
   return out;
 }
 

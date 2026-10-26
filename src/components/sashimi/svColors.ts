@@ -27,5 +27,6 @@ export const IMPACT: Record<ImpactKind, { color: string; label: string; short: s
   duplicated: { color: '#16a34a', label: 'whole gene duplicated', short: 'duplicated' },
   domain: { color: '#b45309', label: 'chromatin domain changed', short: 'domain changed' },
   moved: { color: '#2563eb', label: 'intact, inverted or moved', short: 'inverted / moved' },
+  nearby: { color: '#a16207', label: 'intact, near a breakpoint', short: 'near a breakpoint' },
   unaffected: { color: '#8796a8', label: 'unchanged', short: 'unchanged' },
 };

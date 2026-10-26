@@ -187,7 +187,7 @@ export const ranksText = (r: number[]): string => {
   return s[s.length - 1] - s[0] === s.length - 1 ? `exons ${s[0]}–${s[s.length - 1]}` : `exons ${s.join(', ')}`;
 };
 
-export type ImpactKind = 'fusion' | 'disrupted' | 'intragenic-del' | 'deleted' | 'intragenic-dup' | 'partial-copy' | 'duplicated' | 'domain' | 'moved' | 'unaffected';
+export type ImpactKind = 'fusion' | 'disrupted' | 'intragenic-del' | 'deleted' | 'intragenic-dup' | 'partial-copy' | 'duplicated' | 'domain' | 'moved' | 'nearby' | 'unaffected';
 export type FrameCall = 'kept' | 'shifted' | 'unknown' | 'none';
 
 export interface FusionCall {
@@ -412,6 +412,8 @@ function domainChanges(genes: SvGene[], domains: Domain[], dd: DerDomain[], impa
 
 export interface GeneImpact {
   gene: SvGene;
+  /** the nearest breakpoint of the rearrangement, for an intact gene (bp from the gene's span; 0 when it lies inside) */
+  nearest: { distance: number; pos: number; junctions: string[] } | null;
   principal: TxImpact;
   /** every NM_ transcript, when they differ from the principal one */
   others: TxImpact[];
@@ -430,9 +432,16 @@ export interface GeneStory {
   derDomains: DerDomain[];
 }
 
-const SEVERITY: Record<ImpactKind, number> = { fusion: 8, disrupted: 7, deleted: 6, 'intragenic-del': 6, duplicated: 5, 'intragenic-dup': 5, 'partial-copy': 4, domain: 3, moved: 2, unaffected: 0 };
+const SEVERITY: Record<ImpactKind, number> = { fusion: 8, disrupted: 7, deleted: 6, 'intragenic-del': 6, duplicated: 5, 'intragenic-dup': 5, 'partial-copy': 4, domain: 3, moved: 2, nearby: 1, unaffected: 0 };
 
-export function geneStory(rec: SvReconstruction, genes: SvGene[], window: { start: number; end: number }, opts: { flankCopies: number; zygosity: 'het' | 'hom'; domains: Domain[] }): GeneStory {
+/**
+ * Without chromatin domains, an intact gene within this distance of a breakpoint is reported as a possible position
+ * effect. 1 Mb by default: TADs average about 0.85–1.1 Mb in Hi-C (Dixon et al. 2012), and position effects have been
+ * documented from breakpoints 1.3 Mb away (SOX9, campomelic dysplasia) and further.
+ */
+export const NEAR_BREAKPOINT_DEFAULT = 1_000_000;
+
+export function geneStory(rec: SvReconstruction, genes: SvGene[], window: { start: number; end: number }, opts: { flankCopies: number; zygosity: 'het' | 'hom'; domains: Domain[]; near?: number }): GeneStory {
   const ders = derLayouts(rec);
   const txs = genes.flatMap(g => g.transcripts);
   const fragments = txs.flatMap(tx => fragmentsOf(tx, ders, window));
@@ -444,7 +453,18 @@ export function geneStory(rec: SvReconstruction, genes: SvGene[], window: { star
     const p = imps.find(x => x.tx === g.principal)!;
     principalImpacts.set(g.symbol, p);
     const others = imps.filter(x => x !== p && (x.kind !== p.kind || x.frame !== p.frame || x.fusions.map(f => f.kind).join() !== p.fusions.map(f => f.kind).join()));
-    out.push({ gene: g, principal: p, others, kind: p.kind, domain: null, rank: SEVERITY[p.kind], fragments: fragments.filter(f => f.tx.gene === g.symbol) });
+    out.push({ gene: g, principal: p, others, kind: p.kind, domain: null, nearest: null, rank: SEVERITY[p.kind], fragments: fragments.filter(f => f.tx.gene === g.symbol) });
+  }
+  // the nearest breakpoint of every gene, with the junctions meeting there
+  const bps = new Map<number, string[]>();
+  for (const j of rec.junctions) for (const e of [j.a, j.b]) if (e.chrom === rec.chrs[0]) bps.set(e.pos, [...new Set([...(bps.get(e.pos) ?? []), j.id])]);
+  for (const gi of out) {
+    let best: GeneImpact['nearest'] = null;
+    for (const [pos, js] of bps) {
+      const d = pos < gi.gene.start ? gi.gene.start - pos : pos > gi.gene.end ? pos - gi.gene.end : 0;
+      if (!best || d < best.distance) best = { distance: d, pos, junctions: js };
+    }
+    gi.nearest = best;
   }
   const domains = opts.domains.filter(d => d.end > window.start && d.start < window.end).sort((a, b) => a.start - b.start);
   const dd = domains.length ? derDomains(domains, ders) : [];
@@ -458,6 +478,16 @@ export function geneStory(rec: SvReconstruction, genes: SvGene[], window: { star
         gi.kind = 'domain'; gi.rank = SEVERITY.domain;
         gi.principal = { ...gi.principal, text: `Coding sequence intact${gi.principal.moved.length ? `, ${gi.principal.moved.map(m => (m.reversed ? `inverted (segment ${m.segment})` : `moved (segment ${m.segment})`)).join(', ')}` : ''}; its chromatin domain changes: ${c.text}.` };
       }
+    }
+  }
+  // no domains: an intact, unmoved gene near a breakpoint may still be misregulated
+  if (!domains.length && opts.near != null && opts.near > 0) {
+    for (const gi of out) {
+      if (gi.kind !== 'unaffected' || !gi.nearest || gi.nearest.distance > opts.near) continue;
+      const side = gi.nearest.pos < gi.gene.start ? (gi.gene.strand > 0 ? 'upstream' : 'downstream') : gi.nearest.pos > gi.gene.end ? (gi.gene.strand > 0 ? 'downstream' : 'upstream') : 'inside its span';
+      const dist = gi.nearest.distance >= 1e6 ? `${(gi.nearest.distance / 1e6).toFixed(2)} Mb` : `${Math.round(gi.nearest.distance / 1000)} kb`;
+      gi.kind = 'nearby'; gi.rank = SEVERITY.nearby;
+      gi.principal = { ...gi.principal, text: `Coding sequence intact, ${dist} ${side} of the breakpoint at ${(gi.nearest.pos + 1).toLocaleString('en-US')} (${gi.nearest.junctions.join(', ')}): a position effect is possible (its enhancers or their insulation may have changed); load chromatin domains to judge it.` };
     }
   }
   out.sort((a, b) => b.rank - a.rank || a.gene.start - b.gene.start);
@@ -490,6 +520,12 @@ export function dosageReading(gi: GeneImpact, a: GeneAnnotations): { level: 'hig
     if (d?.ts === 3) { level = 'high'; parts.push('ClinGen: triplosensitive (3, sufficient evidence)'); }
     else if (d?.ts != null) { parts.push(`ClinGen triplosensitivity ${d.ts} (${dosageScoreText(d.ts)})`); level = d.ts === 2 ? 'moderate' : 'low'; }
     else parts.push('ClinGen triplosensitivity not curated');
+  } else if (gi.kind === 'nearby' || gi.kind === 'domain' || gi.kind === 'moved') {
+    // intact but repositioned: what a change of its expression would mean
+    if (d?.hi === 3) { level = 'moderate'; parts.push('haploinsufficient gene (ClinGen 3): a position effect lowering its expression could matter'); }
+    if (d?.ts === 3) { level = 'moderate'; parts.push('triplosensitive gene (ClinGen 3): a position effect raising its expression could matter'); }
+    if (!parts.length && intolerant) { level = 'low'; parts.push(`LoF-intolerant (gnomAD LOEUF ${c!.loeuf!.toFixed(2)}): sensitive to a loss of expression`); }
+    if (!parts.length) return { level: 'unknown', text: '' };
   } else return { level: 'unknown', text: '' };
   return { level, text: parts.join(' · ') || 'no dosage curation, no constraint data' };
 }

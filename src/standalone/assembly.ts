@@ -16,6 +16,14 @@ const GRCH37 = [249250621, 243199373, 198022430, 191154276, 180915260, 171115067
 const OTHER: Record<number, string> = { 248387328: 'T2T-CHM13', 247249719: 'NCBI36 (hg18)' };
 const NAMES = [...Array.from({ length: 22 }, (_, i) => String(i + 1)), 'X', 'Y'];
 
+/** Length of a primary chromosome (chr1–22, X, Y, M) in a build; null for any other sequence. */
+export function chromLength(build: GenomeBuild, chrom: string): number | null {
+  const bare = chrom.replace(/^chr/i, '').toUpperCase();
+  if (bare === 'M' || bare === 'MT') return build === 'GRCh38' ? 16569 : 16571;
+  const i = NAMES.indexOf(bare);
+  return i < 0 ? null : (build === 'GRCh38' ? GRCH38 : GRCH37)[i];
+}
+
 export interface AssemblyCall {
   /** the build, when it is one the page has annotation for */
   build: GenomeBuild | null;
