@@ -449,4 +449,77 @@ export async function getProteinDomains(build: GenomeBuild, model: ProteinModelR
 }
 
 /** Pure helpers exposed for tests (not part of the viewer API). */
+// ======================== Structural variants: every NM_ model, dosage curation, constraint ========================
+
+/** An NM_ model of a window, 0-based half-open, exons with their rank in transcription order. */
+export interface RegionTranscript {
+  id: string; gene: string; strand: 1 | -1; start: number; end: number;
+  exons: { start: number; end: number; rank: number }[];
+  cdsStart: number | null; cdsEnd: number | null;
+  status: 'mane' | 'mane-plus' | 'select' | null;
+}
+
+/**
+ * Every RefSeq NM_ model overlapping a window (curated coding models only: no XM_ prediction, no NR_ non-coding), with
+ * its MANE Select / Plus Clinical status (GRCh38) or RefSeq Select status.
+ */
+export async function getRegionTranscripts(build: GenomeBuild, chrom: string, start: number, end: number): Promise<RegionTranscript[]> {
+  const [models, select, mane] = await Promise.all([genePreds(build, 'ncbiRefSeqCurated', chrom, start, end), selectAccessions(build, chrom, start, end), maneStatus(build, chrom, start, end)]);
+  return models.filter(m => m.name.startsWith('NM_') && m.symbol && m.txEnd > start && m.txStart < end).map(m => {
+    const n = m.exons.length, acc = accession(m.name);
+    const st = mane.get(acc);
+    return {
+      id: m.name, gene: m.symbol, strand: m.strand, start: m.txStart, end: m.txEnd,
+      exons: m.exons.map((e, i) => ({ start: e.start, end: e.end, rank: m.strand > 0 ? i + 1 : n - i })),
+      cdsStart: isCoding(m) ? m.cdsStart : null, cdsEnd: isCoding(m) ? m.cdsEnd : null,
+      status: st === 'select' ? 'mane' : st === 'plus' ? 'mane-plus' : select.has(acc) ? 'select' : null,
+    };
+  });
+}
+
+/**
+ * ClinGen dosage sensitivity scores by gene symbol: 0 no evidence, 1 little, 2 some, 3 sufficient, 30 autosomal
+ * recessive, 40 unlikely (the UCSC description of the ClinGen Dosage Sensitivity Map). The hg19 tracks are
+ * `clinGenHaploInsufficiency` / `clinGenTriploSensitivity`; the hg38 names are tried in both spellings. The score is read
+ * from a field named after the score when there is one, else from the BED score; region entries (ISCA ids) are skipped.
+ */
+const DOSAGE_VALUES = new Set([0, 1, 2, 3, 30, 40]);
+const DOSAGE_TRACKS: Record<'hi' | 'ts', string[]> = { hi: ['clinGenHaplo', 'clinGenHaploInsufficiency'], ts: ['clinGenTriplo', 'clinGenTriploSensitivity'] };
+function dosageOf(it: any): { symbol: string; score: number } | null {
+  if (!it || typeof it !== 'object') return null;
+  const symbol = String(it.geneSymbol ?? it.gene ?? it.symbol ?? it.name ?? '');
+  if (!symbol || /^ISCA-|^\d/.test(symbol) || /\s/.test(symbol)) return null;
+  const named = Object.entries(it).find(([k, v]) => /(haplo|triplo|dosage).*score|score.*(haplo|triplo|dosage)/i.test(k) && DOSAGE_VALUES.has(Number(v)));
+  const v = named ? Number(named[1]) : Number(it.score);
+  return Number.isFinite(v) && DOSAGE_VALUES.has(v) ? { symbol, score: v } : null;
+}
+export async function getDosageScores(build: GenomeBuild, chrom: string, start: number, end: number): Promise<Map<string, { hi: number | null; ts: number | null }>> {
+  const out = new Map<string, { hi: number | null; ts: number | null }>();
+  for (const which of ['hi', 'ts'] as const) {
+    let items: any[] | null = null;
+    for (const track of DOSAGE_TRACKS[which]) { try { items = await trackWindow(build, track, chrom, start, end); break; } catch { /* next spelling */ } }
+    if (!items) throw new Error('ClinGen dosage tracks unavailable from the UCSC API');
+    for (const it of items) {
+      const d = dosageOf(it);
+      if (!d) continue;
+      const cur = out.get(d.symbol) ?? { hi: null, ts: null };
+      cur[which] = d.score;
+      out.set(d.symbol, cur);
+    }
+  }
+  return out;
+}
+
+/** gnomAD v2.1.1 gene-level LoF constraint from the UCSC `pliByGene` track (fields `_pli`, `_loeuf`, `geneName`). */
+export async function getConstraintV2(build: GenomeBuild, chrom: string, start: number, end: number): Promise<Map<string, { pli: number | null; loeuf: number | null }>> {
+  const items = await trackWindow(build, 'pliByGene', chrom, start, end);
+  const out = new Map<string, { pli: number | null; loeuf: number | null }>();
+  const num = (v: unknown) => { const x = Number(v); return v == null || v === '' || !Number.isFinite(x) || x < 0 ? null : x; };
+  for (const it of items) {
+    const symbol = String(it?.geneName ?? it?.name2 ?? '');
+    if (symbol) out.set(symbol, { pli: num(it._pli ?? it.pli), loeuf: num(it._loeuf ?? it.loeuf) });
+  }
+  return out;
+}
+
 export const _internal = { parseGenePred, codingOffset, searchHits, trackItems };

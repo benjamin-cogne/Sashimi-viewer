@@ -23,7 +23,9 @@ import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 import { assemblyOfHeader, type AssemblyCall } from './assembly';
-import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
+import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores } from './ucsc';
+import { getConstraint } from './gnomad';
+import type { SvTranscript, DosageScore, Constraint } from '../components/sashimi/svGenes';
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
@@ -893,6 +895,15 @@ export class LocalDataSource implements SashimiDataSource {
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }
   async getRunSamples(): Promise<SampleRef[]> { return this.list(); }
   getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> { return getRegionGenes(this.reference.build, chrom, start, end, exclude); }
+  getRegionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> { return getRegionTranscripts(this.reference.build, chrom, start, end); }
+  async getGeneAnnotations(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }> {
+    const build = this.reference.build, notes: string[] = [];
+    const [dosage, constraint] = await Promise.all([
+      getDosageScores(build, chrom, start, end).then(d => { notes.push('ClinGen dosage: UCSC Genome Browser'); return d; }).catch(e => { notes.push(`ClinGen dosage unavailable (${e?.message || e})`); return new Map<string, DosageScore>(); }),
+      getConstraint(build, symbols, { chrom, start, end }).then(c => { notes.push(c.source); return c.values as Map<string, Constraint>; }).catch(e => { notes.push(`gnomAD constraint unavailable (${e?.message || e})`); return new Map<string, Constraint>(); }),
+    ]);
+    return { dosage, constraint, notes };
+  }
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.reference.build, model); }
   getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.reference.build, chrom, start, end); }
   getGtexTissues(): Promise<GtexTissue[]> {

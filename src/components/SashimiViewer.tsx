@@ -1355,6 +1355,11 @@ export default function SashimiViewer({
     const keys = prev.keys.includes(key) ? prev.keys.filter(k => k !== key) : [...prev.keys, key];
     return keys.length ? { sampleId, keys } : null;
   }), []);
+  /** The SV cartoon's genes and annotations, from the data source when it can give them. */
+  const svGeneLoaders = useMemo(() => ({
+    getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
+    getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
+  }), [ds]);
   /** The toolbar chip of the picked arcs: opens the SV cartoon on them, or unpicks them. */
   const svPickedChip = () => svPicked && (
     <span className="inline-flex items-center h-[30px] rounded-[6px] border border-accent-200 bg-accent-50 text-accent-800 text-[12.5px] font-medium overflow-hidden" title="Structural arcs picked with shift-click on one DNA track: they are read as the junctions of one event">
@@ -7326,7 +7331,7 @@ export default function SashimiViewer({
           const models: TxModel[] = [...(tx ? [tx] : []), ...(altModels ?? []).filter(m => !tx || m.name !== tx.transcriptId).map(m => ({
             geneName: currentGeneName, transcriptId: m.name, isMane: m.is_mane, modelKind: 'chosen' as const, chrom: currentChrom, strand: (m.strand < 0 ? -1 : 1) as 1 | -1, start: m.start, end: m.end,
             exons: m.exons.map((e, i) => ({ start: e.start, end: e.end, rank: m.strand < 0 ? m.exons.length - i : i + 1 })), cdsStart: m.cdsStart, cdsEnd: m.cdsEnd }))];
-          return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build}
+          return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build} geneLoaders={svGeneLoaders}
             sample={{ name: track.sampleName, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], coverage: track.coverage, sampled: !!track.sampled }} controls={controls}
             onClose={() => setSvCartoon(null)} />;
         })()}

@@ -11,6 +11,8 @@ import type { TxModel } from './geometry';
 import { formatBp } from './geometry';
 import { reconstruct, checkDepth, segmentContent, breakpointSite, exonRun, draftNotation, SV_DEPTH_MARGIN_BP, SV_DEPTH_MIN_BINS, SV_FIT_MIN_COPIES, SV_FIT_Z, SV_MOSAIC_MIN, SV_MOSAIC_MAX, SV_FLANK_MIN_BINS,
   type SvJunction, type SvSegment, type SvPiece, type SegmentDepth } from './svModel';
+import { KIND_COLOR, segmentColors } from './svColors';
+import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 
 // ======================== Timeline ========================
 
@@ -25,9 +27,6 @@ const lerp = (a: number, b: number, p: number) => a + (b - a) * p;
 const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', lost: '#dc2626', ok: '#16a34a', accent: '#0f766e', dup: '#15803d', inv: '#2563eb', bg: '#ffffff' };
-const KIND_COLOR: Record<SvJunction['kind'], string> = { deletion: '#b91c1c', duplication: '#15803d', inversion: '#2563eb', translocation: '#d97706' };
-const FLANK_COLORS = ['#64748b', '#7c3aed', '#0891b2'];
-const SEG_COLORS = ['#2a78d6', '#eda100', '#1baf7a', '#e87ba4', '#008300', '#eb6834', '#a16207', '#0ea5e9'];
 const VW = 1200, LX = 120, RX = 1170;
 const SEG_H = 30, GAP_OPEN = 26, GAP_JOIN = 8;
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -45,8 +44,8 @@ interface Scene {
 
 function layout(rec: ReturnType<typeof reconstruct>): Scene {
   const segs = rec.segs as PlacedSeg[];
-  let ci = 0;
-  for (const s of segs) { s.color = s.first || s.last ? FLANK_COLORS[rec.chrs.indexOf(s.chrom) % FLANK_COLORS.length] : SEG_COLORS[ci++ % SEG_COLORS.length]; }
+  const colors = segmentColors(rec);
+  for (const s of segs) s.color = colors.get(s.id)!;
   const refRows = rec.chrs.map((chrom, k) => ({ chrom, y: 84 + k * 100 }));
   const refBottom = refRows[refRows.length - 1].y;
   const derRows = rec.ders.map((d, k) => ({ name: d.name, ends: d.ends, rearranged: d.rearranged, pieces: d.pieces as PlacedPiece[], y: refBottom + 134 + k * 96 }));
@@ -87,10 +86,12 @@ export interface SvCartoonProps {
   controls: { name: string; coverage: CoverageRun[] }[];
   models: TxModel[];
   build: string;
+  /** the genes of the window and their annotations (the data source's), for the rearranged genome browser */
+  geneLoaders: Omit<SvGeneLoaders, 'fallback'>;
   onClose: () => void;
 }
 
-export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, onClose }: SvCartoonProps) {
+export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, geneLoaders, onClose }: SvCartoonProps) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelected));
   const [zygosity, setZygosity] = useState<'het' | 'hom'>('het');
   const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
@@ -118,6 +119,10 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
     return { rec, depth, scene, notation, depthOf };
   }, [chosen, chrom, win.start, win.end, sample, controls, useControls, zygosity, copies, build]);
   const { scene, rec, depth } = story;
+  const segColorMap = useMemo(() => segmentColors(rec), [rec]);
+  const loaders = useMemo<SvGeneLoaders>(() => ({ ...geneLoaders, fallback: models.map(m => ({
+    id: m.transcriptId, gene: m.geneName, strand: m.strand, start: m.start, end: m.end, exons: m.exons.map(e => ({ start: e.start, end: e.end, rank: e.rank })),
+    cdsStart: m.cdsStart, cdsEnd: m.cdsEnd, status: m.isMane ? 'mane' as const : null })) }), [geneLoaders, models]);
   const T_END = scene.tEnd;
 
   // ---- playback (one rAF, delta-time based) ----
@@ -274,6 +279,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
         </div>
 
         <Details rec={rec} depth={depth} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} notation={story.notation} chrom={chrom} />
+        {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
       </div>
     </div>
   );
