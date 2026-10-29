@@ -79,6 +79,8 @@ export interface SvReconstruction {
   choice: number[]; options: number[];
   /** junctions the walk could not place: they share a breakend with a junction it took */
   unplaced: SvJunction[];
+  /** how far each breakpoint ("chr20:10489765") may be from the position given: the spread of its breakends and the junctions' precision, in bp */
+  bpError: Record<string, number>;
 }
 
 const chrNum = (c: string) => c.replace(/^chr/i, '');
@@ -88,7 +90,7 @@ const fmt = (n: number) => n.toLocaleString('en-US');
  *  microhomology, and the few bases of templated sequence MMBIR / FoSTeS leave at complex breakpoints. The same ceiling
  *  as the merging of arcs (SV_MERGE_MAX_BP); a fragment shorter than this between two breakpoints is not resolved. */
 export const SV_BREAKEND_CLUSTER_BP = 100;
-/** Paths tried when several junctions share a breakend (each choice doubles them). */
+/** Paths tried at the breakends where the walk has a choice: several junctions, or a junction and the reference (each choice doubles them). */
 export const SV_MAX_PATHS = 64;
 
 /**
@@ -157,6 +159,8 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
     const spread = new Set(g.members.map(m => m.pos)).size > 1 ? ` (breakends ${fmt(Math.min(...g.members.map(m => m.pos)))}–${fmt(Math.max(...g.members.map(m => m.pos)))}, taken at ${fmt(g.pos)})` : '';
     return `${where}: ${[...new Set(g.members.map(m => m.j.id))].join(', ')}${spread}`;
   });
+  const bpError: Record<string, number> = {};
+  for (const g of groups) bpError[`${g.chrom}:${g.pos}`] = Math.max(...g.members.map(m => Math.max(m.j.precision, Math.abs(m.pos - g.pos))));
   const keyOf = (e: Breakend): string | null => {
     const list = byChr[e.chrom];
     if (!list) return null;
@@ -190,7 +194,12 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
       const copy = visits.get(seg.id) ?? 0; visits.set(seg.id, copy + 1);
       pieces.push({ seg, reversed, via, copy });
       const exit = `${seg.id}:${reversed ? 'h' : 't'}`;
-      const open = (at.get(exit) ?? []).filter(x => !used.has(x.j.id));
+      const open: ({ j: SvJunction; other: string } | null)[] = (at.get(exit) ?? []).filter(x => !used.has(x.j.id));
+      // the reference may also go on through a breakend whose junction is met again further on (a copy inserted
+      // elsewhere: the original passes, the copy joins there): offered last, when the junction's far side is still ahead
+      const ahead = open.some(x => x && !seen.has(+x.other.split(':')[0]));
+      const refOn = !reversed ? seg.i + 1 < byChr[seg.chrom].length : seg.i > 0;
+      if (ahead && refOn) open.push(null);
       let next = open[0];
       if (open.length > 1) { const k = Math.min(open.length - 1, choice[taken.length] ?? 0); next = open[k]; taken.push(k); options.push(open.length); }
       if (next) { used.add(next.j.id); via = next.j; key = next.other; continue; }
@@ -212,7 +221,7 @@ export function reconstruct(windows: { chrom: string; start: number; end: number
     warnings.push(`${j.id} (${j.reads} read${j.reads > 1 ? 's' : ''}) is on no rebuilt chromosome${rivals.length ? `: ${rivals.join(' and ')} took its breakend` : ''}. A breakend joined two ways points to two versions of the rearrangement (a second derivative, or cells that differ), or to a small piece the breakpoints cannot resolve.`);
   }
   const lost = segs.filter(s => !seen.has(s.id));
-  return { segs, byChr, chrs, ders, lost, warnings, junctions, merged, choice: taken, options, unplaced };
+  return { segs, byChr, chrs, ders, lost, warnings, junctions, merged, choice: taken, options, unplaced, bpError };
 }
 
 /** Every path through the shared breakends (at most SV_MAX_PATHS), the best-supported first. */
@@ -396,31 +405,6 @@ export function breakpointSite(pos: number, models: TxModel[]): string {
 
 /** Short names of the exon runs: "exons 3–5", "exon 7". */
 export const exonRun = (ranks: number[]): string => !ranks.length ? '' : ranks.length > 1 && ranks[ranks.length - 1] - ranks[0] === ranks.length - 1 ? `exons ${ranks[0]}–${ranks[ranks.length - 1]}` : `exon${ranks.length > 1 ? 's' : ''} ${ranks.join(', ')}`;
-
-// ======================== Notation ========================
-
-const g = (chrom: string, a: number, b: number) => `${chrom}:g.${a + 1}_${b}`;
-/**
- * A draft HGVS / ISCN description of the simple events (one deletion, one tandem duplication, one inversion made of its
- * two junctions, one reciprocal translocation); a complex event is described by its rebuilt chromosomes. Uncertain
- * breakpoints (pairs only) are written with their uncertainty.
- */
-export function draftNotation(rec: SvReconstruction, build: string): { text: string; kind: 'hgvs' | 'iscn' | 'none'; note: string } {
-  const J = rec.junctions;
-  const unc = (j: SvJunction) => (j.precision > 10 ? ` (±${j.precision} bp)` : '');
-  if (J.length === 1 && J[0].kind === 'deletion') { const [a, b] = [J[0].a.pos, J[0].b.pos].sort((x, y) => x - y); return { text: `${g(J[0].a.chrom, a, b)}del${unc(J[0])}`, kind: 'hgvs', note: `${build ? `${build} · ` : ''}${(b - a).toLocaleString('en-US')} bp deleted` }; }
-  if (J.length === 1 && J[0].kind === 'duplication') { const [a, b] = [J[0].a.pos, J[0].b.pos].sort((x, y) => x - y); return { text: `${g(J[0].a.chrom, a, b)}dup${unc(J[0])}`, kind: 'hgvs', note: `${build ? `${build} · ` : ''}${(b - a).toLocaleString('en-US')} bp in tandem` }; }
-  if (J.length === 2 && J.every(j => j.kind === 'inversion') && !rec.lost.length) {
-    const p = [...new Set(J.flatMap(j => [j.a.pos, j.b.pos]))].sort((x, y) => x - y);
-    if (p.length === 2) return { text: `${g(J[0].a.chrom, p[0], p[1])}inv${unc(J[0])}`, kind: 'hgvs', note: `${build ? `${build} · ` : ''}${(p[1] - p[0]).toLocaleString('en-US')} bp inverted, both junctions seen` };
-  }
-  if (J.length === 2 && J.every(j => j.kind === 'translocation') && !rec.lost.length) {
-    const c = [...new Set(J.flatMap(j => [j.a.chrom, j.b.chrom]))].map(chrNum).sort((a, b) => (+a || 99) - (+b || 99));
-    return { text: `t(${c.join(';')})`, kind: 'iscn', note: 'reciprocal and balanced on the junctions; bands to be added by hand' };
-  }
-  if (!J.length) return { text: '', kind: 'none', note: '' };
-  return { text: rec.ders.filter(d => d.rearranged).map(d => `${d.name}: ${d.pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}`).join('; '), kind: 'none', note: 'complex event: the rebuilt order of the segments; the ISCN / HGVS description is to be written by hand from the breakpoints' };
-}
 
 // ======================== From the viewer's evidence ========================
 

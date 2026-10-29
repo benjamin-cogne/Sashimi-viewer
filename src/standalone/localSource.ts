@@ -22,8 +22,8 @@ import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
-import { assemblyOfHeader, type AssemblyCall } from './assembly';
-import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores } from './ucsc';
+import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
+import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands } from './ucsc';
 import { getConstraint } from './gnomad';
 import type { SvTranscript, DosageScore, Constraint } from '../components/sashimi/svGenes';
 import { getCommonSnps } from './snps';
@@ -904,6 +904,7 @@ export class LocalDataSource implements SashimiDataSource {
     ]);
     return { dosage, constraint, notes };
   }
+  getCytobands(chrom: string) { return getCytobands(this.reference.build, chrom, chromLength(this.reference.build, chrom) ?? 300_000_000); }
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.reference.build, model); }
   getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.reference.build, chrom, start, end); }
   getGtexTissues(): Promise<GtexTissue[]> {

@@ -17,8 +17,18 @@ const NC_VERSION: Record<'GRCh38' | 'GRCh37', Record<string, number>> = {
   GRCh37: { 1: 10, 2: 11, 3: 11, 4: 11, 5: 9, 6: 11, 7: 13, 8: 10, 9: 11, 10: 10, 11: 9, 12: 11, 13: 10, 14: 8, 15: 9, 16: 9, 17: 10, 18: 9, 19: 9, 20: 10, 21: 8, 22: 10, X: 10, Y: 9 },
 };
 
+/** The RefSeq accession of a chromosome: `chr20`, GRCh38 → `NC_000020.11`; null for another build or contig. */
+export function ncAccession(build: string, chrom: string): string | null {
+  const c = chrom.replace(/^chr/i, '').toUpperCase();
+  if (c === 'M' || c === 'MT') return 'NC_012920.1';
+  const v = (NC_VERSION as Record<string, Record<string, number>>)[build]?.[c];
+  if (!v) return null;
+  const n = c === 'X' ? 23 : c === 'Y' ? 24 : Number(c);
+  return `NC_${String(n).padStart(6, '0')}.${v}`;
+}
+
 /** `NC_000017` → `17`, `NC_000023` → `X`, `NC_012920` → `M`. */
-function chromOfAccession(acc: string): string | null {
+export function chromOfAccession(acc: string): string | null {
   const n = Number(acc.replace(/^NC_0*/, ''));
   if (acc.startsWith('NC_012920')) return 'M';
   if (!Number.isFinite(n)) return null;

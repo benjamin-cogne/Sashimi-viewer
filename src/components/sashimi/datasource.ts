@@ -155,6 +155,8 @@ export interface SashimiDataSource {
    * could not be had. Each part fails on its own: a missing one leaves its map empty.
    */
   getGeneAnnotations?(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
+  /** The cytogenetic bands of a chromosome (ISCN of a rebuilt SV); absent when the source has none. */
+  getCytobands?(chrom: string): Promise<{ start: number; end: number; name: string; stain: string }[]>;
   /** Common variants (dbSNP 155 common via UCSC, Ensembl fallback) overlapping a 0-based half-open window. */
   getCommonSnps(chrom: string, start: number, end: number): Promise<CommonSnp[]>;
   /** GTEx tissues available for tissue tracks (rejects when GTEx cannot be used, e.g. GRCh37). */

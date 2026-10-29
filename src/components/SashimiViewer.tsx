@@ -1359,6 +1359,7 @@ export default function SashimiViewer({
   const svGeneLoaders = useMemo(() => ({
     getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
     getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
+    getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
   }), [ds]);
   /** The toolbar chip of the picked arcs: opens the SV cartoon on them, or unpicks them. */
   const svPickedChip = () => svPicked && (
@@ -6872,7 +6873,7 @@ export default function SashimiViewer({
                     : <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to the default: ${autoNote}`}
                         onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
                               {svPickedChip()}
-              </Section>
+                              </Section>
             );
           })()}
           <Section label="Show" boxed>

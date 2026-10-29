@@ -9,10 +9,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CoverageRun } from './types';
 import type { TxModel } from './geometry';
 import { formatBp } from './geometry';
-import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathText, type RankedPath, checkDepth, segmentContent, breakpointSite, exonRun, draftNotation, SV_DEPTH_MARGIN_BP, SV_DEPTH_MIN_BINS, SV_FIT_MIN_COPIES, SV_FIT_Z, SV_MOSAIC_MIN, SV_MOSAIC_MAX, SV_FLANK_MIN_BINS,
+import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathText, type RankedPath, checkDepth, segmentContent, breakpointSite, exonRun, SV_DEPTH_MARGIN_BP, SV_DEPTH_MIN_BINS, SV_FIT_MIN_COPIES, SV_FIT_Z, SV_MOSAIC_MIN, SV_MOSAIC_MAX, SV_FLANK_MIN_BINS,
   type SvJunction, type SvSegment, type SvPiece, type SegmentDepth } from './svModel';
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
+import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import type { Cytoband } from './svNomenclature';
 
 // ======================== Timeline ========================
 
@@ -118,11 +120,11 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const story = useMemo(() => {
     const { rec, depth } = ranked.find(r => r.rec.choice.join(',') === pathKey) ?? ranked[0];
     const scene = layout(rec);
-    const notation = draftNotation(rec, build);
     const depthOf = new Map(depth.segments.map(d => [d.seg.id, d]));
-    return { rec, depth, scene, notation, depthOf };
+    return { rec, depth, scene, depthOf };
   }, [ranked, pathKey, build]);
   const { scene, rec, depth } = story;
+  const bands = useCytobands(chrom, geneLoaders.getCytobands);
   const segColorMap = useMemo(() => segmentColors(rec), [rec]);
   const loaders = useMemo<SvGeneLoaders>(() => ({ ...geneLoaders, fallback: models.map(m => ({
     id: m.transcriptId, gene: m.geneName, strand: m.strand, start: m.start, end: m.end, exons: m.exons.map(e => ({ start: e.start, end: e.end, rank: e.rank })),
@@ -282,7 +284,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
           </span>
         </div>
 
-        <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} notation={story.notation} chrom={chrom} />
+        <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} build={build} bands={bands} chrom={chrom} />
         {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
       </div>
     </div>
@@ -439,9 +441,9 @@ function Caption({ t, scene, rec, depth, chosen, zygosity }: { t: number; scene:
 
 // ======================== Details ========================
 
-function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, notation, chrom }: {
+function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, build, bands, chrom }: {
   rec: ReturnType<typeof reconstruct>; depth: ReturnType<typeof checkDepth>; ranked: RankedPath[]; onPath: (key: string) => void; candidates: SvJunction[]; selected: Set<string>; onToggle: (id: string) => void; models: TxModel[];
-  notation: ReturnType<typeof draftNotation>; chrom: string;
+  build: string; bands?: Cytoband[]; chrom: string;
 }) {
   const side = (e: SvJunction['a']) => (e.side === 'tail' ? '▸' : '◂');
   const breakpoints = [...new Set(rec.junctions.flatMap(j => [j.a.pos, j.b.pos]))].sort((a, b) => a - b);
@@ -500,9 +502,9 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
       <div>
         {ranked.length > 1 && (
           <div className="mb-2">
-            <div className="text-[10.5px] font-semibold text-gray-700 mb-0.5">{ranked.length} possible paths · junctions share a breakend</div>
+            <div className="text-[10.5px] font-semibold text-gray-700 mb-0.5">{ranked.length} possible paths · the walk has a choice at some breakends</div>
             <div className="space-y-0.5">
-              {ranked.map((r, i) => {
+              {ranked.slice(0, 5).map((r, i) => {
                 const key = r.rec.choice.join(','), on = r.rec === rec;
                 return (
                   <button key={key} onClick={() => onPath(key)} className={`w-full text-left rounded px-1.5 py-1 border ${on ? 'border-accent-400 bg-accent-50' : 'border-gray-200 hover:bg-gray-50'}`}>
@@ -516,6 +518,7 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
                 );
               })}
             </div>
+            {ranked.length > 5 && <div className="text-[10.5px] text-gray-500">{ranked.length - 5} less likely paths not listed</div>}
             <div className="text-[10.5px] text-gray-500 mt-0.5">Ranked by the segments whose depth does not fit, then the reads left out, then the summed deviation. The junctions left out by the best path may belong to a second version of the rearrangement (another derivative, or a subclone): their share of the reads at the shared breakend is a rough fraction.</div>
           </div>
         )}
@@ -527,14 +530,7 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
           </div>
         ))}
         {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mb-1">Lost from the rebuilt homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
-        {notation.text && notation.kind !== 'none' && (
-          <div className="mt-1">
-            <div className="text-[10.5px] font-semibold text-gray-700">{notation.kind === 'hgvs' ? 'Draft HGVS (to check)' : 'Draft ISCN (to check)'}</div>
-            <div className="font-mono text-[11px] bg-accent-50 text-accent-900 rounded px-2 py-1 select-all">{notation.text}</div>
-            <div className="text-[10.5px] text-gray-500">{notation.note}</div>
-          </div>
-        )}
-        {notation.text && notation.kind === 'none' && <div className="text-[10.5px] text-gray-500">{notation.note}</div>}
+        <SvNomenclatureBox rec={rec} build={build} bands={bands} />
         {breakpoints.length > 0 && (
           <div className="mt-1.5">
             <div className="text-[10.5px] font-semibold text-gray-700">Breakpoints ({chrom})</div>

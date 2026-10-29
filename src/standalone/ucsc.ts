@@ -522,4 +522,11 @@ export async function getConstraintV2(build: GenomeBuild, chrom: string, start: 
   return out;
 }
 
+/** The cytogenetic bands of a chromosome (UCSC `cytoBand`): 0-based half-open, `name` like p12.2, `stain` acen at the centromere. */
+export async function getCytobands(build: GenomeBuild, chrom: string, length: number): Promise<{ start: number; end: number; name: string; stain: string }[]> {
+  const items = await trackWindow(build, 'cytoBand', chrom, 0, length);
+  return items.map(it => ({ start: Number(it.chromStart), end: Number(it.chromEnd), name: String(it.name ?? ''), stain: String(it.gieStain ?? '') }))
+    .filter(b => b.name && Number.isFinite(b.start) && b.end > b.start).sort((a, b) => a.start - b.start);
+}
+
 export const _internal = { parseGenePred, codingOffset, searchHits, trackItems };

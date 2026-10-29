@@ -9,6 +9,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { reconstruct, type SvReconstruction } from './svModel';
+import type { Cytoband } from './svNomenclature';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { geneStory, dosageReading, dosageScoreText, ranksText, toDer, LOEUF_INTOLERANT, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
@@ -28,6 +29,8 @@ const kb = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)} Mb` : n >= 1000 ?
 export interface SvGeneLoaders {
   getTranscripts?: (chrom: string, start: number, end: number) => Promise<SvTranscript[]>;
   getAnnotations?: (chrom: string, start: number, end: number, symbols: string[]) => Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
+  /** the cytogenetic bands of a chromosome (the ISCN of the event) */
+  getCytobands?: (chrom: string) => Promise<Cytoband[]>;
   /** the models the viewer already has (the gene in view): used when the source cannot list a window's transcripts */
   fallback: SvTranscript[];
 }
@@ -36,6 +39,8 @@ interface Props {
   rec: SvReconstruction; chrom: string; window: { start: number; end: number };
   segColors: Map<number, string>; flankCopies: number; zygosity: 'het' | 'hom'; build: string;
   loaders: SvGeneLoaders;
+  /** the same derivative over a wider window; by default the junctions are walked again */
+  rebuild?: (w: { start: number; end: number }) => SvReconstruction;
 }
 
 // ======================== Genes of the window ========================
@@ -77,7 +82,7 @@ const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, na
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild }: Props) {
   const [mode, setMode] = useState<'mane' | 'all'>('mane');
   const [txs, setTxs] = useState<{ list: SvTranscript[]; loading: boolean; error?: string; source: string }>({ list: [], loading: true, source: '' });
   const [ann, setAnn] = useState<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[]; loading: boolean }>({ dosage: new Map(), constraint: new Map(), notes: [], loading: false });
@@ -102,7 +107,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const len = chromLength(build as GenomeBuild, chrom) ?? Infinity;
     return { start: Math.max(0, Math.min(eventWin.start, bps[0] - near)), end: Math.min(Math.max(len, eventWin.end), Math.max(eventWin.end, bps[bps.length - 1] + near)) };
   }, [eventWin.start, eventWin.end, bpKey, near, build, chrom]); // eslint-disable-line react-hooks/exhaustive-deps
-  const rec = useMemo(() => (win === eventWin ? eventRec : reconstruct([{ chrom, start: win.start, end: win.end }], eventRec.junctions, eventRec.choice)), [eventRec, win]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rec = useMemo(() => (win === eventWin ? eventRec : rebuild ? rebuild(win) : reconstruct([{ chrom, start: win.start, end: win.end }], eventRec.junctions, eventRec.choice)), [eventRec, win]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the NM_ models of the window
   useEffect(() => {

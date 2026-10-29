@@ -7,6 +7,7 @@
 import '../plugins';   // registered file kinds (fileKinds.ts), before anything asks which files it reads
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import SvBrowserDialog from '../components/sashimi/SvBrowserDialog';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
@@ -250,6 +251,13 @@ function App() {
     attachVariantWorker(dsRef.current);
   }
   const ds = dsRef.current;
+  /** the SV browser (a rearrangement typed as HGVS or ISCN) and the gene loaders it uses */
+  const [svBrowser, setSvBrowser] = useState(false);
+  const svLoaders = useMemo(() => ({
+    getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
+    getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
+    getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
+  }), [ds]);
 
   /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */
   const snapshot = useCallback((tabs: ViewTab[]): ViewTab[] => {
@@ -1150,6 +1158,10 @@ function App() {
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+              <button onClick={() => setSvBrowser(true)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
+                title="SV browser: type a structural variant as HGVS (NC_000020.11:g.[…del;…inv;…del]) or as the ISCN sequence form, and see the genes of the rearranged chromosome">
+                🧬 SV browser
+              </button>
               <Popover width={420} title="Add a variant of interest, drawn on every view"
                 buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
                 button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-bar-muted" /></>}>
@@ -1251,6 +1263,7 @@ function App() {
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}
+      {svBrowser && <SvBrowserDialog build={build} loaders={svLoaders} onClose={() => setSvBrowser(false)} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
