@@ -96,6 +96,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [domainsFile, setDomainsFile] = useState<{ name: string; text: string } | null>(() => store.get('sashimi.svDomains'));
   const [hover, setHover] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number; gene: string } | null>(null);
+  /** a gene's card kept open by a click (the hover card follows the pointer and goes with it) */
+  const [pinned, setPinned] = useState<{ x: number; y: number; gene: string } | null>(null);
+  /** where the last press started: a click that ends a drag (a pan) opens no card */
+  const downAt = useRef(0);
   const [colorBy, setColorBy] = useState<'loeuf' | 'impact'>(() => store.get<'loeuf' | 'impact'>('sashimi.svColorBy') ?? 'loeuf');
   const [view, setView] = useState({ z: 1, pan: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
@@ -294,6 +298,14 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const dim = (sym: string | string[]) => (hover && !(Array.isArray(sym) ? sym.includes(hover) : sym === hover) ? 0.28 : 1);
   const enter = (sym: string) => (e: React.MouseEvent) => { setHover(sym); const r = boxRef.current!.getBoundingClientRect(); setTip({ x: e.clientX - r.left, y: e.clientY - r.top, gene: sym }); };
   const leave = () => { setHover(null); setTip(null); };
+  const pin = (sym: string) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (Math.abs(e.clientX - downAt.current) > 3) return;
+    const r = boxRef.current!.getBoundingClientRect();
+    setPinned(p => (p?.gene === sym ? null : { x: e.clientX - r.left, y: e.clientY - r.top, gene: sym }));
+  };
+  // the card points at the gene where it was: it closes when the view moves
+  useEffect(() => { setPinned(null); }, [view.z, view.pan]);
   const chevrons = (x0: number, x1: number, yy: number, dir: 1 | -1, color: string, key: string) => {
     const out: JSX.Element[] = [];
     for (let x = Math.min(x0, x1) + 10; x < Math.max(x0, x1) - 6; x += 16) out.push(<path key={`${key}c${x}`} d={`M${x - 2.5 * dir},${yy - 3} L${x + 1.5 * dir},${yy} L${x - 2.5 * dir},${yy + 3}`} fill="none" stroke={color} strokeWidth={1} opacity={0.7} />);
@@ -328,7 +340,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   // ---- the SVG ----
   const svg = (
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: z > 1 ? (drag.current ? 'grabbing' : 'grab') : 'default', fontFamily: FONT }} className="block select-none"
-      onMouseDown={e => { if (e.button === 0) drag.current = { x: e.clientX, pan: view.pan }; }}
+      onMouseDown={e => { downAt.current = e.clientX; if (e.button === 0) drag.current = { x: e.clientX, pan: view.pan }; }}
+      onClick={e => { if (Math.abs(e.clientX - downAt.current) <= 3) setPinned(null); }}
       onMouseMove={e => { const d = drag.current; if (!d || z <= 1) return; const r = svgRef.current!.getBoundingClientRect(); setView(v => ({ ...v, pan: d.pan + ((e.clientX - d.x) / r.width) * VW })); }}
       onMouseUp={() => { drag.current = null; }} onMouseLeave={() => { drag.current = null; leave(); }} onDoubleClick={() => setView(eventView())}>
       <defs>
@@ -361,7 +374,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const lostGene = gi?.kind === 'deleted';
           const dot = panelDot(g.symbol), lx = Math.max(X0 + 2, refX(Math.max(g.start, win.start)));
           return (
-            <g key={`rg${g.symbol}`} opacity={dim(g.symbol)} onMouseEnter={enter(g.symbol)} onMouseMove={enter(g.symbol)} onMouseLeave={leave} style={{ cursor: 'pointer' }} onClick={() => zoomTo(g.start, g.end)}>
+            <g key={`rg${g.symbol}`} opacity={dim(g.symbol)} onMouseEnter={enter(g.symbol)} onMouseMove={enter(g.symbol)} onMouseLeave={leave} style={{ cursor: 'pointer' }} onClick={pin(g.symbol)}>
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
               {labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={col}>{g.symbol}</text>}
               {shown(g).map((t, i) => <g key={t.id}>{txGlyph(t, refX, yy + LABEL_H + 6 + i * TX_H, col, `r${t.id}`)}</g>)}
@@ -426,7 +439,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                 const lx = Math.max(X0 + 2, b.x0);
                 const dot = !isFusion ? panelDot(b.genes[0]) : null;
                 return (
-                  <g key={`dg${bi}`} opacity={dim(b.genes)} onMouseEnter={enter(b.genes[0])} onMouseMove={enter(b.genes[0])} onMouseLeave={leave} style={{ cursor: 'pointer' }}>
+                  <g key={`dg${bi}`} opacity={dim(b.genes)} onMouseEnter={enter(b.genes[0])} onMouseMove={enter(b.genes[0])} onMouseLeave={leave} style={{ cursor: 'pointer' }} onClick={pin(b.genes[0])}>
                     {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
                     {b.labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>}
                     {b.labeled && isFusion && b.fusion && <g>
@@ -524,12 +537,19 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       )}
       <div className="px-3 mt-2 relative" ref={boxRef}>
         {txs.loading ? <div className="h-[220px] flex items-center justify-center text-sm text-gray-500">loading the gene models of the window…</div> : svg}
-        {tip && (() => {
-          const gi = impactOf.get(tip.gene); if (!gi) return null;
+        {[pinned, tip && tip.gene !== pinned?.gene ? tip : null].map((at, n) => {
+          if (!at) return null;
+          const isPin = n === 0;
+          const gi = impactOf.get(at.gene); if (!gi) return null;
           const r = dosageReading(gi, annotations);
+          const boxW = boxRef.current?.clientWidth ?? 900, boxH = boxRef.current?.clientHeight ?? 400;
+          // below the pointer, or above it near the bottom of the figure (the dialog would cut it)
+          const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, boxW - 390)), ...(at.y > boxH - 150 ? { bottom: boxH - at.y + 14 } : { top: at.y + 14 }) };
           return (
-            <div className="pointer-events-none absolute z-10 rounded-md bg-gray-900/92 text-white text-[11px] px-2.5 py-1.5 shadow-lg max-w-[380px]" style={{ left: Math.min(tip.x + 14, (boxRef.current?.clientWidth ?? 900) - 390), top: tip.y + 14 }}>
-              <div className="font-semibold"><i>{gi.gene.symbol}</i> · {IMPACT[gi.kind].label}</div>
+            <div key={isPin ? 'pin' : 'tip'} className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg max-w-[380px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+              onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+              <div className="font-semibold flex items-start gap-2"><span className="flex-1"><i>{gi.gene.symbol}</i> · {IMPACT[gi.kind].label}</span>
+                {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
               <div className="text-gray-300">{gi.principal.tx.id}{gi.principal.tx.status === 'mane' ? ' (MANE Select)' : gi.principal.tx.status === 'select' ? ' (RefSeq Select)' : ''}</div>
               <div className="mt-0.5">{gi.principal.text}</div>
               {r.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
@@ -543,9 +563,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                 const dot = { intolerant: '#fca5a5', constrained: '#fdba74', tolerant: '#cbd5e1', unknown: '#cbd5e1' }[loeufClass(c)];
                 return <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>;
               })()}
+              {isPin
+                ? <div className="mt-1.5 pt-1.5 border-t border-white/15"><button onClick={() => zoomTo(gi.gene.start, gi.gene.end)} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on <i>{gi.gene.symbol}</i></button></div>
+                : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
             </div>
           );
-        })()}
+        })}
       </div>
       {/* legend */}
       <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gray-500">
@@ -555,7 +578,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
-        <span>· Ctrl / ⌘ + scroll to zoom, drag to pan, click a gene to zoom on it, double-click to fit, hover a gene for its consequence</span>
+        <span>· Ctrl / ⌘ + scroll to zoom, drag to pan, hover a gene for its consequence, click it to keep its card open (and zoom on it from there), double-click to fit</span>
       </div>
       <div className="px-5 mt-2 pb-1">
         {!story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-gray-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
