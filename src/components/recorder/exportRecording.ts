@@ -9,6 +9,7 @@
  * the length of the whole recording, so they stay in step when the player pauses or seeks them, and when looping.
  */
 import type { Recording, Chunk, Layer } from './recorder';
+import { renderCaptions, type Caption, type Chapter } from './captions';
 
 /** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
 export interface Zoom { start: number; end: number; rect: [number, number, number, number]; source: 'auto' | 'drawn' }
@@ -21,6 +22,8 @@ export interface ExportOptions {
   title: string;
   zooms: Zoom[];
   pointer: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
+  captions: Caption[];
+  chapters: Chapter[];
 }
 /** The idle stretch kept by default, in ms. */
 export const MAX_IDLE_DEFAULT_MS = 1000;
@@ -137,7 +140,7 @@ function pointerPath(rec: Recording, map: (t: number) => number, smooth: boolean
   return out;
 }
 
-export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number] }
+export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[] }
 
 export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   const map = timeMap(rec, opts.maxIdleMs);
@@ -254,6 +257,10 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
     css.push(`@keyframes cam{${kfs.map(k => `${pct(k.t, D)}{${tf(k.r)};animation-timing-function:${EASE}}`).join('')}}#cam{animation-name:cam;transform-box:view-box;transform-origin:0 0}`);
   }
 
+  const cap = renderCaptions(opts.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, opts.replace).slice(1, -1) })), opts.chapters, map, D, { x0, y0, W, H }, rec.fontFamily);
+  css.push(...cap.css);
+  const chapters = opts.chapters.map(c => ({ t: map(c.t), name: c.name })).sort((a, b) => a.t - b.t);
+
   const clipDefs = [...clips].map(([k, id]) => { const [x, y, w, h] = k.split(','); return `<clipPath id="${id}"><rect x="${x}" y="${y}" width="${w}" height="${h}"/></clipPath>`; }).join('');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${esc(rec.fontFamily)}">
 <title>${esc(opts.title)}</title>
@@ -263,8 +270,10 @@ ${defs}</defs>
 <rect width="${W}" height="${H}" fill="${rec.background}"/>
 <g id="cam" class="a"><g transform="translate(${-x0} ${-y0})">
 ${body.join('\n')}
+${cap.content}
 ${clickEls}${pointer}
 </g></g>
+${cap.screen}
 </svg>`;
 
   // the page's CSS rules the HTML blocks use
@@ -274,11 +283,19 @@ ${clickEls}${pointer}
     for (const h of rec.html) for (const m of h.html.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (c) classes.add(c.replace(/&amp;/g, '&'));
     pageCss = rec.css.filter(r => r.classes.every(c => classes.has(c))).map(r => r.text).join('\n');
   }
-  return { svg, css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bytes: new Blob([svg, pageCss]).size, bounds: B };
+  return { svg, css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bytes: new Blob([svg, pageCss]).size, bounds: B, chapters };
 }
 
-/** An HTML page around the SVG: play / pause, a time bar, the time; space toggles. */
+/**
+ * An HTML page around the SVG: play / pause, a time bar with the chapters marked, the chapter list. With "pause at
+ * chapters" the playback stops at each chapter, for a talk: → / PageDown (a presentation clicker) goes on, or jumps to
+ * the next chapter while playing; ← / PageUp goes back to the start of the chapter (the one before when at its start).
+ * Space toggles play / pause.
+ */
 export function svgToHtml(out: Exported, title: string): string {
+  const D = Math.round(out.duration);
+  const ch = out.chapters.filter(c => c.t >= 0 && c.t < D);
+  const chJson = JSON.stringify(ch.map(c => ({ t: Math.round(c.t), name: c.name }))).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
@@ -287,29 +304,60 @@ ${out.css ? `<style>${out.css.replace(/<\/style/gi, '<\\/style')}</style>` : ''}
 body{margin:0;background:#f4f6f8;font:13px Inter,system-ui,-apple-system,'Segoe UI',sans-serif;color:#1f2937}
 .rec-wrap{max-width:100%;padding:16px;box-sizing:border-box}
 .rec-stage{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.12);overflow:hidden}
-.rec-stage>svg{display:block;width:100%;height:auto;max-height:calc(100vh - 80px)}
+.rec-stage>svg{display:block;width:100%;height:auto;max-height:calc(100vh - ${ch.length ? 118 : 80}px)}
 .rec-bar{display:flex;align-items:center;gap:10px;margin-top:10px}
 .rec-bar button{width:34px;height:30px;border-radius:8px;border:1px solid #d3dbe5;background:#fff;cursor:pointer;font-size:14px}
-.rec-bar input{flex:1;accent-color:#0f766e}
+.rec-track{position:relative;flex:1;display:flex;align-items:center}
+.rec-track input{width:100%;accent-color:#0f766e;margin:0}
+.rec-tick{position:absolute;top:-7px;width:2px;height:8px;background:#0f766e;border-radius:1px;pointer-events:none}
 .rec-time{font-variant-numeric:tabular-nums;color:#5b6b7e;min-width:90px;text-align:right}
+.rec-ch{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+.rec-ch button{border:1px solid #d3dbe5;background:#fff;border-radius:999px;padding:3px 10px;font:inherit;font-size:12px;cursor:pointer;color:#334155}
+.rec-ch button.on{background:#0f766e;border-color:#0f766e;color:#fff}
+.rec-ch label{margin-left:auto;color:#5b6b7e;font-size:12px;display:flex;align-items:center;gap:4px}
 </style></head><body><div class="rec-wrap">
 <div class="rec-stage" id="stage">${out.svg}</div>
-<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><input id="seek" type="range" min="0" max="${Math.round(out.duration)}" step="10" value="0"><span class="rec-time" id="time"></span></div>
+<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
+${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chapter; → or PageDown goes on"><input type="checkbox" id="pauseAt" checked> pause at chapters</label></div>` : ''}
 </div>
 <script>
 (function(){
-  var D=${Math.round(out.duration)}, svg=document.querySelector('#stage>svg'), play=document.getElementById('play'), seek=document.getElementById('seek'), time=document.getElementById('time');
-  var anims=function(){return svg.getAnimations({subtree:true});}, paused=false, dragging=false;
+  var D=${D}, CH=${chJson}, svg=document.querySelector('#stage>svg'), play=document.getElementById('play'), seek=document.getElementById('seek'), time=document.getElementById('time');
+  var anims=function(){return svg.getAnimations({subtree:true});}, paused=false, dragging=false, last=0;
   var fmt=function(ms){var s=Math.max(0,ms)/1000;return Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2);};
   var cur=function(){var a=anims()[0];return a?(Number(a.currentTime)||0)%D:0;};
-  var set=function(ms){anims().forEach(function(a){a.currentTime=ms;});};
-  var toggle=function(){paused=!paused;anims().forEach(function(a){paused?a.pause():a.play();});play.textContent=paused?'▶':'❚❚';};
-  window.recPlayer={pause:function(){if(!paused)toggle();},play:function(){if(paused)toggle();},seek:set,time:cur,paused:function(){return paused;},duration:D};
+  var set=function(ms){anims().forEach(function(a){a.currentTime=ms;});last=ms;};
+  var setPaused=function(p){paused=p;anims().forEach(function(a){p?a.pause():a.play();});play.textContent=p?'▶':'❚❚';};
+  var toggle=function(){setPaused(!paused);};
+  var pauseAt=function(){var b=document.getElementById('pauseAt');return !!(b&&b.checked);};
+  var chList=document.getElementById('chapters'), chBtns=[];
+  CH.forEach(function(c,i){
+    var b=document.createElement('button');b.textContent=(i+1)+'. '+c.name;b.onclick=function(){setPaused(pauseAt());set(c.t);};
+    chList.insertBefore(b,chList.lastElementChild);chBtns.push(b);
+    var k=document.createElement('div');k.className='rec-tick';k.style.left='calc('+(c.t/D*100)+'% - 1px)';k.title=c.name;document.getElementById('track').appendChild(k);
+  });
+  var chapterAt=function(t){var k=-1;CH.forEach(function(c,i){if(c.t<=t+1)k=i;});return k;};
+  var next=function(){var t=cur();if(paused){setPaused(false);return;}for(var i=0;i<CH.length;i++)if(CH[i].t>t+50){if(pauseAt())setPaused(true);set(CH[i].t);return;}};
+  var prev=function(){var t=cur(),k=chapterAt(t);if(k<0){setPaused(true);set(0);return;}if(t-CH[k].t<1000&&k>0)k--;setPaused(true);set(CH[k].t);};
+  window.recPlayer={pause:function(){setPaused(true);},play:function(){setPaused(false);},seek:function(ms){set(ms);},time:cur,paused:function(){return paused;},duration:D,chapters:CH};
   play.onclick=toggle;
-  document.addEventListener('keydown',function(e){if(e.code==='Space'){e.preventDefault();toggle();}});
+  document.addEventListener('keydown',function(e){
+    if(e.code==='Space'){e.preventDefault();toggle();}
+    else if(e.key==='ArrowRight'||e.key==='PageDown'){e.preventDefault();next();}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();prev();}
+  });
   seek.oninput=function(){dragging=true;set(Number(seek.value));};
   seek.onchange=function(){dragging=false;};
-  (function tick(){var t=cur();if(!dragging)seek.value=String(Math.round(t));time.textContent=fmt(t)+' / '+fmt(D);requestAnimationFrame(tick);})();
+  (function tick(){
+    var t=cur();
+    // stop at a chapter crossed while playing (not on a loop back to the start)
+    if(!paused&&!dragging&&pauseAt()&&t>=last){for(var i=0;i<CH.length;i++){if(CH[i].t>0&&CH[i].t>last&&CH[i].t<=t){setPaused(true);set(CH[i].t);t=CH[i].t;break;}}}
+    last=t;
+    if(!dragging)seek.value=String(Math.round(t));
+    time.textContent=fmt(t)+' / '+fmt(D);
+    var k=chapterAt(t);chBtns.forEach(function(b,i){b.className=i===k?'on':'';});
+    requestAnimationFrame(tick);
+  })();
 })();
 </script></body></html>`;
 }
