@@ -55,6 +55,9 @@ export interface Recording {
 export interface Recorder { stop(): Recording; elapsed(): number }
 
 const SVG_NS_ATTR = / xmlns="http:\/\/www\.w3\.org\/2000\/svg"/g;
+/** Geometry to 0.01 px: the page writes coordinates to 15 decimals, where a hundredth of a pixel cannot be seen even zoomed. Only these attributes, never the text shown. */
+const GEOM_ATTR = /(\s(?:d|x|y|x1|x2|y1|y2|cx|cy|r|rx|ry|width|height|points|transform|viewBox|stroke-width|stroke-dasharray|font-size)=")([^"]*)"/g;
+const roundGeom = (s: string): string => s.replace(GEOM_ATTR, (_m, a: string, v: string) => `${a}${v.replace(/-?\d*\.\d{3,}/g, n => String(Math.round(Number(n) * 100) / 100 || 0))}"`);
 /**
  * The stacking order of an element, as a key that sorts like the page paints: the z-indexes of the positioned
  * elements holding it (with a numeric z-index), outermost first, each as a fixed-width number, padded to ZDEPTH
@@ -160,11 +163,11 @@ export function startRecording(root: Document = document): Recorder {
     const many = el.getElementsByTagName('*').length > LEAF_MAX_DESCENDANTS;
     const hasSkip = !!el.querySelector('title, [data-export="skip"]');
     if (!el.childElementCount || (!many && !hasSkip)) {
-      const s = ser.serializeToString(el).replace(SVG_NS_ATTR, '');
+      const s = roundGeom(ser.serializeToString(el).replace(SVG_NS_ATTR, ''));
       id = intern(s, c => 'leaf' in c && c.leaf === s, () => ({ leaf: s }));
     } else {
       const tag = el.tagName;
-      const open = ser.serializeToString(el.cloneNode(false)).replace(SVG_NS_ATTR, '').replace(/\s*\/>$/, '>').replace(new RegExp(`></${tag}>$`), '>');
+      const open = roundGeom(ser.serializeToString(el.cloneNode(false)).replace(SVG_NS_ATTR, '').replace(/\s*\/>$/, '>').replace(new RegExp(`></${tag}>$`), '>'));
       const kids: number[] = [];
       for (const c of Array.from(el.children)) if (!skipped(c)) kids.push(chunkOf(c));
       const k = kids.join(',');

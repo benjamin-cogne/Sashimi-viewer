@@ -4,7 +4,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
-import { recordingToSvg, recordingToPlayer, playerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import { recordingToSvg, recordingToPlayer, playerHtml, packedPlayerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
 import { suggestCaptions, CAPTION_DEFAULT_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
@@ -88,22 +88,30 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const [settled, setSettled] = useState(opts);
   useEffect(() => { if (settled === opts) return; const id = setTimeout(() => setSettled(opts), 350); return () => clearTimeout(id); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
   // only the page is kept (it holds the SVG): the SVG file and the editable copy are made when downloading
-  const built = useMemo(() => { const o = recordingToPlayer(rec, settled); return { html: playerHtml(o, settled.title), out: { ...o, scene: '', screen: '' } }; }, [rec, settled]);
-  const { html, out } = built;
+  const built = useMemo(() => { const o = recordingToPlayer(rec, settled); return { html: playerHtml(o, settled.title), out: { ...o, scene: '', screen: '' }, packedPart: utf8Length(o.scene) + JSON.stringify(o.timeline).length }; }, [rec, settled]);
+  const { html, out, packedPart } = built;
   const preview = html;
   const fmtOut = out.hasHtml ? 'html' : format;
   const [gz, setGz] = useState<number | null>(null);
   // the gzipped size, once the edits have been still for a while
   useEffect(() => { setGz(null); let alive = true; const id = setTimeout(() => { gzipSize(html).then(v => { if (alive) setGz(v); }); }, 1500); return () => { alive = false; clearTimeout(id); }; }, [html]);
-  const save = () => {
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
     const base = `sashimi-recording-${stamp()}`;
     if (fmtOut !== 'html') download(recordingToSvg(rec, opts).svg, 'image/svg+xml', `${base}.svg`);
     if (fmtOut !== 'svg') {
       const project = editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined;
-      download(project || opts !== settled ? playerHtml(recordingToPlayer(rec, opts), opts.title, { project }) : html, 'text/html', `${base}.html`);
+      const out = recordingToPlayer(rec, opts);
+      setSaving(true);
+      // saved compressed (the page unpacks itself); a browser without CompressionStream saves it as it is
+      try { download(await packedPlayerHtml(out, opts.title, project), 'text/html', `${base}.html`); }
+      catch { download(playerHtml(out, opts.title, { project }), 'text/html', `${base}.html`); }
+      finally { setSaving(false); }
     }
   };
   const bytes = fmtOut === 'svg' ? out.bytes : fmtOut === 'html' ? utf8Length(html) : out.bytes + utf8Length(html);
+  // the page is saved with its scene and timeline compressed (base64 of deflate, about 4/3 of the gzipped size)
+  const saved = gz && fmtOut !== 'svg' ? utf8Length(html) - packedPart + (gz * 4) / 3 + (fmtOut === 'both' ? out.bytes : 0) : null;
 
   // ---- preview: the HTML page itself, in a frame; its time is kept when it is rebuilt ----
   const frame = useRef<HTMLIFrameElement>(null);
@@ -277,7 +285,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-[1200px] text-gray-900 text-sm" onMouseDown={e => e.stopPropagation()}>
         <div className="flex items-start justify-between px-5 pt-4 pb-2">
           <div>
-            <div className="text-base font-bold">Recording <span className="font-normal text-gray-500">· {fmtTime(out.duration)} · {out.frames} frames · {fmtSize(bytes)}{gz ? ` (${fmtSize(gz)} gzipped)` : ''}</span></div>
+            <div className="text-base font-bold">Recording <span className="font-normal text-gray-500">· {fmtTime(out.duration)} · {out.frames} frames · {saved ? <span title={`The page as saved: its drawing compressed inside it, unpacked when it opens (${fmtSize(bytes)} unpacked)`}>≈ {fmtSize(saved)} saved</span> : fmtSize(bytes)}</span></div>
             <div className="text-xs text-gray-500">vectors only: sharp at any zoom, text kept as text · the drawings and the dialogs are recorded, not the toolbar</div>
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none px-1" title="Close">×</button>
@@ -448,7 +456,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
             title="For PowerPoint, Keynote or Google Slides: the recording is played full window, in real time, and captured as a video of this tab (the browser asks to share it). MP4 (H.264) where the browser records it (recent Chrome or Edge, Safari), else WebM.">🎞 MP4 video…</button>
           <button onClick={() => { onClose(); onAgain(); }} className="h-8 px-3 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Record again</button>
           <button onClick={onClose} className="h-8 px-3 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Discard</button>
-          <button onClick={save} className="h-8 px-4 rounded-md bg-accent-600 text-white font-semibold hover:bg-accent-700">Download</button>
+          <button onClick={() => void save()} disabled={saving} className="h-8 px-4 rounded-md bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-60">{saving ? 'Packing…' : 'Download'}</button>
         </div>
       </div>
       {video && <iframe ref={videoFrame} title="video" srcDoc={video.html} onLoad={runVideo} className="fixed inset-0 w-screen h-screen z-[100] bg-white border-0" />}

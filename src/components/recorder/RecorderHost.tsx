@@ -6,7 +6,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import { createPortal } from 'react-dom';
 import { startRecording, type Recorder, type Recording } from './recorder';
 import RecordingEditor, { type Edits } from './RecordingEditor';
-import { PROJECT_SCRIPT_ID } from './exportRecording';
+import { PROJECT_SCRIPT_ID, inflateBase64 } from './exportRecording';
 
 /** Seconds counted down before the recording starts. */
 export const COUNTDOWN_S = 3;
@@ -51,7 +51,8 @@ const RecorderHost = forwardRef<RecorderHandle, { names: string[]; onRecording?:
   const openFile = async (f: File) => {
     try {
       const doc = new DOMParser().parseFromString(await f.text(), 'text/html');
-      const json = doc.getElementById(PROJECT_SCRIPT_ID)?.textContent;
+      const el = doc.getElementById(PROJECT_SCRIPT_ID);
+      const json = el?.textContent && el.getAttribute('data-packed') === 'deflate-raw' ? await inflateBase64(el.textContent) : el?.textContent;
       if (!json) throw new Error('this page was not saved editable (tick "keep the HTML page editable", next to Download, before downloading)');
       const p = JSON.parse(json);
       if (!p?.rec?.frames) throw new Error('no recording inside');

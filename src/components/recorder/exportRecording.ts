@@ -8,9 +8,15 @@
  * zooms on areas (around the clicks, or drawn by hand) and back, with eased transforms: the drawing is vector, so a zoom
  * stays sharp. The pointer follows its path, smoothed; each click is a ring that widens and fades. Every animation has
  * the length of the whole recording, so they stay in step when the player pauses or seeks them, and when looping.
+ *
+ * Only what changes is stored: an element that only moved is written once and moved by the timeline (svgShift.ts); in
+ * the HTML page a dialog's HTML is one box per place, filled with its successive contents, each kept as a list of
+ * pieces (tags with their text) shared by all of them; and the page is saved with its scene compressed (deflate, then
+ * unpacked by the page when it opens).
  */
 import type { Recording, Layer } from './recorder';
 import { renderCaptions, CAPTION_FADE_MS, type Caption, type Chapter } from './captions';
+import { shiftCanon, type Canon } from './svgShift';
 
 /** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
 export interface Zoom { start: number; end: number; rect: [number, number, number, number]; source: 'auto' | 'drawn' }
@@ -198,8 +204,19 @@ export interface Timeline {
   ptr: [number, number, number][]; ptrScale: number;
   clicks: [number, number, number][];
   fades: [string, number, number][];
+  /**
+   * The dialogs' HTML, as changes: each place a block of a dialog takes is one box, filled with its successive
+   * contents. `pieces`: every tag (with the text after it) met, once; `contents`: a content as its pieces, its style
+   * first; `boxes`: per box, from which time on each content shows. A dialog in which one number changes keeps all
+   * its other pieces: only the new number is new.
+   */
+  html?: { pieces: string[]; contents: number[][]; boxes: [number, number][][] };
 }
 export interface PlayerExport extends Omit<Exported, 'svg'> { scene: string; screen: string; timeline: Timeline }
+
+/** The translation-free form of each chunk, kept with the recording: the editor rebuilds its export at every edit. */
+const canonCache = new WeakMap<Recording, Map<number, Canon | null>>();
+const canonsOf = (rec: Recording) => { let m = canonCache.get(rec); if (!m) { m = new Map(); canonCache.set(rec, m); } return m; };
 
 function build(rec: Recording, opts: ExportOptions, player: boolean): Exported | PlayerExport {
   const map = timeMap(rec, opts.time);
@@ -263,20 +280,50 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
    * content (or a group with the same tag) at the same rank kept once, shown during the frames that hold it. A
    * drawing that does not change is thus written once for the whole recording, and a change adds only what changed.
    */
-  interface TreeNode { chunk: number; open?: string; frames: number[]; kids: TreeNode[][] }
+  // An element that only moved (the same drawing at another place: a chevron following the view, a group whose own
+  // translate changed) joins the node of its first place: written once, moved by the timeline (see svgShift.ts).
+  interface TreeNode { chunk: number; open?: string; frames: number[]; kids: TreeNode[][]; canon?: string; pos?: { i: number; x: number; y: number }[] }
+  const canon = canonsOf(rec);
+  const canonOf = (id: number): Canon | null => {
+    let v = canon.get(id);
+    if (v === undefined) { const c = rec.chunks[id]; v = 'leaf' in c ? shiftCanon(c.leaf) : shiftCanon(c.open, true); canon.set(id, v); }
+    return v;
+  };
   const insert = (alts: TreeNode[][], pos: number, id: number, frame: number) => {
     const c = rec.chunks[id];
     const list = (alts[pos] ??= []);
     let node = list.find(n => ('leaf' in c ? n.chunk === id : n.open === c.open));
-    if (!node) { node = { chunk: id, open: 'leaf' in c ? undefined : c.open, frames: [], kids: [] }; list.push(node); }
-    if (node.frames[node.frames.length - 1] !== frame) node.frames.push(frame);
+    const cn = canonOf(id);
+    if (!node && cn) node = list.find(n => n.canon === cn.key && n.frames[n.frames.length - 1] !== frame);
+    if (!node) { node = { chunk: id, open: 'leaf' in c ? undefined : c.open, frames: [], kids: [], canon: cn?.key, pos: cn ? [] : undefined }; list.push(node); }
+    if (node.frames[node.frames.length - 1] !== frame) { node.frames.push(frame); if (node.pos && cn) node.pos.push({ i: frame, x: cn.x, y: cn.y }); }
     if (!('leaf' in c)) c.kids.forEach((k, j) => insert(node!.kids, j, k, frame));
   };
   const emit = (n: TreeNode, parentFrames: number): string => {
     const c = rec.chunks[n.chunk];
     const own = n.frames.length !== parentFrames;
-    const inner = 'leaf' in c ? replaceText(c.leaf, opts.replace) : `${replaceText(n.open!, opts.replace)}${n.kids.map(list => list.map(k => emit(k, n.frames.length)).join('')).join('')}${c.close}`;
+    const mv = n.pos && n.canon != null ? moveClass(n.pos) : null;
+    const kids = () => n.kids.map(list => list.map(k => emit(k, n.frames.length)).join('')).join('');
+    const inner = mv
+      ? `<g class="a ${mv}">${'leaf' in c ? replaceText(n.canon!, opts.replace) : `${replaceText(n.canon!, opts.replace)}${kids()}${c.close}`}</g>`
+      : 'leaf' in c ? replaceText(c.leaf, opts.replace) : `${replaceText(n.open!, opts.replace)}${kids()}${c.close}`;
     return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner;
+  };
+
+  // the dialogs' HTML for the player: every tag (with its text) once, a content as its pieces (see Timeline.html)
+  const html: NonNullable<Timeline['html']> = { pieces: [], contents: [], boxes: [] };
+  const pieceIds = new Map<string, number>(), contentIds = new Map<number, number>(), contentKeys = new Map<string, number>();
+  const piece = (t: string) => { let k = pieceIds.get(t); if (k == null) { k = html.pieces.length; html.pieces.push(t); pieceIds.set(t, k); } return k; };
+  const contentOf = (id: number): number => {
+    let c = contentIds.get(id);
+    if (c != null) return c;
+    const h = rec.html[id];
+    const ids = [piece(h.style), ...(replaceText(h.html, opts.replace).match(/<[^>]*>[^<]*|[^<]+/g) ?? []).map(piece)];
+    const key = ids.join(',');
+    c = contentKeys.get(key);
+    if (c == null) { c = html.contents.length; html.contents.push(ids); contentKeys.set(key, c); }
+    contentIds.set(id, c);
+    return c;
   };
 
   let nSlots = 0;
@@ -302,6 +349,28 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
         windows.get(k)!.frames.push(i);
       }
       const blocks: string[] = [];
+      if (player) {
+        // one box per place (and size, and clip), filled by the player with the content of the moment
+        const boxes = new Map<string, { b: Layer['blocks'][number]; frames: number[]; seq: [number, number][] }>();
+        for (const { f, i } of here) {
+          const seen = new Map<string, number>();
+          for (const b of pick(f.layers[L]) ?? []) {
+            const base = `${b.x}|${b.y}|${b.w}|${b.h}|${b.clip?.join(',') ?? ''}`;
+            const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
+            const k = `${base}#${nth}`;
+            if (!boxes.has(k)) boxes.set(k, { b, frames: [], seq: [] });
+            const box = boxes.get(k)!, c = contentOf(b.id);
+            box.frames.push(i);
+            if (box.seq[box.seq.length - 1]?.[1] !== c) box.seq.push([Math.round(shown[order.get(i)!].a), c]);
+          }
+        }
+        for (const { b, frames, seq } of boxes.values()) {
+          nBlocks++;
+          const n = html.boxes.length; html.boxes.push(seq);
+          blocks.push(clipped(b.clip, `<foreignObject class="fr ${win(frames)}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" data-rec-box="${n}" style="width:${b.w}px;height:${b.h}px;overflow:hidden"></div></foreignObject>`));
+        }
+        return blocks;
+      }
       for (const { b, frames } of windows.values()) {
         nBlocks++;
         const h = rec.html[b.id];
@@ -426,6 +495,7 @@ ${player ? '' : cap.screen}
   const meta = { css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bounds: B, chapters };
   if (player) {
     tl.W = W; tl.H = H;
+    if (html.boxes.length) tl.html = html;
     const screen = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" font-family="${esc(rec.fontFamily)}">${cap.screen}</svg>`;
     return { ...meta, scene: svg, screen, timeline: tl, bytes: utf8Length(svg) + utf8Length(screen) + utf8Length(pageCss) + JSON.stringify(tl).length };
   }
@@ -441,7 +511,7 @@ ${player ? '' : cap.screen}
  * start of the chapter (the one before when at its start). Space toggles play / pause. `bare`: the drawing alone,
  * filling the window, still at the start until recPlayer.play() (the video export).
  */
-export function playerHtml(out: PlayerExport, title: string, extra: { bare?: boolean; project?: string } = {}): string {
+export function playerHtml(out: PlayerExport, title: string, extra: { bare?: boolean; project?: string; packed?: { scene: string; project?: string } } = {}): string {
   const tl = out.timeline, D = Math.round(out.duration);
   const ch = extra.bare ? [] : out.chapters.filter(c => c.t >= 0 && c.t < D).map(c => ({ t: Math.round(c.t), name: c.name }));
   const json = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
@@ -473,22 +543,35 @@ body{margin:0;background:${extra.bare ? '#fff' : '#f4f6f8'};font:13px 'Inter Vie
 .rec-ch label{margin-left:auto;color:#5b6b7e;font-size:12px;display:flex;align-items:center;gap:4px}
 </style></head><body><div class="rec-wrap">
 <div class="rec-stage" id="stage"><div class="rec-view" id="view">
-<div id="camv">${out.scene}<div id="clicks"></div><div id="ptr"></div></div>
+<div id="camv">${extra.packed ? '' : out.scene}<div id="clicks"></div><div id="ptr"></div></div>
 <div class="rec-screen">${out.screen}</div>
 </div></div>
 ${extra.bare ? '' : `<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
 ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chapter; → or PageDown goes on"><input type="checkbox" id="pauseAt" checked> pause at chapters</label></div>` : ''}`}
 </div>
-<script type="application/json" id="rec-timeline">${json(tl)}</script>
+${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extra.packed.scene}</script>` : `<script type="application/json" id="rec-timeline">${json(tl)}</script>`}
 <script>
 (function(){
-  var T=JSON.parse(document.getElementById('rec-timeline').textContent), D=T.D, CH=${json(ch)}, BARE=${extra.bare ? 'true' : 'false'};
-  var view=document.getElementById('view'), camv=document.getElementById('camv'), ptr=document.getElementById('ptr'), clickBox=document.getElementById('clicks');
+  var camv=document.getElementById('camv');
+  // a page saved compressed: the scene and its timeline are unpacked first (deflate, in the browser)
+  var packed=document.getElementById('rec-packed');
+  if(packed){
+    var b=atob(packed.textContent.trim()),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+    new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text().then(function(t){
+      var v=JSON.parse(t);camv.insertAdjacentHTML('afterbegin',v[0]);packed.remove();start(v[1]);
+    }).catch(function(e){camv.insertAdjacentHTML('afterbegin','<p style="padding:24px">This recording could not be unpacked by this browser ('+e+'). Open it in a recent Chrome, Edge, Firefox or Safari.</p>');});
+  } else start(JSON.parse(document.getElementById('rec-timeline').textContent));
+  function start(T){
+  var D=T.D, CH=${json(ch)}, BARE=${extra.bare ? 'true' : 'false'};
+  var view=document.getElementById('view'), ptr=document.getElementById('ptr'), clickBox=document.getElementById('clicks');
   var list=function(c){return Array.prototype.slice.call(document.getElementsByClassName(c));};
   // what the timeline drives, looked up once
-  var wins=[], moves=[], fades=[], clicks=[];
+  var wins=[], moves=[], fades=[], clicks=[], boxes=[];
   for(var c in T.wins) wins.push({els:list(c),runs:T.wins[c],on:null});
   for(var m in T.moves) moves.push({els:list(m),pts:T.moves[m],k:-2});
+  // the dialogs' boxes, filled with the content of the moment (its pieces joined) when it changes
+  var H=T.html;
+  if(H)Array.prototype.forEach.call(document.querySelectorAll('[data-rec-box]'),function(el){boxes.push({el:el,seq:H.boxes[+el.getAttribute('data-rec-box')],base:el.getAttribute('style'),k:-2});});
   T.fades.forEach(function(f){var el=document.getElementById(f[0]);if(el)fades.push({el:el,a:f[1],b:f[2],o:-1});});
   var NS='http://www.w3.org/2000/svg', sc=T.ptrScale||1;
   if(T.ptr.length){ptr.innerHTML='<svg width="'+(14*sc)+'" height="'+(20*sc)+'" viewBox="0 0 14 20"><path d="M0 0 L0 16 L4.5 12.2 L7.6 19 L10.2 17.8 L7.2 11.2 L13 11.2 Z" fill="#111827" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/></svg>';}
@@ -508,6 +591,7 @@ ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chap
   var render=function(t){
     var i,j;
     for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++)w.els[j].style.visibility=on?'visible':'hidden';}}
+    for(i=0;i<boxes.length;i++){var bx=boxes[i],S=bx.seq,kb=0;for(j=1;j<S.length&&S[j][0]<=t;j++)kb=j;if(kb!==bx.k){bx.k=kb;var ids=H.contents[S[kb][1]],a=[];for(j=1;j<ids.length;j++)a.push(H.pieces[ids[j]]);bx.el.setAttribute('style',H.pieces[ids[0]]+';'+bx.base);bx.el.innerHTML=a.join('');}}
     for(i=0;i<moves.length;i++){var mv=moves[i],P=mv.pts,k=-1;for(j=0;j<P.length&&P[j][0]<=t;j++)k=j;if(k<0)k=0;if(k!==mv.k){mv.k=k;for(j=0;j<mv.els.length;j++)mv.els[j].style.transform='translate('+P[k][1]+'px,'+P[k][2]+'px)';}}
     for(i=0;i<fades.length;i++){var f=fades[i],F=${CAPTION_FADE_MS},o=t<f.a||t>f.b+F?0:t<f.a+F?(t-f.a)/F:t<=f.b?1:1-(t-f.b)/F;o=Math.round(o*100)/100;if(o!==f.o){f.o=o;f.el.style.opacity=o;}}
     var fx=view.clientWidth/T.W;
@@ -561,8 +645,32 @@ ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chap
     var k=chapterAt(time());chBtns.forEach(function(b,i){b.className=i===k?'on':'';});
     requestAnimationFrame(tick);
   })();
+  }
 })();
-</script>${extra.project ? `\n<script type="application/json" id="sashimi-recording-project">${extra.project.replace(/</g, '\\u003c')}</script>` : ''}</body></html>`;
+</script>${extra.packed?.project ? `\n<script type="application/octet-stream" id="${PROJECT_SCRIPT_ID}" data-packed="deflate-raw">${extra.packed.project}</script>` : extra.project ? `\n<script type="application/json" id="${PROJECT_SCRIPT_ID}">${extra.project.replace(/</g, '\\u003c')}</script>` : ''}</body></html>`;
+}
+
+/** Bytes compressed with raw deflate (the browser's CompressionStream), as base64. */
+export async function deflateBase64(text: string): Promise<string> {
+  const buf = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + 0x8000)));
+  return btoa(bin);
+}
+/** The inverse of deflateBase64. */
+export async function inflateBase64(b64: string): Promise<string> {
+  const bin = atob(b64.trim()), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+}
+
+/**
+ * The page as saved: the scene and its timeline compressed inside it (about a fifth of their size, unpacked by the
+ * page when it opens), and the recording to edit it again, compressed too.
+ */
+export async function packedPlayerHtml(out: PlayerExport, title: string, project?: string): Promise<string> {
+  const scene = await deflateBase64(JSON.stringify([out.scene, out.timeline]));
+  return playerHtml(out, title, { packed: { scene, project: project ? await deflateBase64(project) : undefined } });
 }
 
 /** The size of a string in UTF-8, without copying it. */
