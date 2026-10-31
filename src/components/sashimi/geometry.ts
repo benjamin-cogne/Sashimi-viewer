@@ -639,13 +639,18 @@ export function niceTicks(start: number, end: number, target: number): number[] 
 }
 
 /** Round a depth up to a nice axis maximum (1, 2, 2.5, 5 × 10^k). */
+/**
+ * A round axis maximum at or above v. The steps are close (1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8 × 10ⁿ) so the curve fills
+ * at least three quarters of the height: with 1, 2, 2.5, 5, 10 a 56× maximum took a 100× axis and left the top half of
+ * the coverage empty, a band that grew with the coverage's height. Every step halves to a round tick.
+ */
 export function niceMax(v: number, floor = 10): number {
   if (v <= floor) return floor;
   if (v <= 0) return floor;
   const mag = Math.pow(10, Math.floor(Math.log10(v)));
   const r = v / mag;
-  const m = r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10;
-  return m * mag;
+  const m = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find(s => r <= s + 1e-9) ?? 10;
+  return Math.round(m * mag * 1e6) / 1e6;
 }
 
 /**

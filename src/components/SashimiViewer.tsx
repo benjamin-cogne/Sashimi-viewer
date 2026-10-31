@@ -4420,15 +4420,24 @@ export default function SashimiViewer({
       }
       // Highest point of the track content relative to the baseline (negative): the coverage area itself,
       // every arc apex (dragged arcs included, their apex height carries the drag), read-count pill and edge chevron.
+      // An arc reaching past the view counts by its part in view: its apex may be far outside, much higher than what shows.
+      const visibleExtreme = (a: typeof arcs[number], down: boolean): number => {
+        const lo = Math.max(Math.min(a.geom.x1, a.geom.x2), PLOT_LEFT), hi = Math.min(Math.max(a.geom.x1, a.geom.x2), plotRight);
+        const whole = down ? Math.max(a.geom.y1, a.geom.y2) + a.apexH : Math.min(a.geom.y1, a.geom.y2) - a.apexH;
+        if (hi <= lo || (lo <= Math.min(a.geom.x1, a.geom.x2) && hi >= Math.max(a.geom.x1, a.geom.x2))) return whole;
+        let v = down ? -Infinity : Infinity;
+        for (let k = 0; k <= 16; k++) { const y = arcYAtX(a.geom, lo + ((hi - lo) * k) / 16); v = down ? Math.max(v, y) : Math.min(v, y); }
+        return v;
+      };
       let top = -COVERAGE_H, bottom = 0;
       for (const a of arcs) {
         if (a.below) {
-          bottom = Math.max(bottom, Math.max(a.geom.y1, a.geom.y2) + a.apexH);
+          bottom = Math.max(bottom, visibleExtreme(a, true));
           if (a.label) bottom = Math.max(bottom, a.label.y + (LABEL_H * a.labelScale) / 2);
           if (a.edge) bottom = Math.max(bottom, a.edge.y + 4);
           continue;
         }
-        top = Math.min(top, Math.min(a.geom.y1, a.geom.y2) - a.apexH);
+        top = Math.min(top, visibleExtreme(a, false));
         if (a.label) top = Math.min(top, a.label.y - (LABEL_H * a.labelScale) / 2);
         if (a.edge) top = Math.min(top, a.edge.y - 4);
       }
