@@ -48,17 +48,23 @@ function wrap(text: string, px: number, weight: number, family: string, max: num
 
 export interface CaptionLayers { css: string[]; screen: string; content: string }
 
+/** The fade of a caption: its element id, shown from `a` to `b` (played ms), fading in and out over FADE_MS. */
+export type CaptionFade = [string, number, number];
+export const CAPTION_FADE_MS = FADE_MS;
+
 /**
  * The captions as SVG: `screen` goes above the camera (view coordinates 0..W, 0..H), `content` inside it (page
  * coordinates, so it zooms with the drawing). `map` turns recorded into played time, `D` is the animation length.
+ * With `fades`, the fades are listed there for a player to run instead of written as CSS animations.
  */
 export function renderCaptions(captions: Caption[], chapters: Chapter[], map: (t: number) => number, D: number,
-  view: { x0: number; y0: number; W: number; H: number }, family: string): CaptionLayers {
+  view: { x0: number; y0: number; W: number; H: number }, family: string, fades?: CaptionFade[]): CaptionLayers {
   const { x0, y0, W, H } = view;
   const css: string[] = [];
   let screen = '', content = '', n = 0;
   const fade = (a: number, b: number) => {
     const id = `cp${n++}`;
+    if (fades) { fades.push([id, Math.round(a), Math.round(b)]); return id; }
     css.push(`@keyframes ${id}{0%,${pct(a, D)}{opacity:0}${pct(a + FADE_MS, D)},${pct(b, D)}{opacity:1}${pct(b + FADE_MS, D)},100%{opacity:0}}#${id}{animation-name:${id};animation-timing-function:linear}`);
     return id;
   };

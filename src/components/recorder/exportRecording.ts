@@ -10,7 +10,7 @@
  * the length of the whole recording, so they stay in step when the player pauses or seeks them, and when looping.
  */
 import type { Recording, Layer } from './recorder';
-import { renderCaptions, type Caption, type Chapter } from './captions';
+import { renderCaptions, CAPTION_FADE_MS, type Caption, type Chapter } from './captions';
 
 /** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
 export interface Zoom { start: number; end: number; rect: [number, number, number, number]; source: 'auto' | 'drawn' }
@@ -174,15 +174,44 @@ function pointerPath(rec: Recording, map: (t: number) => number, smooth: boolean
 export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[] }
 
 export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
+  return build(rec, opts, false) as Exported;
+}
+
+/**
+ * The recording for the HTML player: the same scene, but nothing in it is a CSS animation. The player (playerHtml)
+ * reads `timeline` and shows, hides and moves the elements itself, only when they change; the pointer, the clicks and
+ * the camera are layers of the page above the scene, so moving them does not redraw it.
+ */
+export function recordingToPlayer(rec: Recording, opts: ExportOptions): PlayerExport {
+  return build(rec, opts, true) as PlayerExport;
+}
+
+/** What the player runs (times in played ms, positions in the view's coordinates). */
+export interface Timeline {
+  W: number; H: number; D: number; loop: boolean;
+  /** window classes: the stretches during which their elements show */
+  wins: Record<string, [number, number][]>;
+  /** move classes: the position of their elements from each time on */
+  moves: Record<string, [number, number, number][]>;
+  /** the camera: the area shown from each time on ([x, y, w, h] in view coordinates, null = all), eased between */
+  cam: [number, [number, number, number, number] | null][];
+  ptr: [number, number, number][]; ptrScale: number;
+  clicks: [number, number, number][];
+  fades: [string, number, number][];
+}
+export interface PlayerExport extends Omit<Exported, 'svg'> { scene: string; screen: string; timeline: Timeline }
+
+function build(rec: Recording, opts: ExportOptions, player: boolean): Exported | PlayerExport {
   const map = timeMap(rec, opts.time);
   const end = map(rec.duration);
   const D = Math.max(1, end + (opts.loop ? END_HOLD_MS : 0));
   const B = boundsOf(rec);
   const [x0, y0, W, H] = B;
   const iter = opts.loop ? 'infinite' : '1';
+  const tl: Timeline = { W: 0, H: 0, D, loop: opts.loop, wins: {}, moves: {}, cam: [], ptr: [], ptrScale: opts.pointer.scale, clicks: [], fades: [] };
   const css: string[] = [
-    `.fr{visibility:hidden;animation:${D}ms step-end ${iter} forwards}`,
-    `.a{animation-duration:${D}ms;animation-iteration-count:${iter};animation-fill-mode:forwards}`,
+    player ? '.fr{visibility:hidden}' : `.fr{visibility:hidden;animation:${D}ms step-end ${iter} forwards}`,
+    player ? '' : `.a{animation-duration:${D}ms;animation-iteration-count:${iter};animation-fill-mode:forwards}`,
     // what a clip, mask, gradient or pattern holds is used, not drawn: it must stay visible whatever hides the group
     // around it (an invisible clip path clips everything away)
     'clipPath,clipPath *,mask *,pattern *,marker *,linearGradient *,radialGradient *,filter *{visibility:visible!important}',
@@ -199,14 +228,16 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
     if (!c) {
       c = `w${winClass.size}`;
       let kf = '0%{visibility:hidden}', k = 0;
+      const runs: [number, number][] = [];
       while (k < frames.length) {
         let e = k;
         while (e + 1 < frames.length && order.get(frames[e + 1]) === order.get(frames[e])! + 1) e++;
         const a = shown[order.get(frames[k])!].a, z = shown[order.get(frames[e])!].b;
         kf += `${pct(a, D)}{visibility:visible}${z === Infinity ? '' : `${pct(z, D)}{visibility:hidden}`}`;
+        runs.push([Math.round(a), z === Infinity ? Math.round(D) + 1 : Math.round(z)]);
         k = e + 1;
       }
-      css.push(`@keyframes ${c}{${kf}}.${c}{animation-name:${c}}`);
+      if (player) tl.wins[c] = runs; else css.push(`@keyframes ${c}{${kf}}.${c}{animation-name:${c}}`);
       winClass.set(key, c);
     }
     return c;
@@ -216,6 +247,7 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   const moveClass = (pos: { i: number; x: number; y: number }[]): string | null => {
     if (pos.every(q => q.x === pos[0].x && q.y === pos[0].y)) return null;
     const id = `m${nMoves++}`;
+    if (player) { tl.moves[id] = pos.map(q => [Math.round(shown[order.get(q.i)!].a), q.x, q.y]); return id; }
     css.push(`@keyframes ${id}{${pos.map(q => `${pct(shown[order.get(q.i)!].a, D)}{transform:translate(${n1(q.x)}px,${n1(q.y)}px)}`).join('')}}.${id}{animation-name:${id};animation-timing-function:step-end}`);
     return id;
   };
@@ -318,13 +350,15 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
 
   // the pointer and the clicks
   let pointer = '';
-  if (opts.pointer.show && rec.pointer.length) {
+  if (opts.pointer.show && rec.pointer.length && player) tl.ptr = pointerPath(rec, map, opts.pointer.smooth).map(p => [Math.round(p.t), Math.round(p.x - x0), Math.round(p.y - y0)]);
+  else if (opts.pointer.show && rec.pointer.length) {
     const path = pointerPath(rec, map, opts.pointer.smooth);
     const kf = path.map(p => `${pct(p.t, D)}{transform:translate(${Math.round(p.x)}px,${Math.round(p.y)}px)}`);
     css.push(`@keyframes ptr{0%{transform:translate(${Math.round(path[0].x)}px,${Math.round(path[0].y)}px)}${kf.join('')}}#ptr{animation-name:ptr;animation-timing-function:linear}`);
     pointer = `<g id="ptr" class="a"><path transform="scale(${opts.pointer.scale})" d="M0 0 L0 16 L4.5 12.2 L7.6 19 L10.2 17.8 L7.2 11.2 L13 11.2 Z" fill="#111827" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/></g>`;
   }
-  const clickEls = !opts.pointer.clicks ? '' : rec.clicks.map((c, i) => {
+  if (player && opts.pointer.clicks) tl.clicks = rec.clicks.map(c => [Math.round(map(c.t)), Math.round(c.x - x0), Math.round(c.y - y0)]);
+  const clickEls = !opts.pointer.clicks || player ? '' : rec.clicks.map((c, i) => {
     const a = map(c.t), b = a + CLICK_MS;
     css.push(`@keyframes ck${i}{0%,${pct(a, D)}{opacity:0;transform:scale(.3)}${pct(a + 40, D)}{opacity:.9;transform:scale(.5)}${pct(b, D)},100%{opacity:0;transform:scale(1.6)}}#ck${i}{animation-name:ck${i};animation-timing-function:ease-out}`);
     return `<circle id="ck${i}" class="a" cx="${Math.round(c.x)}" cy="${Math.round(c.y)}" r="${14 * opts.pointer.scale}" fill="none" stroke="#0f766e" stroke-width="3" style="opacity:0;transform-box:fill-box;transform-origin:center"/>`;
@@ -349,10 +383,11 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
       if (next && map(next.start) - ZOOM_IN_MS <= e + ZOOM_OUT_MS) { kfs.push({ t: e, r: rect }); last = rect; }
       else { kfs.push({ t: e, r: rect }, { t: e + ZOOM_OUT_MS, r: null }); last = null; }
     });
-    css.push(`@keyframes cam{${kfs.map(k => `${pct(k.t, D)}{${tf(k.r)};animation-timing-function:${EASE}}`).join('')}}#cam{animation-name:cam;transform-box:view-box;transform-origin:0 0}`);
+    if (player) tl.cam = kfs.map(k => [Math.round(k.t), k.r && [k.r[0] - x0, k.r[1] - y0, k.r[2], k.r[3]]]);
+    else css.push(`@keyframes cam{${kfs.map(k => `${pct(k.t, D)}{${tf(k.r)};animation-timing-function:${EASE}}`).join('')}}#cam{animation-name:cam;transform-box:view-box;transform-origin:0 0}`);
   }
 
-  const cap = renderCaptions(opts.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, opts.replace).slice(1, -1) })), opts.chapters, map, D, { x0, y0, W, H }, rec.fontFamily);
+  const cap = renderCaptions(opts.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, opts.replace).slice(1, -1) })), opts.chapters, map, D, { x0, y0, W, H }, rec.fontFamily, player ? tl.fades : undefined);
   css.push(...cap.css);
   const chapters = opts.chapters.map(c => ({ t: map(c.t), name: c.name })).sort((a, b) => a.t - b.t);
 
@@ -368,7 +403,7 @@ ${body.join('\n')}
 ${cap.content}
 ${clickEls}${pointer}
 </g></g>
-${cap.screen}
+${player ? '' : cap.screen}
 </svg>`;
 
   // the page's CSS rules the HTML blocks use
@@ -378,35 +413,44 @@ ${cap.screen}
     for (const h of rec.html) for (const m of h.html.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (c) classes.add(c.replace(/&amp;/g, '&'));
     pageCss = rec.css.filter(r => r.classes.every(c => classes.has(c))).map(r => r.text).join('\n');
   }
-  return { svg, css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bytes: utf8Length(svg) + utf8Length(pageCss), bounds: B, chapters };
+  const meta = { css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bounds: B, chapters };
+  if (player) {
+    tl.W = W; tl.H = H;
+    const screen = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" font-family="${esc(rec.fontFamily)}">${cap.screen}</svg>`;
+    return { ...meta, scene: svg, screen, timeline: tl, bytes: utf8Length(svg) + utf8Length(screen) + utf8Length(pageCss) + JSON.stringify(tl).length };
+  }
+  return { ...meta, svg, bytes: utf8Length(svg) + utf8Length(pageCss) };
 }
 
 /**
- * An HTML page around the SVG: play / pause, a time bar with the chapters marked, the chapter list. With "pause at
- * chapters" the playback stops at each chapter, for a talk: → / PageDown (a presentation clicker) goes on, or jumps to
- * the next chapter while playing; ← / PageUp goes back to the start of the chapter (the one before when at its start).
- * Space toggles play / pause.
+ * The HTML page of a recording: the scene, the camera, the pointer and the captions, run by a small player that only
+ * touches what changes, when it changes (an element shown or hidden, a block moved), and moves the pointer, the click
+ * rings and the camera as layers of their own, so the scene is not redrawn for them. Play / pause, a time bar with the
+ * chapters marked, the chapter list; with "pause at chapters" the playback stops at each chapter, for a talk: → /
+ * PageDown (a presentation clicker) goes on, or jumps to the next chapter while playing; ← / PageUp goes back to the
+ * start of the chapter (the one before when at its start). Space toggles play / pause. `bare`: the drawing alone,
+ * filling the window, still at the start until recPlayer.play() (the video export).
  */
-export function svgToHtml(out: Exported, title: string, extra: { bare?: boolean; project?: string } = {}): string {
-  const D = Math.round(out.duration);
-  if (extra.bare) {
-    // for the video export: the drawing alone, filling the window, paused at the start until told to play
-    return `<!doctype html><html><head><meta charset="utf-8">${out.css ? `<style>${out.css.replace(/<\/style/gi, '<\\/style')}</style>` : ''}
-<style>html,body{margin:0;height:100%;background:#fff;overflow:hidden}body>svg{display:block;width:100vw;height:100vh}</style></head><body>${out.svg}
-<script>(function(){var svg=document.querySelector('body>svg');var a=function(){return svg.getAnimations({subtree:true});};a().forEach(function(x){x.pause();x.currentTime=0;});
-window.recPlayer={play:function(){a().forEach(function(x){x.currentTime=0;x.play();});},duration:${D}};})();</script></body></html>`;
-  }
-  const ch = out.chapters.filter(c => c.t >= 0 && c.t < D);
-  const chJson = JSON.stringify(ch.map(c => ({ t: Math.round(c.t), name: c.name }))).replace(/</g, '\\u003c');
+export function playerHtml(out: PlayerExport, title: string, extra: { bare?: boolean; project?: string } = {}): string {
+  const tl = out.timeline, D = Math.round(out.duration);
+  const ch = extra.bare ? [] : out.chapters.filter(c => c.t >= 0 && c.t < D).map(c => ({ t: Math.round(c.t), name: c.name }));
+  const json = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
+  const bar = extra.bare ? 0 : ch.length ? 118 : 80;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
 ${out.css ? `<style>${out.css.replace(/<\/style/gi, '<\\/style')}</style>` : ''}
 <style>
-body{margin:0;background:#f4f6f8;font:13px Inter,system-ui,-apple-system,'Segoe UI',sans-serif;color:#1f2937}
-.rec-wrap{max-width:100%;padding:16px;box-sizing:border-box}
-.rec-stage{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.12);overflow:hidden}
-.rec-stage>svg{display:block;width:100%;height:auto;max-height:calc(100vh - ${ch.length ? 118 : 80}px)}
+body{margin:0;background:${extra.bare ? '#fff' : '#f4f6f8'};font:13px 'Inter Viewer',Inter,system-ui,-apple-system,'Segoe UI',sans-serif;color:#1f2937${extra.bare ? ';overflow:hidden' : ''}}
+.rec-wrap{max-width:100%;padding:${extra.bare ? '0' : '16px'};box-sizing:border-box}
+.rec-stage{background:#fff;${extra.bare ? '' : 'border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.12);'}overflow:hidden}
+.rec-view{position:relative;overflow:hidden;margin:0 auto;aspect-ratio:${tl.W}/${tl.H};width:min(100%,calc((100vh - ${bar}px) * ${tl.W} / ${tl.H}))}
+#camv{position:absolute;inset:0;transform-origin:0 0}
+#camv>svg,.rec-screen{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+.rec-screen{pointer-events:none}
+#ptr{position:absolute;left:0;top:0;will-change:transform;pointer-events:none}
+#ptr svg{display:block;overflow:visible}
+.rec-click{position:absolute;left:0;top:0;box-sizing:border-box;border:3px solid #0f766e;border-radius:50%;opacity:0;pointer-events:none}
 .rec-bar{display:flex;align-items:center;gap:10px;margin-top:10px}
 .rec-bar button{width:34px;height:30px;border-radius:8px;border:1px solid #d3dbe5;background:#fff;cursor:pointer;font-size:14px}
 .rec-track{position:relative;flex:1;display:flex;align-items:center}
@@ -418,18 +462,60 @@ body{margin:0;background:#f4f6f8;font:13px Inter,system-ui,-apple-system,'Segoe 
 .rec-ch button.on{background:#0f766e;border-color:#0f766e;color:#fff}
 .rec-ch label{margin-left:auto;color:#5b6b7e;font-size:12px;display:flex;align-items:center;gap:4px}
 </style></head><body><div class="rec-wrap">
-<div class="rec-stage" id="stage">${out.svg}</div>
-<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
-${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chapter; → or PageDown goes on"><input type="checkbox" id="pauseAt" checked> pause at chapters</label></div>` : ''}
+<div class="rec-stage" id="stage"><div class="rec-view" id="view">
+<div id="camv">${out.scene}<div id="clicks"></div><div id="ptr"></div></div>
+<div class="rec-screen">${out.screen}</div>
+</div></div>
+${extra.bare ? '' : `<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
+${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chapter; → or PageDown goes on"><input type="checkbox" id="pauseAt" checked> pause at chapters</label></div>` : ''}`}
 </div>
+<script type="application/json" id="rec-timeline">${json(tl)}</script>
 <script>
 (function(){
-  var D=${D}, CH=${chJson}, svg=document.querySelector('#stage>svg'), play=document.getElementById('play'), seek=document.getElementById('seek'), time=document.getElementById('time');
-  var anims=function(){return svg.getAnimations({subtree:true});}, paused=false, dragging=false, last=0;
-  var fmt=function(ms){var s=Math.max(0,ms)/1000;return Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2);};
-  var cur=function(){var a=anims()[0];return a?(Number(a.currentTime)||0)%D:0;};
-  var set=function(ms){anims().forEach(function(a){a.currentTime=ms;});last=ms;};
-  var setPaused=function(p){paused=p;anims().forEach(function(a){p?a.pause():a.play();});play.textContent=p?'▶':'❚❚';};
+  var T=JSON.parse(document.getElementById('rec-timeline').textContent), D=T.D, CH=${json(ch)}, BARE=${extra.bare ? 'true' : 'false'};
+  var view=document.getElementById('view'), camv=document.getElementById('camv'), ptr=document.getElementById('ptr'), clickBox=document.getElementById('clicks');
+  var list=function(c){return Array.prototype.slice.call(document.getElementsByClassName(c));};
+  // what the timeline drives, looked up once
+  var wins=[], moves=[], fades=[], clicks=[];
+  for(var c in T.wins) wins.push({els:list(c),runs:T.wins[c],on:null});
+  for(var m in T.moves) moves.push({els:list(m),pts:T.moves[m],k:-2});
+  T.fades.forEach(function(f){var el=document.getElementById(f[0]);if(el)fades.push({el:el,a:f[1],b:f[2],o:-1});});
+  var NS='http://www.w3.org/2000/svg', sc=T.ptrScale||1;
+  if(T.ptr.length){ptr.innerHTML='<svg width="'+(14*sc)+'" height="'+(20*sc)+'" viewBox="0 0 14 20"><path d="M0 0 L0 16 L4.5 12.2 L7.6 19 L10.2 17.8 L7.2 11.2 L13 11.2 Z" fill="#111827" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/></svg>';}
+  T.clicks.forEach(function(k){var d=document.createElement('div');d.className='rec-click';clickBox.appendChild(d);clicks.push({el:d,t:k[0],x:k[1],y:k[2],on:false});});
+  var ease=function(p){return p<.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;};
+  var at=function(runs,t){for(var i=0;i<runs.length;i++)if(t>=runs[i][0]&&t<runs[i][1])return true;return false;};
+  var camAt=function(t){
+    var K=T.cam, full=[0,0,T.W,T.H];
+    if(!K.length)return full;
+    var r=function(x){return x||full;};
+    if(t<=K[0][0])return r(K[0][1]);
+    for(var i=0;i+1<K.length;i++){var a=K[i],b=K[i+1];if(t<b[0]){var p=b[0]>a[0]?ease((t-a[0])/(b[0]-a[0])):1,ra=r(a[1]),rb=r(b[1]);return [ra[0]+(rb[0]-ra[0])*p,ra[1]+(rb[1]-ra[1])*p,ra[2]+(rb[2]-ra[2])*p,ra[3]+(rb[3]-ra[3])*p];}}
+    return r(K[K.length-1][1]);
+  };
+  var ptrAt=function(t){var P=T.ptr;if(!P.length)return null;if(t<=P[0][0])return P[0];var lo=0,hi=P.length-1;if(t>=P[hi][0])return P[hi];while(hi-lo>1){var md=(lo+hi)>>1;if(P[md][0]<=t)lo=md;else hi=md;}var a=P[lo],b=P[hi],p=(t-a[0])/((b[0]-a[0])||1);return [t,a[1]+(b[1]-a[1])*p,a[2]+(b[2]-a[2])*p];};
+  var camNow=[0,0,T.W,T.H], lastCam='', still=0;
+  var render=function(t){
+    var i,j;
+    for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++)w.els[j].style.visibility=on?'visible':'hidden';}}
+    for(i=0;i<moves.length;i++){var mv=moves[i],P=mv.pts,k=-1;for(j=0;j<P.length&&P[j][0]<=t;j++)k=j;if(k<0)k=0;if(k!==mv.k){mv.k=k;for(j=0;j<mv.els.length;j++)mv.els[j].style.transform='translate('+P[k][1]+'px,'+P[k][2]+'px)';}}
+    for(i=0;i<fades.length;i++){var f=fades[i],F=${CAPTION_FADE_MS},o=t<f.a||t>f.b+F?0:t<f.a+F?(t-f.a)/F:t<=f.b?1:1-(t-f.b)/F;o=Math.round(o*100)/100;if(o!==f.o){f.o=o;f.el.style.opacity=o;}}
+    var fx=view.clientWidth/T.W;
+    // the camera: a layer of its own while it moves, drawn sharp again once it stops
+    camNow=camAt(t);var s=T.W/camNow[2],key=camNow.map(function(v){return v.toFixed(2);}).join(',')+fx;
+    if(key!==lastCam){lastCam=key;still=0;camv.style.willChange='transform';camv.style.transform='translate('+(-camNow[0]*s*fx)+'px,'+(-camNow[1]*s*fx)+'px) scale('+s+')';}
+    else if(++still===20)camv.style.willChange='auto';
+    var q=ptrAt(t);if(q)ptr.style.transform='translate('+(q[1]*fx)+'px,'+(q[2]*fx)+'px) scale('+fx+')';
+    for(i=0;i<clicks.length;i++){var ck=clicks[i],p=(t-ck.t)/${CLICK_MS};if(p>=0&&p<=1){var sz=28*sc*fx,sc2=.5+1.1*p;ck.el.style.width=ck.el.style.height=sz+'px';ck.el.style.transform='translate('+(ck.x*fx-sz/2)+'px,'+(ck.y*fx-sz/2)+'px) scale('+sc2+')';ck.el.style.opacity=(p<.07?p/.07:1-p)*.9;ck.on=true;}else if(ck.on){ck.on=false;ck.el.style.opacity=0;}}
+  };
+  ptr.style.transformOrigin='0 0';
+  // the clock
+  var cur=0, paused=BARE, t0=0, last=0, dragging=false;
+  var now=function(){return performance.now();};
+  var time=function(){return paused?cur:Math.min(D,now()-t0);};
+  var set=function(ms){cur=Math.max(0,Math.min(D,ms));t0=now()-cur;last=cur;render(cur);};
+  var play=BARE?null:document.getElementById('play'), seek=document.getElementById('seek'), timeEl=document.getElementById('time');
+  var setPaused=function(p){if(p){cur=time();paused=true;}else{if(cur>=D)cur=0;t0=now()-cur;paused=false;}if(play)play.textContent=paused?'▶':'❚❚';};
   var toggle=function(){setPaused(!paused);};
   var pauseAt=function(){var b=document.getElementById('pauseAt');return !!(b&&b.checked);};
   var chList=document.getElementById('chapters'), chBtns=[];
@@ -439,25 +525,30 @@ ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chap
     var k=document.createElement('div');k.className='rec-tick';k.style.left='calc('+(c.t/D*100)+'% - 1px)';k.title=c.name;document.getElementById('track').appendChild(k);
   });
   var chapterAt=function(t){var k=-1;CH.forEach(function(c,i){if(c.t<=t+1)k=i;});return k;};
-  var next=function(){var t=cur();if(paused){setPaused(false);return;}for(var i=0;i<CH.length;i++)if(CH[i].t>t+50){if(pauseAt())setPaused(true);set(CH[i].t);return;}};
-  var prev=function(){var t=cur(),k=chapterAt(t);if(k<0){setPaused(true);set(0);return;}if(t-CH[k].t<1000&&k>0)k--;setPaused(true);set(CH[k].t);};
-  window.recPlayer={pause:function(){setPaused(true);},play:function(){setPaused(false);},seek:function(ms){set(ms);},time:cur,paused:function(){return paused;},duration:D,chapters:CH};
-  play.onclick=toggle;
-  document.addEventListener('keydown',function(e){
+  var next=function(){var t=time();if(paused){setPaused(false);return;}for(var i=0;i<CH.length;i++)if(CH[i].t>t+50){if(pauseAt())setPaused(true);set(CH[i].t);return;}};
+  var prev=function(){var t=time(),k=chapterAt(t);if(k<0){setPaused(true);set(0);return;}if(t-CH[k].t<1000&&k>0)k--;setPaused(true);set(CH[k].t);};
+  /** a point of the window (client coordinates) in the view's coordinates, under the current camera */
+  var toView=function(x,y){var r=view.getBoundingClientRect(),u=(x-r.left)/r.width,v=(y-r.top)/r.height;return [camNow[0]+u*camNow[2],camNow[1]+v*camNow[3]];};
+  window.recPlayer={pause:function(){setPaused(true);},play:function(){if(BARE){set(0);}setPaused(false);},seek:function(ms){set(ms);},time:time,paused:function(){return paused;},duration:D,chapters:CH,toView:toView};
+  if(play)play.onclick=toggle;
+  if(!BARE)document.addEventListener('keydown',function(e){
     if(e.code==='Space'){e.preventDefault();toggle();}
     else if(e.key==='ArrowRight'||e.key==='PageDown'){e.preventDefault();next();}
     else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();prev();}
   });
-  seek.oninput=function(){dragging=true;set(Number(seek.value));};
-  seek.onchange=function(){dragging=false;};
+  if(seek){seek.oninput=function(){dragging=true;set(Number(seek.value));};seek.onchange=function(){dragging=false;};}
+  set(0);
   (function tick(){
-    var t=cur();
-    // stop at a chapter crossed while playing (not on a loop back to the start)
-    if(!paused&&!dragging&&pauseAt()&&t>=last){for(var i=0;i<CH.length;i++){if(CH[i].t>0&&CH[i].t>last&&CH[i].t<=t){setPaused(true);set(CH[i].t);t=CH[i].t;break;}}}
-    last=t;
-    if(!dragging)seek.value=String(Math.round(t));
-    time.textContent=fmt(t)+' / '+fmt(D);
-    var k=chapterAt(t);chBtns.forEach(function(b,i){b.className=i===k?'on':'';});
+    if(!paused){
+      var t=now()-t0;
+      if(t>=D){if(T.loop){t=t%D;t0=now()-t;}else{t=D;cur=D;setPaused(true);}}
+      // stop at a chapter crossed while playing
+      if(!dragging&&pauseAt()&&t>=last){for(var i=0;i<CH.length;i++){if(CH[i].t>0&&CH[i].t>last&&CH[i].t<=t){setPaused(true);t=CH[i].t;cur=t;break;}}}
+      last=t;render(t);
+    } else render(cur);
+    if(seek&&!dragging)seek.value=String(Math.round(time()));
+    if(timeEl){var f=function(ms){var s=Math.max(0,ms)/1000;return Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2);};timeEl.textContent=f(time())+' / '+f(D);}
+    var k=chapterAt(time());chBtns.forEach(function(b,i){b.className=i===k?'on':'';});
     requestAnimationFrame(tick);
   })();
 })();
@@ -470,5 +561,6 @@ export function utf8Length(s: string): number {
   for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c > 0x7f) { n += c > 0x7ff ? (c >= 0xd800 && c <= 0xdbff ? (i++, 2) : 2) : 1; } }
   return n;
 }
+
 /** The id of the script that carries a recording and its edits inside an exported page, to edit it again. */
 export const PROJECT_SCRIPT_ID = 'sashimi-recording-project';

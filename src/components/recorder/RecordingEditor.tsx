@@ -4,7 +4,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
-import { recordingToSvg, svgToHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import { recordingToSvg, recordingToPlayer, playerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
 import { suggestCaptions, CAPTION_DEFAULT_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
@@ -88,7 +88,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const [settled, setSettled] = useState(opts);
   useEffect(() => { if (settled === opts) return; const id = setTimeout(() => setSettled(opts), 350); return () => clearTimeout(id); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
   // only the page is kept (it holds the SVG): the SVG file and the editable copy are made when downloading
-  const built = useMemo(() => { const o = recordingToSvg(rec, settled); return { html: svgToHtml(o, settled.title), out: { ...o, svg: '' } }; }, [rec, settled]);
+  const built = useMemo(() => { const o = recordingToPlayer(rec, settled); return { html: playerHtml(o, settled.title), out: { ...o, scene: '', screen: '' } }; }, [rec, settled]);
   const { html, out } = built;
   const preview = html;
   const fmtOut = out.hasHtml ? 'html' : format;
@@ -100,7 +100,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     if (fmtOut !== 'html') download(recordingToSvg(rec, opts).svg, 'image/svg+xml', `${base}.svg`);
     if (fmtOut !== 'svg') {
       const project = editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined;
-      download(project || opts !== settled ? svgToHtml(recordingToSvg(rec, opts), opts.title, { project }) : html, 'text/html', `${base}.html`);
+      download(project || opts !== settled ? playerHtml(recordingToPlayer(rec, opts), opts.title, { project }) : html, 'text/html', `${base}.html`);
     }
   };
   const bytes = fmtOut === 'svg' ? out.bytes : fmtOut === 'html' ? utf8Length(html) : out.bytes + utf8Length(html);
@@ -131,14 +131,10 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     return () => removeEventListener('keydown', onKey, true);
   }, [pick.what]);
   const startPick = (what: Pick, onDone: (r: Rect | [number, number]) => void) => { const p = player(); if (p) { p.pause(); keep.current = { t: p.time(), paused: true }; } setPick({ what, onDone }); };
+  /** A point of the preview (its window's coordinates) on the page, under the preview's current zoom. */
   const toPage = (x: number, y: number): [number, number] | null => {
-    const doc = frame.current?.contentDocument;
-    const g = doc?.querySelector('#cam > g') as SVGGElement | null, svg = doc?.querySelector('#stage > svg') as SVGSVGElement | null;
-    const m = g?.getScreenCTM()?.inverse();
-    if (!svg || !m) return null;
-    const q = svg.createSVGPoint(); q.x = x; q.y = y;
-    const r = q.matrixTransform(m);
-    return [Math.round(r.x), Math.round(r.y)];
+    const v = (frame.current?.contentWindow as any)?.recPlayer?.toView?.(x, y) as [number, number] | undefined;
+    return v ? [Math.round(v[0] + out.bounds[0]), Math.round(v[1] + out.bounds[1])] : null;
   };
   const finishPick = () => {
     const d = drag, done = pick.onDone, what = pick.what;
@@ -237,8 +233,8 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       // asked first, while the click still counts as the user's gesture
       stream = await md.getDisplayMedia({ video: { frameRate: 30 }, audio: false, preferCurrentTab: true, selfBrowserSurface: 'include', surfaceSwitching: 'exclude' });
     } catch (e) { setVideoMsg(`Video cancelled: the tab was not shared (${(e as Error).name}${(e as Error).message ? `: ${(e as Error).message}` : ''}).`); return; }
-    const vOut = recordingToSvg(rec, { ...opts, loop: false });
-    setVideo({ html: svgToHtml(vOut, title, { bare: true }), duration: vOut.duration, stream });
+    const vOut = recordingToPlayer(rec, { ...opts, loop: false });
+    setVideo({ html: playerHtml(vOut, title, { bare: true }), duration: vOut.duration, stream });
   };
   const runVideo = async () => {
     if (!video) return;
