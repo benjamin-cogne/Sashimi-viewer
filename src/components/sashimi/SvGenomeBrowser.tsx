@@ -24,6 +24,12 @@ const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H =
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
 const fmt = (n: number) => n.toLocaleString('en-US');
+let measureCtx: CanvasRenderingContext2D | null | undefined;
+/** The width of a gene name in bold italic 11 px (measured by the browser; estimated when it cannot). */
+function textWidth(s: string): number {
+  if (measureCtx === undefined) { try { measureCtx = document.createElement('canvas').getContext('2d'); if (measureCtx) measureCtx.font = `italic 700 11px ${FONT}`; } catch { measureCtx = null; } }
+  return measureCtx ? measureCtx.measureText(s).width : s.length * 7;
+}
 const kb = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)} Mb` : n >= 1000 ? `${(n / 1000).toFixed(n >= 1e4 ? 0 : 1)} kb` : `${n} bp`);
 
 export interface SvGeneLoaders {
@@ -137,6 +143,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const impactOf = useMemo(() => new Map(story.genes.map(g => [g.gene.symbol, g])), [story]);
   /** in a crowded view, the genes that keep their label: every changed gene, and the nearby ones worth a look */
+  const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
   const worthLabel = (gi: GeneImpact | undefined) => !!gi && gi.kind !== 'unaffected' && (gi.kind !== 'nearby' || notable(gi, annotations));
 
   // ---- geometry ----
@@ -177,12 +184,14 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
 
   // ---- layout of the reference genes ----
   const shown = (g: SvGene) => (mode === 'mane' ? [g.principal] : g.transcripts);
-  const labelW = (s: string) => s.length * 6.4 + 16;
+  /** The width of a gene name as drawn (bold italic 11 px), plus a margin. */
+  const labelW = (s: string) => textWidth(s) + 10;
   /**
    * Genes in lanes, each with its label; when that would take more than MAX_LANES lanes (a gene-dense region seen whole),
-   * glyphs alone are packed (sharing a lane past the cap) and only the genes worth a label keep it (`compact`).
+   * glyphs alone are packed (sharing a lane past the cap), and a label is drawn only where it fits in its lane, clear
+   * of the other glyphs and labels: the genes worth a label first, then the others (`labeled`; the rest show on hover).
    */
-  function pack<T extends { x0: number; x1: number; xg: number; h: number }>(items: T[]): { items: (T & { lane: number; compact: boolean })[]; laneY: number[]; height: number } {
+  function pack<T extends { x0: number; x1: number; xg: number; h: number; worth: boolean; lw: number }>(items: T[]): { items: (T & { lane: number; compact: boolean; labeled: boolean })[]; laneY: number[]; height: number } {
     const run = (ext: (it: T) => number, cap: number) => {
       const lanes: number[] = [], laneH: number[] = [];
       const placed = [...items].sort((a, b) => a.x0 - b.x0).map(it => {
@@ -195,16 +204,42 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       return { placed, laneH };
     };
     let r = run(it => it.x1, Infinity), compact = false;
-    if (r.laneH.length > MAX_LANES) { r = run(it => it.xg, MAX_LANES); compact = true; }
+    const labeled = new Set<number>();
+    if (r.laneH.length <= MAX_LANES) r.placed.forEach((_, i) => labeled.add(i));
+    else {
+      // too many lanes with every label: MAX_LANES lanes, the genes worth a label placed first, each in the first lane
+      // where its glyph and label fit, else its glyph alone, else (past the cap) on the emptiest lane without label
+      compact = true;
+      const spans: [number, number][][] = [], laneH: number[] = [];
+      const fits = (lane: number, a: number, b: number) => spans[lane].every(([x, y]) => y + 8 < a || x - 8 > b);
+      const put = (a: number, b: number): number => {
+        for (let l = 0; l < spans.length; l++) if (fits(l, a, b)) return l;
+        if (spans.length < MAX_LANES) { spans.push([]); laneH.push(0); return spans.length - 1; }
+        return -1;
+      };
+      const idx = items.map((it, i) => ({ it, i })).sort((p, q) => Number(q.it.worth) - Number(p.it.worth) || p.it.x0 - q.it.x0);
+      const lane: number[] = new Array(items.length);
+      for (const { it, i } of idx) {
+        let l = put(it.x0, Math.max(it.xg, it.x0 + it.lw));
+        if (l >= 0) { labeled.add(i); spans[l].push([it.x0, Math.max(it.xg, it.x0 + it.lw)]); }
+        else {
+          l = put(it.x0, it.xg);
+          if (l < 0) l = spans.reduce((best, sp, k) => (sp.length < spans[best].length ? k : best), 0);
+          spans[l].push([it.x0, it.xg]);
+        }
+        lane[i] = l; laneH[l] = Math.max(laneH[l], it.h);
+      }
+      r = { placed: items.map((it, i) => ({ ...it, lane: lane[i] })), laneH };
+    }
     const laneY: number[] = []; let y = 0;
     for (const h of r.laneH) { laneY.push(y); y += h + LANE_GAP; }
-    return { items: r.placed.map(it => ({ ...it, compact })), laneY, height: Math.max(26, y) };
+    return { items: r.placed.map((it, i) => ({ ...it, compact, labeled: labeled.has(i) })), laneY, height: Math.max(26, y) };
   }
   const inView = (a: number, b: number) => Math.max(a, b) >= X0 - 2 && Math.min(a, b) <= X1 + 2;
-  const refItems = pack(genes.filter(g => inView(refX(g.start), refX(g.end))).map(g => { const a = Math.max(X0 + 2, refX(Math.max(g.start, win.start))), b = refX(Math.min(g.end, win.end)); return { g, x0: a, x1: Math.max(b, a + labelW(g.symbol)), xg: Math.max(b, a + 3), h: LABEL_H + shown(g).length * TX_H }; }));
+  const refItems = pack(genes.filter(g => inView(refX(g.start), refX(g.end))).map(g => { const a = Math.max(X0 + 2, refX(Math.max(g.start, win.start))), b = refX(Math.min(g.end, win.end)); const lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0); return { g, x0: a, x1: Math.max(b, a + lw), xg: Math.max(b, a + 3), h: LABEL_H + shown(g).length * TX_H, worth: worthLabel(impactOf.get(g.symbol)), lw }; }));
 
   // ---- layout of the rebuilt chromosome's genes: one block per chain (a fusion's two partners in one block) ----
-  interface DerBlock { der: DerLayout; chains: Chain[]; genes: string[]; label: string; x0: number; x1: number; xg: number; h: number; fusion: GeneImpact['principal']['fusions'][number] | null }
+  interface DerBlock { der: DerLayout; chains: Chain[]; genes: string[]; label: string; x0: number; x1: number; xg: number; h: number; fusion: GeneImpact['principal']['fusions'][number] | null; worth: boolean; lw: number }
   const derBlocks = useMemo(() => {
     const keep = (c: Chain) => c.parts.every(p => (mode === 'mane' ? p.tx === impactOf.get(p.tx.gene)?.gene.principal : true));
     const out = new Map<DerLayout, DerBlock[]>();
@@ -231,10 +266,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       // in "all NM" mode the transcripts of one gene over the same span share a block
       const same = list.find(b => b.genes.join() === geneList.join() && Math.abs(b.x0 - x0) < 2 && Math.abs(b.x1 - x1) < 2);
       if (same) { same.chains.push(c); same.h += TX_H; continue; }
-      list.push({ der: d, chains: [c], genes: geneList, label, x0, x1: Math.max(x1, x0 + labelW(label) + (fusion ? 70 : 0)), xg: Math.max(x1, x0 + 3), h: LABEL_H + TX_H, fusion });
+      const lw = labelW(label) + (fusion ? 80 : 0) + (geneList.length === 1 && panelDot(geneList[0]) ? 10 : 0);
+      list.push({ der: d, chains: [c], genes: geneList, label, x0, x1: Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: LABEL_H + TX_H, fusion, worth: geneList.length > 1 || worthLabel(gi), lw });
     }
     return out;
-  }, [story, mode, view, k]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [story, mode, view, k, panel, annotations]); // eslint-disable-line react-hooks/exhaustive-deps
   const derPacked = ders.map(d => pack(derBlocks.get(d) ?? []));
 
   // ---- vertical layout ----
@@ -281,7 +317,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return els;
   };
   const torn = (x: number, yy: number, color: string, key: string) => <path key={key} d={`M${x},${yy - 8} l-3,3 l3,3 l-3,3 l3,3 l-3,3`} fill="none" stroke={color} strokeWidth={1.4} />;
-  const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
 
   // ticks of the reference ruler
   const ticks = useMemo(() => {
@@ -320,7 +355,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {/* breakpoints through the reference */}
         {rec.segs.filter(s => !s.first).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={domains.length ? yRefTad : yRefGenes} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={1} strokeDasharray="3 3" opacity={0.55} />)}
         {/* reference genes */}
-        {refItems.items.map(({ g, lane, compact }) => {
+        {refItems.items.map(({ g, lane, labeled }) => {
           const gi = impactOf.get(g.symbol); const col = geneColor(g.symbol, gi);
           const yy = yRefGenes + refItems.laneY[lane];
           const lostGene = gi?.kind === 'deleted';
@@ -328,7 +363,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           return (
             <g key={`rg${g.symbol}`} opacity={dim(g.symbol)} onMouseEnter={enter(g.symbol)} onMouseMove={enter(g.symbol)} onMouseLeave={leave} style={{ cursor: 'pointer' }} onClick={() => zoomTo(g.start, g.end)}>
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
-              {(!compact || worthLabel(gi)) && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={gi && gi.kind !== 'unaffected' ? 700 : 500} fontStyle="italic" fill={col}>{g.symbol}</text>}
+              {labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={col}>{g.symbol}</text>}
               {shown(g).map((t, i) => <g key={t.id}>{txGlyph(t, refX, yy + LABEL_H + 6 + i * TX_H, col, `r${t.id}`)}</g>)}
               {lostGene && <line x1={refX(g.start)} x2={refX(g.end)} y1={yy + LABEL_H + 6} y2={yy + LABEL_H + 6} stroke={C.lost} strokeWidth={2.2} opacity={0.6} />}
             </g>
@@ -393,8 +428,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                 return (
                   <g key={`dg${bi}`} opacity={dim(b.genes)} onMouseEnter={enter(b.genes[0])} onMouseMove={enter(b.genes[0])} onMouseLeave={leave} style={{ cursor: 'pointer' }}>
                     {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
-                    {(!b.compact || isFusion || worthLabel(gi)) && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>}
-                    {isFusion && b.fusion && <g>
+                    {b.labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>}
+                    {b.labeled && isFusion && b.fusion && <g>
                       <rect x={lx + labelW(b.label) - 4} y={yy + 1} width={b.fusion.kind === 'in-frame' ? 52 : b.fusion.kind === 'promoter-swap' ? 74 : 66} height={12} rx={6} fill={b.fusion.kind === 'in-frame' ? '#7c3aed' : '#ede9fe'} />
                       <text x={lx + labelW(b.label) + 2} y={yy + 10} fontSize={9} fontWeight={700} fill={b.fusion.kind === 'in-frame' ? '#fff' : '#6d28d9'}>{b.fusion.kind === 'in-frame' ? 'in frame' : b.fusion.kind === 'promoter-swap' ? 'promoter swap' : b.fusion.kind === 'out-of-frame' ? 'out of frame' : b.fusion.kind === 'five-cds-whole' ? '3′ UTR join' : 'frame ?'}</text>
                     </g>}
