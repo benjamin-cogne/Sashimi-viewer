@@ -12,6 +12,8 @@ export default {
   ],
   theme: {
     extend: {
+      // the embedded Inter first (src/index.css), then the system fonts
+      fontFamily: { sans: ['"Inter Viewer"', 'ui-sans-serif', 'system-ui', '-apple-system', '"Segoe UI"', 'Roboto', 'sans-serif'] },
       colors: {
         gray: neutral,
         slate: neutral,

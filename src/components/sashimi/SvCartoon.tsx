@@ -26,7 +26,7 @@ const lerp = (a: number, b: number, p: number) => a + (b - a) * p;
 
 // ======================== Palette and layout ========================
 
-const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', lost: '#dc2626', ok: '#16a34a', accent: '#0f766e', dup: '#15803d', inv: '#2563eb', bg: '#ffffff' };
 const VW = 1200, LX = 120, RX = 1170;

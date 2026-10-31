@@ -497,7 +497,7 @@ const INK = {
 };
 /** Opacity of a track's coverage fill (over the lighter shade of the column's highest depth). */
 const COVERAGE_ALPHA = 0.37;
-const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 // Nucleotide colours follow the IGV convention (A green, C blue, G orange, T red)
 const BASE_COLORS: Record<string, string> = { A: '#1a9e37', C: '#2452d6', G: '#d9861c', T: '#d6332b', N: '#5b6b7e' };
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };

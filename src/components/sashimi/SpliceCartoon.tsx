@@ -29,7 +29,7 @@ const lerp = (a: number, b: number, p: number) => a + (b - a) * p;
 
 // ======================== Palette ========================
 
-const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const C = {
   exon: '#334155', utr: '#94a3b8', intron: '#94a3b8', text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8',
   cryptic: '#b45309', lost: '#dc2626', ejc: '#7c3aed', ribosomeA: '#64748b', ribosomeB: '#94a3b8', upf1: '#dc2626',

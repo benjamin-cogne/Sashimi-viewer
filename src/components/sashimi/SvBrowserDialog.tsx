@@ -10,7 +10,7 @@ import { segmentColors } from './svColors';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 
-const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
   { label: 'deletion', text: 'NC_000020.11:g.10489766_10783340del' },
   { label: 'inversion with deletions', text: 'NC_000020.11:g.[10489766_10783340del;10783341_10807815inv;10807816_10808805del]' },

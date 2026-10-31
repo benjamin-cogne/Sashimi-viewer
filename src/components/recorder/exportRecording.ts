@@ -359,7 +359,8 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   const clipDefs = [...clips].map(([k, id]) => { const [x, y, w, h] = k.split(','); return `<clipPath id="${id}"><rect x="${x}" y="${y}" width="${w}" height="${h}"/></clipPath>`; }).join('');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${esc(rec.fontFamily)}">
 <title>${esc(opts.title)}</title>
-<style>${css.join('\n')}</style>
+<style>${rec.fonts?.length ? `/* Inter 5.3: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter). SIL Open Font License 1.1 (https://openfontlicense.org). */\n${rec.fonts.join('\n')}` : ''}
+${css.join('\n')}</style>
 <defs>${clipDefs}</defs>
 <rect width="${W}" height="${H}" fill="${rec.background}"/>
 <g id="cam" class="a"><g transform="translate(${-x0} ${-y0})">

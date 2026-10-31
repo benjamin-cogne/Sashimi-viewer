@@ -46,6 +46,8 @@ export interface Recording {
   html: { style: string; html: string }[];
   /** the page's CSS rules, with the classes each needs (kept at export when the blocks use them all) */
   css: CssRule[];
+  /** the page's @font-face rules (the embedded font, as data), so the recording replays in the font it was made in */
+  fonts?: string[];
   pointer: { t: number; x: number; y: number }[]; clicks: { t: number; x: number; y: number }[];
   duration: number;
 }
@@ -64,12 +66,22 @@ const skipRoot = (el: Element) => !!el.closest('[data-recorder="skip"]');
 const TRANSPARENT = 'rgba(0, 0, 0, 0)';
 const INHERITED = ['color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-align', 'white-space', 'text-transform'];
 
+/** The page's @font-face rules. */
+function fontFaces(doc: Document): string[] {
+  const out: string[] = [];
+  for (const sheet of Array.from(doc.styleSheets)) {
+    try { for (const r of Array.from(sheet.cssRules)) if (typeof CSSFontFaceRule !== 'undefined' && r instanceof CSSFontFaceRule) out.push(r.cssText); } catch { /* a sheet from elsewhere */ }
+  }
+  return out;
+}
+
 /** The page's CSS rules, each with the class names its selector needs. */
 function pageCss(doc: Document): CssRule[] {
   const out: CssRule[] = [];
   const classesOf = (sel: string) => [...new Set([...sel.matchAll(/\.((?:\\.|[\w-])+)/g)].map(m => m[1].replace(/\\(.)/g, '$1')))];
   const walk = (rules: CSSRuleList, wrap: (t: string) => string) => {
     for (const r of Array.from(rules)) {
+      if (typeof CSSFontFaceRule !== 'undefined' && r instanceof CSSFontFaceRule) continue; // kept apart (fontFaces)
       if (r instanceof CSSStyleRule) {
         // a rule for several selectors is needed when any of them is
         const alts = r.selectorText.split(',').map(classesOf);
@@ -394,7 +406,7 @@ export function startRecording(root: Document = document): Recorder {
       const bs = getComputedStyle(root.body);
       return {
         width: innerWidth, height: innerHeight, background: bs.backgroundColor === TRANSPARENT ? '#ffffff' : bs.backgroundColor, fontFamily: bs.fontFamily.replace(/"/g, "'"),
-        frames, chunks, html, css: html.length ? pageCss(root) : [], pointer, clicks, duration: now(),
+        frames, chunks, html, css: html.length ? pageCss(root) : [], fonts: fontFaces(root), pointer, clicks, duration: now(),
       };
     },
   };
