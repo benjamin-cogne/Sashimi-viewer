@@ -15,11 +15,14 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, LOEUF_CLASS, loeufClass, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
   type SvGene, type SvTranscript, type GeneAnnotations, type GenePanel, type Domain, type GeneImpact, type Chain, type Fragment, type DerLayout, type DosageScore, type Constraint, type ImpactKind } from './svGenes';
 import { IMPACT, KIND_COLOR } from './svColors';
+import { cnvEvents, matchesOf, RO_MATCH, type PopulationSv, type PopMatch, type CnvEvent } from './svPopulation';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary, type LoadedPanel } from '../../standalone/panelapp';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 const VW = 1200, X0 = 112, X1 = 1186;
+const DGV_LANE_H = 9, DGV_MAX_LANES = 8;
+const DGV_COLOR = { loss: '#dc2626', gain: '#2563eb', both: '#7c3aed', unknown: '#64748b' } as const;
 const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H = 20, RULER_H = 18, RIB_H = 118;
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
@@ -37,6 +40,8 @@ export interface SvGeneLoaders {
   getAnnotations?: (chrom: string, start: number, end: number, symbols: string[]) => Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
   /** the cytogenetic bands of a chromosome (the ISCN of the event) */
   getCytobands?: (chrom: string) => Promise<Cytoband[]>;
+  /** CNV regions of the general population (DGV Gold Standard) over a 0-based half-open window */
+  getPopulationSvs?: (chrom: string, start: number, end: number) => Promise<PopulationSv[]>;
   /** the models the viewer already has (the gene in view): used when the source cannot list a window's transcripts */
   fallback: SvTranscript[];
 }
@@ -95,9 +100,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [panelData, setPanelData] = useState<LoadedPanel | null>(() => store.get<LoadedPanel>('sashimi.svPanel'));
   const [domainsFile, setDomainsFile] = useState<{ name: string; text: string } | null>(() => store.get('sashimi.svDomains'));
   const [hover, setHover] = useState<string | null>(null);
-  const [tip, setTip] = useState<{ x: number; y: number; gene: string } | null>(null);
+  const [tip, setTip] = useState<{ x: number; y: number; gene: string; dgv?: PopulationSv } | null>(null);
   /** a gene's card kept open by a click (the hover card follows the pointer and goes with it) */
-  const [pinned, setPinned] = useState<{ x: number; y: number; gene: string } | null>(null);
+  const [pinned, setPinned] = useState<{ x: number; y: number; gene: string; dgv?: PopulationSv } | null>(null);
+  /** the population CNVs (DGV Gold Standard) of the window, drawn under the reference genes */
+  const [showDgv, setShowDgv] = useState<boolean>(() => store.get<boolean>('sashimi.svDgv') ?? true);
+  const [pop, setPop] = useState<{ list: PopulationSv[]; loading: boolean; error?: string }>({ list: [], loading: false });
   /** where the last press started: a click that ends a drag (a pan) opens no card */
   const downAt = useRef(0);
   const [colorBy, setColorBy] = useState<'loeuf' | 'impact'>(() => store.get<'loeuf' | 'impact'>('sashimi.svColorBy') ?? 'loeuf');
@@ -139,9 +147,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return () => { alive = false; };
   }, [symbols.join(','), chrom]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (!showDgv || !loaders.getPopulationSvs) { setPop({ list: [], loading: false }); return; }
+    let alive = true;
+    setPop(p => ({ ...p, loading: true, error: undefined }));
+    loaders.getPopulationSvs(chrom, win.start, win.end)
+      .then(list => { if (alive) setPop({ list, loading: false }); })
+      .catch(e => { if (alive) setPop({ list: [], loading: false, error: String(e?.message || e) }); });
+    return () => { alive = false; };
+  }, [showDgv, chrom, win.start, win.end]); // eslint-disable-line react-hooks/exhaustive-deps
   const domains = useMemo(() => (domainsFile ? parseDomainsBed(domainsFile.text).get(chrom.startsWith('chr') ? chrom : `chr${chrom}`) ?? [] : []), [domainsFile, chrom]);
   const story = useMemo(() => geneStory(rec, genes, win, { flankCopies, zygosity, domains, near }), [rec, genes, win, flankCopies, zygosity, domains, near]);
   const panel = useMemo(() => (panelData ? toPanel(panelData) : null), [panelData]);
+  /** the losses and gains of the rebuilt SV, each with the population CNVs overlapping it */
+  const cnv = useMemo(() => cnvEvents(rec, chrom).map(ev => ({ ev, matches: matchesOf(ev, pop.list) })), [rec, chrom, pop.list]);
+  /** population CNVs that are the same event as a loss or gain (same type, reciprocal overlap ≥ RO_MATCH) */
+  const popSame = useMemo(() => new Set(cnv.flatMap(c => c.matches.filter(m => m.sameType && m.ro >= RO_MATCH).map(m => m.sv))), [cnv]);
   const annotations: GeneAnnotations = useMemo(() => ({ dosage: ann.dosage, constraint: ann.constraint, panel }), [ann, panel]);
   /** A gene's colour: its gnomAD LoF constraint class, or its consequence. */
   const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : IMPACT[gi?.kind ?? 'unaffected'].color);
@@ -281,6 +302,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   let y = 10;
   const yRefTad = domains.length ? y : -1; if (domains.length) y += TAD_H + 6;
   const yRefGenes = y; y += refItems.height + 4;
+  // the population CNVs: one box plot each (outer extent a line, inner one a bar), packed in lanes at the current zoom
+  const dgvShown = showDgv && !!loaders.getPopulationSvs;
+  const dgvItems: { v: PopulationSv; lane: number; a: number; b: number; ia: number; ib: number }[] = [];
+  if (dgvShown) {
+    const ends: number[] = [];
+    for (const v of [...pop.list].sort((p, q) => p.outer[0] - q.outer[0])) {
+      const a = refX(v.outer[0]), b = Math.max(refX(v.outer[1]), a + 2);
+      if (b < X0 || a > X1) continue;
+      let lane = ends.findIndex(e => e + 3 < a);
+      if (lane < 0) { if (ends.length < DGV_MAX_LANES) { lane = ends.length; ends.push(b); } else { lane = ends.indexOf(Math.min(...ends)); ends[lane] = Math.max(ends[lane], b); } }
+      else ends[lane] = b;
+      dgvItems.push({ v, lane, a, b, ia: refX(v.inner[0]), ib: refX(v.inner[1]) });
+    }
+  }
+  const dgvLanes = Math.max(1, ...dgvItems.map(d => d.lane + 1));
+  const yDgv = dgvShown ? y : -1; if (dgvShown) y += dgvLanes * DGV_LANE_H + 10;
   const yRefRuler = y; y += RULER_H;
   const yRefBand = y; y += BAND_H;
   const yRib = y; y += RIB_H;
@@ -298,6 +335,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const dim = (sym: string | string[]) => (hover && !(Array.isArray(sym) ? sym.includes(hover) : sym === hover) ? 0.28 : 1);
   const enter = (sym: string) => (e: React.MouseEvent) => { setHover(sym); const r = boxRef.current!.getBoundingClientRect(); setTip({ x: e.clientX - r.left, y: e.clientY - r.top, gene: sym }); };
   const leave = () => { setHover(null); setTip(null); };
+  const dgvAt = (v: PopulationSv, e: React.MouseEvent) => { const r = boxRef.current!.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top, gene: `dgv:${v.id}`, dgv: v }; };
+  const dgvEnter = (v: PopulationSv) => (e: React.MouseEvent) => setTip(dgvAt(v, e));
+  const dgvPin = (v: PopulationSv) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (Math.abs(e.clientX - downAt.current) > 3) return;
+    setPinned(p => (p?.gene === `dgv:${v.id}` ? null : dgvAt(v, e)));
+  };
   const pin = (sym: string) => (e: React.MouseEvent) => {
     e.stopPropagation();
     if (Math.abs(e.clientX - downAt.current) > 3) return;
@@ -355,6 +399,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {domains.length > 0 && <text x={14} y={yRefTad + TAD_H - 6}>TADs</text>}
         <text x={14} y={yRefGenes + 12} fontWeight={600} fill={C.text}>genes</text>
         <text x={14} y={yRefGenes + 25} fontSize={9.5}>{mode === 'mane' ? 'MANE Select' : 'all NM_'}</text>
+        {yDgv >= 0 && <text x={14} y={yDgv + 8} fontWeight={600} fill={C.text}>DGV Gold<title>DGV Gold Standard: copy-number variants of the general population (curated, found in two studies and two samples at least)</title></text>}
         <text x={14} y={yRefBand + 14} fontWeight={700} fill={C.text}>{chrom}</text>
         <text x={14} y={yRefBand + 26} fontSize={9.5}>reference</text>
         {ders.map((d, i) => <g key={d.name}><text x={14} y={derY[i].band + 14} fontWeight={700} fill={C.accent}>{d.name}</text><text x={14} y={derY[i].band + 26} fontSize={9.5}>rebuilt</text></g>)}
@@ -382,6 +427,19 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             </g>
           );
         })}
+        {/* population CNVs */}
+        {yDgv >= 0 && dgvItems.map(({ v, lane, a, b, ia, ib }) => {
+          const yy = yDgv + lane * DGV_LANE_H, col = DGV_COLOR[v.type], same = popSame.has(v);
+          return (
+            <g key={`dgv${v.id}${v.outer[0]}`} opacity={same ? 1 : 0.5} style={{ cursor: 'pointer' }} onMouseEnter={dgvEnter(v)} onMouseMove={dgvEnter(v)} onMouseLeave={leave} onClick={dgvPin(v)}>
+              <rect x={a} y={yy} width={b - a} height={DGV_LANE_H - 1} fill="transparent" />
+              <line x1={a} x2={b} y1={yy + 4} y2={yy + 4} stroke={col} strokeWidth={1} />
+              <line x1={a} x2={a} y1={yy + 2} y2={yy + 6} stroke={col} strokeWidth={1} /><line x1={b} x2={b} y1={yy + 2} y2={yy + 6} stroke={col} strokeWidth={1} />
+              <rect x={ia} y={yy + 1.5} width={Math.max(1.5, ib - ia)} height={5} fill={col} stroke={same ? '#111827' : 'none'} strokeWidth={0.6} />
+            </g>
+          );
+        })}
+        {yDgv >= 0 && !dgvItems.length && <text x={X0 + 6} y={yDgv + 8} fontSize={9.5} fill={C.faint}>{pop.loading ? 'loading the DGV Gold Standard…' : pop.error ? `DGV Gold Standard unavailable: ${pop.error}` : 'no DGV Gold Standard CNV here'}</text>}
         {/* reference ruler and band */}
         {ticks.map(t => <g key={`tk${t}`}><line x1={refX(t)} x2={refX(t)} y1={yRefRuler + 12} y2={yRefRuler + 16} stroke={C.faint} /><text x={refX(t)} y={yRefRuler + 9} fontSize={8.5} textAnchor="middle" fill={C.faint} fontFamily={MONO}>{fmt(t)}</text></g>)}
         {rec.segs.map(s => {
@@ -507,6 +565,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {(['loeuf', 'impact'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : 'colour: impact'}</button>)}
         </span>
         <PanelPicker panel={panelData} onPanel={p => { setPanelData(p); store.set('sashimi.svPanel', p); }} />
+        {loaders.getPopulationSvs && (
+          <button onClick={() => { setShowDgv(v => { store.set('sashimi.svDgv', !v); return !v; }); }} aria-pressed={showDgv}
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${showDgv ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-600'} hover:bg-gray-50`}
+            title="DGV Gold Standard (UCSC track dgvGold): curated copy-number variants of the general population, each found in two studies and two samples at least; drawn under the reference genes and compared with the event's losses and gains">
+            ▤ DGV Gold{showDgv && pop.list.length ? ` (${pop.list.length})` : ''}
+          </button>
+        )}
         <label className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 cursor-pointer" title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build as the alignments), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
           ◭ {domainsFile ? `TADs: ${domainsFile.name} (${domains.length} here)` : 'Add chromatin domains (BED)…'}
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
@@ -535,16 +600,18 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           ))}
         </div>
       )}
+      {showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
       <div className="px-3 mt-2 relative" ref={boxRef}>
         {txs.loading ? <div className="h-[220px] flex items-center justify-center text-sm text-gray-500">loading the gene models of the window…</div> : svg}
         {[pinned, tip && tip.gene !== pinned?.gene ? tip : null].map((at, n) => {
           if (!at) return null;
           const isPin = n === 0;
-          const gi = impactOf.get(at.gene); if (!gi) return null;
-          const r = dosageReading(gi, annotations);
           const boxW = boxRef.current?.clientWidth ?? 900, boxH = boxRef.current?.clientHeight ?? 400;
           // below the pointer, or above it near the bottom of the figure (the dialog would cut it)
           const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, boxW - 390)), ...(at.y > boxH - 150 ? { bottom: boxH - at.y + 14 } : { top: at.y + 14 }) };
+          if (at.dgv) return <DgvCard key={isPin ? 'pin' : 'tip'} v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={place} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} />;
+          const gi = impactOf.get(at.gene); if (!gi) return null;
+          const r = dosageReading(gi, annotations);
           return (
             <div key={isPin ? 'pin' : 'tip'} className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg max-w-[380px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
               onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
@@ -577,6 +644,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>
+        {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>; outlined and solid when it matches a loss or gain of the event, pale otherwise</span>}
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· Ctrl / ⌘ + scroll to zoom, drag to pan, hover a gene for its consequence, click it to keep its card open (and zoom on it from there), double-click to fit</span>
       </div>
@@ -632,6 +700,67 @@ function summary(genes: GeneImpact[], a: GeneAnnotations, near: number): { title
 }
 
 // ======================== PanelApp picker ========================
+
+const TYPE_LABEL = { loss: 'loss', gain: 'gain', both: 'gain and loss', unknown: 'type not given' } as const;
+const pct = (v: number) => `${Math.round(v * 100)} %`;
+const evName = (ev: CnvEvent) => `${ev.kind} ${ev.letters} (${kb(ev.end - ev.start)})`;
+
+/** The card of a population CNV: its extents, its frequency, its overlap with the event's losses and gains, and every field the source gives. */
+function DgvCard({ v, chrom, cnv, pinned, place, onClose, onZoom }: { v: PopulationSv; chrom: string; cnv: { ev: CnvEvent; matches: PopMatch[] }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
+  const span = (r: [number, number]) => `${chrom}:${fmt(r[0] + 1)}-${fmt(r[1])} (${kb(r[1] - r[0])})`;
+  const sameInner = v.inner[0] === v.outer[0] && v.inner[1] === v.outer[1];
+  const rows = cnv.map(c => ({ ev: c.ev, m: c.matches.find(m => m.sv === v) })).filter(x => x.m);
+  return (
+    <div className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg max-w-[400px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+      onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+      <div className="font-semibold flex items-start gap-2"><span className="flex-1"><span style={{ color: { loss: '#fca5a5', gain: '#93c5fd', both: '#c4b5fd', unknown: '#cbd5e1' }[v.type] }}>●</span> {v.id} · population {TYPE_LABEL[v.type]} (DGV Gold Standard)</span>
+        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+      <div className="text-gray-300">{sameInner ? span(v.outer) : <>outer {span(v.outer)}<br />inner {span(v.inner)}</>}</div>
+      <div className="mt-0.5">{[v.freqText != null ? `frequency ${v.freqText}` : 'frequency not given', v.samples != null ? `${fmt(v.samples)} samples` : '', v.studies != null ? `${fmt(v.studies)} studies` : ''].filter(Boolean).join(' · ')}</div>
+      {rows.map(({ ev, m }) => (
+        <div key={ev.start} className={`mt-0.5 ${m!.sameType && m!.ro >= RO_MATCH ? 'text-emerald-300' : 'text-gray-300'}`}>
+          vs the {evName(ev)}: reciprocal overlap {pct(m!.ro)}{sameInner ? '' : ` (inner ${pct(m!.roInner)}, outer ${pct(m!.roOuter)})`}{m!.covers ? ', its inner extent holds the whole event' : ''}{m!.sameType ? '' : ', other type'}
+        </div>
+      ))}
+      {pinned && v.fields.length > 0 && (
+        <details className="mt-1 text-gray-400"><summary className="cursor-pointer">all fields ({v.fields.length})</summary>
+          <div className="mt-0.5 max-h-40 overflow-auto font-mono text-[10px] leading-snug">{v.fields.map(([k2, val]) => <div key={k2}><span className="text-gray-500">{k2}</span> {val.length > 160 ? `${val.slice(0, 160)}…` : val}</div>)}</div>
+        </details>
+      )}
+      {pinned
+        ? <div className="mt-1.5 pt-1.5 border-t border-white/15"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button></div>
+        : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
+    </div>
+  );
+}
+
+/**
+ * One line per loss or gain of the event: the population CNVs of the same type with a reciprocal overlap of RO_MATCH or
+ * more (the same event seen in the general population: evidence towards benign), else the closest one.
+ */
+function DgvSummary({ cnv, loading, error }: { cnv: { ev: CnvEvent; matches: PopMatch[] }[]; loading: boolean; error?: string }) {
+  if (!cnv.length) return null;
+  const tip = `DGV Gold Standard: curated CNV regions of the general population, each found in two studies and two samples at least. A loss or gain counts as seen when a population CNV of the same type overlaps it reciprocally by ${pct(RO_MATCH)} or more (inner or outer extent). Seen in the population is evidence towards benign; not seen is not evidence of pathogenicity.`;
+  return (
+    <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={tip}>
+      <span className="text-gray-500 self-center">DGV Gold:</span>
+      {loading ? <span className="text-gray-500">loading…</span> : error ? <span className="text-gray-500">unavailable ({error})</span> : cnv.map(({ ev, matches }) => {
+        const same = matches.filter(m => m.sameType && m.ro >= RO_MATCH);
+        const best = matches.find(m => m.sameType);
+        const seen = same.length > 0, top = same.sort((a, b) => (b.sv.freq ?? 0) - (a.sv.freq ?? 0))[0];
+        return (
+          <span key={ev.start} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border ${seen ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-gray-50 border-gray-300 text-gray-700'}`}>
+            <b>{evName(ev)}</b>
+            {seen
+              ? <>seen in the population: {same.length} CNV{same.length > 1 ? 's' : ''} ≥ {pct(RO_MATCH)} overlap{top ? `, e.g. ${top.sv.id}${top.sv.freqText != null ? ` (frequency ${top.sv.freqText})` : ''}` : ''}</>
+              : <>no population {ev.kind} ≥ {pct(RO_MATCH)} overlap{best ? `; closest ${best.sv.id}, ${pct(best.ro)}` : ''}</>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 
 function PanelPicker({ panel, onPanel }: { panel: LoadedPanel | null; onPanel: (p: LoadedPanel | null) => void }) {
   const [open, setOpen] = useState(false);

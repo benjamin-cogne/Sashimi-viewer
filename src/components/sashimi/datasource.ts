@@ -1,5 +1,6 @@
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import type { MethylWindow } from '../../standalone/methylation';
+import type { PopulationSv } from './svPopulation';
 import type { ArcSupport } from '../../standalone/arcSupport';
 /**
  * Data source used by the Sashimi viewer. The web application implements it with the
@@ -157,6 +158,8 @@ export interface SashimiDataSource {
   getGeneAnnotations?(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
   /** The cytogenetic bands of a chromosome (ISCN of a rebuilt SV); absent when the source has none. */
   getCytobands?(chrom: string): Promise<{ start: number; end: number; name: string; stain: string }[]>;
+  /** CNV regions of the general population (DGV Gold Standard) overlapping a 0-based half-open window. */
+  getPopulationSvs?(chrom: string, start: number, end: number): Promise<PopulationSv[]>;
   /** Common variants (dbSNP 155 common via UCSC, Ensembl fallback) overlapping a 0-based half-open window. */
   getCommonSnps(chrom: string, start: number, end: number): Promise<CommonSnp[]>;
   /** GTEx tissues available for tissue tracks (rejects when GTEx cannot be used, e.g. GRCh37). */

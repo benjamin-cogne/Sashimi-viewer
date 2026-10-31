@@ -529,4 +529,9 @@ export async function getCytobands(build: GenomeBuild, chrom: string, length: nu
     .filter(b => b.name && Number.isFinite(b.start) && b.end > b.start).sort((a, b) => a.start - b.start);
 }
 
+/** The DGV Gold Standard CNV regions (track dgvGold) overlapping a 0-based half-open window, as the API gives them. */
+export async function getDgvGold(build: GenomeBuild, chrom: string, start: number, end: number): Promise<Record<string, unknown>[]> {
+  return trackWindow(build, 'dgvGold', chrom, start, end);
+}
+
 export const _internal = { parseGenePred, codingOffset, searchHits, trackItems };

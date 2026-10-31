@@ -261,6 +261,7 @@ function App() {
     getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
     getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
     getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
+    getPopulationSvs: ds.getPopulationSvs ? (c: string, a: number, b: number) => ds.getPopulationSvs!(c, a, b) : undefined,
   }), [ds]);
 
   /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */
