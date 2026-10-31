@@ -13,9 +13,15 @@ import { renderCaptions, type Caption, type Chapter } from './captions';
 
 /** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
 export interface Zoom { start: number; end: number; rect: [number, number, number, number]; source: 'auto' | 'drawn' }
-export interface ExportOptions {
+/** How recorded time plays: idle stretches cut, stretches cut by hand, stretches sped up or slowed down (recorded ms). */
+export interface TimeEdits {
   /** idle stretches (nothing drawn changes, the pointer still) longer than this are cut down to it; 0 keeps them */
   maxIdleMs: number;
+  cuts: { start: number; end: number }[];
+  speeds: { start: number; end: number; factor: number }[];
+}
+export interface ExportOptions {
+  time: TimeEdits;
   loop: boolean;
   /** text drawn in the recording replaced at export: sample names → "Sample 1"… */
   replace: { from: string; to: string }[];
@@ -40,14 +46,36 @@ const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const pct = (t: number, d: number) => `${Math.max(0, Math.min(100, (t / d) * 100)).toFixed(3).replace(/\.?0+$/, '')}%`;
 const n1 = (v: number) => String(Math.round(v * 10) / 10);
 
-/** A function from recorded time to played time, cutting idle stretches to `maxIdle`. */
-export function timeMap(rec: Recording, maxIdle: number): (t: number) => number {
-  if (!(maxIdle > 0)) return t => t;
+/** The idle stretches the pause shortening removes (recorded ms): what lies past the first `maxIdle` of each gap between events. */
+export function idleCuts(rec: Recording, maxIdle: number): { start: number; end: number }[] {
+  if (!(maxIdle > 0)) return [];
   const ev = [0, ...rec.frames.map(f => f.t), ...rec.pointer.map(p => p.t), ...rec.clicks.map(c => c.t), rec.duration].sort((a, b) => a - b);
-  // each gap longer than maxIdle loses what lies past its first maxIdle
-  const cuts: { s: number; e: number }[] = [];
-  for (let i = 1; i < ev.length; i++) if (ev[i] - ev[i - 1] > maxIdle) cuts.push({ s: ev[i - 1] + maxIdle, e: ev[i] });
-  return t => t - cuts.reduce((acc, c) => acc + Math.min(Math.max(t - c.s, 0), c.e - c.s), 0);
+  const out: { start: number; end: number }[] = [];
+  for (let i = 1; i < ev.length; i++) if (ev[i] - ev[i - 1] > maxIdle) out.push({ start: ev[i - 1] + maxIdle, end: ev[i] });
+  return out;
+}
+
+/**
+ * Recorded time to played time: piecewise linear, with the rate 0 in a cut (idle or by hand) and 1 / factor in a
+ * stretch played faster or slower (a cut wins over a speed).
+ */
+export function timeMap(rec: Recording, edits: TimeEdits): (t: number) => number {
+  const cuts = [...idleCuts(rec, edits.maxIdleMs), ...edits.cuts.filter(c => c.end > c.start)];
+  const speeds = edits.speeds.filter(s => s.end > s.start && s.factor > 0);
+  if (!cuts.length && !speeds.length) return t => t;
+  const cut = (t: number) => cuts.some(c => t >= c.start && t < c.end);
+  // in overlapping speed stretches, the one set last applies
+  const rate = (t: number) => { if (cut(t)) return 0; const sp = speeds.filter(s => t >= s.start && t < s.end); return sp.length ? 1 / sp[sp.length - 1].factor : 1; };
+  const xs = [...new Set([0, rec.duration, ...cuts.flatMap(c => [c.start, c.end]), ...speeds.flatMap(s => [s.start, s.end])])].filter(x => x >= 0 && x <= rec.duration).sort((a, b) => a - b);
+  const acc: number[] = [0], rates: number[] = [];
+  for (let i = 0; i + 1 < xs.length; i++) { const r = rate((xs[i] + xs[i + 1]) / 2); rates.push(r); acc.push(acc[i] + r * (xs[i + 1] - xs[i])); }
+  return t => {
+    if (t <= 0) return t;
+    if (t >= rec.duration) return acc[acc.length - 1] + (t - rec.duration);
+    let lo = 0, hi = xs.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= t) lo = m; else hi = m; }
+    return acc[lo] + rates[lo] * (t - xs[lo]);
+  };
 }
 /** Played time back to recorded time (the map is monotone). */
 export function invertTime(map: (t: number) => number, played: number, duration: number): number {
@@ -57,7 +85,7 @@ export function invertTime(map: (t: number) => number, played: number, duration:
 }
 
 /** The text between tags with the replacements made (attributes and tag names untouched). */
-function replaceText(s: string, rep: ExportOptions['replace']): string {
+export function replaceText(s: string, rep: ExportOptions['replace']): string {
   if (!rep.length) return s;
   const list = rep.filter(r => r.from).map(r => ({ from: esc(r.from), to: esc(r.to) })).sort((a, b) => b.from.length - a.from.length);
   return s.replace(/>([^<]+)</g, (_m, txt: string) => `>${list.reduce((acc, r) => acc.split(r.from).join(r.to), txt)}<`);
@@ -143,7 +171,7 @@ function pointerPath(rec: Recording, map: (t: number) => number, smooth: boolean
 export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[] }
 
 export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
-  const map = timeMap(rec, opts.maxIdleMs);
+  const map = timeMap(rec, opts.time);
   const end = map(rec.duration);
   const D = Math.max(1, end + (opts.loop ? END_HOLD_MS : 0));
   const B = boundsOf(rec);
@@ -292,8 +320,15 @@ ${cap.screen}
  * the next chapter while playing; ← / PageUp goes back to the start of the chapter (the one before when at its start).
  * Space toggles play / pause.
  */
-export function svgToHtml(out: Exported, title: string): string {
+export function svgToHtml(out: Exported, title: string, extra: { bare?: boolean; project?: string } = {}): string {
   const D = Math.round(out.duration);
+  if (extra.bare) {
+    // for the video export: the drawing alone, filling the window, paused at the start until told to play
+    return `<!doctype html><html><head><meta charset="utf-8">${out.css ? `<style>${out.css.replace(/<\/style/gi, '<\\/style')}</style>` : ''}
+<style>html,body{margin:0;height:100%;background:#fff;overflow:hidden}body>svg{display:block;width:100vw;height:100vh}</style></head><body>${out.svg}
+<script>(function(){var svg=document.querySelector('body>svg');var a=function(){return svg.getAnimations({subtree:true});};a().forEach(function(x){x.pause();x.currentTime=0;});
+window.recPlayer={play:function(){a().forEach(function(x){x.currentTime=0;x.play();});},duration:${D}};})();</script></body></html>`;
+  }
   const ch = out.chapters.filter(c => c.t >= 0 && c.t < D);
   const chJson = JSON.stringify(ch.map(c => ({ t: Math.round(c.t), name: c.name }))).replace(/</g, '\\u003c');
   return `<!doctype html>
@@ -359,5 +394,8 @@ ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chap
     requestAnimationFrame(tick);
   })();
 })();
-</script></body></html>`;
+</script>${extra.project ? `\n<script type="application/json" id="sashimi-recording-project">${extra.project.replace(/</g, '\\u003c')}</script>` : ''}</body></html>`;
 }
+
+/** The id of the script that carries a recording and its edits inside an exported page, to edit it again. */
+export const PROJECT_SCRIPT_ID = 'sashimi-recording-project';

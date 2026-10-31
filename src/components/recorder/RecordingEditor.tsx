@@ -4,7 +4,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
-import { recordingToSvg, svgToHtml, autoZooms, timeMap, invertTime, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import { recordingToSvg, svgToHtml, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import Timeline, { type TimelineLane } from './Timeline';
 import { suggestCaptions, CAPTION_DEFAULT_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
 type Rect = [number, number, number, number];
@@ -38,32 +39,55 @@ const KIND_HELP: Record<CaptionKind, string> = {
   highlight: 'a ring around an area (drag it on the preview), optionally dimming the rest',
 };
 
-export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec: Recording; names: string[]; onClose: () => void; onAgain: () => void }) {
+/** Everything the editor sets: saved with the page when it is kept editable, and read back to edit it again. */
+export interface Edits {
+  title: string; format: 'svg' | 'html' | 'both'; shorten: boolean; loop: boolean; editable: boolean;
+  anon: boolean; aliases: Record<string, string>;
+  autoOn: boolean; level: number; autoOff: number[]; drawn: Zoom[];
+  ptr: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
+  captions: Caption[]; chapters: Chapter[];
+  cuts: { start: number; end: number }[]; speeds: { start: number; end: number; factor: number }[];
+}
+const DEFAULT_EDITS: Edits = {
+  title: 'Sashimi viewer recording', format: 'html', shorten: true, loop: true, editable: false, anon: false, aliases: {},
+  autoOn: true, level: ZOOM_LEVEL_DEFAULT, autoOff: [], drawn: [], ptr: { show: true, smooth: true, scale: 1.4, clicks: true },
+  captions: [], chapters: [], cuts: [], speeds: [],
+};
+type Upd<T> = T | ((prev: T) => T);
+
+/** The recording with the replacements made in every text it holds, for a page kept editable after anonymisation. */
+function anonymised(rec: Recording, rep: { from: string; to: string }[]): Recording {
+  if (!rep.length) return rec;
+  return {
+    ...rec,
+    chunks: rec.chunks.map(c => ('leaf' in c ? { leaf: replaceText(c.leaf, rep) } : { ...c, open: replaceText(c.open, rep) })),
+    html: rec.html.map(h => ({ ...h, html: replaceText(h.html, rep) })),
+  };
+}
+
+export default function RecordingEditor({ rec, names, initial, onClose, onAgain }: { rec: Recording; names: string[]; initial?: Partial<Edits>; onClose: () => void; onAgain: () => void }) {
   const [tab, setTab] = useState<Tab>('zooms');
-  const [format, setFormat] = useState<'svg' | 'html' | 'both'>('html');
-  const [shorten, setShorten] = useState(true);
-  const [loop, setLoop] = useState(true);
-  const [anon, setAnon] = useState(false);
-  const [title, setTitle] = useState('Sashimi viewer recording');
+  const [ed, setEd] = useState<Edits>(() => ({ ...DEFAULT_EDITS, ...initial }));
+  const field = <K extends keyof Edits>(k: K) => (v: Upd<Edits[K]>) => setEd(e => ({ ...e, [k]: typeof v === 'function' ? (v as (p: Edits[K]) => Edits[K])(e[k]) : v }));
+  const { format, shorten, loop, anon, title, autoOn, level, drawn, ptr, captions, chapters, cuts, speeds, editable } = ed;
+  const [setFormat, setShorten, setLoop, setAnon, setTitle, setAutoOn, setLevel, setDrawn, setPtr, setCaptions, setChapters, setCuts, setSpeeds, setEditable] =
+    [field('format'), field('shorten'), field('loop'), field('anon'), field('title'), field('autoOn'), field('level'), field('drawn'), field('ptr'), field('captions'), field('chapters'), field('cuts'), field('speeds'), field('editable')];
+  const autoOff = useMemo(() => new Set(ed.autoOff), [ed.autoOff]);
+  const setAutoOff = (f: (s: Set<number>) => Set<number>) => setEd(e => ({ ...e, autoOff: [...f(new Set(e.autoOff))] }));
   const uniq = useMemo(() => [...new Set(names.filter(Boolean))], [names]);
-  const [aliases, setAliases] = useState<string[]>(() => uniq.map((_, i) => `Sample ${i + 1}`));
-  // zooms: automatic on the clicks (each can be turned off), and drawn on the preview
-  const [autoOn, setAutoOn] = useState(true);
-  const [level, setLevel] = useState(ZOOM_LEVEL_DEFAULT);
-  const [autoOff, setAutoOff] = useState<Set<number>>(new Set());
-  const [drawn, setDrawn] = useState<Zoom[]>([]);
-  const [ptr, setPtr] = useState({ show: true, smooth: true, scale: 1.4, clicks: true });
-  const [captions, setCaptions] = useState<Caption[]>([]);
-  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const aliases = uniq.map((n, i) => ed.aliases[n] ?? `Sample ${i + 1}`);
+  const setAliases = (f: (a: string[]) => string[]) => { const next = f(aliases); setEd(e => ({ ...e, aliases: Object.fromEntries(uniq.map((n, i) => [n, next[i]])) })); };
+  const replace = useMemo(() => (anon ? uniq.map((n, i) => ({ from: n, to: aliases[i] })) : []), [anon, uniq, ed.aliases]); // eslint-disable-line react-hooks/exhaustive-deps
   const suggestions = useMemo(() => suggestCaptions(rec), [rec]);
   const autos = useMemo(() => autoZooms(rec, level), [rec, level]);
   const zooms = useMemo(() => [...(autoOn ? autos.filter((_, i) => !autoOff.has(i)) : []), ...drawn], [autos, autoOn, autoOff, drawn]);
-  const map = useMemo(() => timeMap(rec, shorten ? MAX_IDLE_DEFAULT_MS : 0), [rec, shorten]);
-  const out = useMemo(() => recordingToSvg(rec, {
-    maxIdleMs: shorten ? MAX_IDLE_DEFAULT_MS : 0, loop, title, zooms, pointer: ptr, captions, chapters,
-    replace: anon ? uniq.map((n, i) => ({ from: n, to: aliases[i] ?? `Sample ${i + 1}` })) : [],
-  }), [rec, shorten, loop, anon, uniq, aliases, title, zooms, ptr, captions, chapters]);
-  const html = useMemo(() => svgToHtml(out, title), [out, title]);
+  const time = useMemo(() => ({ maxIdleMs: shorten ? MAX_IDLE_DEFAULT_MS : 0, cuts, speeds }), [shorten, cuts, speeds]);
+  const map = useMemo(() => timeMap(rec, time), [rec, time]);
+  const opts = useMemo(() => ({ time, loop, title, zooms, pointer: ptr, captions, chapters, replace }), [time, loop, title, zooms, ptr, captions, chapters, replace]);
+  const out = useMemo(() => recordingToSvg(rec, opts), [rec, opts]);
+  const project = useMemo(() => (editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined), [editable, rec, replace, ed]);
+  const html = useMemo(() => svgToHtml(out, title, { project }), [out, title, project]);
+  const preview = useMemo(() => (project ? svgToHtml(out, title) : html), [out, title, project, html]);
   const fmtOut = out.hasHtml ? 'html' : format;
   const [gz, setGz] = useState<number | null>(null);
   useEffect(() => { let alive = true; gzipSize(fmtOut === 'svg' ? out.svg : html).then(v => { if (alive) setGz(v); }); return () => { alive = false; }; }, [out, html, fmtOut]);
@@ -80,7 +104,7 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
   const player = () => (frame.current?.contentWindow as any)?.recPlayer as { pause(): void; play(): void; seek(ms: number): void; time(): number; paused(): boolean } | undefined;
   const ready = useRef(false);
   const onFrameLoad = () => { const p = player(); if (!p) return; if (keep.current.t > 0) p.seek(keep.current.t); if (keep.current.paused) p.pause(); ready.current = true; };
-  useEffect(() => { ready.current = false; }, [html]);
+  useEffect(() => { ready.current = false; }, [preview]);
   useEffect(() => {
     const id = setInterval(() => { const p = player(); if (p && ready.current) keep.current = { t: p.time(), paused: p.paused() }; }, 200);
     return () => clearInterval(id);
@@ -141,6 +165,103 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
       onChange={e => { const ps = Math.max(0, Number(e.target.value) * 1000), d = map(c.end) - map(c.start); set(invertTime(map, ps, rec.duration), invertTime(map, ps + d, rec.duration)); }} />
   );
 
+  // ---- the timeline ----
+  const [playhead, setPlayhead] = useState(0);
+  useEffect(() => { const id = setInterval(() => setPlayhead(invertTime(map, keep.current.t, rec.duration)), 200); return () => clearInterval(id); }, [map, rec.duration]);
+  const [sel, setSel] = useState<string | null>(null);
+  const CAP_COLOR: Record<CaptionKind, string> = { title: '#0f1b2b', lower: '#475569', callout: '#14857a', highlight: '#7c3aed' };
+  const lanes: TimelineLane[] = [
+    { key: 'edit', label: 'Cut · speed', items: [
+      ...cuts.map((c, i) => ({ id: `cut:${i}`, start: c.start, end: c.end, label: '✂ cut', color: '#dc2626' })),
+      ...speeds.map((c, i) => ({ id: `sp:${i}`, start: c.start, end: c.end, label: `${c.factor < 1 ? '◀' : '⏩'} ×${c.factor}`, color: '#d97706' })),
+    ] },
+    { key: 'zoom', label: 'Zooms', items: [
+      ...(autoOn ? autos.map((z, i) => ({ id: `az:${i}`, start: z.start, end: z.end, label: `click ${level}×`, color: '#4fb3a6', faded: autoOff.has(i) })) : []),
+      ...drawn.map((z, i) => ({ id: `dz:${i}`, start: z.start, end: z.end, label: 'zoom', color: '#0f766e' })),
+    ] },
+    { key: 'cap', label: 'Captions', items: captions.map((c, i) => ({ id: `cp:${i}`, start: c.start, end: c.end, label: c.text || KIND_LABEL[c.kind], color: CAP_COLOR[c.kind] })) },
+    { key: 'ch', label: 'Chapters', marks: true, items: chapters.map((c, i) => ({ id: `ch:${i}`, start: c.t, end: c.t + 1, label: `${i + 1}. ${c.name}`, color: '#0f766e' })) },
+  ];
+  const onTimelineChange = (_lane: string, id: string, start: number, end: number) => {
+    const [kind, n] = id.split(':'), i = Number(n);
+    if (kind === 'cut') setCuts(l => l.map((x, k) => (k === i ? { start, end } : x)));
+    else if (kind === 'sp') setSpeeds(l => l.map((x, k) => (k === i ? { ...x, start, end } : x)));
+    else if (kind === 'az') { const z = autos[i]; setAutoOff(s => new Set([...s, i])); setDrawn(l => [...l, { ...z, start, end, source: 'drawn' }]); setSel(`dz:${drawn.length}`); }
+    else if (kind === 'dz') setDrawn(l => l.map((x, k) => (k === i ? { ...x, start, end } : x)));
+    else if (kind === 'cp') editCaption(i, { start, end });
+    else if (kind === 'ch') setChapters(l => l.map((x, k) => (k === i ? { ...x, t: start } : x)).sort((a, b) => a.t - b.t));
+  };
+  const removeSelected = () => {
+    if (!sel) return;
+    const [kind, n] = sel.split(':'), i = Number(n);
+    const drop = <T,>(l: T[]) => l.filter((_, k) => k !== i);
+    if (kind === 'cut') setCuts(drop); else if (kind === 'sp') setSpeeds(drop);
+    else if (kind === 'az') setAutoOff(s => new Set([...s, i])); else if (kind === 'dz') setDrawn(drop);
+    else if (kind === 'cp') setCaptions(drop); else if (kind === 'ch') setChapters(drop);
+    setSel(null);
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && sel && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) { e.preventDefault(); removeSelected(); }
+    };
+    addEventListener('keydown', onKey);
+    return () => removeEventListener('keydown', onKey);
+  });
+  const seekRec = (t: number) => { const p = player(); const pt = map(t); keep.current = { t: pt, paused: true }; if (p) { p.pause(); p.seek(pt); } setPlayhead(t); };
+  const addAtPlayhead = (what: 'cut' | 'speed') => {
+    const t = nowRec(), e = Math.min(rec.duration, t + 2000);
+    if (e - t < 200) return;
+    if (what === 'cut') { setCuts(l => [...l, { start: t, end: e }]); setSel(`cut:${cuts.length}`); }
+    else { setSpeeds(l => [...l, { start: t, end: e, factor: 2 }]); setSel(`sp:${speeds.length}`); }
+  };
+  const selSpeed = sel?.startsWith('sp:') ? Number(sel.slice(3)) : -1;
+  const idle = useMemo(() => idleCuts(rec, shorten ? MAX_IDLE_DEFAULT_MS : 0), [rec, shorten]);
+
+  // ---- video: the drawing played full window, captured as a video of this tab ----
+  const [video, setVideo] = useState<{ html: string; duration: number; stream: MediaStream } | null>(null);
+  const [videoMsg, setVideoMsg] = useState<string | null>(null);
+  const videoFrame = useRef<HTMLIFrameElement>(null);
+  const startVideo = async () => {
+    setVideoMsg(null);
+    const md = navigator.mediaDevices as any;
+    if (!md?.getDisplayMedia || typeof MediaRecorder === 'undefined') { setVideoMsg('This browser cannot record its tab: use Chrome or Edge on a computer.'); return; }
+    let stream: MediaStream;
+    try {
+      // asked first, while the click still counts as the user's gesture
+      stream = await md.getDisplayMedia({ video: { frameRate: 30 }, audio: false, preferCurrentTab: true, selfBrowserSurface: 'include', surfaceSwitching: 'exclude' });
+    } catch (e) { setVideoMsg(`Video cancelled: the tab was not shared (${(e as Error).name}${(e as Error).message ? `: ${(e as Error).message}` : ''}).`); return; }
+    const vOut = recordingToSvg(rec, { ...opts, loop: false });
+    setVideo({ html: svgToHtml(vOut, title, { bare: true }), duration: vOut.duration, stream });
+  };
+  const runVideo = async () => {
+    if (!video) return;
+    const { stream, duration } = video;
+    const track = stream.getVideoTracks()[0];
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    try {
+      const CT = (window as any).CropTarget;
+      if (CT?.fromElement && videoFrame.current && (track as any).cropTo) await (track as any).cropTo(await CT.fromElement(videoFrame.current));
+      await sleep(700);
+      // H.264 in MP4 is what PowerPoint plays everywhere; else WebM (VP9); an MP4 of another codec last
+      const mime = ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1.42E01E', 'video/webm;codecs=vp9', 'video/webm', 'video/mp4'].find(m => MediaRecorder.isTypeSupported(m)) ?? '';
+      const mr = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), videoBitsPerSecond: 8_000_000 });
+      const parts: Blob[] = [];
+      mr.ondataavailable = e => { if (e.data.size) parts.push(e.data); };
+      const stopped = new Promise(r => { mr.onstop = r; });
+      mr.start(250);
+      (videoFrame.current?.contentWindow as any)?.recPlayer?.play();
+      await sleep(duration + 500);
+      mr.stop(); await stopped;
+      const type = mr.mimeType || mime || 'video/webm';
+      const blob = new Blob(parts, { type });
+      const url = URL.createObjectURL(blob), a = document.createElement('a');
+      a.href = url; a.download = `sashimi-recording-${stamp()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      setVideoMsg(`Video saved: ${type.includes('mp4') ? (type.includes('avc1') ? 'MP4 (H.264)' : 'MP4') : 'WebM (VP9)'}, ${fmtSize(blob.size)}${CT?.fromElement ? '' : ' (this browser records the whole tab)'}.`);
+    } catch (e) { setVideoMsg(`Video failed: ${(e as Error).message}`); }
+    finally { stream.getTracks().forEach(t => t.stop()); setVideo(null); }
+  };
+
   const tabBtn = (t: Tab, label: string, n?: number) => (
     <button onClick={() => setTab(t)} className={`h-8 px-3 rounded-md text-xs font-semibold ${tab === t ? 'bg-accent-600 text-white' : 'text-gray-600 hover:bg-gray-100'}`}>{label}{n ? ` · ${n}` : ''}</button>
   );
@@ -160,7 +281,7 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
         </div>
         <div className="px-5">
           <div className="relative rounded-lg border border-gray-200 overflow-hidden" style={{ height: '56vh' }}>
-            <iframe ref={frame} title="preview" srcDoc={html} onLoad={onFrameLoad} className="w-full h-full block" />
+            <iframe ref={frame} title="preview" srcDoc={preview} onLoad={onFrameLoad} className="w-full h-full block" />
             {pick.what && (
               <div className="absolute inset-0 cursor-crosshair bg-accent-500/5" onMouseDown={e => { const p = pos(e); setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y }); }}
                 onMouseMove={e => { if (drag) { const p = pos(e); setDrag({ ...drag, x1: p.x, y1: p.y }); } }} onMouseUp={finishPick}>
@@ -171,6 +292,22 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
             )}
           </div>
         </div>
+        <div className="px-5 pt-2">
+          <div className="flex items-center gap-2 text-xs mb-1">
+            <span className="font-semibold text-gray-700">Timeline</span>
+            <button onClick={() => addAtPlayhead('cut')} className="h-6 px-2 rounded border border-red-300 text-red-700 hover:bg-red-50" title="Remove 2 s from the playhead; drag its edges to fit">✂ cut</button>
+            <button onClick={() => addAtPlayhead('speed')} className="h-6 px-2 rounded border border-amber-300 text-amber-700 hover:bg-amber-50" title="Play 2 s from the playhead faster or slower; drag its edges to fit">⏩ speed</button>
+            {selSpeed >= 0 && speeds[selSpeed] && (
+              <select value={speeds[selSpeed].factor} onChange={e => setSpeeds(l => l.map((x, k) => (k === selSpeed ? { ...x, factor: Number(e.target.value) } : x)))} className="border border-gray-300 rounded px-1 py-0.5">
+                {[0.5, 1.5, 2, 4, 8].map(f => <option key={f} value={f}>×{f}{f < 1 ? ' (slower)' : ''}</option>)}
+              </select>
+            )}
+            {sel && <button onClick={removeSelected} className="h-6 px-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50" title="Delete (Del)">delete</button>}
+            <span className="ml-auto text-[11px] text-gray-500">recorded time · drag a block to move it, its edges to resize · click to place the playhead · Del removes the selection</span>
+          </div>
+          <Timeline duration={rec.duration} lanes={lanes} idle={idle} activity={rec.frames.map(f => f.t)} clicks={rec.clicks.map(c => c.t)}
+            playhead={playhead} selected={sel} onSelect={setSel} onSeek={seekRec} onChange={onTimelineChange} />
+        </div>
         <div className="px-5 pt-3 flex items-center gap-1 border-b border-gray-100 pb-2">
           {tabBtn('zooms', 'Zooms', zooms.length)}{tabBtn('captions', 'Captions', captions.length)}{tabBtn('chapters', 'Chapters', chapters.length)}{tabBtn('pointer', 'Pointer & playback')}{tabBtn('file', 'File')}
           <span className="ml-auto text-[11px] text-gray-500">new items start at the preview's moment</span>
@@ -180,7 +317,7 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
             <div>
               <div className="flex items-center gap-3 mb-1.5">
                 {check(autoOn, setAutoOn, 'zoom on the clicks')}
-                <select value={level} onChange={e => { setLevel(Number(e.target.value)); setAutoOff(new Set()); }} className="border border-gray-300 rounded px-1 py-0.5">
+                <select value={level} onChange={e => { setLevel(Number(e.target.value)); setAutoOff(() => new Set()); }} className="border border-gray-300 rounded px-1 py-0.5">
                   {[1.5, 2, 3, 4].map(l => <option key={l} value={l}>{l}×</option>)}
                 </select>
                 <button onClick={() => startPick('zoom', r => { const t = nowRec(); setDrawn(z => [...z, { ...span(t, 2500), rect: r as Rect, source: 'drawn' }]); })} className="ml-auto h-7 px-2.5 rounded-md border border-accent-300 text-accent-700 hover:bg-accent-50">＋ draw a zoom</button>
@@ -279,6 +416,12 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
                 </div>
                 {out.hasHtml && <div className="text-[11px] text-gray-500">a dialog is recorded with its text and tables: HTML page only</div>}
                 {!out.hasHtml && chapters.length > 0 && <div className="text-[11px] text-gray-500">chapters work in the HTML page; the SVG plays straight through</div>}
+                <div>{check(editable, setEditable, 'keep the HTML page editable', 'The recording and these settings go into the page: open it again with ✎ next to Record to change it. About doubles the size.')}</div>
+                <div className="flex items-center gap-2 pt-1">
+                  <button onClick={startVideo} disabled={!!video} className="h-7 px-2.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50" title="For PowerPoint or Google Slides: the recording played full window and captured as a video of this tab (the browser asks to share it)">🎞 save as a video…</button>
+                  <span className="text-[11px] text-gray-500">MP4 (H.264) where the browser can, else WebM · Chrome or Edge on a computer · plays in real time</span>
+                </div>
+                {videoMsg && <div className="text-[11px] text-gray-700">{videoMsg}</div>}
               </div>
               <div>
                 {check(anon, setAnon, 'anonymise the sample names')}
@@ -302,6 +445,7 @@ export default function RecordingEditor({ rec, names, onClose, onAgain }: { rec:
           <button onClick={save} className="h-8 px-4 rounded-md bg-accent-600 text-white font-semibold hover:bg-accent-700">Download</button>
         </div>
       </div>
+      {video && <iframe ref={videoFrame} title="video" srcDoc={video.html} onLoad={runVideo} className="fixed inset-0 w-screen h-screen z-[100] bg-white border-0" />}
     </div>
   );
 }
