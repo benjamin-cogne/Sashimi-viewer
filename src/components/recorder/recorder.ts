@@ -52,6 +52,14 @@ export interface Recording {
 export interface Recorder { stop(): Recording; elapsed(): number }
 
 const SVG_NS_ATTR = / xmlns="http:\/\/www\.w3\.org\/2000\/svg"/g;
+/** A 53-bit hash of a string (cyrb53), as text: the key a chunk is found again by. */
+function hash(s: string): string {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
 const skipRoot = (el: Element) => !!el.closest('[data-recorder="skip"]');
 const TRANSPARENT = 'rgba(0, 0, 0, 0)';
 const INHERITED = ['color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-align', 'white-space', 'text-transform'];
@@ -79,10 +87,14 @@ export function startRecording(root: Document = document): Recorder {
   const t0 = performance.now();
   const now = () => performance.now() - t0;
   const chunks: Chunk[] = [];
-  const index = new Map<string, number>();
+  // chunks and HTML blocks are found again by a hash of their text (and checked against it), not by a second copy of it
+  const index = new Map<string, number[]>();
   const cache = new WeakMap<Element, number>();
   const html: Recording['html'] = [];
-  const htmlIndex = new Map<string, number>();
+  const htmlIndex = new Map<string, number[]>();
+  /** Strings met again and again (styles, view boxes), kept once. */
+  const strings = new Map<string, string>();
+  const once = (v: string): string => { const k = strings.get(v); if (k != null) return k; strings.set(v, v); return v; };
   const htmlCache = new WeakMap<Element, { id: number; w: number; h: number }>();
   const boxCache = new WeakMap<Element, { clips: boolean; fixed: boolean }>();
   const ser = new XMLSerializer();
@@ -90,13 +102,18 @@ export function startRecording(root: Document = document): Recorder {
   const pointer: Recording['pointer'] = [];
   const clicks: Recording['clicks'] = [];
   let lastKey = '';
+  let lastKeys: { panels: string; blocks: string; svgs: string; fixed: string; origin: string }[] = [];
   const r1 = (v: number) => Math.round(v * 10) / 10;
   const bigSvg = (s: Element) => { const r = s.getBoundingClientRect(); return !(r.width <= ICON_MAX_PX && r.height <= ICON_MAX_PX); };
 
   // ---- SVG drawings ----
-  const intern = (key: string, make: () => Chunk): number => {
-    let id = index.get(key);
-    if (id == null) { id = chunks.length; chunks.push(make()); index.set(key, id); }
+  const intern = (text: string, same: (c: Chunk) => boolean, make: () => Chunk): number => {
+    const h = hash(text);
+    const ids = index.get(h);
+    const hit = ids?.find(i => same(chunks[i]));
+    if (hit != null) return hit;
+    const id = chunks.length; chunks.push(make());
+    if (ids) ids.push(id); else index.set(h, [id]);
     return id;
   };
   const skipped = (el: Element) => el.tagName.toLowerCase() === 'title' || el.getAttribute('data-export') === 'skip';
@@ -109,13 +126,14 @@ export function startRecording(root: Document = document): Recorder {
     const hasSkip = !!el.querySelector('title, [data-export="skip"]');
     if (!el.childElementCount || (!many && !hasSkip)) {
       const s = ser.serializeToString(el).replace(SVG_NS_ATTR, '');
-      id = intern(`L${s}`, () => ({ leaf: s }));
+      id = intern(s, c => 'leaf' in c && c.leaf === s, () => ({ leaf: s }));
     } else {
       const tag = el.tagName;
       const open = ser.serializeToString(el.cloneNode(false)).replace(SVG_NS_ATTR, '').replace(/\s*\/>$/, '>').replace(new RegExp(`></${tag}>$`), '>');
       const kids: number[] = [];
       for (const c of Array.from(el.children)) if (!skipped(c)) kids.push(chunkOf(c));
-      id = intern(`C${open}|${kids.join(',')}`, () => ({ open, close: `</${tag}>`, kids }));
+      const k = kids.join(',');
+      id = intern(`${open}|${k}`, c => 'kids' in c && c.open === open && c.kids.join(',') === k, () => ({ open, close: `</${tag}>`, kids }));
     }
     cache.set(el, id);
     return id;
@@ -165,8 +183,8 @@ export function startRecording(root: Document = document): Recorder {
     const kids: number[] = [];
     for (const c of Array.from(svg.children)) if (!skipped(c)) kids.push(chunkOf(c));
     return {
-      x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), viewBox: svg.getAttribute('viewBox'), par: svg.getAttribute('preserveAspectRatio'),
-      style: `color:${cs.color};font-family:${cs.fontFamily.replace(/"/g, "'")};font-size:${cs.fontSize}`, clip, kids,
+      x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), viewBox: svg.getAttribute('viewBox') && once(svg.getAttribute('viewBox')!), par: svg.getAttribute('preserveAspectRatio') && once(svg.getAttribute('preserveAspectRatio')!),
+      style: once(`color:${cs.color};font-family:${cs.fontFamily.replace(/"/g, "'")};font-size:${cs.fontSize}`), clip, kids,
     };
   };
 
@@ -210,11 +228,12 @@ export function startRecording(root: Document = document): Recorder {
     clone.style.margin = '0'; clone.style.position = 'static'; clone.style.boxSizing = 'border-box';
     clone.style.width = `${r1(r.width)}px`; clone.style.height = `${r1(r.height)}px`;
     const pcs = el.parentElement ? getComputedStyle(el.parentElement) : null;
-    const style = pcs ? INHERITED.map(p => `${p}:${pcs.getPropertyValue(p).replace(/"/g, "'")}`).join(';') : '';
+    const style = once(pcs ? INHERITED.map(p => `${p}:${pcs.getPropertyValue(p).replace(/"/g, "'")}`).join(';') : '');
     const text = ser.serializeToString(clone);
-    const key = `${style}|${text}`;
-    let id = htmlIndex.get(key);
-    if (id == null) { id = html.length; html.push({ style, html: text }); htmlIndex.set(key, id); }
+    const h = hash(`${style}|${text}`);
+    const ids = htmlIndex.get(h);
+    let id = ids?.find(i => html[i].style === style && html[i].html === text);
+    if (id == null) { id = html.length; html.push({ style, html: text }); if (ids) ids.push(id); else htmlIndex.set(h, [id]); }
     htmlCache.set(el, { id, w: r1(r.width), h: r1(r.height) });
     return id;
   };
@@ -282,10 +301,23 @@ export function startRecording(root: Document = document): Recorder {
       overlays.forEach((ov, i) => { if (ov.contains(svg)) layer = i + 1; });
       layers[layer].svgs.push(p);
     }
-    const key = JSON.stringify(layers);
+    // what did not change since the last frame is the same object (a long recording holds each state once)
+    const keys = layers.map(l => ({ panels: JSON.stringify(l.panels), blocks: JSON.stringify(l.blocks), svgs: JSON.stringify(l.svgs), fixed: JSON.stringify(l.fixed ?? []), origin: l.origin.join(',') }));
+    const key = keys.map(k => `${k.panels}|${k.blocks}|${k.svgs}|${k.fixed}|${k.origin}`).join('#');
     if (key === lastKey) return;
     lastKey = key;
-    frames.push({ t: now(), layers });
+    const prev = frames[frames.length - 1]?.layers;
+    const reused = layers.map((l, i) => {
+      const p = prev?.[i], pk = lastKeys[i];
+      if (!p || !pk) return l;
+      return {
+        panels: pk.panels === keys[i].panels ? p.panels : l.panels, blocks: pk.blocks === keys[i].blocks ? p.blocks : l.blocks,
+        svgs: pk.svgs === keys[i].svgs ? p.svgs : l.svgs, origin: pk.origin === keys[i].origin ? p.origin : l.origin,
+        ...(l.fixed || p.fixed ? { fixed: pk.fixed === keys[i].fixed ? p.fixed : l.fixed } : {}),
+      };
+    });
+    lastKeys = keys;
+    frames.push({ t: now(), layers: reused });
   };
 
   // ---- scheduling: a copy after each burst of changes, at most RECORD_FPS a second ----

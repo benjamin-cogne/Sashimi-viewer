@@ -1,14 +1,15 @@
 /**
  * A recording as one animated SVG (or an HTML page holding it, with play / pause and a time bar).
  *
- * The drawings copied during the recording go once into <defs>; each frame is a group of <use> references, shown from
- * its time to the next frame's by a CSS animation (visibility, step-end). A dialog's HTML blocks are drawn once each
+ * The drawings copied during the recording are merged across frames: each element is written once, inline, shown
+ * during the frames that hold it by a CSS animation (visibility, step-end); no <use> references, which the browser
+ * would expand into a full copy of the drawing for every frame. A dialog's HTML blocks are drawn once each
  * (foreignObject), shown while they are in the dialog, and moved with the dialog's card. A camera above everything
  * zooms on areas (around the clicks, or drawn by hand) and back, with eased transforms: the drawing is vector, so a zoom
  * stays sharp. The pointer follows its path, smoothed; each click is a ring that widens and fades. Every animation has
  * the length of the whole recording, so they stay in step when the player pauses or seeks them, and when looping.
  */
-import type { Recording, Chunk, Layer } from './recorder';
+import type { Recording, Layer } from './recorder';
 import { renderCaptions, type Caption, type Chapter } from './captions';
 
 /** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
@@ -186,27 +187,62 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
 
   // frames shown for some time once the pauses are cut, with their window
   const shown = rec.frames.map((f, i) => ({ f, i, a: map(f.t), b: i + 1 < rec.frames.length ? map(rec.frames[i + 1].t) : Infinity })).filter(x => x.b > x.a);
-  for (const { i, a, b } of shown) css.push(`@keyframes q${i}{0%{visibility:hidden}${pct(a, D)}{visibility:visible}${b === Infinity ? '' : `${pct(b, D)}{visibility:hidden}`}}.q${i}{animation-name:q${i}}`);
-
-  // definitions: every chunk a frame reaches, once
-  const used = new Set<number>();
-  const visit = (id: number) => { if (used.has(id)) return; used.add(id); const c = rec.chunks[id]; if ('kids' in c) c.kids.forEach(visit); };
-  shown.forEach(({ f }) => f.layers.forEach(l => l.svgs.forEach(s => s.kids.forEach(visit))));
-  const withId = (tagText: string, id: string): string | null => (/^<[^>]*\sid="/.test(tagText) ? null : tagText.replace(/^<([\w:-]+)/, `<$1 id="${id}"`));
-  const defOf = (id: number, c: Chunk): string => {
-    if ('leaf' in c) { const s = replaceText(c.leaf, opts.replace); return withId(s, `c${id}`) ?? `<g id="c${id}">${s}</g>`; }
-    const inner = c.kids.map(k => `<use href="#c${k}"/>`).join('');
-    const open = replaceText(c.open, opts.replace);
-    const tagged = withId(open, `c${id}`);
-    return tagged ? `${tagged}${inner}${c.close}` : `<g id="c${id}">${open}${inner}${c.close}</g>`;
+  const order = new Map(shown.map((x, k) => [x.i, k]));
+  // a class showing an element during a set of frames (runs of consecutive shown frames), one per distinct set
+  const winClass = new Map<string, string>();
+  const win = (frames: number[]): string => {
+    const key = frames.join(',');
+    let c = winClass.get(key);
+    if (!c) {
+      c = `w${winClass.size}`;
+      let kf = '0%{visibility:hidden}', k = 0;
+      while (k < frames.length) {
+        let e = k;
+        while (e + 1 < frames.length && order.get(frames[e + 1]) === order.get(frames[e])! + 1) e++;
+        const a = shown[order.get(frames[k])!].a, z = shown[order.get(frames[e])!].b;
+        kf += `${pct(a, D)}{visibility:visible}${z === Infinity ? '' : `${pct(z, D)}{visibility:hidden}`}`;
+        k = e + 1;
+      }
+      css.push(`@keyframes ${c}{${kf}}.${c}{animation-name:${c}}`);
+      winClass.set(key, c);
+    }
+    return c;
   };
-  const defs = [...used].sort((a, b) => a - b).map(id => defOf(id, rec.chunks[id])).join('\n');
+  /** A step-end animation through per-frame positions; null when the position never changes. */
+  let nMoves = 0;
+  const moveClass = (pos: { i: number; x: number; y: number }[]): string | null => {
+    if (pos.every(q => q.x === pos[0].x && q.y === pos[0].y)) return null;
+    const id = `m${nMoves++}`;
+    css.push(`@keyframes ${id}{${pos.map(q => `${pct(shown[order.get(q.i)!].a, D)}{transform:translate(${n1(q.x)}px,${n1(q.y)}px)}`).join('')}}.${id}{animation-name:${id};animation-timing-function:step-end}`);
+    return id;
+  };
 
   const clips = new Map<string, string>();
   const clipId = (c: [number, number, number, number]) => { const k = c.join(','); if (!clips.has(k)) clips.set(k, `k${clips.size}`); return clips.get(k)!; };
   const clipped = (c: [number, number, number, number] | null | undefined, inner: string) => (c ? `<g clip-path="url(#${clipId(c)})">${inner}</g>` : inner);
   const panel = (p: Layer['panels'][number]) => clipped(p.clip, `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="${p.radius}" fill="${p.fill}"${p.stroke ? ` stroke="${p.stroke}" stroke-width="${p.strokeWidth}"` : ''}/>`);
-  const svgEl = (s: Layer['svgs'][number]) => clipped(s.clip, `<svg x="${s.x}" y="${s.y}" width="${s.w}" height="${s.h}"${s.viewBox ? ` viewBox="${s.viewBox}"` : ''}${s.par ? ` preserveAspectRatio="${s.par}"` : ''} style="${esc(s.style)}">${s.kids.map(k => `<use href="#c${k}"/>`).join('')}</svg>`);
+
+  /**
+   * The drawings, written once: every SVG seen in one place (size, view box, style, clip) is one slot, moved to where
+   * it is in each frame; inside, the elements of every frame are merged into one tree, an element with the same
+   * content (or a group with the same tag) at the same rank kept once, shown during the frames that hold it. A
+   * drawing that does not change is thus written once for the whole recording, and a change adds only what changed.
+   */
+  interface TreeNode { chunk: number; open?: string; frames: number[]; kids: TreeNode[][] }
+  const insert = (alts: TreeNode[][], pos: number, id: number, frame: number) => {
+    const c = rec.chunks[id];
+    const list = (alts[pos] ??= []);
+    let node = list.find(n => ('leaf' in c ? n.chunk === id : n.open === c.open));
+    if (!node) { node = { chunk: id, open: 'leaf' in c ? undefined : c.open, frames: [], kids: [] }; list.push(node); }
+    if (node.frames[node.frames.length - 1] !== frame) node.frames.push(frame);
+    if (!('leaf' in c)) c.kids.forEach((k, j) => insert(node!.kids, j, k, frame));
+  };
+  const emit = (n: TreeNode, parentFrames: number): string => {
+    const c = rec.chunks[n.chunk];
+    const own = n.frames.length !== parentFrames;
+    const inner = 'leaf' in c ? replaceText(c.leaf, opts.replace) : `${replaceText(n.open!, opts.replace)}${n.kids.map(list => list.map(k => emit(k, n.frames.length)).join('')).join('')}${c.close}`;
+    return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner;
+  };
 
   // layer by layer: the page, then each dialog (its backdrop and card, its HTML, its drawings)
   const nLayers = Math.max(1, ...shown.map(x => x.f.layers.length));
@@ -215,10 +251,12 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   for (let L = 0; L < nLayers; L++) {
     const here = shown.filter(x => x.f.layers[L]);
     const part: string[] = [];
-    for (const { f, i } of here) { const ps = f.layers[L].panels; if (ps.length) part.push(`<g class="fr q${i}">${ps.map(panel).join('')}</g>`); }
+    // backgrounds: each distinct set once
+    const panelSets = new Map<string, { ps: Layer['panels']; frames: number[] }>();
+    for (const { f, i } of here) { const ps = f.layers[L].panels; if (!ps.length) continue; const k = JSON.stringify(ps); if (!panelSets.has(k)) panelSets.set(k, { ps, frames: [] }); panelSets.get(k)!.frames.push(i); }
+    for (const { ps, frames } of panelSets.values()) part.push(`<g class="fr ${win(frames)}">${ps.map(panel).join('')}</g>`);
     // the HTML blocks of this layer: each placement once, shown while a frame holds it; the page's (or the dialog
     // card's) blocks move with its origin, the fixed ones stay on the screen
-    const order = new Map(shown.map((x, k) => [x.i, k]));
     const blockSet = (pick: (l: Layer) => Layer['blocks'] | undefined): string[] => {
       const windows = new Map<string, { b: Layer['blocks'][number]; frames: number[] }>();
       for (const { f, i } of here) for (const b of pick(f.layers[L]) ?? []) {
@@ -228,31 +266,42 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
       }
       const blocks: string[] = [];
       for (const { b, frames } of windows.values()) {
-        // the time windows: runs of consecutive shown frames
-        let kf = '0%{visibility:hidden}';
-        let k = 0;
-        while (k < frames.length) {
-          let e = k;
-          while (e + 1 < frames.length && order.get(frames[e + 1]) === order.get(frames[e])! + 1) e++;
-          const a = shown[order.get(frames[k])!].a, z = shown[order.get(frames[e])!].b;
-          kf += `${pct(a, D)}{visibility:visible}${z === Infinity ? '' : `${pct(z, D)}{visibility:hidden}`}`;
-          k = e + 1;
-        }
-        const n = nBlocks++;
-        css.push(`@keyframes v${n}{${kf}}.v${n}{animation-name:v${n}}`);
+        nBlocks++;
         const h = rec.html[b.id];
-        blocks.push(clipped(b.clip, `<foreignObject class="fr v${n}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" style="${esc(h.style)};width:${b.w}px;height:${b.h}px;overflow:hidden">${replaceText(h.html, opts.replace)}</div></foreignObject>`));
+        blocks.push(clipped(b.clip, `<foreignObject class="fr ${win(frames)}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" style="${esc(h.style)};width:${b.w}px;height:${b.h}px;overflow:hidden">${replaceText(h.html, opts.replace)}</div></foreignObject>`));
       }
       return blocks;
     };
     const moving = blockSet(l => l.blocks);
     if (moving.length) {
-      // the origin's place in each frame
-      const moves = here.map(({ f, i }) => `${pct(shown[order.get(i)!].a, D)}{transform:translate(${n1(f.layers[L].origin[0])}px,${n1(f.layers[L].origin[1])}px)}`);
-      css.push(`@keyframes o${L}{${moves.join('')}}#o${L}{animation-name:o${L};animation-timing-function:step-end}`);
-      part.push(`<g id="o${L}" class="a">${moving.join('\n')}</g>`);
+      const mv = moveClass(here.map(({ f, i }) => ({ i, x: f.layers[L].origin[0], y: f.layers[L].origin[1] })));
+      const o = here[0].f.layers[L].origin;
+      part.push(mv ? `<g class="a ${mv}">${moving.join('\n')}</g>` : `<g transform="translate(${o[0]} ${o[1]})">${moving.join('\n')}</g>`);
     }
-    for (const { f, i } of here) { const ss = f.layers[L].svgs; if (ss.length) part.push(`<g class="fr q${i}">${ss.map(svgEl).join('')}</g>`); }
+    // the drawings, slot by slot
+    const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][] }>();
+    for (const { f, i } of here) {
+      const seen = new Map<string, number>();
+      for (const sv of f.layers[L].svgs) {
+        const base = `${sv.w}|${sv.h}|${sv.viewBox}|${sv.par}|${sv.style}|${sv.clip ? sv.clip.map((v, k) => v - (k === 0 ? sv.x : k === 1 ? sv.y : 0)).join(',') : ''}`;
+        // two copies of one drawing in a frame are two slots
+        const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
+        const key = `${base}#${nth}`;
+        let slot = slots.get(key);
+        if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [] }; slots.set(key, slot); }
+        slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y });
+        sv.kids.forEach((k, j) => insert(slot!.kids, j, k, i));
+      }
+    }
+    for (const { s: sv, frames, pos, kids } of slots.values()) {
+      const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('');
+      const el = `<svg width="${sv.w}" height="${sv.h}"${sv.viewBox ? ` viewBox="${sv.viewBox}"` : ''}${sv.par ? ` preserveAspectRatio="${sv.par}"` : ''} style="${esc(sv.style)}">${inner}</svg>`;
+      // the clip moves with the drawing: it is given relative to the drawing's place
+      const rel: [number, number, number, number] | null = sv.clip ? [sv.clip[0] - sv.x, sv.clip[1] - sv.y, sv.clip[2], sv.clip[3]] : null;
+      const mv = moveClass(pos);
+      const placed = mv ? `<g class="a ${mv}">${clipped(rel, el)}</g>` : `<g transform="translate(${sv.x} ${sv.y})">${clipped(rel, el)}</g>`;
+      part.push(`<g class="fr ${win(frames)}">${placed}</g>`);
+    }
     part.push(...blockSet(l => l.fixed));
     body.push(`<g clip-path="url(#${clipId([0, 0, rec.width, rec.height])})">${part.join('\n')}</g>`);
   }
@@ -301,8 +350,7 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${esc(rec.fontFamily)}">
 <title>${esc(opts.title)}</title>
 <style>${css.join('\n')}</style>
-<defs>${clipDefs}
-${defs}</defs>
+<defs>${clipDefs}</defs>
 <rect width="${W}" height="${H}" fill="${rec.background}"/>
 <g id="cam" class="a"><g transform="translate(${-x0} ${-y0})">
 ${body.join('\n')}
@@ -319,7 +367,7 @@ ${cap.screen}
     for (const h of rec.html) for (const m of h.html.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (c) classes.add(c.replace(/&amp;/g, '&'));
     pageCss = rec.css.filter(r => r.classes.every(c => classes.has(c))).map(r => r.text).join('\n');
   }
-  return { svg, css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bytes: new Blob([svg, pageCss]).size, bounds: B, chapters };
+  return { svg, css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bytes: utf8Length(svg) + utf8Length(pageCss), bounds: B, chapters };
 }
 
 /**
@@ -405,5 +453,11 @@ ${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chap
 </script>${extra.project ? `\n<script type="application/json" id="sashimi-recording-project">${extra.project.replace(/</g, '\\u003c')}</script>` : ''}</body></html>`;
 }
 
+/** The size of a string in UTF-8, without copying it. */
+export function utf8Length(s: string): number {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c > 0x7f) { n += c > 0x7ff ? (c >= 0xd800 && c <= 0xdbff ? (i++, 2) : 2) : 1; } }
+  return n;
+}
 /** The id of the script that carries a recording and its edits inside an exported page, to edit it again. */
 export const PROJECT_SCRIPT_ID = 'sashimi-recording-project';

@@ -4,7 +4,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
-import { recordingToSvg, svgToHtml, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import { recordingToSvg, svgToHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
 import { suggestCaptions, CAPTION_DEFAULT_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
@@ -84,19 +84,26 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const time = useMemo(() => ({ maxIdleMs: shorten ? MAX_IDLE_DEFAULT_MS : 0, cuts, speeds }), [shorten, cuts, speeds]);
   const map = useMemo(() => timeMap(rec, time), [rec, time]);
   const opts = useMemo(() => ({ time, loop, title, zooms, pointer: ptr, captions, chapters, replace }), [time, loop, title, zooms, ptr, captions, chapters, replace]);
-  const out = useMemo(() => recordingToSvg(rec, opts), [rec, opts]);
-  const project = useMemo(() => (editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined), [editable, rec, replace, ed]);
-  const html = useMemo(() => svgToHtml(out, title, { project }), [out, title, project]);
-  const preview = useMemo(() => (project ? svgToHtml(out, title) : html), [out, title, project, html]);
+  // the preview is rebuilt once the edits settle (typing a caption does not rebuild it at every key)
+  const [settled, setSettled] = useState(opts);
+  useEffect(() => { if (settled === opts) return; const id = setTimeout(() => setSettled(opts), 350); return () => clearTimeout(id); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
+  // only the page is kept (it holds the SVG): the SVG file and the editable copy are made when downloading
+  const built = useMemo(() => { const o = recordingToSvg(rec, settled); return { html: svgToHtml(o, settled.title), out: { ...o, svg: '' } }; }, [rec, settled]);
+  const { html, out } = built;
+  const preview = html;
   const fmtOut = out.hasHtml ? 'html' : format;
   const [gz, setGz] = useState<number | null>(null);
-  useEffect(() => { let alive = true; gzipSize(fmtOut === 'svg' ? out.svg : html).then(v => { if (alive) setGz(v); }); return () => { alive = false; }; }, [out, html, fmtOut]);
+  // the gzipped size, once the edits have been still for a while
+  useEffect(() => { setGz(null); let alive = true; const id = setTimeout(() => { gzipSize(html).then(v => { if (alive) setGz(v); }); }, 1500); return () => { alive = false; clearTimeout(id); }; }, [html]);
   const save = () => {
     const base = `sashimi-recording-${stamp()}`;
-    if (fmtOut !== 'html') download(out.svg, 'image/svg+xml', `${base}.svg`);
-    if (fmtOut !== 'svg') download(html, 'text/html', `${base}.html`);
+    if (fmtOut !== 'html') download(recordingToSvg(rec, opts).svg, 'image/svg+xml', `${base}.svg`);
+    if (fmtOut !== 'svg') {
+      const project = editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined;
+      download(project || opts !== settled ? svgToHtml(recordingToSvg(rec, opts), opts.title, { project }) : html, 'text/html', `${base}.html`);
+    }
   };
-  const bytes = fmtOut === 'svg' ? out.bytes : fmtOut === 'html' ? new Blob([html]).size : out.bytes + new Blob([html]).size;
+  const bytes = fmtOut === 'svg' ? out.bytes : fmtOut === 'html' ? utf8Length(html) : out.bytes + utf8Length(html);
 
   // ---- preview: the HTML page itself, in a frame; its time is kept when it is rebuilt ----
   const frame = useRef<HTMLIFrameElement>(null);
