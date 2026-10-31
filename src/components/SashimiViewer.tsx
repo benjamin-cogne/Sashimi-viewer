@@ -162,6 +162,8 @@ export interface ViewerSettings {
   clippedBases?: boolean;
   /** reads track: inserted bases written inside the insertion marks (default off) */
   insertedBases?: boolean;
+  /** coverage track of a DNA sample: the soft-clip clusters and the insertions between two parts of a read, as marks on the baseline (default off: they crowd the track) */
+  clipMarks?: boolean;
   /** reads track: widest view whose reads are loaded, bp (one of READS_WINDOW_CHOICES_BP; absent = 100 kb) */
   readsWindow?: number;
   /**
@@ -196,7 +198,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   depthAxis: 'relative', minMapq: 0,
   reads: false, readsAll: false, readsSample: null, collapseReads: false, minVafPct: 10,
   minJunctionReads: 3, minUsagePct: 1, arcLabels: 'reads', intronRetention: true,
-  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, coverage: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false,
+  viewMode: 'samples', groups: [], knownVariants: true, hiddenJunctions: [], coverageVariants: false, methylation: false, methylIslands: false, coverage: true, pairs: true, haplotypes: 2, clippedBases: false, insertedBases: false, clipMarks: false,
 };
 /** The options plus where the viewer is: gene, window and pinned locus, 1-based inclusive. */
 export interface ViewerState extends ViewerSettings {
@@ -1246,6 +1248,7 @@ export default function SashimiViewer({
   const [readsGroup, setReadsGroup] = useState<'none' | 'hp' | 'phase'>(init.readsGroup === 'hp' || init.readsGroup === 'phase' ? init.readsGroup : 'none');
   const [readsWindow, setReadsWindow] = useState<number>(() => readsWindowOf(init.readsWindow));
   const [showClipped, setShowClipped] = useState(init.clippedBases ?? false);
+  const [showClipMarks, setShowClipMarks] = useState(init.clipMarks ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
@@ -4447,13 +4450,13 @@ export default function SashimiViewer({
       if (dnaTrack && track.structural && svHints) {
         const approx = track.sampled ? '≈' : '';
         const minSv = svMinReads(track.sampleId);
-        for (const c of track.structural.clips) {
+        for (const c of showClipMarks ? track.structural.clips : []) {
           if (c.count < minSv || c.pos < viewStart || c.pos > viewEnd) continue;
           retention.push({ x: scale.x(c.pos), y: baseline - LABEL_H / 2 - 3, text: `${c.side === 'left' ? '⇤' : '⇥'} ${approx}${c.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.clip,
             onClick: e => { const pt = svgPoint(e); openClipConsensus(track.sampleId, c.pos, c.side, c.count, pt.x, pt.y); },
             title: `soft-clip cluster: ${approx}${c.count.toLocaleString('en-US')} reads clipped by 20 bases or more ${c.side === 'left' ? 'before' : 'after'} ${currentChrom}:${(c.pos + (c.side === 'left' ? 1 : 0)).toLocaleString('en-US')} (a breakpoint candidate)\nevidence, not a call: open the reads to check it` });
         }
-        for (const x of track.structural.insertions ?? []) {
+        for (const x of showClipMarks ? track.structural.insertions ?? [] : []) {
           if (x.count < minSv || x.pos < viewStart || x.pos > viewEnd) continue;
           retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.insertion,
             title: `insertion: ${approx}${x.count.toLocaleString('en-US')} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString('en-US')}\nevidence, not a call: open the reads to check it` });
@@ -4501,7 +4504,7 @@ export default function SashimiViewer({
       if (e) place(e.t, e.idx);
     }
     return { layouts: out, annotY };
-  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, transOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [orderKeys, transcriptPanelH, seqPanelH, knownPanelH, snpPanelH, altPanelH, comparedTracks, displayTracks, minJunctionCount, viewStart, viewEnd, scale, depthAxis, globalMaxDepth, tx, longRangeOf, longRangeLabel, longRangeEnds, fusionOf, transOf, otherTrackJunctionKeys, junctionOffsets, plotWidth, reverse, currentChrom, readsTracks, altJunctionIndex, junctionContext, usageEvents, minUsagePct, hiddenArcs, labelScales, isDnaTrack, dnaSites, coverageVariants, rnaVariants, showStrands, minVafPct, minIndelBp, longReadMinVafPct, knownSnp, openClipConsensus, dnaSitesLoading, minMapq, svHints, svMinReads, showMethyl, methylTagged, showCoverage, showClipMarks]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * Mean methylation difference per CpG island between the first sample with a methylation panel (the primary) and each
@@ -4674,24 +4677,26 @@ export default function SashimiViewer({
       line(PAIR_CLASS_LINE.duplication, true, 'discordant pairs ← → (duplication-type)', 'lsv3');
       line(PAIR_CLASS_LINE.deletion, true, 'discordant pairs → ← far apart (deletion-type)', 'lsv3b');
       line(PAIR_CLASS_LINE.inversion, true, 'discordant pairs on one strand (inversion-type)', 'lsv3c');
-      items.push({
-        w: 250, el: (
-          <g key="lsv6">
-            <rect x={0} y={y - 6.5} width={52} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.insertion} strokeWidth={1} />
-            <text x={26} y={y + 3} textAnchor="middle" fill={SV_COLORS.insertion} fontSize={8.5} fontWeight={700}>ins 1 kb n</text>
-            <text x={58} y={y + 3.5} fill={INK.muted} fontSize={9.5}>insertion between two parts of a read</text>
-          </g>
-        ),
-      });
-      items.push({
-        w: 290, el: (
-          <g key="lsv4">
-            <rect x={0} y={y - 6.5} width={30} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.clip} strokeWidth={1} />
-            <text x={15} y={y + 3} textAnchor="middle" fill={SV_COLORS.clip} fontSize={8.5} fontWeight={700}>⇥ n</text>
-            <text x={36} y={y + 3.5} fill={INK.muted} fontSize={9.5}>soft-clip cluster (≥ 3 reads clipped ≥ 20 bases)</text>
-          </g>
-        ),
-      });
+      if (showClipMarks) {
+        items.push({
+          w: 250, el: (
+            <g key="lsv6">
+              <rect x={0} y={y - 6.5} width={52} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.insertion} strokeWidth={1} />
+              <text x={26} y={y + 3} textAnchor="middle" fill={SV_COLORS.insertion} fontSize={8.5} fontWeight={700}>ins 1 kb n</text>
+              <text x={58} y={y + 3.5} fill={INK.muted} fontSize={9.5}>insertion between two parts of a read</text>
+            </g>
+          ),
+        });
+        items.push({
+          w: 290, el: (
+            <g key="lsv4">
+              <rect x={0} y={y - 6.5} width={30} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.clip} strokeWidth={1} />
+              <text x={15} y={y + 3} textAnchor="middle" fill={SV_COLORS.clip} fontSize={8.5} fontWeight={700}>⇥ n</text>
+              <text x={36} y={y + 3.5} fill={INK.muted} fontSize={9.5}>soft-clip cluster (≥ 3 reads clipped ≥ 20 bases)</text>
+            </g>
+          ),
+        });
+      }
       items.push({
         w: 300, el: (
           <g key="lsv5">
@@ -6657,14 +6662,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, minMapq,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, clipMarks: showClipMarks, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : sampleId > 0 ? [] : undefined,   // none: no file yet
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, showClipMarks, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -6849,6 +6854,8 @@ export default function SashimiViewer({
                 <Stepper label="min" unit="reads" value={minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min reads"
                   title="Hide junctions supported by fewer spliced reads" />
               )}
+              {anyDna && <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Clip marks" size="sm"
+                title="On the DNA tracks: soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate) and insertions between two parts of a read (ins 1 kb n), as marks on the coverage baseline. Off by default: they crowd the track; the arcs and the reads keep the evidence." />}
               {svPickedChip()}
               {hiddenHere > 0 && (
                 <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
@@ -6872,6 +6879,8 @@ export default function SashimiViewer({
                     ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
                     : <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to the default: ${autoNote}`}
                         onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
+                <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Clip marks" size="sm"
+                  title="Soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate) and insertions between two parts of a read (ins 1 kb n), as marks on the coverage baseline. Off by default: they crowd the track; the arcs and the reads keep the evidence." />
                               {svPickedChip()}
                               </Section>
             );
