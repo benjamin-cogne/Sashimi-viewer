@@ -162,7 +162,7 @@ export interface ViewerSettings {
   clippedBases?: boolean;
   /** reads track: inserted bases written inside the insertion marks (default off) */
   insertedBases?: boolean;
-  /** coverage track of a DNA sample: the soft-clip clusters and the insertions between two parts of a read, as marks on the baseline (default off: they crowd the track) */
+  /** coverage track of a DNA sample: the soft-clip clusters, the insertions between two parts of a read and the mates or split alignments on another chromosome, as marks on the baseline (default off: they crowd the track) */
   clipMarks?: boolean;
   /** reads track: widest view whose reads are loaded, bp (one of READS_WINDOW_CHOICES_BP; absent = 100 kb) */
   readsWindow?: number;
@@ -4461,7 +4461,7 @@ export default function SashimiViewer({
           retention.push({ x: scale.x(x.pos), y: baseline - LABEL_H / 2 - 3, text: `ins ${formatBp(x.len)} ${approx}${x.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.insertion,
             title: `insertion: ${approx}${x.count.toLocaleString('en-US')} split reads with about ${formatBp(x.len)} of unaligned sequence between two adjacent parts at ${currentChrom}:${(x.pos + 1).toLocaleString('en-US')}\nevidence, not a call: open the reads to check it` });
         }
-        for (const e of track.structural.elsewhere) {
+        for (const e of showClipMarks ? track.structural.elsewhere : []) {
           if (e.count < minSv || e.pos < viewStart || e.pos > viewEnd) continue;
           retention.push({ x: scale.x(e.pos), y: baseline - LABEL_H / 2 - 3, text: `→ ${e.chrom} ${approx}${e.count.toLocaleString('en-US')}`, deltas: [], color: SV_COLORS.elsewhere,
             title: `${e.kind === 'split' ? 'split alignments' : 'mates'} on ${e.chrom}: ${approx}${e.count.toLocaleString('en-US')} reads ${e.kind === 'split' ? 'at' : 'starting in the 500 bp from'} ${currentChrom}:${(e.pos + 1).toLocaleString('en-US')} (translocation or insertion candidate)\nevidence, not a call: open the reads to check it` });
@@ -4697,15 +4697,17 @@ export default function SashimiViewer({
           ),
         });
       }
-      items.push({
-        w: 300, el: (
-          <g key="lsv5">
-            <rect x={0} y={y - 6.5} width={40} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.elsewhere} strokeWidth={1} />
-            <text x={20} y={y + 3} textAnchor="middle" fill={SV_COLORS.elsewhere} fontSize={8.5} fontWeight={700}>→ chr</text>
-            <text x={46} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mate or split alignment on another chromosome</text>
-          </g>
-        ),
-      });
+      if (showClipMarks) {
+        items.push({
+          w: 300, el: (
+            <g key="lsv5">
+              <rect x={0} y={y - 6.5} width={40} height={13} rx={6.5} fill={INK.bg} stroke={SV_COLORS.elsewhere} strokeWidth={1} />
+              <text x={20} y={y + 3} textAnchor="middle" fill={SV_COLORS.elsewhere} fontSize={8.5} fontWeight={700}>→ chr</text>
+              <text x={46} y={y + 3.5} fill={INK.muted} fontSize={9.5}>mate or split alignment on another chromosome</text>
+            </g>
+          ),
+        });
+      }
     }
     if (anyDna && coverageVariants) {
       items.push({
@@ -6854,8 +6856,8 @@ export default function SashimiViewer({
                 <Stepper label="min" unit="reads" value={minJunctionCount} onChange={v => setMinReads(Math.max(1, Math.round(v)))} min={1} ariaLabel="Min reads"
                   title="Hide junctions supported by fewer spliced reads" />
               )}
-              {anyDna && <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Clip marks" size="sm"
-                title="On the DNA tracks: soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate) and insertions between two parts of a read (ins 1 kb n), as marks on the coverage baseline. Off by default: they crowd the track; the arcs and the reads keep the evidence." />}
+              {anyDna && <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Read marks" size="sm"
+                title="On the DNA tracks, marks on the coverage baseline: soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate), insertions between two parts of a read (ins 1 kb n) and mates or split alignments on another chromosome (→ chr n). Off by default: they crowd the track; the arcs and the reads keep the evidence." />}
               {svPickedChip()}
               {hiddenHere > 0 && (
                 <button onClick={() => setHiddenArcs(prev => prev.filter(k => !k.startsWith(`${currentChrom}:`)))}
@@ -6879,8 +6881,8 @@ export default function SashimiViewer({
                     ? <span className="pr-1.5 text-[10.5px] text-slate-400" title={autoNote}>{deep.length ? `auto, >${SV_DEEP_X}×` : 'auto'}</span>
                     : <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to the default: ${autoNote}`}
                         onClick={() => { setMinJunctionCount(MIN_READS_DEFAULT); setMinReadsSet(false); }}>auto</button>} />
-                <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Clip marks" size="sm"
-                  title="Soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate) and insertions between two parts of a read (ins 1 kb n), as marks on the coverage baseline. Off by default: they crowd the track; the arcs and the reads keep the evidence." />
+                <Pill on={showClipMarks} onChange={v => setShowClipMarks(v)} label="Read marks" size="sm"
+                  title="Marks on the coverage baseline: soft-clip clusters (⇥ n: reads clipped by 20 bases or more at one place, a breakpoint candidate), insertions between two parts of a read (ins 1 kb n) and mates or split alignments on another chromosome (→ chr n). Off by default: they crowd the track; the arcs and the reads keep the evidence." />
                               {svPickedChip()}
                               </Section>
             );
