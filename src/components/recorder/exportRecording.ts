@@ -183,6 +183,9 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   const css: string[] = [
     `.fr{visibility:hidden;animation:${D}ms step-end ${iter} forwards}`,
     `.a{animation-duration:${D}ms;animation-iteration-count:${iter};animation-fill-mode:forwards}`,
+    // what a clip, mask, gradient or pattern holds is used, not drawn: it must stay visible whatever hides the group
+    // around it (an invisible clip path clips everything away)
+    'clipPath,clipPath *,mask *,pattern *,marker *,linearGradient *,radialGradient *,filter *{visibility:visible!important}',
   ];
 
   // frames shown for some time once the pauses are cut, with their window
@@ -244,6 +247,7 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
     return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner;
   };
 
+  let nSlots = 0;
   // layer by layer: the page, then each dialog (its backdrop and card, its HTML, its drawings)
   const nLayers = Math.max(1, ...shown.map(x => x.f.layers.length));
   const body: string[] = [];
@@ -294,7 +298,13 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
       }
     }
     for (const { s: sv, frames, pos, kids } of slots.values()) {
-      const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('');
+      // the ids a drawing defines (clip paths, gradients, patterns) are its own: the page reuses one id while its
+      // geometry changes (a clip that moves when a track is added), and the first in the file would serve them all
+      const sfx = `_s${nSlots++}`;
+      const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('')
+        .replace(/\sid="([^"]+)"/g, ` id="$1${sfx}"`)
+        .replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, `url(#$2${sfx})`)
+        .replace(/(\s(?:xlink:)?href)="#([^"]+)"/g, `$1="#$2${sfx}"`);
       const el = `<svg width="${sv.w}" height="${sv.h}"${sv.viewBox ? ` viewBox="${sv.viewBox}"` : ''}${sv.par ? ` preserveAspectRatio="${sv.par}"` : ''} style="${esc(sv.style)}">${inner}</svg>`;
       // the clip moves with the drawing: it is given relative to the drawing's place
       const rel: [number, number, number, number] | null = sv.clip ? [sv.clip[0] - sv.x, sv.clip[1] - sv.y, sv.clip[2], sv.clip[3]] : null;

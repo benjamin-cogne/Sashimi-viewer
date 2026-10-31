@@ -138,7 +138,12 @@ export function startRecording(root: Document = document): Recorder {
     cache.set(el, id);
     return id;
   };
-  /** The part of an element's box its scrolling ancestors (up to a fixed one) and the window leave visible. */
+  /**
+   * The part of an element's box its scrolling ancestors (up to a fixed one) leave visible; null when none cuts it.
+   * The window is not a clip here, nor a box covering the whole window (a dialog's backdrop): the export clips every
+   * layer to the window, and a clip that only follows the scroll would make a new copy of the drawing at every step.
+   * [0, 0, 0, 0] when nothing of it shows.
+   */
   const clipOf = (el: Element, r: DOMRect): Clip => {
     let x0 = r.left, y0 = r.top, x1 = r.right, y1 = r.bottom, clipped = false;
     for (let a = el.parentElement; a && a !== root.body; a = a.parentElement) {
@@ -146,15 +151,17 @@ export function startRecording(root: Document = document): Recorder {
       if (!box) { const cs = getComputedStyle(a); box = { clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible', fixed: cs.position === 'fixed' }; boxCache.set(a, box); }
       if (box.clips) {
         const b = a.getBoundingClientRect();
-        if (b.left > x0 || b.top > y0 || b.right < x1 || b.bottom < y1) clipped = true;
-        x0 = Math.max(x0, b.left); y0 = Math.max(y0, b.top); x1 = Math.min(x1, b.right); y1 = Math.min(y1, b.bottom);
+        const wholeWindow = b.left <= 0 && b.top <= 0 && b.right >= innerWidth && b.bottom >= innerHeight;
+        if (!wholeWindow) {
+          if (b.left > x0 || b.top > y0 || b.right < x1 || b.bottom < y1) clipped = true;
+          x0 = Math.max(x0, b.left); y0 = Math.max(y0, b.top); x1 = Math.min(x1, b.right); y1 = Math.min(y1, b.bottom);
+        }
       }
       // a fixed box (a dialog) is not clipped by what holds it
       if (box.fixed) break;
     }
-    x0 = Math.max(x0, 0); y0 = Math.max(y0, 0); x1 = Math.min(x1, innerWidth); y1 = Math.min(y1, innerHeight);
-    if (x1 <= x0 || y1 <= y0) return [0, 0, 0, 0];
-    return clipped || r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight ? [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)] : null;
+    if (x1 <= x0 || y1 <= y0 || x1 < 0 || y1 < 0 || x0 > innerWidth || y0 > innerHeight) return [0, 0, 0, 0];
+    return clipped ? [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)] : null;
   };
   /** The part of an element left visible by the scrolling boxes between it and its dialog's card (not the window). */
   const innerClip = (el: Element, r: DOMRect): Clip => {
