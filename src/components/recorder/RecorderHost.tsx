@@ -52,7 +52,7 @@ const RecorderHost = forwardRef<RecorderHandle, { names: string[]; onRecording?:
     try {
       const doc = new DOMParser().parseFromString(await f.text(), 'text/html');
       const json = doc.getElementById(PROJECT_SCRIPT_ID)?.textContent;
-      if (!json) throw new Error('this page was not saved editable (tick "keep the HTML page editable" before downloading)');
+      if (!json) throw new Error('this page was not saved editable (tick "keep the HTML page editable", next to Download, before downloading)');
       const p = JSON.parse(json);
       if (!p?.rec?.frames) throw new Error('no recording inside');
       setOpenErr(null); setDone({ rec: p.rec as Recording, initial: p.edits as Partial<Edits> });

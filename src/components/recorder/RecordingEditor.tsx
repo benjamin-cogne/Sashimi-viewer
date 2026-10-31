@@ -419,12 +419,6 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
                 </div>
                 {out.hasHtml && <div className="text-[11px] text-gray-500">a dialog is recorded with its text and tables: HTML page only</div>}
                 {!out.hasHtml && chapters.length > 0 && <div className="text-[11px] text-gray-500">chapters work in the HTML page; the SVG plays straight through</div>}
-                <div>{check(editable, setEditable, 'keep the HTML page editable', 'The recording and these settings go into the page: open it again with ✎ next to Record to change it. About doubles the size.')}</div>
-                <div className="flex items-center gap-2 pt-1">
-                  <button onClick={startVideo} disabled={!!video} className="h-7 px-2.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50" title="For PowerPoint or Google Slides: the recording played full window and captured as a video of this tab (the browser asks to share it)">🎞 save as a video…</button>
-                  <span className="text-[11px] text-gray-500">MP4 (H.264) where the browser can, else WebM · Chrome or Edge on a computer · plays in real time</span>
-                </div>
-                {videoMsg && <div className="text-[11px] text-gray-700">{videoMsg}</div>}
               </div>
               <div>
                 {check(anon, setAnon, 'anonymise the sample names')}
@@ -442,7 +436,16 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
             </div>
           )}
         </div>
-        <div className="flex items-center justify-end gap-2 px-5 pb-4">
+        {/* kept in sight on a short screen: the editor is taller than a laptop window and the overlay scrolls */}
+        <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 px-5 py-3 mt-1 bg-white border-t border-gray-200 rounded-b-2xl">
+          <label className={`mr-auto inline-flex items-center gap-1.5 text-xs ${fmtOut === 'svg' ? 'opacity-40' : 'text-gray-700'}`}
+            title="The recording and these settings go into the HTML page: open it again with Export → Edit a recording… to change it. About doubles the size.">
+            <input type="checkbox" checked={editable && fmtOut !== 'svg'} disabled={fmtOut === 'svg'} onChange={e => setEditable(e.target.checked)} className="accent-accent-600" />
+            keep the HTML page editable <span className="text-gray-500">(reopen it with Export → Edit a recording…)</span>
+          </label>
+          {videoMsg && <span className="text-[11px] text-gray-700">{videoMsg}</span>}
+          <button onClick={startVideo} disabled={!!video} className="h-8 px-3 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="For PowerPoint, Keynote or Google Slides: the recording is played full window, in real time, and captured as a video of this tab (the browser asks to share it). MP4 (H.264) where the browser records it (recent Chrome or Edge, Safari), else WebM.">🎞 MP4 video…</button>
           <button onClick={() => { onClose(); onAgain(); }} className="h-8 px-3 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Record again</button>
           <button onClick={onClose} className="h-8 px-3 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">Discard</button>
           <button onClick={save} className="h-8 px-4 rounded-md bg-accent-600 text-white font-semibold hover:bg-accent-700">Download</button>
