@@ -4,10 +4,11 @@
  * Every SVG on screen (the tracks, the cartoons, the SV browser; not the icons) is copied whenever the page changes,
  * at most RECORD_FPS times a second, with its place on the screen. Each drawing element is serialised once: a
  * MutationObserver marks what changed since the last copy, so an unchanged element is a reference to the copy already
- * kept, and a frame is a list of references. Full-screen dialogs are kept whole: their backdrop, their card, and the
- * HTML inside (tables, controls, text) cut into blocks, each block copied once while it does not change, so a ticking
- * clock renews a few words and not the whole dialog; the page's CSS rules those blocks use go with the recording. The
- * pointer is kept as its positions and clicks. The export (exportRecording.ts) turns this into one animated SVG.
+ * kept, and a frame is a list of references. The page around them is kept whole too: its HTML (toolbars, buttons,
+ * text) cut into blocks, each block copied once while it does not change, so a ticking clock renews a few words and not
+ * the whole page; the blocks move with the page as it scrolls (fixed and sticky ones stay on the screen). Full-screen
+ * dialogs are layers above it: their backdrop, their card, and their HTML cut the same way. The page's CSS rules those
+ * blocks use go with the recording. The pointer is kept as its positions and clicks. The export (exportRecording.ts) turns this into one animated SVG.
  */
 
 /** Copies per second, at most: enough for the cartoons' movements, light on long recordings. */
@@ -31,7 +32,11 @@ export interface Block { x: number; y: number; w: number; h: number; id: number;
  * What is drawn at one level: the page (layer 0), then each dialog above it. A dialog's blocks are placed relative to
  * its card (`origin`), so scrolling the dialog moves them together instead of copying them again.
  */
-export interface Layer { panels: Panel[]; blocks: Block[]; svgs: Placement[]; origin: [number, number] }
+export interface Layer {
+  panels: Panel[]; blocks: Block[]; svgs: Placement[]; origin: [number, number];
+  /** blocks that stay put on the screen (fixed or sticky elements of the page), in screen coordinates */
+  fixed?: Block[];
+}
 export interface Frame { t: number; layers: Layer[] }
 export interface CssRule { classes: string[]; text: string }
 export interface Recording {
@@ -78,7 +83,7 @@ export function startRecording(root: Document = document): Recorder {
   const cache = new WeakMap<Element, number>();
   const html: Recording['html'] = [];
   const htmlIndex = new Map<string, number>();
-  const htmlCache = new WeakMap<Element, number>();
+  const htmlCache = new WeakMap<Element, { id: number; w: number; h: number }>();
   const boxCache = new WeakMap<Element, { clips: boolean; fixed: boolean }>();
   const ser = new XMLSerializer();
   const frames: Frame[] = [];
@@ -172,11 +177,21 @@ export function startRecording(root: Document = document): Recorder {
     return n;
   };
   const directText = (el: Element) => Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent!.trim());
-  const split = (el: Element) => el.childElementCount > 0 && !directText(el) && (htmlCount(el) > HTML_BLOCK_MAX || Array.from(el.getElementsByTagName('svg')).some(s => !s.parentElement?.closest('svg') && bigSvg(s)));
+  const splitCache = new WeakMap<Element, boolean>();
+  const split = (el: Element) => {
+    let v = splitCache.get(el);
+    if (v == null) {
+      v = el.childElementCount > 0 && !directText(el) && (htmlCount(el) > HTML_BLOCK_MAX || Array.from(el.getElementsByTagName('svg')).some(s => !s.parentElement?.closest('svg') && bigSvg(s)));
+      splitCache.set(el, v);
+    }
+    return v;
+  };
+  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META']);
   /** One block: the element as it shows now (form states written into it, drawings left to the SVG layer). */
   const blockId = (el: HTMLElement, r: DOMRect): number => {
     const hit = htmlCache.get(el);
-    if (hit != null) return hit;
+    // a block keeps its copy while it neither changes nor resizes (a layout shift around it)
+    if (hit && hit.w === r1(r.width) && hit.h === r1(r.height)) return hit.id;
     const clone = el.cloneNode(true) as HTMLElement;
     const live = [el, ...Array.from(el.querySelectorAll('input, select, textarea'))], copy = [clone, ...Array.from(clone.querySelectorAll('input, select, textarea'))];
     live.forEach((n, i) => {
@@ -200,29 +215,39 @@ export function startRecording(root: Document = document): Recorder {
     const key = `${style}|${text}`;
     let id = htmlIndex.get(key);
     if (id == null) { id = html.length; html.push({ style, html: text }); htmlIndex.set(key, id); }
-    htmlCache.set(el, id);
+    htmlCache.set(el, { id, w: r1(r.width), h: r1(r.height) });
     return id;
   };
-  /** The blocks and backgrounds of a dialog's HTML, cutting large elements and those holding drawings into their children. */
-  const blocksOf = (el: Element, out: Layer) => {
+  /**
+   * The blocks and backgrounds of the page's or a dialog's HTML, cutting large elements and those holding drawings into
+   * their children. Dialogs met in the page are left to their own layer; fixed and sticky elements of the page (and
+   * what they hold) go to the layer's `fixed` blocks, in screen coordinates.
+   */
+  const blocksOf = (el: Element, out: Layer, page = false, stuck = false) => {
     for (const c of Array.from(el.children)) {
-      if (!(c instanceof HTMLElement) || skipRoot(c)) continue;
+      const small = c instanceof SVGSVGElement && !bigSvg(c);
+      if (!(c instanceof HTMLElement || small) || skipRoot(c) || SKIP_TAGS.has(c.tagName)) continue;
+      if (page && c.matches('.fixed.inset-0')) continue;
+      if (c instanceof SVGSVGElement && !small) continue;
       const r = c.getBoundingClientRect();
       if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
       const cs = getComputedStyle(c);
       if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) continue;
       const clip = clipOf(c, r);
       if (clip && clip[2] === 0) continue;
+      const pinned = stuck || (page && (cs.position === 'fixed' || cs.position === 'sticky'));
       if (split(c)) {
         const bw = parseFloat(cs.borderTopWidth) || 0;
         if (cs.backgroundColor !== TRANSPARENT || (bw > 0 && cs.borderTopStyle !== 'none'))
           out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip });
-        blocksOf(c, out);
+        blocksOf(c, out, page, pinned);
+      } else if (pinned) {
+        (out.fixed ??= []).push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip });
       } else {
         const [ox, oy] = out.origin;
         // inside the card: only the dialog's own scrolling boxes clip (the window is clipped once for the whole dialog)
         const inner = innerClip(c, r);
-        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]] });
+        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]] });
       }
     }
   };
@@ -234,7 +259,10 @@ export function startRecording(root: Document = document): Recorder {
       const cs = getComputedStyle(ov);
       return cs.display !== 'none' && cs.visibility !== 'hidden';
     });
-    const layers: Layer[] = [{ panels: [], blocks: [], svgs: [], origin: [0, 0] }, ...overlays.map(ov => {
+    // the page: its blocks placed in page coordinates, moved by the scroll
+    const page: Layer = { panels: [], blocks: [], svgs: [], origin: [r1(-scrollX), r1(-scrollY)] };
+    blocksOf(root.body, page, true);
+    const layers: Layer[] = [page, ...overlays.map(ov => {
       const layer: Layer = { panels: [{ x: 0, y: 0, w: innerWidth, h: innerHeight, fill: getComputedStyle(ov).backgroundColor, radius: 0 }], blocks: [], svgs: [], origin: [0, 0] };
       const card = ov.firstElementChild as HTMLElement | null;
       if (card) {
@@ -269,7 +297,7 @@ export function startRecording(root: Document = document): Recorder {
   };
   const dirty = (n: Node | null) => {
     for (let e: Element | null = n instanceof Element ? n : n?.parentElement ?? null; e; e = e.parentElement) {
-      cache.delete(e); htmlCache.delete(e);
+      cache.delete(e); htmlCache.delete(e); splitCache.delete(e);
       if (e.tagName.toLowerCase() === 'svg' && bigSvg(e)) break;
     }
   };

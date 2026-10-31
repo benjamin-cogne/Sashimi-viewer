@@ -93,6 +93,8 @@ export function replaceText(s: string, rep: ExportOptions['replace']): string {
 
 /** The area the recording shows: every drawing and dialog card, clipped to what showed, with a margin. */
 export function boundsOf(rec: Recording): [number, number, number, number] {
+  // the whole page was recorded: the whole window
+  if (rec.frames.some(f => f.layers[0]?.blocks.length || f.layers[0]?.fixed?.length)) return [0, 0, rec.width, rec.height];
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   const add = (r: [number, number, number, number]) => { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); };
   const clamp = (r: [number, number, number, number]): [number, number, number, number] => { const a = Math.max(0, r[0]), b = Math.max(0, r[1]); return [a, b, Math.min(rec.width, r[0] + r[2]) - a, Math.min(rec.height, r[1] + r[3]) - b]; };
@@ -214,15 +216,16 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
     const here = shown.filter(x => x.f.layers[L]);
     const part: string[] = [];
     for (const { f, i } of here) { const ps = f.layers[L].panels; if (ps.length) part.push(`<g class="fr q${i}">${ps.map(panel).join('')}</g>`); }
-    // the HTML blocks of this dialog: each placement once, shown while a frame holds it, moved with the card
-    const windows = new Map<string, { b: Layer['blocks'][number]; frames: number[] }>();
-    for (const { f, i } of here) for (const b of f.layers[L].blocks) {
-      const k = `${b.id}|${b.x}|${b.y}|${b.w}|${b.h}|${b.clip?.join(',') ?? ''}`;
-      if (!windows.has(k)) windows.set(k, { b, frames: [] });
-      windows.get(k)!.frames.push(i);
-    }
-    if (windows.size) {
-      const order = new Map(shown.map((x, k) => [x.i, k]));
+    // the HTML blocks of this layer: each placement once, shown while a frame holds it; the page's (or the dialog
+    // card's) blocks move with its origin, the fixed ones stay on the screen
+    const order = new Map(shown.map((x, k) => [x.i, k]));
+    const blockSet = (pick: (l: Layer) => Layer['blocks'] | undefined): string[] => {
+      const windows = new Map<string, { b: Layer['blocks'][number]; frames: number[] }>();
+      for (const { f, i } of here) for (const b of pick(f.layers[L]) ?? []) {
+        const k = `${b.id}|${b.x}|${b.y}|${b.w}|${b.h}|${b.clip?.join(',') ?? ''}`;
+        if (!windows.has(k)) windows.set(k, { b, frames: [] });
+        windows.get(k)!.frames.push(i);
+      }
       const blocks: string[] = [];
       for (const { b, frames } of windows.values()) {
         // the time windows: runs of consecutive shown frames
@@ -240,13 +243,18 @@ export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
         const h = rec.html[b.id];
         blocks.push(clipped(b.clip, `<foreignObject class="fr v${n}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" style="${esc(h.style)};width:${b.w}px;height:${b.h}px;overflow:hidden">${replaceText(h.html, opts.replace)}</div></foreignObject>`));
       }
-      // the card's place in each frame
+      return blocks;
+    };
+    const moving = blockSet(l => l.blocks);
+    if (moving.length) {
+      // the origin's place in each frame
       const moves = here.map(({ f, i }) => `${pct(shown[order.get(i)!].a, D)}{transform:translate(${n1(f.layers[L].origin[0])}px,${n1(f.layers[L].origin[1])}px)}`);
       css.push(`@keyframes o${L}{${moves.join('')}}#o${L}{animation-name:o${L};animation-timing-function:step-end}`);
-      part.push(`<g id="o${L}" class="a">${blocks.join('\n')}</g>`);
+      part.push(`<g id="o${L}" class="a">${moving.join('\n')}</g>`);
     }
     for (const { f, i } of here) { const ss = f.layers[L].svgs; if (ss.length) part.push(`<g class="fr q${i}">${ss.map(svgEl).join('')}</g>`); }
-    body.push(L > 0 ? `<g clip-path="url(#${clipId([0, 0, rec.width, rec.height])})">${part.join('\n')}</g>` : part.join('\n'));
+    part.push(...blockSet(l => l.fixed));
+    body.push(`<g clip-path="url(#${clipId([0, 0, rec.width, rec.height])})">${part.join('\n')}</g>`);
   }
 
   // the pointer and the clicks

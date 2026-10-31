@@ -169,7 +169,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   useEffect(() => {
     const el = svgRef.current;
     if (!el || !explore) return;
-    const onWheel = (e: WheelEvent) => { e.preventDefault(); const p = toScene(e); zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x, p.y); };
+    const onWheel = (e: WheelEvent) => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); const p = toScene(e); zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x, p.y); };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [explore]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -237,7 +237,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
           </svg>
           {explore && (
             <div className="absolute top-3 right-6 flex items-center gap-1 text-xs" onMouseDown={e => e.stopPropagation()}>
-              <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · scroll to zoom, drag to pan, double-click to reset</span>
+              <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, double-click to reset</span>
               {([['−', () => zoomAt(1 / 1.3)], ['+', () => zoomAt(1.3)], ['fit', resetView]] as [string, () => void][]).map(([lab, fn]) => (
                 <button key={lab} onClick={fn} className="w-7 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold">{lab}</button>
               ))}

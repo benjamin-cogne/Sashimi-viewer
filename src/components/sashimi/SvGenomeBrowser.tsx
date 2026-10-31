@@ -12,7 +12,7 @@ import { reconstruct, type SvReconstruction } from './svModel';
 import type { Cytoband } from './svNomenclature';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
-import { geneStory, dosageReading, dosageScoreText, ranksText, toDer, LOEUF_INTOLERANT, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
+import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, LOEUF_CLASS, loeufClass, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
   type SvGene, type SvTranscript, type GeneAnnotations, type GenePanel, type Domain, type GeneImpact, type Chain, type Fragment, type DerLayout, type DosageScore, type Constraint, type ImpactKind } from './svGenes';
 import { IMPACT, KIND_COLOR } from './svColors';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary, type LoadedPanel } from '../../standalone/panelapp';
@@ -90,8 +90,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [domainsFile, setDomainsFile] = useState<{ name: string; text: string } | null>(() => store.get('sashimi.svDomains'));
   const [hover, setHover] = useState<string | null>(null);
   const [tip, setTip] = useState<{ x: number; y: number; gene: string } | null>(null);
-  const [showUnchanged, setShowUnchanged] = useState(false);
-  const [showNear, setShowNear] = useState(false);
+  const [colorBy, setColorBy] = useState<'loeuf' | 'impact'>(() => store.get<'loeuf' | 'impact'>('sashimi.svColorBy') ?? 'loeuf');
   const [view, setView] = useState({ z: 1, pan: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -134,6 +133,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const story = useMemo(() => geneStory(rec, genes, win, { flankCopies, zygosity, domains, near }), [rec, genes, win, flankCopies, zygosity, domains, near]);
   const panel = useMemo(() => (panelData ? toPanel(panelData) : null), [panelData]);
   const annotations: GeneAnnotations = useMemo(() => ({ dosage: ann.dosage, constraint: ann.constraint, panel }), [ann, panel]);
+  /** A gene's colour: its gnomAD LoF constraint class, or its consequence. */
+  const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const impactOf = useMemo(() => new Map(story.genes.map(g => [g.gene.symbol, g])), [story]);
   /** in a crowded view, the genes that keep their label: every changed gene, and the nearby ones worth a look */
   const worthLabel = (gi: GeneImpact | undefined) => !!gi && gi.kind !== 'unaffected' && (gi.kind !== 'nearby' || notable(gi, annotations));
@@ -147,11 +148,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const refX = (pos: number) => zx(X0 + ((X1 - X0) - winLen * k) / 2 + (pos - win.start) * k);
   const derX = (d: DerLayout, dpos: number) => zx(X0 + ((X1 - X0) - d.length * k) / 2 + dpos * k);
 
-  // wheel zoom at the pointer, drag to pan, double-click to fit
+  // Ctrl / ⌘ + wheel zooms at the pointer (the wheel alone scrolls the page), drag to pan, double-click to fit
   useEffect(() => {
     const el = svgRef.current; if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+      if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       const r = el.getBoundingClientRect(), xc = ((e.clientX - r.left) / r.width) * VW;
       setView(v => { const z2 = Math.max(1, Math.min(200, v.z * (e.deltaY < 0 ? 1.2 : 1 / 1.2))); return { z: z2, pan: z2 === 1 ? 0 : xc - X0 - (xc - X0 - v.pan) * (z2 / v.z) }; });
@@ -320,7 +321,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {rec.segs.filter(s => !s.first).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={domains.length ? yRefTad : yRefGenes} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={1} strokeDasharray="3 3" opacity={0.55} />)}
         {/* reference genes */}
         {refItems.items.map(({ g, lane, compact }) => {
-          const gi = impactOf.get(g.symbol); const col = IMPACT[gi?.kind ?? 'unaffected'].color;
+          const gi = impactOf.get(g.symbol); const col = geneColor(g.symbol, gi);
           const yy = yRefGenes + refItems.laneY[lane];
           const lostGene = gi?.kind === 'deleted';
           const dot = panelDot(g.symbol), lx = Math.max(X0 + 2, refX(Math.max(g.start, win.start)));
@@ -386,7 +387,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                 const yy = Y.genes + derPacked[di].laneY[b.lane];
                 const gi = impactOf.get(b.genes[0]);
                 const isFusion = b.genes.length > 1;
-                const head = isFusion ? C.fusion5 : IMPACT[gi?.kind ?? 'unaffected'].color;
+                const head = isFusion && colorBy === 'impact' ? C.fusion5 : geneColor(b.genes[0], gi);
                 const lx = Math.max(X0 + 2, b.x0);
                 const dot = !isFusion ? panelDot(b.genes[0]) : null;
                 return (
@@ -402,7 +403,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                       return (
                         <g key={`ch${ci}`}>
                           {c.parts.map((p: Fragment, pi) => {
-                            const col = isFusion ? (p.tx.gene === b.genes[0] ? C.fusion5 : C.fusion3) : head;
+                            const col = isFusion ? (colorBy === 'loeuf' ? geneColor(p.tx.gene, impactOf.get(p.tx.gene)) : p.tx.gene === b.genes[0] ? C.fusion5 : C.fusion3) : head;
                             const X = (pos: number) => derX(d, toDer(p.dp, pos));
                             const els = txGlyph(p.tx, X, yl, col, `d${bi}${ci}${pi}`, p.lo, p.hi, p.strand);
                             // torn ends: where the chain stops at a breakpoint
@@ -444,12 +445,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     </svg>
   );
 
-  // ---- gene table ----
-  const nearby = story.genes.filter(g => g.kind === 'nearby');
-  const touched = [...story.genes.filter(g => g.kind !== 'unaffected' && g.kind !== 'nearby'), ...nearby.filter(g => notable(g, annotations))];
-  const nearOthers = nearby.filter(g => !notable(g, annotations));
-  const unchanged = story.genes.filter(g => g.kind === 'unaffected');
-  const rowsOf = (list: GeneImpact[]) => [...list].sort((a, b) => b.rank - a.rank || (panel?.genes.get(b.gene.symbol.toUpperCase())?.confidence ?? 0) - (panel?.genes.get(a.gene.symbol.toUpperCase())?.confidence ?? 0) || (ann.dosage.get(b.gene.symbol)?.hi ?? -1) - (ann.dosage.get(a.gene.symbol)?.hi ?? -1));
   const findings = useMemo(() => summary(story.genes, annotations, near), [story, annotations, near]);
 
   return (
@@ -459,6 +454,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <div className="text-sm font-bold mr-1">Genes on the rebuilt chromosome</div>
         <span className="inline-flex rounded-md border border-gray-300 overflow-hidden" role="group" aria-label="Transcripts">
           {(['mane', 'all'] as const).map(m => <button key={m} onClick={() => setMode(m)} className={`px-2 py-0.5 ${mode === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'mane' ? 'One model per gene: MANE Select (else RefSeq Select, else the longest coding sequence)' : 'Every RefSeq NM_ model of each gene (no XM_ prediction, no NR_ non-coding): the consequence can differ between isoforms'}>{m === 'mane' ? 'MANE Select' : 'all NM_ transcripts'}</button>)}
+        </span>
+        <span className="inline-flex rounded-md border border-gray-300 overflow-hidden" role="group" aria-label="Gene colour">
+          {(['loeuf', 'impact'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : 'colour: impact'}</button>)}
         </span>
         <PanelPicker panel={panelData} onPanel={p => { setPanelData(p); store.set('sashimi.svPanel', p); }} />
         <label className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 cursor-pointer" title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build as the alignments), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
@@ -500,40 +498,37 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
               <div className="text-gray-300">{gi.principal.tx.id}{gi.principal.tx.status === 'mane' ? ' (MANE Select)' : gi.principal.tx.status === 'select' ? ' (RefSeq Select)' : ''}</div>
               <div className="mt-0.5">{gi.principal.text}</div>
               {r.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
+              {(() => {
+                const c = ann.constraint.get(gi.gene.symbol), d = ann.dosage.get(gi.gene.symbol), pg = panel?.genes.get(gi.gene.symbol.toUpperCase());
+                const parts = [
+                  c ? `gnomAD ${c.version}: LOEUF ${c.loeuf != null ? c.loeuf.toFixed(2) : 'n/a'} · pLI ${c.pli != null ? c.pli.toFixed(2) : 'n/a'}` : 'gnomAD: no constraint',
+                  d ? `ClinGen HI ${d.hi ?? '—'} · TS ${d.ts ?? '—'}` : '',
+                  pg ? `${panel!.name}: ${CONF[pg.confidence].label}` : '',
+                ].filter(Boolean);
+                const dot = { intolerant: '#fca5a5', constrained: '#fdba74', tolerant: '#cbd5e1', unknown: '#cbd5e1' }[loeufClass(c)];
+                return <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>;
+              })()}
             </div>
           );
         })()}
       </div>
       {/* legend */}
       <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gray-500">
-        {(['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'nearby', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)}
+        {colorBy === 'impact'
+          ? (['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'nearby', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)
+          : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
+        {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
-        <span>· scroll with Ctrl to zoom, drag to pan, click a gene to zoom on it, double-click to fit</span>
+        <span>· Ctrl / ⌘ + scroll to zoom, drag to pan, click a gene to zoom on it, double-click to fit, hover a gene for its consequence</span>
       </div>
-      {/* table */}
-      <div className="px-5 mt-3 pb-1">
-        <table className="w-full border-collapse text-xs">
-          <thead><tr className="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">
-            <th className="text-left font-semibold py-1 pr-2">gene</th><th className="text-left font-semibold pr-2">impact</th><th className="text-left font-semibold pr-2">consequence</th>
-            <th className="text-left font-semibold pr-2">ClinGen dosage</th><th className="text-left font-semibold pr-2">gnomAD LoF constraint</th><th className="text-left font-semibold">{panel ? 'panel' : 'PanelApp'}</th>
-          </tr></thead>
-          <tbody>
-            {rowsOf(touched).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
-            {showNear && rowsOf(nearOthers).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
-            {showUnchanged && rowsOf(unchanged).map(g => <GeneRow key={g.gene.symbol} gi={g} ann={annotations} mode={mode} hover={hover === g.gene.symbol} onHover={setHover} onZoom={() => zoomTo(g.gene.start, g.gene.end)} />)}
-          </tbody>
-        </table>
-        <div className="flex flex-wrap gap-x-4">
-          {nearOthers.length > 0 && <button onClick={() => setShowNear(v => !v)} className="mt-1 text-[11px] text-accent-700 hover:underline">{showNear ? 'hide' : 'show'} the {nearOthers.length} other gene{nearOthers.length > 1 ? 's' : ''} near a breakpoint (not in the panel, not dosage-sensitive, not LoF-intolerant)</button>}
-          {unchanged.length > 0 && <button onClick={() => setShowUnchanged(v => !v)} className="mt-1 text-[11px] text-accent-700 hover:underline">{showUnchanged ? 'hide' : 'show'} the {unchanged.length} unchanged gene{unchanged.length > 1 ? 's' : ''}</button>}
-        </div>
-        {!touched.length && !txs.loading && <div className="text-gray-400 text-xs py-2">No gene of the window is changed by the selected junctions.</div>}
+      <div className="px-5 mt-2 pb-1">
+        {!story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-gray-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
         <div className="text-[10.5px] text-gray-500 mt-2 leading-4">
           Genes: {txs.source || '—'}{txs.error ? <span className="text-amber-700"> · {txs.error}</span> : null}. {ann.loading ? 'Annotations loading… ' : ann.notes.length ? `${ann.notes.join(' · ')}. ` : ''}
           Copies count the {zygosity === 'het' ? `${flankCopies - 1} intact homologue${flankCopies - 1 === 1 ? '' : 's'} and the rearranged one` : 'rearranged homologues'}; a fusion needs both partners on the same strand of the rebuilt chromosome, its frame is read from the coding phases of the two exons joined (breakpoints in introns); a breakpoint inside an exon leaves the frame undetermined.
-          LoF-intolerant: LOEUF &lt; {LOEUF_INTOLERANT.v4} (gnomAD v4; &lt; {LOEUF_INTOLERANT['v2.1.1']} for v2.1.1) or pLI ≥ {PLI_INTOLERANT}, as gnomAD suggests for Mendelian cases when a hard threshold is needed. ClinGen scores: 3 sufficient, 2 some, 1 little, 0 no evidence, 30 autosomal recessive, 40 dosage sensitivity unlikely.
-          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged, whatever the size.' : near > 0 ? ` No domains loaded: intact genes within ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`} of a breakpoint are listed as a possible position effect; those in the panel, with a ClinGen score of 2 or 3, or LoF-intolerant are shown first, the others folded.` : ''}
+          LoF-intolerant: LOEUF &lt; {LOEUF_INTOLERANT.v4} (gnomAD v4, the browser's threshold for Mendelian cases; &lt; {LOEUF_INTOLERANT['v2.1.1']} for v2.1.1) or pLI ≥ {PLI_INTOLERANT}; constrained: LOEUF &lt; {LOEUF_CONSTRAINED.v4} (gnomAD v4.0's general cut-off). LOEUF is best read as a continuous value: hover a gene for it. ClinGen scores: 3 sufficient, 2 some, 1 little, 0 no evidence, 30 autosomal recessive, 40 dosage sensitivity unlikely.
+          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged, whatever the size.' : near > 0 ? ` No domains loaded: intact genes within ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`} of a breakpoint are flagged as a possible position effect; those in the panel, with a ClinGen score of 2 or 3, or LoF-intolerant are named in the findings above.` : ''}
         </div>
       </div>
     </div>
@@ -576,50 +571,6 @@ function summary(genes: GeneImpact[], a: GeneAnnotations, near: number): { title
     out.push({ title: `Near a breakpoint (≤ ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`}), ${nb.length} gene${nb.length > 1 ? 's' : ''}${hot.length ? ', of which:' : ': none in the panel, dosage-sensitive or LoF-intolerant'}`, color: IMPACT.nearby.color, genes: hot.map(g => ({ symbol: g.gene.symbol, note: [note(g), g.nearest ? `${Math.round(g.nearest.distance / 1000)} kb` : ''].filter(Boolean).join(', ') })) });
   }
   return out;
-}
-
-// ======================== One table row ========================
-
-function GeneRow({ gi, ann, mode, hover, onHover, onZoom }: { gi: GeneImpact; ann: GeneAnnotations; mode: 'mane' | 'all'; hover: boolean; onHover: (s: string | null) => void; onZoom: () => void }) {
-  const sym = gi.gene.symbol, d = ann.dosage.get(sym), c = ann.constraint.get(sym), p = ann.panel?.genes.get(sym.toUpperCase());
-  const r = dosageReading(gi, ann);
-  const thr = c ? LOEUF_INTOLERANT[c.version] ?? 0.45 : 0.45;
-  const scoreChip = (label: string, v: number | null | undefined, hot: string) => (
-    <span className="inline-block px-1.5 rounded text-[10.5px] font-semibold mr-1" title={`${label}: ${dosageScoreText(v)}`}
-      style={v === 3 ? { background: `${hot}1f`, color: hot } : v === 2 ? { background: '#fef3c7', color: '#b45309' } : { background: '#f1f4f8', color: '#5b6b7e' }}>{label} {v ?? '—'}</span>
-  );
-  return (
-    <tr className={`border-b border-gray-100 align-top ${hover ? 'bg-accent-50' : ''}`} onMouseEnter={() => onHover(sym)} onMouseLeave={() => onHover(null)}>
-      <td className="py-1.5 pr-2 whitespace-nowrap">
-        <button onClick={onZoom} className="italic font-bold text-[12.5px] hover:underline" style={{ color: IMPACT[gi.kind].color }} title="Zoom on this gene">{sym}</button>
-        <div className="text-[10px] text-gray-400 font-mono">{gi.principal.tx.id}{gi.principal.tx.status === 'mane' ? ' · MANE' : gi.principal.tx.status === 'select' ? ' · Select' : ''}</div>
-      </td>
-      <td className="py-1.5 pr-2"><span className="inline-block px-2 py-0.5 rounded-full text-[10.5px] font-semibold whitespace-nowrap" style={{ background: `${IMPACT[gi.kind].color}18`, color: IMPACT[gi.kind].color }}>{IMPACT[gi.kind].short}</span>
-        <div className="text-[10px] text-gray-500 mt-0.5 font-mono">{gi.principal.copies} / {gi.principal.refCopies} copies</div></td>
-      <td className="py-1.5 pr-2 text-gray-700 leading-4 max-w-[430px]">
-        {gi.principal.text}
-        {mode === 'all' && gi.others.length > 0 && <div className="mt-0.5 text-[10.5px] text-gray-500">other NM_: {gi.others.map(o => `${o.tx.id} ${IMPACT[o.kind].short}${o.frame === 'kept' || o.frame === 'shifted' ? `, frame ${o.frame}` : ''}${o.lost.length ? ` (${ranksText(o.lost)} lost)` : ''}`).join(' · ')}</div>}
-        {mode === 'mane' && gi.others.length > 0 && <div className="mt-0.5 text-[10.5px] text-amber-700">{gi.others.length} other NM_ model{gi.others.length > 1 ? 's' : ''} read{gi.others.length > 1 ? '' : 's'} differently: switch to all NM_ transcripts</div>}
-      </td>
-      <td className="py-1.5 pr-2 whitespace-nowrap">
-        {scoreChip('HI', d?.hi, '#b91c1c')}{scoreChip('TS', d?.ts, '#1d4ed8')}
-        {r.text && <div className={`text-[10.5px] mt-0.5 whitespace-normal max-w-[220px] ${r.level === 'high' ? 'text-red-700 font-semibold' : r.level === 'moderate' ? 'text-amber-700' : 'text-gray-500'}`}>{r.text}</div>}
-      </td>
-      <td className="py-1.5 pr-2 whitespace-nowrap">
-        {c ? (
-          <div className="flex items-center gap-1.5" title={`gnomAD ${c.version}: LOEUF (upper bound of the observed / expected LoF ratio) ${c.loeuf ?? 'n/a'}, pLI ${c.pli ?? 'n/a'}; LoF-intolerant below LOEUF ${thr} (or pLI ≥ ${PLI_INTOLERANT})`}>
-            <svg width="62" height="10"><rect x={0} y={3} width={62} height={4} rx={2} fill="#e3e8ee" /><line x1={(thr / 2) * 62} x2={(thr / 2) * 62} y1={0} y2={10} stroke="#94a3b8" strokeWidth={1} />{c.loeuf != null && <circle cx={Math.min(62, (c.loeuf / 2) * 62)} cy={5} r={3.5} fill={c.loeuf < thr ? '#b91c1c' : '#64748b'} />}</svg>
-            <span className="font-mono text-[10.5px]">LOEUF {c.loeuf != null ? c.loeuf.toFixed(2) : '—'}</span>
-            <span className="font-mono text-[10.5px] text-gray-500">pLI {c.pli != null ? c.pli.toFixed(2) : '—'}</span>
-          </div>
-        ) : <span className="text-gray-400">—</span>}
-        {c && <div className="text-[10px] text-gray-400">gnomAD {c.version}</div>}
-      </td>
-      <td className="py-1.5 whitespace-nowrap">
-        {p ? <span className="inline-block px-1.5 py-0.5 rounded text-[10.5px] font-semibold" style={{ background: CONF[p.confidence].bg, color: CONF[p.confidence].color }} title={p.phenotypes?.join('; ')}>{CONF[p.confidence].label}{p.moi ? ` · ${p.moi.replace(/^(\w+ ?\w*).*/, '$1').toLowerCase()}` : ''}</span> : <span className="text-gray-300">{ann.panel ? 'not in panel' : '—'}</span>}
-      </td>
-    </tr>
-  );
 }
 
 // ======================== PanelApp picker ========================

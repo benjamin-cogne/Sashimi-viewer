@@ -181,11 +181,12 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
     // keep the scene point under (cx, cy) fixed
     return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
   });
-  // non-passive wheel listener so the page does not scroll while zooming the figure
+  // Ctrl / ⌘ + wheel zooms the figure (non-passive, so the page does not scroll then); the wheel alone scrolls the page
   useEffect(() => {
     const el = svgRef.current;
     if (!el || !explore) return;
     const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       const p = toScene(e);
       zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, p.x, p.y);
@@ -288,7 +289,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
           )}
           {explore && story && (
             <div className="absolute top-3 right-6 flex items-center gap-1 text-xs" onMouseDown={e => e.stopPropagation()}>
-              <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · scroll to zoom, drag to pan, hover for details, click to highlight, double-click to reset</span>
+              <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, hover for details, click to highlight, double-click to reset</span>
               {[['−', () => zoomAt(1 / 1.3)], ['+', () => zoomAt(1.3)], ['fit', resetView]].map(([lab, fn]) => (
                 <button key={lab as string} onClick={fn as () => void} className="w-7 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold">{lab as string}</button>
               ))}

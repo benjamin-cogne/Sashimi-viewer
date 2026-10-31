@@ -45,11 +45,30 @@ export interface GeneAnnotations {
 // Every one of them is printed in the panel's method note.
 
 /**
- * gnomAD LOEUF below which a gene is called LoF-intolerant, when a hard threshold is needed: < 0.45 for gnomAD v4 (its
- * help page, "for the interpretation of Mendelian disease cases"; UCSC's track notes: changed from < 0.35 in v2.1.1).
- * gnomAD advises reading LOEUF as a continuous value; the panel shows it.
+ * gnomAD LOEUF below which a gene is called LoF-intolerant, when a hard threshold is needed. gnomAD v4: < 0.45, the
+ * browser's help "for the interpretation of Mendelian disease cases" (the 85th LOEUF percentile); v2.1.1: < 0.35
+ * (Karczewski et al. 2020). gnomAD advises reading LOEUF as a continuous value.
  */
 export const LOEUF_INTOLERANT: Record<string, number> = { v4: 0.45, 'v2.1.1': 0.35 };
+/**
+ * gnomAD's general cut-off for a constrained gene: < 0.6 for v4.0 ("due to expected shifts in the LOEUF distribution
+ * between gnomAD v2.1.1 and v4.0", gnomAD v4.0 gene constraint, March 2024), < 0.35 for v2.1.1.
+ */
+export const LOEUF_CONSTRAINED: Record<string, number> = { v4: 0.6, 'v2.1.1': 0.35 };
+/** A gene's LoF constraint class: below the Mendelian threshold, below the general one only, above both, or not known. */
+export type LoeufClass = 'intolerant' | 'constrained' | 'tolerant' | 'unknown';
+export function loeufClass(c: Constraint | undefined): LoeufClass {
+  if (!c || c.loeuf == null) return 'unknown';
+  if (c.loeuf < (LOEUF_INTOLERANT[c.version] ?? LOEUF_INTOLERANT.v4)) return 'intolerant';
+  if (c.loeuf < (LOEUF_CONSTRAINED[c.version] ?? LOEUF_CONSTRAINED.v4)) return 'constrained';
+  return 'tolerant';
+}
+export const LOEUF_CLASS: Record<LoeufClass, { color: string; label: (v: string) => string }> = {
+  intolerant: { color: '#b91c1c', label: v => `LOEUF < ${LOEUF_INTOLERANT[v] ?? LOEUF_INTOLERANT.v4}: LoF-intolerant` },
+  constrained: { color: '#ea580c', label: v => `LOEUF ${LOEUF_INTOLERANT[v] ?? LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED[v] ?? LOEUF_CONSTRAINED.v4}: constrained` },
+  tolerant: { color: '#475569', label: v => `LOEUF ≥ ${LOEUF_CONSTRAINED[v] ?? LOEUF_CONSTRAINED.v4}: not constrained` },
+  unknown: { color: '#9aa6b5', label: () => 'no gnomAD constraint' },
+};
 /** pLI at or above which a gene is called LoF-intolerant (the convention gnomAD and UCSC cite). */
 export const PLI_INTOLERANT = 0.9;
 
