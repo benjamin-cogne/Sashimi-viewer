@@ -4,8 +4,10 @@
  * Every SVG on screen (the tracks, the cartoons, the SV browser; not the icons) is copied whenever the page changes,
  * at most RECORD_FPS times a second, with its place on the screen. Each drawing element is serialised once: a
  * MutationObserver marks what changed since the last copy, so an unchanged element is a reference to the copy already
- * kept, and a frame is a list of references. Full-screen dialogs are kept as their backdrop and their card (HTML is not
- * copied), the pointer as its positions and clicks. The export (exportRecording.ts) turns this into one animated SVG.
+ * kept, and a frame is a list of references. Full-screen dialogs are kept whole: their backdrop, their card, and the
+ * HTML inside (tables, controls, text) cut into blocks, each block copied once while it does not change, so a ticking
+ * clock renews a few words and not the whole dialog; the page's CSS rules those blocks use go with the recording. The
+ * pointer is kept as its positions and clicks. The export (exportRecording.ts) turns this into one animated SVG.
  */
 
 /** Copies per second, at most: enough for the cartoons' movements, light on long recordings. */
@@ -14,17 +16,31 @@ export const RECORD_FPS = 12;
 export const POINTER_HZ = 20;
 /** An element with more descendants than this is kept as a group of its children, so a change deep inside it only renews the part that changed. */
 const LEAF_MAX_DESCENDANTS = 40;
-/** SVGs this small are icons and logos: left out. */
+/** An HTML element of a dialog with more elements than this (or holding a drawing) is cut into its children. */
+const HTML_BLOCK_MAX = 60;
+/** SVGs this small are icons and logos: left out (inside a dialog, they go with the HTML around them). */
 const ICON_MAX_PX = 48;
 
 export type Chunk = { leaf: string } | { open: string; close: string; kids: number[] };
-export interface Placement { x: number; y: number; w: number; h: number; viewBox: string | null; par: string | null; style: string; clip: [number, number, number, number] | null; kids: number[] }
-export interface Panel { x: number; y: number; w: number; h: number; fill: string; radius: number }
-/** `order`: per layer (the page, then each dialog above it), how many panels then SVGs it holds, in drawing order. */
-export interface Frame { t: number; panels: Panel[]; svgs: Placement[]; order: [number, number][] }
+type Clip = [number, number, number, number] | null;
+export interface Placement { x: number; y: number; w: number; h: number; viewBox: string | null; par: string | null; style: string; clip: Clip; kids: number[] }
+export interface Panel { x: number; y: number; w: number; h: number; fill: string; radius: number; stroke?: string; strokeWidth?: number; clip?: Clip }
+/** A piece of a dialog's HTML: `id` into Recording.html, drawn in a box of its size; position and clip relative to the dialog's card. */
+export interface Block { x: number; y: number; w: number; h: number; id: number; clip: Clip }
+/**
+ * What is drawn at one level: the page (layer 0), then each dialog above it. A dialog's blocks are placed relative to
+ * its card (`origin`), so scrolling the dialog moves them together instead of copying them again.
+ */
+export interface Layer { panels: Panel[]; blocks: Block[]; svgs: Placement[]; origin: [number, number] }
+export interface Frame { t: number; layers: Layer[] }
+export interface CssRule { classes: string[]; text: string }
 export interface Recording {
   width: number; height: number; background: string; fontFamily: string;
   frames: Frame[]; chunks: Chunk[];
+  /** the HTML blocks: the wrapper's inherited style and the element */
+  html: { style: string; html: string }[];
+  /** the page's CSS rules, with the classes each needs (kept at export when the blocks use them all) */
+  css: CssRule[];
   pointer: { t: number; x: number; y: number }[]; clicks: { t: number; x: number; y: number }[];
   duration: number;
 }
@@ -32,6 +48,27 @@ export interface Recorder { stop(): Recording; elapsed(): number }
 
 const SVG_NS_ATTR = / xmlns="http:\/\/www\.w3\.org\/2000\/svg"/g;
 const skipRoot = (el: Element) => !!el.closest('[data-recorder="skip"]');
+const TRANSPARENT = 'rgba(0, 0, 0, 0)';
+const INHERITED = ['color', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing', 'text-align', 'white-space', 'text-transform'];
+
+/** The page's CSS rules, each with the class names its selector needs. */
+function pageCss(doc: Document): CssRule[] {
+  const out: CssRule[] = [];
+  const classesOf = (sel: string) => [...new Set([...sel.matchAll(/\.((?:\\.|[\w-])+)/g)].map(m => m[1].replace(/\\(.)/g, '$1')))];
+  const walk = (rules: CSSRuleList, wrap: (t: string) => string) => {
+    for (const r of Array.from(rules)) {
+      if (r instanceof CSSStyleRule) {
+        // a rule for several selectors is needed when any of them is
+        const alts = r.selectorText.split(',').map(classesOf);
+        out.push({ classes: alts.reduce((best, a) => (a.length < best.length ? a : best), alts[0] ?? []), text: wrap(r.cssText) });
+      } else if (r instanceof CSSMediaRule) walk(r.cssRules, t => wrap(`@media ${r.conditionText}{${t}}`));
+      else if (typeof CSSSupportsRule !== 'undefined' && r instanceof CSSSupportsRule) walk(r.cssRules, t => wrap(`@supports ${r.conditionText}{${t}}`));
+      else out.push({ classes: [], text: wrap(r.cssText) });
+    }
+  };
+  for (const sheet of Array.from(doc.styleSheets)) { try { walk(sheet.cssRules, t => t); } catch { /* a sheet from elsewhere: not readable */ } }
+  return out;
+}
 
 export function startRecording(root: Document = document): Recorder {
   const t0 = performance.now();
@@ -39,13 +76,19 @@ export function startRecording(root: Document = document): Recorder {
   const chunks: Chunk[] = [];
   const index = new Map<string, number>();
   const cache = new WeakMap<Element, number>();
+  const html: Recording['html'] = [];
+  const htmlIndex = new Map<string, number>();
+  const htmlCache = new WeakMap<Element, number>();
   const boxCache = new WeakMap<Element, { clips: boolean; fixed: boolean }>();
   const ser = new XMLSerializer();
   const frames: Frame[] = [];
   const pointer: Recording['pointer'] = [];
   const clicks: Recording['clicks'] = [];
   let lastKey = '';
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const bigSvg = (s: Element) => { const r = s.getBoundingClientRect(); return !(r.width <= ICON_MAX_PX && r.height <= ICON_MAX_PX); };
 
+  // ---- SVG drawings ----
   const intern = (key: string, make: () => Chunk): number => {
     let id = index.get(key);
     if (id == null) { id = chunks.length; chunks.push(make()); index.set(key, id); }
@@ -72,8 +115,8 @@ export function startRecording(root: Document = document): Recorder {
     cache.set(el, id);
     return id;
   };
-  /** The part of an element's box its scrolling ancestors leave visible. */
-  const clipOf = (el: Element, r: DOMRect): [number, number, number, number] | null => {
+  /** The part of an element's box its scrolling ancestors (up to a fixed one) and the window leave visible. */
+  const clipOf = (el: Element, r: DOMRect): Clip => {
     let x0 = r.left, y0 = r.top, x1 = r.right, y1 = r.bottom, clipped = false;
     for (let a = el.parentElement; a && a !== root.body; a = a.parentElement) {
       let box = boxCache.get(a);
@@ -88,10 +131,23 @@ export function startRecording(root: Document = document): Recorder {
     }
     x0 = Math.max(x0, 0); y0 = Math.max(y0, 0); x1 = Math.min(x1, innerWidth); y1 = Math.min(y1, innerHeight);
     if (x1 <= x0 || y1 <= y0) return [0, 0, 0, 0];
-    return clipped || r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight ? [x0, y0, x1 - x0, y1 - y0] : null;
+    return clipped || r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight ? [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)] : null;
   };
-  const r1 = (v: number) => Math.round(v * 10) / 10;
-
+  /** The part of an element left visible by the scrolling boxes between it and its dialog's card (not the window). */
+  const innerClip = (el: Element, r: DOMRect): Clip => {
+    let x0 = r.left, y0 = r.top, x1 = r.right, y1 = r.bottom, clipped = false;
+    for (let a = el.parentElement; a && !(a.parentElement?.matches('.fixed.inset-0')); a = a.parentElement) {
+      let box = boxCache.get(a);
+      if (!box) { const cs = getComputedStyle(a); box = { clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible', fixed: cs.position === 'fixed' }; boxCache.set(a, box); }
+      if (box.fixed) break;
+      if (!box.clips) continue;
+      const b = a.getBoundingClientRect();
+      if (b.left > x0 || b.top > y0 || b.right < x1 || b.bottom < y1) clipped = true;
+      x0 = Math.max(x0, b.left); y0 = Math.max(y0, b.top); x1 = Math.min(x1, b.right); y1 = Math.min(y1, b.bottom);
+    }
+    if (x1 <= x0 || y1 <= y0) return [0, 0, 0, 0];
+    return clipped ? [r1(x0), r1(y0), r1(x1 - x0), r1(y1 - y0)] : null;
+  };
   /** A copy of one SVG, or null when it is not drawn. */
   const place = (svg: SVGSVGElement): Placement | null => {
     const r = svg.getBoundingClientRect();
@@ -105,8 +161,70 @@ export function startRecording(root: Document = document): Recorder {
     for (const c of Array.from(svg.children)) if (!skipped(c)) kids.push(chunkOf(c));
     return {
       x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), viewBox: svg.getAttribute('viewBox'), par: svg.getAttribute('preserveAspectRatio'),
-      style: `color:${cs.color};font-family:${cs.fontFamily.replace(/"/g, "'")};font-size:${cs.fontSize}`, clip: clip && clip.map(r1) as Placement['clip'], kids,
+      style: `color:${cs.color};font-family:${cs.fontFamily.replace(/"/g, "'")};font-size:${cs.fontSize}`, clip, kids,
     };
+  };
+
+  // ---- the HTML of dialogs ----
+  const htmlCount = (el: Element) => {
+    let n = el.getElementsByTagName('*').length;
+    for (const s of Array.from(el.getElementsByTagName('svg'))) if (!s.parentElement?.closest('svg')) n -= s.getElementsByTagName('*').length;
+    return n;
+  };
+  const directText = (el: Element) => Array.from(el.childNodes).some(n => n.nodeType === 3 && n.textContent!.trim());
+  const split = (el: Element) => el.childElementCount > 0 && !directText(el) && (htmlCount(el) > HTML_BLOCK_MAX || Array.from(el.getElementsByTagName('svg')).some(s => !s.parentElement?.closest('svg') && bigSvg(s)));
+  /** One block: the element as it shows now (form states written into it, drawings left to the SVG layer). */
+  const blockId = (el: HTMLElement, r: DOMRect): number => {
+    const hit = htmlCache.get(el);
+    if (hit != null) return hit;
+    const clone = el.cloneNode(true) as HTMLElement;
+    const live = [el, ...Array.from(el.querySelectorAll('input, select, textarea'))], copy = [clone, ...Array.from(clone.querySelectorAll('input, select, textarea'))];
+    live.forEach((n, i) => {
+      const c = copy[i];
+      if (n instanceof HTMLInputElement && c instanceof HTMLInputElement) {
+        if (n.type === 'checkbox' || n.type === 'radio') { if (n.checked) c.setAttribute('checked', ''); else c.removeAttribute('checked'); } else c.setAttribute('value', n.value);
+      } else if (n instanceof HTMLSelectElement && c instanceof HTMLSelectElement) {
+        Array.from(c.options).forEach((o, k) => { if (k === n.selectedIndex) o.setAttribute('selected', ''); else o.removeAttribute('selected'); });
+      } else if (n instanceof HTMLTextAreaElement && c instanceof HTMLTextAreaElement) c.textContent = n.value;
+    });
+    // the drawings inside are drawn by the SVG layer: kept here as empty boxes of their size
+    for (const s of Array.from(clone.getElementsByTagName('svg'))) if (!s.parentElement?.closest('svg')) {
+      const orig = el.querySelectorAll('svg')[Array.from(clone.querySelectorAll('svg')).indexOf(s)];
+      if (orig && bigSvg(orig)) s.replaceChildren();
+    }
+    clone.style.margin = '0'; clone.style.position = 'static'; clone.style.boxSizing = 'border-box';
+    clone.style.width = `${r1(r.width)}px`; clone.style.height = `${r1(r.height)}px`;
+    const pcs = el.parentElement ? getComputedStyle(el.parentElement) : null;
+    const style = pcs ? INHERITED.map(p => `${p}:${pcs.getPropertyValue(p).replace(/"/g, "'")}`).join(';') : '';
+    const text = ser.serializeToString(clone);
+    const key = `${style}|${text}`;
+    let id = htmlIndex.get(key);
+    if (id == null) { id = html.length; html.push({ style, html: text }); htmlIndex.set(key, id); }
+    htmlCache.set(el, id);
+    return id;
+  };
+  /** The blocks and backgrounds of a dialog's HTML, cutting large elements and those holding drawings into their children. */
+  const blocksOf = (el: Element, out: Layer) => {
+    for (const c of Array.from(el.children)) {
+      if (!(c instanceof HTMLElement) || skipRoot(c)) continue;
+      const r = c.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
+      const cs = getComputedStyle(c);
+      if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) continue;
+      const clip = clipOf(c, r);
+      if (clip && clip[2] === 0) continue;
+      if (split(c)) {
+        const bw = parseFloat(cs.borderTopWidth) || 0;
+        if (cs.backgroundColor !== TRANSPARENT || (bw > 0 && cs.borderTopStyle !== 'none'))
+          out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip });
+        blocksOf(c, out);
+      } else {
+        const [ox, oy] = out.origin;
+        // inside the card: only the dialog's own scrolling boxes clip (the window is clipped once for the whole dialog)
+        const inner = innerClip(c, r);
+        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]] });
+      }
+    }
   };
 
   const capture = () => {
@@ -116,14 +234,16 @@ export function startRecording(root: Document = document): Recorder {
       const cs = getComputedStyle(ov);
       return cs.display !== 'none' && cs.visibility !== 'hidden';
     });
-    const layers: { panels: Panel[]; svgs: Placement[] }[] = [{ panels: [], svgs: [] }, ...overlays.map(ov => {
-      const panels: Panel[] = [{ x: 0, y: 0, w: innerWidth, h: innerHeight, fill: getComputedStyle(ov).backgroundColor, radius: 0 }];
+    const layers: Layer[] = [{ panels: [], blocks: [], svgs: [], origin: [0, 0] }, ...overlays.map(ov => {
+      const layer: Layer = { panels: [{ x: 0, y: 0, w: innerWidth, h: innerHeight, fill: getComputedStyle(ov).backgroundColor, radius: 0 }], blocks: [], svgs: [], origin: [0, 0] };
       const card = ov.firstElementChild as HTMLElement | null;
       if (card) {
         const r = card.getBoundingClientRect(), cc = getComputedStyle(card);
-        if (r.width > 0 && cc.backgroundColor !== 'rgba(0, 0, 0, 0)') panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cc.backgroundColor, radius: parseFloat(cc.borderTopLeftRadius) || 0 });
+        layer.origin = [r1(r.left), r1(r.top)];
+        if (r.width > 0 && cc.backgroundColor !== TRANSPARENT) layer.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cc.backgroundColor, radius: parseFloat(cc.borderTopLeftRadius) || 0, clip: clipOf(card, r) });
+        blocksOf(card, layer);
       }
-      return { panels, svgs: [] as Placement[] };
+      return layer;
     })];
     for (const svg of Array.from(root.querySelectorAll('svg'))) {
       if (svg.parentElement?.closest('svg') || skipRoot(svg)) continue;
@@ -134,13 +254,10 @@ export function startRecording(root: Document = document): Recorder {
       overlays.forEach((ov, i) => { if (ov.contains(svg)) layer = i + 1; });
       layers[layer].svgs.push(p);
     }
-    const panels = layers.flatMap(l => l.panels);
-    const svgs = layers.flatMap(l => l.svgs);
-    const order = layers.map(l => [l.panels.length, l.svgs.length] as [number, number]);
     const key = JSON.stringify(layers);
     if (key === lastKey) return;
     lastKey = key;
-    frames.push({ t: now(), panels, svgs, order });
+    frames.push({ t: now(), layers });
   };
 
   // ---- scheduling: a copy after each burst of changes, at most RECORD_FPS a second ----
@@ -152,8 +269,8 @@ export function startRecording(root: Document = document): Recorder {
   };
   const dirty = (n: Node | null) => {
     for (let e: Element | null = n instanceof Element ? n : n?.parentElement ?? null; e; e = e.parentElement) {
-      if (!cache.has(e)) { if (e.tagName.toLowerCase() === 'svg') break; continue; }
-      cache.delete(e);
+      cache.delete(e); htmlCache.delete(e);
+      if (e.tagName.toLowerCase() === 'svg' && bigSvg(e)) break;
     }
   };
   const mo = new MutationObserver(records => {
@@ -162,13 +279,15 @@ export function startRecording(root: Document = document): Recorder {
       const target = m.target instanceof Element ? m.target : m.target.parentElement;
       if (target && skipRoot(target)) continue;
       dirty(m.target);
-      if (m.type === 'childList') m.removedNodes.forEach(n => { if (n instanceof Element) cache.delete(n); });
+      if (m.type === 'childList') m.removedNodes.forEach(n => { if (n instanceof Element) { cache.delete(n); htmlCache.delete(n); } });
       any = true;
     }
     if (any) schedule();
   });
   mo.observe(root.body, { subtree: true, childList: true, attributes: true, characterData: true });
   const onScroll = () => schedule();
+  // form controls change without touching the DOM
+  const onInput = (e: Event) => { if (e.target instanceof Element && !skipRoot(e.target)) { dirty(e.target); schedule(); } };
   let lastPtr = -Infinity;
   const onMove = (e: PointerEvent) => {
     const t = now();
@@ -186,6 +305,8 @@ export function startRecording(root: Document = document): Recorder {
   };
   addEventListener('scroll', onScroll, true);
   addEventListener('resize', onScroll);
+  addEventListener('input', onInput, true);
+  addEventListener('change', onInput, true);
   addEventListener('pointermove', onMove, { capture: true, passive: true });
   addEventListener('pointerdown', onDown, { capture: true, passive: true });
   capture();
@@ -197,14 +318,16 @@ export function startRecording(root: Document = document): Recorder {
       mo.disconnect();
       removeEventListener('scroll', onScroll, true);
       removeEventListener('resize', onScroll);
+      removeEventListener('input', onInput, true);
+      removeEventListener('change', onInput, true);
       removeEventListener('pointermove', onMove, true);
       removeEventListener('pointerdown', onDown, true);
       if (timer != null) clearTimeout(timer);
       capture();
       const bs = getComputedStyle(root.body);
       return {
-        width: innerWidth, height: innerHeight, background: bs.backgroundColor === 'rgba(0, 0, 0, 0)' ? '#ffffff' : bs.backgroundColor, fontFamily: bs.fontFamily.replace(/"/g, "'"),
-        frames, chunks, pointer, clicks, duration: now(),
+        width: innerWidth, height: innerHeight, background: bs.backgroundColor === TRANSPARENT ? '#ffffff' : bs.backgroundColor, fontFamily: bs.fontFamily.replace(/"/g, "'"),
+        frames, chunks, html, css: html.length ? pageCss(root) : [], pointer, clicks, duration: now(),
       };
     },
   };
