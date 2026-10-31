@@ -8,6 +8,7 @@ import '../plugins';   // registered file kinds (fileKinds.ts), before anything 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SvBrowserDialog from '../components/sashimi/SvBrowserDialog';
+import RecordButton from '../components/recorder/RecordButton';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
@@ -1158,6 +1159,7 @@ function App() {
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+              <RecordButton names={samples.map(x => x.name)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap" />
               <button onClick={() => setSvBrowser(true)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
                 title="SV browser: type a structural variant as HGVS (NC_000020.11:g.[…del;…inv;…del]) or as the ISCN sequence form, and see the genes of the rearranged chromosome">
                 🧬 SV browser
