@@ -16,6 +16,8 @@ import { useEffect, useRef, useState } from 'react';
 const ICON_PATHS: Record<string, string> = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-3.5-3.5',
   plus: 'M12 5v14M5 12h14',
+  edit: 'M4 20h4L19 9l-4-4L4 16v4zM14 6l4 4',
+  video: 'M3 7a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7zM17 10l4-2.5v9L17 14',
   minus: 'M5 12h14',
   reset: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5',
   chev: 'm6 9 6 6 6-6',

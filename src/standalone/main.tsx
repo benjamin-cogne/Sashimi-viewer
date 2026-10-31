@@ -8,7 +8,7 @@ import '../plugins';   // registered file kinds (fileKinds.ts), before anything 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SvBrowserDialog from '../components/sashimi/SvBrowserDialog';
-import RecordButton from '../components/recorder/RecordButton';
+import RecorderHost, { type RecorderHandle } from '../components/recorder/RecorderHost';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
@@ -252,6 +252,9 @@ function App() {
     attachVariantWorker(dsRef.current);
   }
   const ds = dsRef.current;
+  /** the screen recorder (Export menu) */
+  const recorder = useRef<RecorderHandle>(null);
+  const [recording, setRecording] = useState(false);
   /** the SV browser (a rearrangement typed as HGVS or ISCN) and the gene loaders it uses */
   const [svBrowser, setSvBrowser] = useState(false);
   const svLoaders = useMemo(() => ({
@@ -1134,6 +1137,10 @@ function App() {
                     <MenuItem icon="file" label={busy ? 'Export HTML…' : 'Export HTML'} disabled={busy || !opened || pageIsUnbuilt()} onClick={() => { close(); setExportDialog({ window: 'margin', readsCap: 'shown' }); }}
                       hint="This viewer with the data of every view embedded: opens anywhere, without the alignment files"
                       title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'} />
+                    <MenuItem icon="video" label={recording ? 'Stop the recording' : 'Record the screen'} onClick={() => { close(); if (recording) recorder.current?.stop(); else recorder.current?.start(); }}
+                      hint={recording ? 'Then edit and save it' : 'After a 3-2-1 countdown: the drawings and dialogs as vectors, for a presentation (HTML page, SVG or video)'} />
+                    <MenuItem icon="edit" label="Edit a recording…" disabled={recording} onClick={() => { close(); recorder.current?.openFile(); }}
+                      hint="Open an HTML page saved editable, to change it" />
                     <MenuItem icon="image" label={views.length > 1 ? `SVG · ${views.length} views` : 'SVG'} disabled={busy || !views.length} onClick={() => { close(); void exportAllSvg(); }}
                       hint="Every view on one page, stacked under their titles (vector)"
                       title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The ⋯ menu of the plot saves the current view alone." />
@@ -1159,7 +1166,6 @@ function App() {
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
-              <RecordButton names={samples.map(x => x.name)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap" />
               <button onClick={() => setSvBrowser(true)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
                 title="SV browser: type a structural variant as HGVS (NC_000020.11:g.[…del;…inv;…del]) or as the ISCN sequence form, and see the genes of the rearranged chromosome">
                 🧬 SV browser
@@ -1265,6 +1271,7 @@ function App() {
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}
+      <RecorderHost ref={recorder} names={samples.map(x => x.name)} onRecording={setRecording} />
       {svBrowser && <SvBrowserDialog build={build} loaders={svLoaders} onClose={() => setSvBrowser(false)} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
