@@ -24,10 +24,11 @@ const ICON_MAX_PX = 48;
 
 export type Chunk = { leaf: string } | { open: string; close: string; kids: number[] };
 type Clip = [number, number, number, number] | null;
-export interface Placement { x: number; y: number; w: number; h: number; viewBox: string | null; par: string | null; style: string; clip: Clip; kids: number[] }
-export interface Panel { x: number; y: number; w: number; h: number; fill: string; radius: number; stroke?: string; strokeWidth?: number; clip?: Clip }
+/** `z`: the stacking order (see zKey), absent at the base level. */
+export interface Placement { x: number; y: number; w: number; h: number; viewBox: string | null; par: string | null; style: string; clip: Clip; kids: number[]; z?: string }
+export interface Panel { x: number; y: number; w: number; h: number; fill: string; radius: number; stroke?: string; strokeWidth?: number; clip?: Clip; z?: string }
 /** A piece of a dialog's HTML: `id` into Recording.html, drawn in a box of its size; position and clip relative to the dialog's card. */
-export interface Block { x: number; y: number; w: number; h: number; id: number; clip: Clip }
+export interface Block { x: number; y: number; w: number; h: number; id: number; clip: Clip; z?: string }
 /**
  * What is drawn at one level: the page (layer 0), then each dialog above it. A dialog's blocks are placed relative to
  * its card (`origin`), so scrolling the dialog moves them together instead of copying them again.
@@ -54,6 +55,16 @@ export interface Recording {
 export interface Recorder { stop(): Recording; elapsed(): number }
 
 const SVG_NS_ATTR = / xmlns="http:\/\/www\.w3\.org\/2000\/svg"/g;
+/**
+ * The stacking order of an element, as a key that sorts like the page paints: the z-indexes of the positioned
+ * elements holding it (with a numeric z-index), outermost first, each as a fixed-width number, padded to ZDEPTH
+ * levels. A popover with z-index 30 inside a plot box sorts above the plot's drawing, and a menu of z-index 50 above
+ * both. '' at the base level.
+ */
+const ZDEPTH = 4, Z0 = '050000';
+const zPart = (z: number) => String(Math.max(0, Math.min(99999, z + 50000))).padStart(6, '0');
+export const zKey = (chain: number[]): string => (chain.some(z => z !== 0) ? Array.from({ length: ZDEPTH }, (_, i) => (i < chain.length ? zPart(chain[i]) : Z0)).join('') : '');
+
 /** A 53-bit hash of a string (cyrb53), as text: the key a chunk is found again by. */
 function hash(s: string): string {
   let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
@@ -109,6 +120,18 @@ export function startRecording(root: Document = document): Recorder {
   const once = (v: string): string => { const k = strings.get(v); if (k != null) return k; strings.set(v, v); return v; };
   const htmlCache = new WeakMap<Element, { id: number; w: number; h: number }>();
   const boxCache = new WeakMap<Element, { clips: boolean; fixed: boolean }>();
+  /** the z-indexes of the positioned elements holding an element (itself included), outermost first, up to a layer's root */
+  const zCache = new WeakMap<Element, number[]>();
+  const zChain = (el: Element | null): number[] => {
+    if (!el || el === root.body || el === root.documentElement || el.matches('.fixed.inset-0')) return [];
+    const hit = zCache.get(el);
+    if (hit) return hit;
+    const cs = getComputedStyle(el);
+    const own = cs.position !== 'static' && cs.zIndex !== 'auto' && Number.isFinite(Number(cs.zIndex)) ? [Number(cs.zIndex)] : [];
+    const chain = [...zChain(el.parentElement), ...own];
+    zCache.set(el, chain);
+    return chain;
+  };
   const ser = new XMLSerializer();
   const frames: Frame[] = [];
   const pointer: Recording['pointer'] = [];
@@ -246,6 +269,14 @@ export function startRecording(root: Document = document): Recorder {
     }
     clone.style.margin = '0'; clone.style.position = 'static'; clone.style.boxSizing = 'border-box';
     clone.style.width = `${r1(r.width)}px`; clone.style.height = `${r1(r.height)}px`;
+    // its size is the one measured: limits relative to its old container (max-width: 95 %…) would shrink it here
+    clone.style.maxWidth = 'none'; clone.style.maxHeight = 'none'; clone.style.minWidth = '0'; clone.style.minHeight = '0';
+    // a copy does not scroll: no scroll bar of its own, and the part scrolled into view shown as it was
+    clone.style.overflow = 'hidden';
+    if (el.scrollTop || el.scrollLeft) for (const k of Array.from(clone.children) as HTMLElement[]) {
+      if (getComputedStyle(el.children[Array.from(clone.children).indexOf(k)] ?? el).position === 'absolute') continue;
+      k.style.position = k.style.position || 'relative'; k.style.top = `${-el.scrollTop}px`; k.style.left = `${-el.scrollLeft}px`;
+    }
     const pcs = el.parentElement ? getComputedStyle(el.parentElement) : null;
     const style = once(pcs ? INHERITED.map(p => `${p}:${pcs.getPropertyValue(p).replace(/"/g, "'")}`).join(';') : '');
     const text = ser.serializeToString(clone);
@@ -261,6 +292,7 @@ export function startRecording(root: Document = document): Recorder {
    * their children. Dialogs met in the page are left to their own layer; fixed and sticky elements of the page (and
    * what they hold) go to the layer's `fixed` blocks, in screen coordinates.
    */
+  const zOf = (el: Element): { z?: string } => { const k = zKey(zChain(el)); return k ? { z: k } : {}; };
   const blocksOf = (el: Element, out: Layer, page = false, stuck = false) => {
     for (const c of Array.from(el.children)) {
       const small = c instanceof SVGSVGElement && !bigSvg(c);
@@ -277,15 +309,15 @@ export function startRecording(root: Document = document): Recorder {
       if (split(c)) {
         const bw = parseFloat(cs.borderTopWidth) || 0;
         if (cs.backgroundColor !== TRANSPARENT || (bw > 0 && cs.borderTopStyle !== 'none'))
-          out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip });
+          out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip, ...zOf(c) });
         blocksOf(c, out, page, pinned);
       } else if (pinned) {
-        (out.fixed ??= []).push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip });
+        (out.fixed ??= []).push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip, ...zOf(c) });
       } else {
         const [ox, oy] = out.origin;
         // inside the card: only the dialog's own scrolling boxes clip (the window is clipped once for the whole dialog)
         const inner = innerClip(c, r);
-        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]] });
+        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]], ...zOf(c) });
       }
     }
   };
@@ -318,7 +350,8 @@ export function startRecording(root: Document = document): Recorder {
       // the innermost dialog holding it
       let layer = 0;
       overlays.forEach((ov, i) => { if (ov.contains(svg)) layer = i + 1; });
-      layers[layer].svgs.push(p);
+      const z = zKey(zChain(svg));
+      layers[layer].svgs.push(z ? { ...p, z } : p);
     }
     // what did not change since the last frame is the same object (a long recording holds each state once)
     const keys = layers.map(l => ({ panels: JSON.stringify(l.panels), blocks: JSON.stringify(l.blocks), svgs: JSON.stringify(l.svgs), fixed: JSON.stringify(l.fixed ?? []), origin: l.origin.join(',') }));

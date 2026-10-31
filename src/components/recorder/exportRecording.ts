@@ -287,12 +287,13 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
   for (let L = 0; L < nLayers; L++) {
     const here = shown.filter(x => x.f.layers[L]);
     const part: string[] = [];
-    // backgrounds: each distinct set once
-    const panelSets = new Map<string, { ps: Layer['panels']; frames: number[] }>();
-    for (const { f, i } of here) { const ps = f.layers[L].panels; if (!ps.length) continue; const k = JSON.stringify(ps); if (!panelSets.has(k)) panelSets.set(k, { ps, frames: [] }); panelSets.get(k)!.frames.push(i); }
-    for (const { ps, frames } of panelSets.values()) part.push(`<g class="fr ${win(frames)}">${ps.map(panel).join('')}</g>`);
-    // the HTML blocks of this layer: each placement once, shown while a frame holds it; the page's (or the dialog
-    // card's) blocks move with its origin, the fixed ones stay on the screen
+    // the stacking levels of this layer (see zKey), lowest first: at each level its backgrounds, its HTML, its drawings
+    const zs = new Set<string>(['']);
+    for (const { f } of here) { const l = f.layers[L]; for (const it of [...l.panels, ...l.blocks, ...l.svgs]) zs.add(it.z ?? ''); }
+    const levels = [...zs].sort();
+    const zIs = (z: string) => (it: { z?: string }) => (it.z ?? '') === z;
+    // the HTML blocks: each placement once, shown while a frame holds it; the page's (or the dialog card's) blocks
+    // move with its origin, the fixed ones stay on the screen
     const blockSet = (pick: (l: Layer) => Layer['blocks'] | undefined): string[] => {
       const windows = new Map<string, { b: Layer['blocks'][number]; frames: number[] }>();
       for (const { f, i } of here) for (const b of pick(f.layers[L]) ?? []) {
@@ -308,43 +309,52 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
       }
       return blocks;
     };
-    const moving = blockSet(l => l.blocks);
-    if (moving.length) {
-      const mv = moveClass(here.map(({ f, i }) => ({ i, x: f.layers[L].origin[0], y: f.layers[L].origin[1] })));
-      const o = here[0].f.layers[L].origin;
-      part.push(mv ? `<g class="a ${mv}">${moving.join('\n')}</g>` : `<g transform="translate(${o[0]} ${o[1]})">${moving.join('\n')}</g>`);
-    }
-    // the drawings, slot by slot
-    const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][] }>();
-    for (const { f, i } of here) {
-      const seen = new Map<string, number>();
-      for (const sv of f.layers[L].svgs) {
-        const base = `${sv.w}|${sv.h}|${sv.viewBox}|${sv.par}|${sv.style}|${sv.clip ? sv.clip.map((v, k) => v - (k === 0 ? sv.x : k === 1 ? sv.y : 0)).join(',') : ''}`;
-        // two copies of one drawing in a frame are two slots
-        const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
-        const key = `${base}#${nth}`;
-        let slot = slots.get(key);
-        if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [] }; slots.set(key, slot); }
-        slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y });
-        sv.kids.forEach((k, j) => insert(slot!.kids, j, k, i));
+    let originMove: string | null | undefined;
+    for (const z of levels) {
+      // backgrounds: each distinct set once
+      const panelSets = new Map<string, { ps: Layer['panels']; frames: number[] }>();
+      for (const { f, i } of here) { const ps = f.layers[L].panels.filter(zIs(z)); if (!ps.length) continue; const k = JSON.stringify(ps); if (!panelSets.has(k)) panelSets.set(k, { ps, frames: [] }); panelSets.get(k)!.frames.push(i); }
+      for (const { ps, frames } of panelSets.values()) part.push(`<g class="fr ${win(frames)}">${ps.map(panel).join('')}</g>`);
+      const moving = blockSet(l => l.blocks.filter(zIs(z)));
+      if (moving.length) {
+        if (originMove === undefined) originMove = moveClass(here.map(({ f, i }) => ({ i, x: f.layers[L].origin[0], y: f.layers[L].origin[1] })));
+        const o = here[0].f.layers[L].origin;
+        part.push(originMove ? `<g class="a ${originMove}">${moving.join('\n')}</g>` : `<g transform="translate(${o[0]} ${o[1]})">${moving.join('\n')}</g>`);
+      }
+      // the drawings, slot by slot
+      const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][] }>();
+      for (const { f, i } of here) {
+        const seen = new Map<string, number>();
+        for (const sv of f.layers[L].svgs.filter(zIs(z))) {
+          const base = `${sv.w}|${sv.h}|${sv.viewBox}|${sv.par}|${sv.style}|${sv.clip ? sv.clip.map((v, k) => v - (k === 0 ? sv.x : k === 1 ? sv.y : 0)).join(',') : ''}`;
+          // two copies of one drawing in a frame are two slots
+          const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
+          const key = `${base}#${nth}`;
+          let slot = slots.get(key);
+          if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [] }; slots.set(key, slot); }
+          slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y });
+          sv.kids.forEach((k, j) => insert(slot!.kids, j, k, i));
+        }
+      }
+      for (const { s: sv, frames, pos, kids } of slots.values()) {
+        // the ids a drawing defines (clip paths, gradients, patterns) are its own: the page reuses one id while its
+        // geometry changes (a clip that moves when a track is added), and the first in the file would serve them all
+        const sfx = `_s${nSlots++}`;
+        const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('')
+          .replace(/\sid="([^"]+)"/g, ` id="$1${sfx}"`)
+          .replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, `url(#$2${sfx})`)
+          .replace(/(\s(?:xlink:)?href)="#([^"]+)"/g, `$1="#$2${sfx}"`);
+        const el = `<svg width="${sv.w}" height="${sv.h}"${sv.viewBox ? ` viewBox="${sv.viewBox}"` : ''}${sv.par ? ` preserveAspectRatio="${sv.par}"` : ''} style="${esc(sv.style)}">${inner}</svg>`;
+        // the clip moves with the drawing: it is given relative to the drawing's place
+        const rel: [number, number, number, number] | null = sv.clip ? [sv.clip[0] - sv.x, sv.clip[1] - sv.y, sv.clip[2], sv.clip[3]] : null;
+        const mv = moveClass(pos);
+        const placed = mv ? `<g class="a ${mv}">${clipped(rel, el)}</g>` : `<g transform="translate(${sv.x} ${sv.y})">${clipped(rel, el)}</g>`;
+        part.push(`<g class="fr ${win(frames)}">${placed}</g>`);
       }
     }
-    for (const { s: sv, frames, pos, kids } of slots.values()) {
-      // the ids a drawing defines (clip paths, gradients, patterns) are its own: the page reuses one id while its
-      // geometry changes (a clip that moves when a track is added), and the first in the file would serve them all
-      const sfx = `_s${nSlots++}`;
-      const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('')
-        .replace(/\sid="([^"]+)"/g, ` id="$1${sfx}"`)
-        .replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, `url(#$2${sfx})`)
-        .replace(/(\s(?:xlink:)?href)="#([^"]+)"/g, `$1="#$2${sfx}"`);
-      const el = `<svg width="${sv.w}" height="${sv.h}"${sv.viewBox ? ` viewBox="${sv.viewBox}"` : ''}${sv.par ? ` preserveAspectRatio="${sv.par}"` : ''} style="${esc(sv.style)}">${inner}</svg>`;
-      // the clip moves with the drawing: it is given relative to the drawing's place
-      const rel: [number, number, number, number] | null = sv.clip ? [sv.clip[0] - sv.x, sv.clip[1] - sv.y, sv.clip[2], sv.clip[3]] : null;
-      const mv = moveClass(pos);
-      const placed = mv ? `<g class="a ${mv}">${clipped(rel, el)}</g>` : `<g transform="translate(${sv.x} ${sv.y})">${clipped(rel, el)}</g>`;
-      part.push(`<g class="fr ${win(frames)}">${placed}</g>`);
-    }
-    part.push(...blockSet(l => l.fixed));
+    // fixed and sticky elements of the page, lowest level first
+    const fixedLevels = [...new Set(here.flatMap(({ f }) => (f.layers[L].fixed ?? []).map(b => b.z ?? '')))].sort();
+    for (const z of fixedLevels) part.push(...blockSet(l => l.fixed?.filter(zIs(z))));
     body.push(`<g clip-path="url(#${clipId([0, 0, rec.width, rec.height])})">${part.join('\n')}</g>`);
   }
 
