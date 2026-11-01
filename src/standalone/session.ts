@@ -4,7 +4,8 @@
  * A browser cannot read or store file paths, so the alignments are recorded by file name (with
  * their index name and size) and the user adds the files again when loading; the session then
  * matches them by name, restores the sample names, the order (first = primary), the gene and
- * window, and every viewer option (groups and reads track refer to samples by name).
+ * window, and every viewer option (groups and reads track refer to samples by name). A file read from a URL
+ * (remote.ts) is recorded by its URL too, and is opened again from it without being asked for.
  */
 import type { ViewerSettings, ViewerState } from '../components/SashimiViewer';
 import type { GenomeBuild } from './ensembl';
@@ -14,7 +15,7 @@ import type { SampleKind } from './fileKinds';
 export const SESSION_APP = 'sashimi-viewer';
 export const SESSION_VERSION = 1;
 
-export interface SessionSample { name: string; file: string; index: string; size: number; kind: SampleKind; /** paths relative to the run folder, when known */ path?: string; indexPath?: string; /** RNA-seq or DNA, as decided or chosen in the saving page */ library?: LibraryEvidence }
+export interface SessionSample { name: string; file: string; index: string; size: number; kind: SampleKind; /** paths relative to the run folder, when known */ path?: string; indexPath?: string; /** the file and its index at URLs (remote.ts): such a sample reopens by itself */ url?: string; indexUrl?: string; /** RNA-seq or DNA, as decided or chosen in the saving page */ library?: LibraryEvidence }
 export interface SessionGene {
   name: string; id?: string; chrom: string;
   /** gene bounds, 1-based inclusive */
@@ -47,7 +48,7 @@ export interface SessionFile {
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
 
 /** The minimum a loaded sample must expose (LocalSample without the File objects' behaviour). */
-export interface SampleLike { id: number; name: string; kind: SampleKind; file: { name: string; size: number }; index: { name: string }; path?: string; indexPath?: string; lib?: LibraryEvidence }
+export interface SampleLike { id: number; name: string; kind: SampleKind; file: { name: string; size: number; url?: string }; index: { name: string; url?: string }; path?: string; indexPath?: string; lib?: LibraryEvidence }
 
 export function defaultSessionName(geneName?: string | null): string {
   const day = new Date().toISOString().slice(0, 10);
@@ -86,7 +87,7 @@ export function buildSession(args: {
   const views = args.views?.map(v => ({ label: v.label, gene: geneOf(v.state), viewer: viewerOf(v.state) }));
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
-    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
+    samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, url: s.file.url, indexUrl: s.index.url, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
     fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name } : null,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
@@ -95,6 +96,9 @@ export function buildSession(args: {
     knownVariants: args.knownVariants?.length ? args.knownVariants.map(k => ({ text: k.text, label: k.label })) : undefined,
   };
 }
+
+/** A string that is an http(s) URL, else undefined. */
+const httpUrl = (u: unknown): string | undefined => (typeof u === 'string' && /^https?:\/\//i.test(u) ? u : undefined);
 
 /** Parses and checks a session file; throws a readable error for anything else. */
 export function parseSession(text: string): SessionFile {
@@ -108,6 +112,7 @@ export function parseSession(text: string): SessionFile {
     .filter((s: any) => s && typeof s.file === 'string')
     .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: typeof s.kind === 'string' && /^[a-z0-9_-]+$/.test(s.kind) ? s.kind : 'bam',
       path: typeof s.path === 'string' ? s.path : undefined, indexPath: typeof s.indexPath === 'string' ? s.indexPath : undefined,
+      url: httpUrl(s.url), indexUrl: httpUrl(s.indexUrl),
       library: s.library && (s.library.type === 'rna' || s.library.type === 'dna' || s.library.strand) ? {
         type: s.library.type === 'rna' || s.library.type === 'dna' ? s.library.type : 'unknown',
         source: ['header', 'reads', 'user', 'none'].includes(s.library.source) ? s.library.source : 'user', note: String(s.library.note ?? ''),
@@ -147,7 +152,8 @@ export function matchSession(session: SessionFile, samples: SampleLike[]): { mat
   const matched: { entry: SessionSample; sample: SampleLike }[] = [];
   const missing: SessionSample[] = [];
   for (const entry of session.samples) {
-    const hit = (entry.path ? samples.find(s => !used.has(s.id) && s.path === entry.path) : undefined)
+    const hit = (entry.url ? samples.find(s => !used.has(s.id) && s.file.url === entry.url) : undefined)
+      ?? (entry.path ? samples.find(s => !used.has(s.id) && s.path === entry.path) : undefined)
       ?? samples.find(s => !used.has(s.id) && (s.file.name === entry.file || (!!entry.index && s.index.name === entry.index)));
     if (hit) { used.add(hit.id); matched.push({ entry, sample: hit }); } else missing.push(entry);
   }

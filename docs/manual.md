@@ -303,6 +303,17 @@ https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464
 | `gene` | Symbol used only when no RefSeq gene covers the window | from the position |
 | `build` | `GRCh38` / `GRCh37` (`hg38` / `hg19`), when no accession says it | GRCh38 |
 | `reads` | `1` opens with the reads track on | off |
+| `bam`, `cram`, `file` | A file at a URL, read by Range requests (see *Files from a URL* in the README); repeat for several, the first is the primary sample. Relative to the page's address (`bam=data/P1.bam`). Percent-encode a URL that has its own `?…&…` (a pre-signed link) | none |
+| `index` | The index of each file, in the same order, when it is not beside it | `x.bam.bai`, `x.bai` |
+| `name` | The sample name of each file, in the same order | the file name |
+
+Files on the page's own server open at once; files on another server open after the user clicks **Open the files** in a
+notice naming that server, so a link cannot show another server's data as the patient's unnoticed. A link with
+files and no `variant` or `locus` only loads them. With the viewer hosted beside the data:
+
+```
+https://ngs.lab/sashimi-viewer.html#variant=chr17:g.43094464G>A&bam=run42/P1.bam&name=P1&bam=run42/mother.bam&name=Mother
+```
 
 Template: `href="…/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100"`. A GRCh37
 laboratory sends the hg19 accession or `build=GRCh37`; deep-intronic variants need a larger `pad` or a `locus`.

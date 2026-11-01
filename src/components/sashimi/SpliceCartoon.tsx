@@ -31,7 +31,7 @@ const lerp = (a: number, b: number, p: number) => a + (b - a) * p;
 
 const FONT = 'Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const C = {
-  exon: '#334155', utr: '#94a3b8', intron: '#94a3b8', text: '#1f2937', muted: '#6b7280', faint: '#9ca3af',
+  exon: '#334155', utr: '#94a3b8', intron: '#94a3b8', text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8',
   cryptic: '#b45309', lost: '#dc2626', ejc: '#7c3aed', ribosomeA: '#64748b', ribosomeB: '#94a3b8', upf1: '#dc2626',
   chain: '#cbd5e1', neo: '#f59e0b', ok: '#16a34a', bg: '#ffffff',
   /** the 3′ partner's exons and residues in a fusion */
@@ -267,7 +267,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
             <svg ref={svgRef} viewBox={`0 0 ${VW} ${VH}`} width="100%" className="block select-none" style={{ aspectRatio: `${VW} / ${VH}`, cursor: explore ? (panRef.current ? 'grabbing' : 'grab') : 'default' }} fontFamily={FONT}
               onMouseDown={onPanStart} onMouseMove={onPanMove} onMouseUp={onPanEnd} onMouseLeave={() => { onPanEnd(); setTip(null); }} onDoubleClick={resetView}>
               <defs>
-                <linearGradient id="sc-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f8fafc" /><stop offset="1" stopColor="#eef2ff" /></linearGradient>
+                <linearGradient id="sc-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f8fafc" /><stop offset="1" stopColor="#ddf1ee" /></linearGradient>
                 <radialGradient id="sc-ribo" cx="35%" cy="30%" r="80%"><stop offset="0" stopColor="#cbd5e1" /><stop offset="1" stopColor="#64748b" /></radialGradient>
                 <radialGradient id="sc-upf1" cx="35%" cy="30%" r="80%"><stop offset="0" stopColor="#fca5a5" /><stop offset="1" stopColor="#b91c1c" /></radialGradient>
                 <pattern id="sc-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fff7ed" /><line x1="0" y1="0" x2="0" y2="6" stroke={C.cryptic} strokeWidth="2" /></pattern>
@@ -305,19 +305,19 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
 
         {/* controls */}
         <div className="px-5 pt-3 pb-2 flex items-center gap-3 text-xs">
-          <button onClick={togglePlay} className="w-9 h-9 rounded-full bg-indigo-600 text-white text-base flex items-center justify-center shadow hover:bg-indigo-700" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
-          <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-indigo-600" />
+          <button onClick={togglePlay} className="w-9 h-9 rounded-full bg-accent-600 text-white text-base flex items-center justify-center shadow hover:bg-accent-700" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
+          <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
           <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
           <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
             {[0.5, 1, 1.5, 2].map(v => <option key={v} value={v}>{v}×</option>)}
           </select>
           <button onClick={() => { setPlaying(false); setT(T_END); setExplore(true); }} disabled={!story}
-            className={`px-2.5 py-1 rounded-full border text-xs font-semibold ${explore ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-indigo-300 text-indigo-700 hover:bg-indigo-50'}`} title="Skip to the final picture and explore it">🔍 Final picture</button>
+            className={`px-2.5 py-1 rounded-full border text-xs font-semibold ${explore ? 'bg-accent-600 border-accent-600 text-white' : 'border-accent-300 text-accent-700 hover:bg-accent-50'}`} title="Skip to the final picture and explore it">🔍 Final picture</button>
         </div>
         <div className="px-5 pb-3 flex flex-wrap gap-1.5 text-[11px]">
           {chapters.map(c => (
             <button key={c.label} onClick={() => { seek(c.at); setPlaying(true); }}
-              className={`px-2 py-0.5 rounded-full border ${t >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > t ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>{c.label}</button>
+              className={`px-2 py-0.5 rounded-full border ${t >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > t ? 'bg-accent-600 border-accent-600 text-white' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>{c.label}</button>
           ))}
         </div>
 
@@ -481,7 +481,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
         style={explore ? { cursor: 'pointer' } : undefined}
         onClick={explore && onSelect && p.rank != null && !isCryptic && !isExt ? (e => { e.stopPropagation(); onSelect(selected === p.rank ? null : p.rank!); }) : undefined}
         transform={dissolve ? `translate(${(i % 2 ? 1 : -1) * 18 * dissolve}, ${(i % 3 - 1) * 22 * dissolve}) rotate(${(i % 2 ? 8 : -8) * dissolve}, ${x + p.w / 2}, ${y})` : undefined}>
-        {isSel && <rect x={x - 4} y={y - EXON_H / 2 - 4} width={p.w + 8} height={EXON_H + 8} rx={7} fill="none" stroke="#6366f1" strokeWidth={2.5} opacity={0.9} />}
+        {isSel && <rect x={x - 4} y={y - EXON_H / 2 - 4} width={p.w + 8} height={EXON_H + 8} rx={7} fill="none" stroke="#14857a" strokeWidth={2.5} opacity={0.9} />}
         {parts}
         {affected && <rect x={x - 1.5} y={y - EXON_H / 2 - 1.5} width={p.w + 3} height={EXON_H + 3} rx={5} fill="none" stroke={C.lost} strokeWidth={1.5} strokeDasharray="3 2" />}
         {p.w >= 16 && <text x={x + p.w / 2} y={y + 4} textAnchor="middle" fill={isCryptic || isExt ? C.cryptic : '#fff'} fontSize={isCryptic || isExt ? 9 : 11} fontWeight={700}>{labelTxt}</text>}
@@ -719,7 +719,7 @@ function Legend({ story, color }: { story: SpliceStory; color: string }) {
   let x = 24;
   return (
     <g>
-      <rect x={16} y={VH - 48} width={VW - 32} height={36} rx={8} fill="#ffffff" opacity={0.96} stroke="#e5e7eb" />
+      <rect x={16} y={VH - 48} width={VW - 32} height={36} rx={8} fill="#ffffff" opacity={0.96} stroke="#e3e8ee" />
       {items.map((it, i) => { const el = <g key={i} transform={`translate(${x}, 0)`}>{it.el}</g>; x += it.w + 18; return el; })}
     </g>
   );

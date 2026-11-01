@@ -8,7 +8,7 @@ import { SharedBudget } from '@gmod/shared-read-cache';
 import { BamFile } from '@gmod/bam';
 import { IndexedCramFile, CraiIndex } from '@gmod/cram';
 import { IndexedFasta, BgzipIndexedFasta } from '@gmod/indexedfasta';
-import { BlobFile } from 'generic-filehandle2';
+import { forgetRemote, handleOf, readBytes, sameSource, type SampleFile } from './remote';
 import { unzip } from '@gmod/bgzf-filehandle';
 import type { AlignedRead, AllTranscripts, BoundarySpanning, ExonUsageResponse, GeneModel, GtexProfile, GtexTissue, KnownVariant, LibraryEvidence, ProteinDomain, ProteinModelRef, ReadsResponse, RegionHint, SampleCoverage, BoundaryHint, SampleExonDepths, TranscriptData, VariantSite } from '../components/sashimi/types';
 import { READS_REGION_MAX_BP, type CoverageOptions, type ReadsOptions, type SashimiDataSource, type SampleRef, type VariantScan, type VariantScanOptions } from '../components/sashimi/datasource';
@@ -27,8 +27,8 @@ import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, get
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
-export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean; /** the build it was aligned on, from its header (assembly.ts); null: not told */ asm?: AssemblyCall | null }
-export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
+export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; /** a file of this computer, or a file at a URL (remote.ts) */ file: SampleFile; index: SampleFile; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean; /** the build it was aligned on, from its header (assembly.ts); null: not told */ asm?: AssemblyCall | null }
+export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: SampleFile; fai: SampleFile; gzi?: SampleFile } }
 
 type Opened =
   | { kind: 'bam'; bam: BamFile; refNames: string[]; header: string }
@@ -393,7 +393,11 @@ export class LocalDataSource implements SashimiDataSource {
     }
     this.samples.set(s.id, s); this.coverage.delete(s.id); this.alleleStates.delete(s.id); this.methylStates.delete(s.id); this.variantScanner?.forget(s.id); }
   renameSample(id: number, name: string) { const s = this.samples.get(id); if (s) this.samples.set(id, { ...s, name }); }
-  removeSample(id: number) { this.providers.get(id)?.dispose?.(); this.providers.delete(id); this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.variantScanner?.forget(id); }
+  removeSample(id: number) {
+    // the cached blocks of a URL go with the last sample reading it
+    const gone = this.samples.get(id);
+    if (gone) for (const f of [gone.file, gone.index]) if (![...this.samples.values()].some(o => o.id !== id && (sameSource(o.file, f) || sameSource(o.index, f)))) forgetRemote(f);
+    this.providers.get(id)?.dispose?.(); this.providers.delete(id); this.samples.delete(id); this.opened.delete(id); this.headers.delete(id); this.coverage.delete(id); this.alleleStates.delete(id); this.methylStates.delete(id); this.variantScanner?.forget(id); }
   /** one byte budget for the decoded records of every alignment file of this source (see RECORD_CACHE_BYTES) */
   private recordBudget = new SharedBudget(RECORD_CACHE_BYTES);
   /**
@@ -421,8 +425,8 @@ export class LocalDataSource implements SashimiDataSource {
       const f = this.reference.fasta!;
       this.fasta = (async () => {
         const fa = f.gzi
-          ? new BgzipIndexedFasta({ fasta: new BlobFile(f.fa), fai: new BlobFile(f.fai), gzi: new BlobFile(f.gzi) })
-          : new IndexedFasta({ fasta: new BlobFile(f.fa), fai: new BlobFile(f.fai) });
+          ? new BgzipIndexedFasta({ fasta: handleOf(f.fa), fai: handleOf(f.fai), gzi: handleOf(f.gzi) })
+          : new IndexedFasta({ fasta: handleOf(f.fa), fai: handleOf(f.fai) });
         const names = await fa.getSequenceNames();
         return { fa, names };
       })();
@@ -466,7 +470,7 @@ export class LocalDataSource implements SashimiDataSource {
         // read, inflate, and grow the read until the header text is complete (64 kB covers most files; a header of
         // thousands of contigs and hundreds of @PG lines takes a few hundred kB)
         for (let len = 64 * 1024; ; len *= 4) {
-          const bytes = new Uint8Array(await s.file.slice(0, Math.min(len, s.file.size)).arrayBuffer());
+          const bytes = await readBytes(s.file, 0, Math.min(len, s.file.size));
           const data = await unzip(bytes);   // whole blocks only; a block cut by the read end is left for the next round
           if (data.length >= 8) {
             if (!(data[0] === 66 && data[1] === 65 && data[2] === 77 && data[3] === 1)) throw new Error(`${s.file.name} is not a BAM file`);
@@ -488,15 +492,15 @@ export class LocalDataSource implements SashimiDataSource {
       this.opened.set(id, (async (): Promise<Opened> => {
         if (s.kind !== 'bam' && s.kind !== 'cram') throw new Error(`${s.file.name}: no reader for ${s.kind} files in this viewer`);
         if (s.kind === 'bam') {
-          const bam = new BamFile({ bamFilehandle: new BlobFile(s.file), baiFilehandle: new BlobFile(s.index), maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget });
+          const bam = new BamFile({ bamFilehandle: handleOf(s.file), baiFilehandle: handleOf(s.index), maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget });
           await bam.getHeader();
           const refNames = (bam.indexToChr || []).map(r => r.refName);
           const header = (await bam.getHeaderText().catch(() => '')) ?? '';
           return { kind: 'bam', bam, refNames, header };
         }
         const cram = new IndexedCramFile({
-          cramFilehandle: new BlobFile(s.file),
-          index: new CraiIndex({ filehandle: new BlobFile(s.index) }),
+          cramFilehandle: handleOf(s.file),
+          index: new CraiIndex({ filehandle: handleOf(s.index) }),
           checkSequenceMD5: false,
           useSliceWorkerPool: false,
           maxCacheBytes: RECORD_CACHE_BYTES, cacheIdleTimeoutMs: RECORD_CACHE_IDLE_MS, cacheBudget: this.recordBudget,

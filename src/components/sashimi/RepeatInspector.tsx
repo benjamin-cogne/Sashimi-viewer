@@ -200,7 +200,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
                 v={<><b>{a.mode}</b> <span className="font-normal text-slate-600">{locus.motif}</span>{c && <span className="ml-1.5 text-[11px] font-semibold px-1.5 py-0.5 rounded-full border" style={{ borderColor: TONE[c.tone], color: '#334155' }}>{c.name}</span>}</>}
                 sub={`P5–P95 ${a.p5}–${a.p95}${a.broad ? ' · broad' : ''}${locus.interruptions.length && st.pats[0] ? ` · ${patText(st.pats[0][0])} (${pct(st.pats[0][1], st.n)})` : ''}`}
                 foot={alleleCons[i]?.c ? (
-                  <button onClick={() => setAlleleCard(alleleCard === i ? null : i)} className={`mt-1 block max-w-[340px] truncate text-left font-mono text-[11px] ${alleleCard === i ? 'text-indigo-800 underline' : 'text-indigo-700 hover:underline'}`}
+                  <button onClick={() => setAlleleCard(alleleCard === i ? null : i)} className={`mt-1 block max-w-[340px] truncate text-left font-mono text-[11px] ${alleleCard === i ? 'text-accent-800 underline' : 'text-accent-700 hover:underline'}`}
                     title={`Consensus of the allele's core: ${alleleCons[i].core} of its ${alleleCons[i].of} reads (sizes P10–P90). Click for the sequence, its support, copy and FASTA.\n${alleleCons[i].c!.structure}`}>
                     ≈ {alleleCons[i].c!.structure}
                   </button>
@@ -222,13 +222,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
           {classes.map(([t, l]) => (
             <button key={t} onClick={() => { if (focus === t) { setFocus(null); setBrowse(null); } else { setFocus(t); setBrowse({ title: t, list: l }); } setBrush(null); }}
               title={focus === t ? 'Back to the usual view' : `Draw these reads alone in the histogram and the waterfall, and list their sequences under the plot`}
-              className={`rounded-full border px-2.5 py-0.5 ${focus === t ? 'border-indigo-400 bg-indigo-50 text-indigo-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
+              className={`rounded-full border px-2.5 py-0.5 ${focus === t ? 'border-accent-400 bg-accent-50 text-accent-800' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'}`}>
               {t} <span className="text-slate-400">{fmt(l.length)}</span>
             </button>
           ))}
         </div>
         {(focused || (enough && withTrunc)) && (
-          <div className="mx-5 mt-1.5 rounded-md bg-indigo-50 px-3 py-1 text-[11.5px] text-indigo-900">
+          <div className="mx-5 mt-1.5 rounded-md bg-accent-50 px-3 py-1 text-[11.5px] text-accent-900">
             {focused
               ? <>Showing <b>{focused[0]}</b> only: {fmt(focused[1].length)} read{focused[1].length === 1 ? '' : 's'}{focused[1].some(x => x.note) ? ' (no tract measured: their anchors are listed under the plot)' : ''}. The allele lines and chips stay those of the reads sized. <button onClick={() => { setFocus(null); setBrowse(null); }} className="underline">back to all</button></>
               : <>Alleles and chips: spanning reads only; the reads stopping inside are drawn at the length they reach.</>}
@@ -349,7 +349,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               );
             })}
             {brush && (
-              <rect x={x(Math.min(...brush))} y={top - 18} width={Math.max(1, x(Math.max(...brush)) - x(Math.min(...brush)))} height={H - top + 8} fill="#4f46e5" opacity={0.1} stroke="#4f46e5" strokeDasharray="4 2" pointerEvents="none" />
+              <rect x={x(Math.min(...brush))} y={top - 18} width={Math.max(1, x(Math.max(...brush)) - x(Math.min(...brush)))} height={H - top + 8} fill="#0f766e" opacity={0.1} stroke="#0f766e" strokeDasharray="4 2" pointerEvents="none" />
             )}
           </svg>
           {hover && !drag.current && (
@@ -362,13 +362,13 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
               <b>{Math.round(Math.min(...brush))}–{Math.round(Math.max(...brush))} units:</b> {fmt(selStats.n)} reads ({pct(selStats.n, drawn.length)}{showTrunc && sel!.some(u => u.truncated) ? `, ${fmt(sel!.filter(u => u.truncated).length)} of them lower bounds` : ''}) · median {selStats.median} · P5–P95 {selStats.p5}–{selStats.p95}
               {locus.interruptions.length > 0 && selStats.pats.length > 0 && <> · {selStats.pats.map(([p, n]) => `${patText(p)} ${pct(n, selStats.n)}`).join(', ')}</>}
               {locus.categories.length > 0 && <> · {locus.categories.map(c => `${c.name.toLowerCase()} ${pct(sel!.filter(u => u.units >= c.min && u.units <= c.max).length, selStats.n)}`).join(', ')}</>}
-              <button onClick={() => setBrowse({ title: `${Math.round(Math.min(...brush))}–${Math.round(Math.max(...brush))} units`, list: sel! })} className="ml-2 text-indigo-700 underline">their sequences</button>
-              <button onClick={() => setBrush(null)} className="ml-2 text-indigo-700 underline">clear</button>
+              <button onClick={() => setBrowse({ title: `${Math.round(Math.min(...brush))}–${Math.round(Math.max(...brush))} units`, list: sel! })} className="ml-2 text-accent-700 underline">their sequences</button>
+              <button onClick={() => setBrush(null)} className="ml-2 text-accent-700 underline">clear</button>
             </span>
           ) : <span className="text-slate-400">Drag across the plot to measure a size range: its reads, spread and interruptions · click a waterfall row for its sequence.</span>}
         </div>
         {alleleCard != null && alleleCons[alleleCard]?.c && (
-          <div className="mx-5 mb-3 rounded-lg border border-indigo-200 overflow-hidden">
+          <div className="mx-5 mb-3 rounded-lg border border-accent-200 overflow-hidden">
             <ConsensusCard c={alleleCons[alleleCard].c!} locus={locus} sample={sampleShort} onClose={() => setAlleleCard(null)}
               title={`allele ${alleleCard + 1} core, sizes ${alleles[alleleCard].p10}–${alleles[alleleCard].p90}`} />
           </div>
@@ -428,7 +428,7 @@ export function RepeatInspector({ locus, samples, ds, initialSample, onClose }: 
 
 function Chip({ k, v, sub, accent, foot }: { k: string; v: React.ReactNode; sub?: string; accent?: string; foot?: React.ReactNode }) {
   return (
-    <div className="rounded-[10px] border border-slate-200 bg-slate-50 px-3 py-1.5 min-w-[150px]" style={accent ? { borderLeft: `3px solid ${accent}` } : undefined}>
+    <div className="rounded-[7px] border border-slate-200 bg-slate-50 px-3 py-1.5 min-w-[150px]" style={accent ? { borderLeft: `3px solid ${accent}` } : undefined}>
       <div className="text-[10.5px] text-slate-500">{k}</div>
       <div className="text-[15px] font-semibold leading-tight">{v}</div>
       {sub && <div className="text-[10.5px] text-slate-500 mt-0.5">{sub}</div>}
