@@ -27,6 +27,16 @@ No server, no installation, no upload: the files stay on your computer, so it ru
 3. Type a gene (`NF1`, suggested from the third letter), an ENSG id or coordinates (`chr17:31,229,000-31,231,000`)
    and press **Open**.
 
+Files on a web server can be opened without downloading them: **Add → From URL…**, one BAM/CRAM URL per line
+(its index is looked for beside it: `x.bam.bai` or `x.bai`, `x.cram.crai` or `x.crai`; or give the index URL after
+the file's, on the same line). Only the header, the index and the regions you look at are fetched, with HTTP Range
+requests, as igv.js does. The server has to answer Range requests (`206 Partial Content`; nginx, Apache, IIS and S3
+do for static files) without compressing the BAM on the fly. If the page is not served from the same server as the
+files, the server must also allow it by CORS: `Access-Control-Allow-Origin`, `Range` in
+`Access-Control-Allow-Headers`, `Content-Range` in `Access-Control-Expose-Headers`. Putting `sashimi-viewer.html` on
+that server, next to the data, needs no CORS at all, and the server's own login keeps working. Local files are added
+as before; sessions record URL samples by their URL and reopen them by themselves.
+
 GRCh38 or GRCh37, read from the files' headers. Gene models (RefSeq, MANE Select) come from the UCSC API, or from
 Ensembl when it fails. Reference bases come from the same APIs, or from a FASTA (+ `.fai`) you add. No data is
 kept when the tab closes. The browser only remembers recent gene names, favourite GTEx tissues and, in Chromium,
@@ -107,7 +117,7 @@ a bookmark to the run folder.
 
 ## Privacy
 
-Files are read in the browser and never uploaded. The network serves gene models, reference bases and protein
+Files are read in the browser and never uploaded (files added by URL are read from their server, by ranges). The network serves gene models, reference bases and protein
 domains (UCSC, Ensembl as fallback), common SNPs, GTEx values, gene-name suggestions and the other build's
 coordinates. Requests carry a gene name, an interval or the letters typed, never reads, sample names or file names.
 Details in the [manual](docs/manual.md#privacy).

@@ -9,14 +9,15 @@ import type { LocalDataSource, VariantScanner, ReferenceChoice } from './localSo
 import type { ReadsOptions, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import type { ReadsResponse } from '../components/sashimi/types';
 import type { MethylWindow } from './methylation';
+import type { SampleFile } from './remote';
 
 export function attachVariantWorker(ds: LocalDataSource): boolean {
   let worker: Worker;
   try { worker = new VariantWorker(); } catch (e) { console.warn('[sashimi] variant scans stay on the page (no worker):', e); return false; }
   let req = 0;
   const pending = new Map<number, { resolve: (r: any) => void; reject: (e: Error) => void; onProgress?: (f: number) => void }>();
-  /** the sample files and the reference the worker has, by identity */
-  const sent = new Map<number, File>();
+  /** the sample files (File objects, or URLs: remote.ts) and the reference the worker has, by identity */
+  const sent = new Map<number, SampleFile>();
   let refSent: ReferenceChoice | null = null;
   const abortError = () => new DOMException('Variant scan cancelled', 'AbortError');
 

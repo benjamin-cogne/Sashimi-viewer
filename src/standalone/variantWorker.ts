@@ -4,8 +4,8 @@
  * A scan decodes every read of a window with its sequence (at 1 000× over a gene, over a million reads,
  * seconds of work however it is counted). On the page that work took the frames with it: a zoom-out that
  * widened the window froze the interface. Here it runs in its own LocalDataSource, on the same files
- * (File objects cross to a worker) and the same reference (a local FASTA, or the web APIs, fetched from
- * here), with the same code as the page would run — countVariants, allele counts kept per sample.
+ * (File objects cross to a worker; a file at a URL crosses as its URL, remote.ts, and is read by ranges from here) and
+ * the same reference (a local FASTA, or the web APIs, fetched from here), with the same code as the page would run — countVariants, allele counts kept per sample.
  *
  * Messages in: reference, sample, forget, scan {req, …}, methyl {req, …}, collapse {req, …} (a collapsed reads window),
  * cancel {req}, release {what}. Out: progress, done, error.

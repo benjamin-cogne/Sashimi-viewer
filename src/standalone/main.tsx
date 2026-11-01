@@ -20,6 +20,7 @@ import type { GenomeBuild } from './ensembl';
 import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { attachVariantWorker } from './variantClient';
+import { findIndexUrl, isRemote, probeUrl, sameSource, type SampleFile } from './remote';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
@@ -95,7 +96,7 @@ const INDEX_EXT = /\.(bai|crai)$/i;
 const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
-type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
+type PairedSample = { name: string; kind: SampleKind; file: SampleFile; index: SampleFile; path?: string; indexPath?: string };
 /**
  * Names for samples being added, none taken by another sample (sessions, groups and exports refer to samples by
  * name): a file's name without its extension, and where two files share it (STAR writes Aligned.sortedByCoord.out.bam
@@ -124,8 +125,9 @@ function uniqueSampleNames(adding: { name: string; path?: string }[], taken: Ite
   return out;
 }
 /** A sample already loaded: the same relative path, or without paths the same file name, size and index. */
-const sameSample = (a: { file: File; index: File; path?: string }, b: { file: File; index: File; path?: string }) =>
-  a.path && b.path ? a.path === b.path : a.file.name === b.file.name && a.file.size === b.file.size && a.index.name === b.index.name;
+const sameSample = (a: { file: SampleFile; index: SampleFile; path?: string }, b: { file: SampleFile; index: SampleFile; path?: string }) =>
+  isRemote(a.file) || isRemote(b.file) ? sameSource(a.file, b.file)
+    : a.path && b.path ? a.path === b.path : a.file.name === b.file.name && a.file.size === b.file.size && a.index.name === b.index.name;
 
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
 function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
@@ -202,6 +204,10 @@ function App() {
   samplesRef.current = samples;
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
   const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
+  /** the "From URL…" form of the Add menu is open, and what is typed in it */
+  const [urlForm, setUrlForm] = useState(false);
+  const [urlText, setUrlText] = useState('');
+  const [urlErrors, setUrlErrors] = useState<string[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
   /** What the page is doing with a folder or files that were just given, before their chips exist (listing a folder, reading a drop, reopening a session's folder). */
   const [intake, setIntake] = useState<string | null>(null);
@@ -293,10 +299,8 @@ function App() {
   }, []);
   (window as any).__sashimiDs = ds; // for debugging from the console
 
-  const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
-    const files = Array.from(list as ArrayLike<File | PathedFile>);
-    const { samples: paired, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
-    const msgs: string[] = [];
+  /** Samples paired with their index (files of this computer or URLs) join the list and start opening. */
+  const admit = useCallback((paired: PairedSample[]) => {
     // a file already loaded is not added again (a session reopening its files while they arrive by another way)
     const have = samplesRef.current;
     const found = paired.filter(s => !have.some(x => !x.embedded && sameSample(x, s)));
@@ -312,11 +316,57 @@ function App() {
       // the build it was aligned on, from the chromosome lengths in its header
       ds.getAssembly?.(s.id).then(asm => setSamples(prev => prev.map(x => (x.id === s.id ? { ...x, asm } : x)))).catch(() => {});
     }
+    return added;
+  }, [ds]);
+
+  const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
+    const files = Array.from(list as ArrayLike<File | PathedFile>);
+    const { samples: paired, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
+    const msgs: string[] = [];
+    admit(paired);
     if (unmatched.length) msgs.push(`No index found for ${unmatched.join(', ')} (add the .bai / .crai file together with it)`);
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
     setNotes(msgs);
-  }, [ds, build]);
+  }, [ds, build, admit]);
+
+  /**
+   * Alignment files at URLs (remote.ts), one per line, optionally followed by the URL of its index on the same line;
+   * without one the index is looked for beside the file (x.bam.bai, x.bai; x.cram.crai, x.crai). Each URL is checked
+   * (Range support, CORS, size) before the sample is added; what fails is said, line by line.
+   */
+  const addUrls = useCallback(async (text: string): Promise<{ added: number; msgs: string[]; failed: string[] }> => {
+    const lines = text.split(/\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+    if (!lines.length) return { added: 0, msgs: [], failed: [] };
+    setIntake(`Checking ${lines.length === 1 ? 'the URL' : `${lines.length} URLs`}…`);
+    const paired: PairedSample[] = [];
+    const msgs: string[] = [], failed: string[] = [];
+    try {
+      await Promise.all(lines.map(async line => {
+        const [dataUrl, indexUrl] = line.split(/\s+/);
+        try {
+          const file = await probeUrl(dataUrl);
+          const k = fileKindOf(file.name);
+          const align = ALIGN_EXT.exec(file.name);
+          if (!k && !align) throw new Error(`${file.name}: not a BAM or CRAM file${kindExtensions().length ? ` (nor ${kindExtensions().join(', ')})` : ''}`);
+          const ext = k ? k.extensions.find(e => file.name.toLowerCase().endsWith(e))! : align![0];
+          const stem = file.name.slice(0, file.name.length - ext.length);
+          const kind: SampleKind = k ? k.id : ext.toLowerCase() === '.cram' ? 'cram' : 'bam';
+          const suffixes = k ? k.index : [kind === 'cram' ? '.crai' : '.bai'];
+          const index = indexUrl ? await probeUrl(indexUrl)
+            : !suffixes ? file   // a registered kind that indexes itself
+            : await findIndexUrl(file, suffixes, new RegExp(`${ext.replace('.', '\\.')}$`, 'i'));
+          if (!index) throw new Error(`${file.name}: no index found beside it (${suffixes!.map(x => `${file.name}${x}`).join(', ')} or ${suffixes!.map(x => `${stem}${x}`).join(', ')}): give its URL after the file's, on the same line`);
+          paired.push({ name: stem, kind, file, index });
+        } catch (e: any) { msgs.push(e?.message ?? String(e)); failed.push(line); }
+      }));
+      const added = admit(paired);
+      const again = paired.length - added.length;
+      if (again) msgs.push(`${again === 1 ? 'One URL is' : `${again} URLs are`} already in the list`);
+      setNotes(msgs);
+      return { added: added.length, msgs, failed };
+    } finally { setIntake(null); }
+  }, [admit]);
 
   /** A folder given through the Chromium picker or the folder input, or dropped: its files carry relative paths. */
   const addFolder = useCallback((name: string | null, handle: FSDirHandle | null, files: PathedFile[]) => {
@@ -935,11 +985,14 @@ function App() {
       buildChosen.current = true;
       if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); setLiftTo(null); }
       setPendingSession({ file: session, name: file.name });
+      // the samples read from URLs are opened again from them, then the files of this computer are looked for
+      const remote = matchSession(session, samplesRef.current).missing.filter(m => m.url);
+      if (remote.length) await addUrls(remote.map(m => (m.indexUrl ? `${m.url} ${m.indexUrl}` : m.url)).join('\n'));
       void reopenSession(session, true);
     } catch (e: any) {
       setError(`Could not load the session ${file.name}: ${e.message}`);
     }
-  }, [build, ds, fasta, reopenSession]);
+  }, [build, ds, fasta, reopenSession, addUrls]);
 
   // An exported page opens its views at once (its samples are embedded)
   const embeddedOpened = useRef(false);
@@ -1032,7 +1085,7 @@ function App() {
             <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
               {samples.map((s, i) => (
                 <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-accent-50 border-accent-200 text-slate-900' : 'bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300 cursor-pointer'}`}
-                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB${isRemote(s.file) ? ` at ${s.file.url.replace(/[?#].*$/, '')}` : ''}`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
                   onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
                   onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
                   {i === 0 && <span className="text-accent-600" title="primary sample"><Icon name="star" size={13} /></span>}
@@ -1072,7 +1125,26 @@ function App() {
                       title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files." />
                     <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" onClick={() => { close(); void chooseFiles(); }}
                       title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" />
-                    <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. They stay on this computer.</div>
+                    {!urlForm ? (
+                      <MenuItem icon="globe" label="From URL…" hint="BAM/CRAM on a web server, read in parts: nothing is downloaded whole" onClick={() => setUrlForm(true)}
+                        title="Add alignment files from a web server (http/https): only the header, the index and the regions shown are fetched, with HTTP Range requests. The server must allow this page (CORS) unless the page is served from the same server." />
+                    ) : (
+                      <form className="mx-1 my-1 p-1.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1.5"
+                        onSubmit={e => { e.preventDefault(); const text = urlText; setUrlErrors([]); void addUrls(text).then(r => { if (!r.msgs.length) { setUrlText(''); setUrlForm(false); close(); } else { setUrlText(r.failed.join('\n')); setUrlErrors(r.msgs); } }); }}>
+                        <label className="block text-[11.5px] text-slate-500">One BAM/CRAM URL per line (its index URL after it, on the same line, if it is not beside it)
+                          <textarea value={urlText} onChange={e => setUrlText(e.target.value)} rows={3} spellCheck={false} autoFocus aria-label="Alignment file URLs"
+                            placeholder="https://server/run42/patient1.bam"
+                            onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement).requestSubmit(); } }}
+                            className="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-[11.5px] bg-white font-mono text-slate-800 outline-none focus:border-indigo-300 resize-y" />
+                        </label>
+                        {urlErrors.length > 0 && <ul className="text-[11px] text-red-700 space-y-0.5 max-h-40 overflow-auto" role="alert">{urlErrors.map((m, i) => <li key={i}>{m}</li>)}</ul>}
+                        <div className="flex gap-1.5">
+                          <button type="submit" disabled={!urlText.trim() || !!intake} className="flex-1 inline-flex justify-center items-center gap-1.5 h-7 rounded-md text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40"><Icon name="plus" size={13} />Add</button>
+                          <button type="button" onClick={() => { setUrlForm(false); setUrlErrors([]); }} className="px-2.5 h-7 rounded-md text-xs border border-slate-200 bg-white text-slate-600 hover:bg-slate-100">Cancel</button>
+                        </div>
+                      </form>
+                    )}
+                    <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. Files of this computer stay on it.</div>
                   </>
                 )}
               </Popover>
