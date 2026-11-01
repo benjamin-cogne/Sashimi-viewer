@@ -47,6 +47,8 @@ if (DEV) {
 const LINK = parseLink(window.location.hash, window.location.search);
 /** alignment files named by the link (bam=, cram=, file=), opened from their URLs */
 const LINK_FILES = parseLinkFiles(window.location.hash, window.location.search);
+/** a link file as the user knows it: its name, else the last part of its path */
+const linkFileName = (f: LinkFile) => f.name || f.url.replace(/[?#].*$/, '').split('/').pop() || f.url;
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 /** The data an exported page carries (null for the normal viewer). */
@@ -598,15 +600,16 @@ function App() {
    * The files a link names: opened at once from the page's own server; from another server only once the user agrees,
    * since a link could otherwise show that server's data as theirs. The question names the servers.
    */
-  const [linkAsk, setLinkAsk] = useState<{ files: LinkFile[]; hosts: string[] } | null>(null);
+  const [linkAsk, setLinkAsk] = useState<{ files: LinkFile[]; hosts: string[]; /** the files from those servers */ foreign: LinkFile[] } | null>(null);
   const linkFilesTaken = useRef(false);
   useEffect(() => {
     if (EMBEDDED || !LINK_FILES.length || linkFilesTaken.current) return;
     linkFilesTaken.current = true;
     const here = /^https?:$/.test(location.protocol) ? location.origin : null;
     const originOf = (u: string) => { try { return new URL(u, location.href).origin; } catch { return u; } };
-    const hosts = [...new Set(LINK_FILES.map(f => [f.url, f.index]).flat().filter((u): u is string => !!u).map(originOf).filter(o => o !== here))];
-    if (hosts.length) setLinkAsk({ files: LINK_FILES, hosts });
+    const elsewhere = (f: LinkFile) => [f.url, f.index].filter((u): u is string => !!u).map(originOf).filter(o => o !== here);
+    const hosts = [...new Set(LINK_FILES.flatMap(elsewhere))];
+    if (hosts.length) setLinkAsk({ files: LINK_FILES, hosts, foreign: LINK_FILES.filter(f => elsewhere(f).length) });
     else void addUrlItems(LINK_FILES);
   }, [addUrlItems]);
 
@@ -1159,11 +1162,11 @@ function App() {
                           <textarea value={urlText} onChange={e => setUrlText(e.target.value)} rows={3} spellCheck={false} autoFocus aria-label="Alignment file URLs"
                             placeholder="https://server/run42/patient1.bam"
                             onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); (e.currentTarget.form as HTMLFormElement).requestSubmit(); } }}
-                            className="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-[11.5px] bg-white font-mono text-slate-800 outline-none focus:border-indigo-300 resize-y" />
+                            className="mt-1 w-full border border-slate-200 rounded-md px-2 py-1.5 text-[11.5px] bg-white font-mono text-slate-800 outline-none focus:border-accent-300 resize-y" />
                         </label>
                         {urlErrors.length > 0 && <ul className="text-[11px] text-red-700 space-y-0.5 max-h-40 overflow-auto" role="alert">{urlErrors.map((m, i) => <li key={i}>{m}</li>)}</ul>}
                         <div className="flex gap-1.5">
-                          <button type="submit" disabled={!urlText.trim() || !!intake} className="flex-1 inline-flex justify-center items-center gap-1.5 h-7 rounded-md text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40"><Icon name="plus" size={13} />Add</button>
+                          <button type="submit" disabled={!urlText.trim() || !!intake} className="flex-1 inline-flex justify-center items-center gap-1.5 h-7 rounded-md text-xs font-medium bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-40"><Icon name="plus" size={13} />Add</button>
                           <button type="button" onClick={() => { setUrlForm(false); setUrlErrors([]); }} className="px-2.5 h-7 rounded-md text-xs border border-slate-200 bg-white text-slate-600 hover:bg-slate-100">Cancel</button>
                         </div>
                       </form>
@@ -1306,9 +1309,9 @@ function App() {
       {linkAsk && (
         <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-900 flex flex-wrap items-center gap-2" role="alert">
           <span className="flex-1 min-w-[240px]">
-            This link asks to open {linkAsk.files.length === 1 ? 'a file' : `${linkAsk.files.length} files`} from {linkAsk.hosts.map((h, i) => <span key={h}>{i ? ', ' : ''}<b className="font-mono">{h}</b></span>)}: {linkAsk.files.map(f => f.name || f.url.replace(/[?#].*$/, '').split('/').pop()).join(', ')}. Open {linkAsk.files.length === 1 ? 'it' : 'them'} only if you trust that server.
+            This link asks to open {linkAsk.foreign.length === 1 ? 'a file' : `${linkAsk.foreign.length} files`} from {linkAsk.hosts.map((h, i) => <span key={h}>{i ? ', ' : ''}<b className="font-mono">{h}</b></span>)}: {linkAsk.foreign.map(linkFileName).join(', ')}{linkAsk.files.length > linkAsk.foreign.length ? `, with ${linkAsk.files.length - linkAsk.foreign.length === 1 ? 'one' : linkAsk.files.length - linkAsk.foreign.length} from this page's server` : ''}. Open {linkAsk.files.length === 1 ? 'it' : 'them'} only if you trust {linkAsk.hosts.length === 1 ? 'that server' : 'those servers'}.
           </span>
-          <button onClick={() => { const f = linkAsk.files; setLinkAsk(null); void addUrlItems(f); }} className="px-2.5 h-7 rounded-md font-medium bg-indigo-600 text-white hover:bg-indigo-700">Open the files</button>
+          <button onClick={() => { const f = linkAsk.files; setLinkAsk(null); void addUrlItems(f); }} className="px-2.5 h-7 rounded-md font-medium bg-accent-600 text-white hover:bg-accent-700">Open the files</button>
           <button onClick={() => setLinkAsk(null)} className="px-2.5 h-7 rounded-md border border-amber-300 bg-white hover:bg-amber-100">Ignore</button>
         </div>
       )}
