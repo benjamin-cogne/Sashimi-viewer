@@ -17,9 +17,17 @@
  *   gene      Symbol used when no RefSeq gene covers the locus (fallback lookup).
  *   build     GRCh38 (default) or GRCh37; only needed when no variant carries an accession.
  *   reads     `1` opens with the reads track on (off by default).
+ *   bam, cram, file
+ *             An alignment file at a URL (remote.ts), read by HTTP Range requests; repeat the parameter for
+ *             several (`file` takes any kind the viewer reads). Relative URLs are taken from the page's own
+ *             address (`bam=data/P1.bam` beside a hosted page). A URL carrying its own query string (a
+ *             pre-signed link) is percent-encoded so that its `&` and `=` stay in it.
+ *   index     The index of each file, in the same order, when it is not beside it (x.bam.bai or x.bai).
+ *   name      The sample name of each file, in the same order (else the file name).
  *
- * The alignments still come from the user's files: a browser page cannot fetch a BAM by itself, so
- * the page waits for the first file and then opens the view on the requested window.
+ * Files may come with or without a locus. A link naming no file waits for the user's files, then opens
+ * the view on the requested window. Files on the page's own server open by themselves; files on another
+ * server are opened once the user agrees (a link could otherwise show another server's data as theirs).
  */
 import type { KnownVariant } from '../components/sashimi/types';
 import { parseHgvsGenomic, normalizeChrom } from '../components/sashimi/knownVariants';
@@ -51,8 +59,24 @@ const params = (text: string) => new URLSearchParams(text.replace(/\+(?=[0-9*])/
 function readParams(hash: string, search: string): URLSearchParams {
   const h = hash.replace(/^#\/?/, '');
   const p = params(h.includes('=') ? h : '');
-  if (!p.has('variant') && !p.has('locus')) return params(search.replace(/^\?/, ''));
+  if (!LINK_KEYS.some(k => p.has(k))) return params(search.replace(/^\?/, ''));
   return p;
+}
+/** a fragment holding one of these is the link (else the query string is) */
+const LINK_KEYS = ['variant', 'variants', 'locus', 'region', 'pos', 'bam', 'cram', 'file'];
+
+/** An alignment file named by a link: its URL as written (relative or absolute), its index and sample name when given. */
+export interface LinkFile { url: string; index?: string; name?: string }
+
+/** The files a link names (`bam`, `cram`, `file`, in their order; `index` and `name` matched by position). */
+export function parseLinkFiles(hash: string, search: string): LinkFile[] {
+  // read without the `+` repair of params(): a `+` in a URL is the URL's own
+  const h = hash.replace(/^#\/?/, '');
+  let p = new URLSearchParams(h.includes('=') ? h : '');
+  if (!LINK_KEYS.some(k => p.has(k))) p = new URLSearchParams(search.replace(/^\?/, ''));
+  const urls = [...p.entries()].filter(([k, v]) => (k === 'bam' || k === 'cram' || k === 'file') && v.trim()).map(([, v]) => v.trim());
+  const indexes = p.getAll('index').map(s => s.trim()), names = p.getAll('name').map(s => s.trim());
+  return urls.map((url, i) => ({ url, index: indexes[i] || undefined, name: names[i] || undefined }));
 }
 
 /** Pseudo-VCF `17-43094464-G-A`, `chr17:43094464:G:A`, `17 43094464 G A` (1-based position). */

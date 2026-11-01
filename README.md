@@ -106,7 +106,8 @@ a bookmark to the run folder.
 - **Sessions** (JSON, files by name or run folder). The **HTML export** carries each view's coverage, junctions
   and filters, plus its reads, methylation and phasing when they are shown, for readers without the BAM files.
 - **Deep links** from another tool: `#variant=NC_000017.11:g.43094464G>A&label=BRCA1`. Other parameters are
-  `locus`, `pad`, `gene`, `build` and `reads=1`.
+  `locus`, `pad`, `gene`, `build`, `reads=1`, and `bam` / `cram` / `file` to open files from a URL
+  (`&bam=data/P1.bam&name=P1`; `index` when it is not beside the file).
 
 [Full manual](docs/manual.md) ·
 [Methods and validation](docs/algorithms.md) ·

@@ -24,7 +24,7 @@ import { findIndexUrl, isRemote, probeUrl, sameSource, type SampleFile } from '.
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
-import { describeLink, parseLink, variantOfInterest } from './link';
+import { describeLink, parseLink, parseLinkFiles, variantOfInterest, type LinkFile } from './link';
 import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
 import { GeneSuggest } from '../components/sashimi/GeneSuggest';
 import { rememberGene } from './geneSuggest';
@@ -45,6 +45,8 @@ if (DEV) {
 
 /** Request carried by the URL (deep link from another tool), read once at start-up. */
 const LINK = parseLink(window.location.hash, window.location.search);
+/** alignment files named by the link (bam=, cram=, file=), opened from their URLs */
+const LINK_FILES = parseLinkFiles(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 /** The data an exported page carries (null for the normal viewer). */
@@ -331,21 +333,18 @@ function App() {
   }, [ds, build, admit]);
 
   /**
-   * Alignment files at URLs (remote.ts), one per line, optionally followed by the URL of its index on the same line;
-   * without one the index is looked for beside the file (x.bam.bai, x.bai; x.cram.crai, x.crai). Each URL is checked
-   * (Range support, CORS, size) before the sample is added; what fails is said, line by line.
+   * Alignment files at URLs (remote.ts), each with its index URL and sample name when given; without an index URL the
+   * index is looked for beside the file (x.bam.bai, x.bai; x.cram.crai, x.crai). Each URL is checked (Range support,
+   * CORS, size) before the sample is added; what fails is said, file by file.
    */
-  const addUrls = useCallback(async (text: string): Promise<{ added: number; msgs: string[]; failed: string[] }> => {
-    const lines = text.split(/\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-    if (!lines.length) return { added: 0, msgs: [], failed: [] };
-    setIntake(`Checking ${lines.length === 1 ? 'the URL' : `${lines.length} URLs`}…`);
-    const paired: PairedSample[] = [];
-    const msgs: string[] = [], failed: string[] = [];
+  const addUrlItems = useCallback(async (items: LinkFile[]): Promise<{ added: number; msgs: string[]; failed: LinkFile[] }> => {
+    if (!items.length) return { added: 0, msgs: [], failed: [] };
+    setIntake(`Checking ${items.length === 1 ? 'the URL' : `${items.length} URLs`}…`);
     try {
-      await Promise.all(lines.map(async line => {
-        const [dataUrl, indexUrl] = line.split(/\s+/);
+      // checked side by side, added in the order given (the first is the primary sample)
+      const results = await Promise.all(items.map(async (it): Promise<PairedSample | Error> => {
         try {
-          const file = await probeUrl(dataUrl);
+          const file = await probeUrl(it.url);
           const k = fileKindOf(file.name);
           const align = ALIGN_EXT.exec(file.name);
           if (!k && !align) throw new Error(`${file.name}: not a BAM or CRAM file${kindExtensions().length ? ` (nor ${kindExtensions().join(', ')})` : ''}`);
@@ -353,13 +352,16 @@ function App() {
           const stem = file.name.slice(0, file.name.length - ext.length);
           const kind: SampleKind = k ? k.id : ext.toLowerCase() === '.cram' ? 'cram' : 'bam';
           const suffixes = k ? k.index : [kind === 'cram' ? '.crai' : '.bai'];
-          const index = indexUrl ? await probeUrl(indexUrl)
+          const index = it.index ? await probeUrl(it.index)
             : !suffixes ? file   // a registered kind that indexes itself
             : await findIndexUrl(file, suffixes, new RegExp(`${ext.replace('.', '\\.')}$`, 'i'));
-          if (!index) throw new Error(`${file.name}: no index found beside it (${suffixes!.map(x => `${file.name}${x}`).join(', ')} or ${suffixes!.map(x => `${stem}${x}`).join(', ')}): give its URL after the file's, on the same line`);
-          paired.push({ name: stem, kind, file, index });
-        } catch (e: any) { msgs.push(e?.message ?? String(e)); failed.push(line); }
+          if (!index) throw new Error(`${file.name}: no index found beside it (${suffixes!.map(x => `${file.name}${x}`).join(', ')} or ${suffixes!.map(x => `${stem}${x}`).join(', ')}): give its URL after the file's`);
+          return { name: it.name || stem, kind, file, index };
+        } catch (e: any) { return e instanceof Error ? e : new Error(String(e)); }
       }));
+      const paired = results.filter((r): r is PairedSample => !(r instanceof Error));
+      const msgs = results.filter((r): r is Error => r instanceof Error).map(e => e.message);
+      const failed = items.filter((_, i) => results[i] instanceof Error);
       const added = admit(paired);
       const again = paired.length - added.length;
       if (again) msgs.push(`${again === 1 ? 'One URL is' : `${again} URLs are`} already in the list`);
@@ -367,6 +369,12 @@ function App() {
       return { added: added.length, msgs, failed };
     } finally { setIntake(null); }
   }, [admit]);
+  /** The lines of the "From URL…" box: a file URL, then its index URL when it is not beside the file. */
+  const addUrls = useCallback(async (text: string): Promise<{ added: number; msgs: string[]; failed: string[] }> => {
+    const items = text.split(/\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => { const [url, index] = l.split(/\s+/); return { url, index }; });
+    const r = await addUrlItems(items);
+    return { ...r, failed: r.failed.map(f => (f.index ? `${f.url} ${f.index}` : f.url)) };
+  }, [addUrlItems]);
 
   /** A folder given through the Chromium picker or the folder input, or dropped: its files carry relative paths. */
   const addFolder = useCallback((name: string | null, handle: FSDirHandle | null, files: PathedFile[]) => {
@@ -585,6 +593,22 @@ function App() {
   useEffect(() => {
     if (LINK && !autoOpened.current) { autoOpened.current = true; openLink(); }
   }, [openLink]);
+
+  /**
+   * The files a link names: opened at once from the page's own server; from another server only once the user agrees,
+   * since a link could otherwise show that server's data as theirs. The question names the servers.
+   */
+  const [linkAsk, setLinkAsk] = useState<{ files: LinkFile[]; hosts: string[] } | null>(null);
+  const linkFilesTaken = useRef(false);
+  useEffect(() => {
+    if (EMBEDDED || !LINK_FILES.length || linkFilesTaken.current) return;
+    linkFilesTaken.current = true;
+    const here = /^https?:$/.test(location.protocol) ? location.origin : null;
+    const originOf = (u: string) => { try { return new URL(u, location.href).origin; } catch { return u; } };
+    const hosts = [...new Set(LINK_FILES.map(f => [f.url, f.index]).flat().filter((u): u is string => !!u).map(originOf).filter(o => o !== here))];
+    if (hosts.length) setLinkAsk({ files: LINK_FILES, hosts });
+    else void addUrlItems(LINK_FILES);
+  }, [addUrlItems]);
 
   /**
    * A search's result: its tab when one was opened for the same gene (or the same locus) already, switched to rather than
@@ -1277,6 +1301,15 @@ function App() {
         <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900">
           <b>Exported viewer</b> ({VERSION_SHORT}) · {EMBEDDED.views.length} view{EMBEDDED.views.length === 1 ? '' : 's'} and {EMBEDDED.samples.length} sample{EMBEDDED.samples.length === 1 ? '' : 's'} embedded{EMBEDDED.saved ? ` on ${EMBEDDED.saved.slice(0, 10)}` : ''}: coverage, junctions and retention counts of each view's window are in this file, the alignment files are not needed for them.
           Other genes, the reads track and exon depths need the original BAM/CRAM files (add them with the buttons above); gene lookups, common SNPs and GTEx use the network when it is available.
+        </div>
+      )}
+      {linkAsk && (
+        <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-amber-200 bg-amber-50 text-amber-900 flex flex-wrap items-center gap-2" role="alert">
+          <span className="flex-1 min-w-[240px]">
+            This link asks to open {linkAsk.files.length === 1 ? 'a file' : `${linkAsk.files.length} files`} from {linkAsk.hosts.map((h, i) => <span key={h}>{i ? ', ' : ''}<b className="font-mono">{h}</b></span>)}: {linkAsk.files.map(f => f.name || f.url.replace(/[?#].*$/, '').split('/').pop()).join(', ')}. Open {linkAsk.files.length === 1 ? 'it' : 'them'} only if you trust that server.
+          </span>
+          <button onClick={() => { const f = linkAsk.files; setLinkAsk(null); void addUrlItems(f); }} className="px-2.5 h-7 rounded-md font-medium bg-indigo-600 text-white hover:bg-indigo-700">Open the files</button>
+          <button onClick={() => setLinkAsk(null)} className="px-2.5 h-7 rounded-md border border-amber-300 bg-white hover:bg-amber-100">Ignore</button>
         </div>
       )}
       {(notes.length > 0 || error || (opened && !samples.length)) && (
