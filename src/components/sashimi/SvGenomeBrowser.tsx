@@ -221,9 +221,9 @@ const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first 
 /** Modes of inheritance (PanelApp), as colours and words. */
 const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
   AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
-  'AD-pat': { color: '#ea580c', short: 'AD ♂exp', label: 'monoallelic, imprinted: paternal allele expressed' },
-  'AD-mat': { color: '#d97706', short: 'AD ♀exp', label: 'monoallelic, imprinted: maternal allele expressed' },
-  'AD+AR': { color: '#7c3aed', short: 'AD+AR', label: 'mono- or biallelic' },
+  'AD-pat': { color: '#ea580c', short: 'AD♂', label: 'monoallelic, imprinted: paternal allele expressed' },
+  'AD-mat': { color: '#d97706', short: 'AD♀', label: 'monoallelic, imprinted: maternal allele expressed' },
+  'AD+AR': { color: '#7c3aed', short: 'AD/AR', label: 'mono- or biallelic' },
   AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },
   XLR: { color: '#db2777', short: 'XLR', label: 'X-linked, females biallelic' },
   XLD: { color: '#9d174d', short: 'XLD', label: 'X-linked, females may be affected' },
@@ -426,6 +426,16 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return { cls: mm.entries.length ? mm.main : 'none', m: mm, fromPanel: null };
   };
   void modesVersion;
+  /** the mode's badge after a gene name: its width (0 when none) and the badge itself */
+  const badgeText = (sym: string) => { const c = modeOf(sym).cls; return c === 'none' || c === '?' ? null : MOI[c].short; };
+  const badgeW = (sym: string) => { const t = badgeText(sym); return t ? t.length * 5.6 + 9 : 0; };
+  const badge = (sym: string, x: number, y: number) => {
+    const t = badgeText(sym); if (!t) return null;
+    const m = modeOf(sym), col = MOI[m.cls].color, w = t.length * 5.6 + 6;
+    return <g key="moi"><rect x={x} y={y - 8.5} width={w} height={11} rx={5.5} fill={col} fillOpacity={0.13} stroke={col} strokeOpacity={0.55} strokeWidth={0.7} />
+      <text x={x + w / 2} y={y} fontSize={8.5} fontWeight={700} textAnchor="middle" fill={col} fontStyle="normal">{t}</text>
+      <title>{`Mode of inheritance (PanelApp): ${MOI[m.cls].label}${m.fromPanel ? ` in ${m.fromPanel}` : m.m ? ` · ${m.m.parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}`).join(', ')}` : ''}`}</title></g>;
+  };
   useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : colorBy === 'moi' ? MOI[modeOf(symbol).cls].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
@@ -534,12 +544,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [tilesVersion, tileSize, Math.floor(vp.s / tileSize), Math.floor(ve / tileSize), dgvTiles, showDgv, span > DGV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneBySym = useMemo(() => new Map(view.genes.map(g => [g.symbol, g])), [view.genes]);
   const visGenes = view.genes.filter(g => g.end >= vp.s - span * 0.02 && g.start <= ve + span * 0.02);
-  // in the inheritance colouring, the modes of the genes in view (the named ones when a crowd), once the view rests
+  // the modes of the genes in view (their badges; the named ones when a crowd), once the view rests
   useEffect(() => {
-    if (colorBy !== 'moi') return;
     const id = window.setTimeout(() => { const vis = visGenes.length <= 250 ? visGenes : visGenes.filter(g => worthSym(g.symbol)); wantModes(vis.slice(0, 250).map(g => g.symbol)); }, 400);
     return () => window.clearTimeout(id);
-  }, [colorBy, visGenes.length, Math.round(vp.s / Math.max(1, span) * 20), Math.round(Math.log(span) * 10)]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visGenes.length, Math.round(vp.s / Math.max(1, span) * 20), Math.round(Math.log(span) * 10)]); // eslint-disable-line react-hooks/exhaustive-deps
   // constraint and dosage of the genes in view, asked once each, when the view rests
   const visKey = span <= LOD_BARS ? visGenes.map(g => g.symbol).join(',') : '';
   useEffect(() => {
@@ -569,10 +578,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const refItems = (() => {
     if (lod === 'density') {
       const worth = visGenes.filter(g => worthSym(g.symbol));
-      return pack(worth.map(g => { const a = Math.max(X0 + 2, refX(g.start)); const lw = labelW(g.symbol); return { g, x0: a, x1: a + lw, xg: a + 3, h: LABEL_H + 2, worth: true, lw }; }), 3);
+      return pack(worth.map(g => { const a = Math.max(X0 + 2, refX(g.start)); const lw = labelW(g.symbol) + badgeW(g.symbol); return { g, x0: a, x1: a + lw, xg: a + 3, h: LABEL_H + 2, worth: true, lw }; }), 3);
     }
     return pack(visGenes.filter(g => inView(refX(g.start), refX(g.end))).map(g => {
-      const a = Math.max(X0 + 2, refX(g.start)), b = refX(g.end), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0);
+      const a = Math.max(X0 + 2, refX(g.start)), b = refX(g.end), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0) + badgeW(g.symbol);
       return { g, x0: a, x1: Math.max(b, a + lw), xg: Math.max(b, a + 3), h: LABEL_H + (lod === 'full' ? shown(g).length * TX_H : 8), worth: worthSym(g.symbol), lw };
     }), MAX_LANES, refLanes.current, it => it.g.symbol, interacting);
   })();
@@ -615,7 +624,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         }
         const same = list.find(b => b.genes.join() === geneList.join() && Math.abs(b.x0 - x0) < 2 && Math.abs(b.x1 - x1) < 2);
         if (same) { same.chains.push(ch); same.h += TX_H; continue; }
-        const lw = labelW(label) + (fusion ? 80 : 0) + (geneList.length === 1 && panelDot(geneList[0]) ? 10 : 0);
+        const lw = labelW(label) + (fusion ? 80 : 0) + (geneList.length === 1 ? (panelDot(geneList[0]) ? 10 : 0) + badgeW(geneList[0]) : 0);
         list.push({ der: d, chains: [ch], genes: geneList, label, x0, x1: Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: LABEL_H + (lod === 'full' ? TX_H : 8), fusion, worth: geneList.length > 1 || worthSym(geneList[0]), lw });
       }
       // genes of the view in the flanks (the chromosome on either side of the event's window), carried as they are
@@ -626,7 +635,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           if (impactOf.has(g.symbol) || g.start < lo || g.end > hi || (g.end > win.start && g.start < win.end)) continue;
           const xa = derX(d, toDer(dp, g.start)), xb = derX(d, toDer(dp, g.end));
           if (!inView(xa, xb)) continue;
-          const x0 = Math.max(X0 + 2, Math.min(xa, xb)), x1 = Math.max(xa, xb), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0);
+          const x0 = Math.max(X0 + 2, Math.min(xa, xb)), x1 = Math.max(xa, xb), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0) + badgeW(g.symbol);
           list.push({ der: d, chains: [], genes: [g.symbol], label: g.symbol, x0, x1: Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: LABEL_H + (lod === 'full' ? TX_H : 8), fusion: null, worth: worthSym(g.symbol), lw, flank: { g, dp } });
         }
       }
@@ -874,6 +883,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             <g key={`rg${g.symbol}`} onMouseEnter={hoverOn(g.symbol)} onMouseMove={hoverOn(g.symbol)} onMouseLeave={hoverOff} style={{ cursor: 'pointer' }} onClick={pinOn(g.symbol)}>
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
               {labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={col}>{g.symbol}</text>}
+              {labeled && badge(g.symbol, lx + (dot ? 10 : 0) + textWidth(g.symbol) + 4, yy + 9.5)}
               {lod === 'density'
                 ? <line x1={lx} x2={lx} y1={yy + 12} y2={yDens + 6} stroke={col} strokeWidth={0.8} strokeOpacity={0.6} />
                 : lod === 'bars'
@@ -962,6 +972,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                   <g key={`dg${b.flank ? `f${b.genes[0]}` : bi}`} onMouseEnter={hoverOn(b.genes[0])} onMouseMove={hoverOn(b.genes[0])} onMouseLeave={hoverOff} style={{ cursor: 'pointer' }} onClick={pinOn(b.genes[0])}>
                     {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
                     {b.labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={head}>{b.label}</text>}
+                    {b.labeled && !isFusion && badge(b.genes[0], lx + (dot ? 10 : 0) + textWidth(b.label) + 4, yy + 9.5)}
                     {b.labeled && isFusion && b.fusion && <g>
                       <rect x={lx + labelW(b.label) - 4} y={yy + 1} width={b.fusion.kind === 'in-frame' ? 52 : b.fusion.kind === 'promoter-swap' ? 74 : 66} height={12} rx={6} fill={b.fusion.kind === 'in-frame' ? '#7c3aed' : '#ede9fe'} />
                       <text x={lx + labelW(b.label) + 2} y={yy + 10} fontSize={9} fontWeight={700} fill={b.fusion.kind === 'in-frame' ? '#fff' : '#6d28d9'}>{b.fusion.kind === 'in-frame' ? 'in frame' : b.fusion.kind === 'promoter-swap' ? 'promoter swap' : b.fusion.kind === 'out-of-frame' ? 'out of frame' : b.fusion.kind === 'five-cds-whole' ? '3′ UTR join' : 'frame ?'}</text>
@@ -1169,6 +1180,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
+        <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)} <span className="text-gray-400">(♂ / ♀: imprinted, the paternal / maternal allele expressed)</span></span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
