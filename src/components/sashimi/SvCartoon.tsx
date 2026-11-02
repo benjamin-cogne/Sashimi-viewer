@@ -14,7 +14,6 @@ import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathTex
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
-import type { Cytoband } from './svNomenclature';
 
 // ======================== Timeline ========================
 
@@ -99,12 +98,22 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
   const [useControls, setUseControls] = useState(true);
   const [t, setT] = useState(0);
-  const [playing, setPlaying] = useState(true);
+  // the cartoon sits below the genes: it plays the first time it comes into view
+  const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [explore, setExplore] = useState(false);
   const [view, setView] = useState({ k: 1, x: 0, y: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
   const sceneRef = useRef<HTMLDivElement>(null);
+  const reconRef = useRef<HTMLDivElement>(null);
+  const seen = useRef(false);
+  useEffect(() => {
+    const el = sceneRef.current; if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(es => { if (!seen.current && es.some(e => e.isIntersecting)) { seen.current = true; if (tRef.current === 0) setPlaying(true); } }, { threshold: 0.4 });
+    // watched once the genes above have had time to take their height: not set off by the page's first, short layout
+    const timer = window.setTimeout(() => io.observe(el), 1500);
+    return () => { window.clearTimeout(timer); io.disconnect(); };
+  }, []);
   const panRef = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
   const raf = useRef<number | null>(null);
   const last = useRef<number | null>(null);
@@ -209,83 +218,112 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const verdictCls = depth.verdict === 'explained' ? 'bg-emerald-600 text-white' : depth.verdict === 'balanced' ? 'bg-sky-600 text-white' : depth.verdict === 'unexplained' ? 'bg-red-600 text-white' : 'bg-gray-400 text-white';
   const verdictText = !chosen.length ? 'no junction selected' : depth.verdict === 'explained' ? '✓ depth fits the rebuilt chromosome' : depth.verdict === 'balanced' ? '≈ balanced: depth cannot confirm it' : depth.verdict === 'unexplained' ? `✗ depth does not fit ${depth.segments.filter(s => s.fits === false).map(s => s.seg.letter).join(', ')}` : 'depth not measurable';
 
+  const ders = rec.ders.filter(d => d.rearranged || rec.ders.length === 1);
+  const toReconstruction = () => reconRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   return (
-    <div className="fixed inset-0 z-[70] bg-slate-900/85 flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-[1240px] text-gray-900" onMouseDown={e => e.stopPropagation()} style={{ fontFamily: FONT }}>
-        <div className="flex items-start justify-between px-5 pt-4 pb-2">
+    <div className="fixed inset-0 z-[70] bg-white overflow-y-auto text-gray-900" style={{ fontFamily: FONT }}>
+      <div className="w-full min-h-full">
+        {/* the SV browser's full-screen page, with the reconstruction from the reads added: back to the viewer from its bar (or Esc) */}
+        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-11 border-b border-gray-200 bg-white/95 shadow-sm">
+          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-gray-300 bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
+          <span className="text-gray-300">/</span>
+          <span className="text-sm font-bold">SV browser</span>
+          <span className="text-sm text-gray-500 truncate">· rebuilt from <span className="inline-block w-2.5 h-2.5 rounded-full align-[-1px]" style={{ background: sample.color }} /> {sample.name}</span>
+          <span className={`ml-auto px-3 py-1 rounded-full text-xs font-semibold ${verdictCls}`}>{verdictText}</span>
+          <span className="text-[11px] text-gray-400">Esc: back to the viewer</span>
+        </div>
+        <div className="flex items-start justify-between px-5 pt-3 pb-2">
           <div>
-            <div className="text-base font-bold">Structural variant cartoon <span className="font-normal text-gray-500">· {chrom}:{fmt(win.start + 1)}-{fmt(win.end)} · {chosen.length} junction{chosen.length === 1 ? '' : 's'}</span></div>
-            <div className="text-xs text-gray-500">observed in {sample.name}{sample.sampled ? ' · sampled window: depths are estimates' : ''} · rebuilt from the junction reads, checked against the read depth · evidence, not a call</div>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className={`px-3 py-1 rounded-full text-xs font-semibold transition-opacity duration-700 ${verdictCls}`} style={{ opacity: tt >= scene.tCn + 0.8 ? 1 : 0.15 }}>{verdictText}</span>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none px-1" title="Close (Esc)">×</button>
+            <div className="text-base font-bold flex items-center gap-2">SV browser <span className="font-normal text-gray-500">· {build} · {chrom}:{fmt(win.start + 1)}-{fmt(win.end)}</span></div>
+            <div className="text-xs text-gray-500">the rearrangement rebuilt from {chosen.length} junction{chosen.length === 1 ? '' : 's'} seen in {sample.name}{sample.sampled ? ' (sampled window: depths are estimates)' : ''}, checked against the read depth · evidence, not a call</div>
           </div>
         </div>
-
-        <div className="px-3 relative" ref={sceneRef}>
-          <svg ref={svgRef} viewBox={`0 0 ${VW} ${scene.H}`} width="100%" className="block select-none" style={{ aspectRatio: `${VW} / ${scene.H}`, cursor: explore ? (panRef.current ? 'grabbing' : 'grab') : 'default' }} fontFamily={FONT}
-            onMouseDown={onPanStart} onMouseMove={onPanMove} onMouseUp={onPanEnd} onMouseLeave={onPanEnd} onDoubleClick={resetView}>
-            <defs>
-              <linearGradient id="svc-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f8fafc" /><stop offset="1" stopColor="#ddf1ee" /></linearGradient>
-            </defs>
-            <rect x={0} y={0} width={VW} height={scene.H} fill="url(#svc-bg)" rx={14} />
-            <g transform={explore ? `translate(${view.x}, ${view.y}) scale(${view.k})` : undefined}>
-              <SceneDrawing scene={scene} t={tt} depthOf={story.depthOf} chosen={chosen} zygosity={zygosity} copies={copies} />
-            </g>
-            <Caption t={tt} scene={scene} rec={rec} depth={depth} chosen={chosen} zygosity={zygosity} />
-          </svg>
-          {explore && (
-            <div className="absolute top-3 right-6 flex items-center gap-1 text-xs" onMouseDown={e => e.stopPropagation()}>
-              <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, double-click to reset</span>
-              {([['−', () => zoomAt(1 / 1.3)], ['+', () => zoomAt(1.3)], ['fit', resetView]] as [string, () => void][]).map(([lab, fn]) => (
-                <button key={lab} onClick={fn} className="w-7 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold">{lab}</button>
-              ))}
-              <button onClick={exportSvg} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">SVG</button>
-              <button onClick={exportPng} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">PNG</button>
+        <div className="px-5 pb-3">
+          <div className="grid grid-cols-[1fr_1fr] gap-4 text-xs">
+            <div>
+              <div className="text-[10.5px] font-semibold text-gray-700">Rebuilt chromosome{ders.length > 1 ? 's' : ''}</div>
+              {chosen.length ? ders.map(d => (
+                <div key={d.name} className="font-mono text-[11px] bg-gray-50 border border-gray-200 rounded px-2 py-1 mt-0.5">{d.name} = {d.pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ') || '—'}{d.ends && <span className="text-gray-400 font-sans"> ({d.ends})</span>}</div>
+              )) : <div className="text-gray-400 mt-0.5">no junction selected: tick the junctions of the event below</div>}
+              {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
+              {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-gray-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-gray-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
+              <div className="text-[10.5px] text-gray-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. <button onClick={toReconstruction} className="text-accent-700 hover:underline font-semibold">▶ the reconstruction from the reads</button> (cartoon, junctions, copy number per segment) is below the genes.</div>
             </div>
-          )}
+            <SvNomenclatureBox rec={rec} build={build} bands={bands} />
+          </div>
         </div>
-
-        {/* controls */}
-        <div className="px-5 pt-3 pb-2 flex items-center gap-3 text-xs">
-          <button onClick={togglePlay} disabled={!chosen.length} className="w-9 h-9 rounded-full bg-accent-600 text-white text-base flex items-center justify-center shadow hover:bg-accent-700 disabled:opacity-40" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
-          <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
-          <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
-          <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
-            {[0.5, 1, 1.5, 2].map(v => <option key={v} value={v}>{v}×</option>)}
-          </select>
-          <button onClick={() => { setPlaying(false); setT(T_END); setExplore(true); }} disabled={!chosen.length}
-            className={`px-2.5 py-1 rounded-full border text-xs font-semibold ${explore ? 'bg-accent-600 border-accent-600 text-white' : 'border-accent-300 text-accent-700 hover:bg-accent-50'}`} title="Skip to the final picture and explore it">🔍 Final picture</button>
-        </div>
-        <div className="px-5 pb-3 flex flex-wrap items-center gap-1.5 text-[11px]">
-          {chapters.map(c => (
-            <button key={c.label} onClick={() => { seek(c.at + 0.001); setPlaying(true); }}
-              className={`px-2 py-0.5 rounded-full border ${tt >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > tt ? 'bg-accent-600 border-accent-600 text-white' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>{c.label}</button>
-          ))}
-          <span className="ml-auto flex items-center gap-3 text-gray-600">
-            <label className="flex items-center gap-1" title="One homologue rearranged and the others intact (a constitutional, heterozygous event), or every homologue (homozygous). On a chromosome with one copy the two coincide.">
-              zygosity
-              <select value={zygosity} onChange={e => { setZygosity(e.target.value as 'het' | 'hom'); }} className="border rounded px-1 py-0.5 text-xs" disabled={copies === 1}>
-                <option value="het">heterozygous</option><option value="hom">homozygous</option>
-              </select>
-            </label>
-            <label className="flex items-center gap-1" title="Copies of this chromosome in the sample outside the event: 2 for an autosome, 1 for X or Y in a male (the default on X and Y), 1 for a female's X after X-chromosome loss, etc. The depth of the flanks is taken as this many copies.">
-              chromosome copies
-              <select value={copies} onChange={e => setCopies(parseInt(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
-                {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </label>
-            {controls.length > 0 && (
-              <label className="flex items-center gap-1" title={`Depth as a ratio to the median of the other DNA samples shown (${controls.map(c => c.name).join(', ')}) bin by bin, which cancels GC and mappability waves; off, the sample's own flanks are the reference`}>
-                <input type="checkbox" checked={useControls} onChange={e => setUseControls(e.target.checked)} className="accent-accent-600" />normalise on the other samples
-              </label>
-            )}
-          </span>
-        </div>
-
-        <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} build={build} bands={bands} chrom={chrom} />
         {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
+
+        <div ref={reconRef} className="scroll-mt-12 border-t border-gray-200 mt-2 pt-3">
+          <div className="px-5 pb-2">
+            <div className="text-base font-bold">Reconstruction from the reads <span className="font-normal text-gray-500">· {chosen.length} junction{chosen.length === 1 ? '' : 's'} · {sample.name}</span></div>
+            <div className="text-xs text-gray-500">the reference cut at the breakpoints, the pieces joined by the junction reads, then the copy number of each segment against the read depth</div>
+          </div>
+          <div className="px-5 max-w-[1280px]">
+            <div className="relative" ref={sceneRef}>
+              <svg ref={svgRef} viewBox={`0 0 ${VW} ${scene.H}`} width="100%" className="block select-none" style={{ aspectRatio: `${VW} / ${scene.H}`, cursor: explore ? (panRef.current ? 'grabbing' : 'grab') : 'default' }} fontFamily={FONT}
+                onMouseDown={onPanStart} onMouseMove={onPanMove} onMouseUp={onPanEnd} onMouseLeave={onPanEnd} onDoubleClick={resetView}>
+                <defs>
+                  <linearGradient id="svc-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f8fafc" /><stop offset="1" stopColor="#ddf1ee" /></linearGradient>
+                </defs>
+                <rect x={0} y={0} width={VW} height={scene.H} fill="url(#svc-bg)" rx={14} />
+                <g transform={explore ? `translate(${view.x}, ${view.y}) scale(${view.k})` : undefined}>
+                  <SceneDrawing scene={scene} t={tt} depthOf={story.depthOf} chosen={chosen} zygosity={zygosity} copies={copies} />
+                </g>
+                <Caption t={tt} scene={scene} rec={rec} depth={depth} chosen={chosen} zygosity={zygosity} />
+              </svg>
+              {explore && (
+                <div className="absolute top-3 right-6 flex items-center gap-1 text-xs" onMouseDown={e => e.stopPropagation()}>
+                  <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, double-click to reset</span>
+                  {([['−', () => zoomAt(1 / 1.3)], ['+', () => zoomAt(1.3)], ['fit', resetView]] as [string, () => void][]).map(([lab, fn]) => (
+                    <button key={lab} onClick={fn} className="w-7 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold">{lab}</button>
+                  ))}
+                  <button onClick={exportSvg} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">SVG</button>
+                  <button onClick={exportPng} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">PNG</button>
+                </div>
+              )}
+            </div>
+
+            {/* controls */}
+            <div className="pt-3 pb-2 flex items-center gap-3 text-xs">
+              <button onClick={togglePlay} disabled={!chosen.length} className="w-9 h-9 rounded-full bg-accent-600 text-white text-base flex items-center justify-center shadow hover:bg-accent-700 disabled:opacity-40" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
+              <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
+              <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
+              <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
+                {[0.5, 1, 1.5, 2].map(v => <option key={v} value={v}>{v}×</option>)}
+              </select>
+              <button onClick={() => { setPlaying(false); setT(T_END); setExplore(true); }} disabled={!chosen.length}
+                className={`px-2.5 py-1 rounded-full border text-xs font-semibold ${explore ? 'bg-accent-600 border-accent-600 text-white' : 'border-accent-300 text-accent-700 hover:bg-accent-50'}`} title="Skip to the final picture and explore it">🔍 Final picture</button>
+            </div>
+            <div className="pb-3 flex flex-wrap items-center gap-1.5 text-[11px]">
+              {chapters.map(c => (
+                <button key={c.label} onClick={() => { seek(c.at + 0.001); setPlaying(true); }}
+                  className={`px-2 py-0.5 rounded-full border ${tt >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > tt ? 'bg-accent-600 border-accent-600 text-white' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>{c.label}</button>
+              ))}
+              <span className="ml-auto flex items-center gap-3 text-gray-600">
+                <label className="flex items-center gap-1" title="One homologue rearranged and the others intact (a constitutional, heterozygous event), or every homologue (homozygous). On a chromosome with one copy the two coincide.">
+                  zygosity
+                  <select value={zygosity} onChange={e => { setZygosity(e.target.value as 'het' | 'hom'); }} className="border rounded px-1 py-0.5 text-xs" disabled={copies === 1}>
+                    <option value="het">heterozygous</option><option value="hom">homozygous</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-1" title="Copies of this chromosome in the sample outside the event: 2 for an autosome, 1 for X or Y in a male (the default on X and Y), 1 for a female's X after X-chromosome loss, etc. The depth of the flanks is taken as this many copies.">
+                  chromosome copies
+                  <select value={copies} onChange={e => setCopies(parseInt(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
+                    {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </label>
+                {controls.length > 0 && (
+                  <label className="flex items-center gap-1" title={`Depth as a ratio to the median of the other DNA samples shown (${controls.map(c => c.name).join(', ')}) bin by bin, which cancels GC and mappability waves; off, the sample's own flanks are the reference`}>
+                    <input type="checkbox" checked={useControls} onChange={e => setUseControls(e.target.checked)} className="accent-accent-600" />normalise on the other samples
+                  </label>
+                )}
+              </span>
+            </div>
+
+          </div>
+          <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} chrom={chrom} />
+        </div>
       </div>
     </div>
   );
@@ -441,9 +479,9 @@ function Caption({ t, scene, rec, depth, chosen, zygosity }: { t: number; scene:
 
 // ======================== Details ========================
 
-function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, build, bands, chrom }: {
+function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, chrom }: {
   rec: ReturnType<typeof reconstruct>; depth: ReturnType<typeof checkDepth>; ranked: RankedPath[]; onPath: (key: string) => void; candidates: SvJunction[]; selected: Set<string>; onToggle: (id: string) => void; models: TxModel[];
-  build: string; bands?: Cytoband[]; chrom: string;
+  chrom: string;
 }) {
   const side = (e: SvJunction['a']) => (e.side === 'tail' ? '▸' : '◂');
   const breakpoints = [...new Set(rec.junctions.flatMap(j => [j.a.pos, j.b.pos]))].sort((a, b) => a - b);
@@ -522,17 +560,8 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
             <div className="text-[10.5px] text-gray-500 mt-0.5">Ranked by the segments whose depth does not fit, then the reads left out, then the summed deviation. The junctions left out by the best path may belong to a second version of the rearrangement (another derivative, or a subclone): their share of the reads at the shared breakend is a rough fraction.</div>
           </div>
         )}
-        <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Rebuilt chromosome{rec.ders.length > 1 ? 's' : ''}</div>
-        {rec.ders.filter(d => d.rearranged || rec.ders.length === 1).map(d => (
-          <div key={d.name} className="mb-1.5">
-            <span className="font-semibold text-accent-700">{d.name}</span>{d.ends && <span className="text-gray-400"> ({d.ends})</span>}
-            <div className="font-mono text-[11px] bg-gray-50 border border-gray-200 rounded px-2 py-1 mt-0.5">{d.pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ') || '—'}</div>
-          </div>
-        ))}
-        {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mb-1">Lost from the rebuilt homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
-        <SvNomenclatureBox rec={rec} build={build} bands={bands} />
         {breakpoints.length > 0 && (
-          <div className="mt-1.5">
+          <div>
             <div className="text-[10.5px] font-semibold text-gray-700">Breakpoints ({chrom})</div>
             <ul className="text-[11px] text-gray-600">
               {breakpoints.map(p => <li key={p}><span className="font-mono">{fmt(p + 1)}</span> · {breakpointSite(p, models)}</li>)}
