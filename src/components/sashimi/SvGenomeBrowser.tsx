@@ -551,7 +551,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     </svg>
   );
 
-  const findings = useMemo(() => summary(story.genes, annotations, near), [story, annotations, near]);
 
   return (
     <div className="mt-2 border-t border-gray-200 pt-3" style={{ fontFamily: FONT }}>
@@ -590,16 +589,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           ))}
         </span>
       </div>
-      {/* key findings */}
-      {findings.length > 0 && (
-        <div className="px-5 mt-2 flex flex-wrap gap-1.5">
-          {findings.map((f, i) => (
-            <span key={i} className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium" style={{ background: `${f.color}14`, color: f.color, border: `1px solid ${f.color}40` }}>
-              <b>{f.title}</b>{f.genes.map(g => <span key={g.symbol} className="italic font-semibold cursor-pointer hover:underline" onMouseEnter={() => setHover(g.symbol)} onMouseLeave={() => setHover(null)}>{g.symbol}{g.note ? <span className="not-italic font-normal opacity-80"> ({g.note})</span> : null}</span>).reduce((acc: React.ReactNode[], el, j) => (j ? [...acc, ', ', el] : [el]), [])}
-            </span>
-          ))}
-        </div>
-      )}
       {showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
       <div className="px-3 mt-2 relative" ref={boxRef}>
         {txs.loading ? <div className="h-[220px] flex items-center justify-center text-sm text-gray-500">loading the gene models of the window…</div> : svg}
@@ -654,7 +643,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           Genes: {txs.source || '—'}{txs.error ? <span className="text-amber-700"> · {txs.error}</span> : null}. {ann.loading ? 'Annotations loading… ' : ann.notes.length ? `${ann.notes.join(' · ')}. ` : ''}
           Copies count the {zygosity === 'het' ? `${flankCopies - 1} intact homologue${flankCopies - 1 === 1 ? '' : 's'} and the rearranged one` : 'rearranged homologues'}; a fusion needs both partners on the same strand of the rebuilt chromosome, its frame is read from the coding phases of the two exons joined (breakpoints in introns); a breakpoint inside an exon leaves the frame undetermined.
           LoF-intolerant: LOEUF &lt; {LOEUF_INTOLERANT.v4} (gnomAD v4, the browser's threshold for Mendelian cases; &lt; {LOEUF_INTOLERANT['v2.1.1']} for v2.1.1) or pLI ≥ {PLI_INTOLERANT}; constrained: LOEUF &lt; {LOEUF_CONSTRAINED.v4} (gnomAD v4.0's general cut-off). LOEUF is best read as a continuous value: hover a gene for it. ClinGen scores: 3 sufficient, 2 some, 1 little, 0 no evidence, 30 autosomal recessive, 40 dosage sensitivity unlikely.
-          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged, whatever the size.' : near > 0 ? ` No domains loaded: intact genes within ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`} of a breakpoint are flagged as a possible position effect; those in the panel, with a ClinGen score of 2 or 3, or LoF-intolerant are named in the findings above.` : ''}
+          {domains.length ? ' Domains: a junction joining two parts of domains makes one new domain (boundaries between them lost); genes whose domain gains foreign sequence or loses part of its own are flagged, whatever the size.' : near > 0 ? ` No domains loaded: intact genes within ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`} of a breakpoint are flagged as a possible position effect; those in the panel, with a ClinGen score of 2 or 3, or LoF-intolerant keep their label in the figure.` : ''}
         </div>
       </div>
     </div>
@@ -668,35 +657,6 @@ function notable(g: GeneImpact, a: GeneAnnotations): boolean {
   const d = a.dosage.get(g.gene.symbol), c = a.constraint.get(g.gene.symbol);
   return !!a.panel?.genes.has(g.gene.symbol.toUpperCase()) || [2, 3].includes(d?.hi ?? -1) || [2, 3].includes(d?.ts ?? -1)
     || (c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? LOEUF_INTOLERANT.v4)) || (c?.pli != null && c.pli >= PLI_INTOLERANT);
-}
-
-// ======================== Key findings ========================
-
-function summary(genes: GeneImpact[], a: GeneAnnotations, near: number): { title: string; color: string; genes: { symbol: string; note?: string }[] }[] {
-  const note = (g: GeneImpact) => {
-    const d = a.dosage.get(g.gene.symbol), c = a.constraint.get(g.gene.symbol), p = a.panel?.genes.get(g.gene.symbol.toUpperCase());
-    const positional = g.kind === 'nearby' || g.kind === 'domain' || g.kind === 'moved';
-    return [p ? `${CONF[p.confidence].label} in panel` : '',
-      d?.hi != null && [2, 3].includes(d.hi) && (g.principal.copies < g.principal.refCopies || positional) ? `HI ${d.hi}` : '',
-      d?.ts != null && [2, 3].includes(d.ts) && (g.kind === 'duplicated' || positional) ? `TS ${d.ts}` : '',
-      c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? 0.45) ? `LOEUF ${c.loeuf.toFixed(2)}` : ''].filter(Boolean).join(', ') || undefined;
-  };
-  const out: { title: string; color: string; genes: { symbol: string; note?: string }[] }[] = [];
-  const add = (title: string, color: string, list: GeneImpact[]) => { if (list.length) out.push({ title, color, genes: list.map(g => ({ symbol: g.gene.symbol, note: note(g) })) }); };
-  add('Loss of a functional copy:', '#b91c1c', genes.filter(g => g.kind === 'deleted' || g.kind === 'disrupted' || (g.kind === 'intragenic-del' && g.principal.frame !== 'kept') || (g.kind === 'intragenic-dup' && g.principal.frame === 'shifted')));
-  const fz = new Map<string, string>();
-  for (const g of genes) for (const f of g.principal.fusions) fz.set(`${f.five.gene}::${f.three.gene}`, f.kind === 'in-frame' ? 'in frame' : f.kind === 'promoter-swap' ? 'promoter swap' : f.kind === 'out-of-frame' ? 'out of frame' : f.kind === 'five-cds-whole' ? '3′ UTR' : 'frame undetermined');
-  if (fz.size) out.push({ title: 'Fusion:', color: '#7c3aed', genes: [...fz].map(([symbol, n]) => ({ symbol, note: n })) });
-  add('In-frame change:', '#ea580c', genes.filter(g => (g.kind === 'intragenic-del' || g.kind === 'intragenic-dup') && g.principal.frame === 'kept'));
-  add('Gain of a whole copy:', '#15803d', genes.filter(g => g.kind === 'duplicated'));
-  add('Chromatin domain changed:', '#b45309', genes.filter(g => g.kind === 'domain'));
-  add('Intact, inverted or moved:', '#2563eb', genes.filter(g => g.kind === 'moved'));
-  const nb = genes.filter(g => g.kind === 'nearby');
-  if (nb.length) {
-    const hot = nb.filter(g => notable(g, a));
-    out.push({ title: `Near a breakpoint (≤ ${near >= 1e6 ? `${near / 1e6} Mb` : `${near / 1e3} kb`}), ${nb.length} gene${nb.length > 1 ? 's' : ''}${hot.length ? ', of which:' : ': none in the panel, dosage-sensitive or LoF-intolerant'}`, color: IMPACT.nearby.color, genes: hot.map(g => ({ symbol: g.gene.symbol, note: [note(g), g.nearest ? `${Math.round(g.nearest.distance / 1000)} kb` : ''].filter(Boolean).join(', ') })) });
-  }
-  return out;
 }
 
 // ======================== PanelApp picker ========================
