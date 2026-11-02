@@ -238,7 +238,9 @@ const MOI: Record<MoiClass | 'none', { color: string; short: string; label: stri
 
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
-type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: AchroPlaced };
+type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: AchroPlaced; achroType?: 'del' | 'dup' };
+/** AChro-Puce bars: deletions red, duplications blue */
+const ACHRO_TYPE_COLOR = { del: '#dc2626', dup: '#2563eb' } as const;
 /** an AChro-Puce region placed on the chromosome in view: 0-based half-open, and how it was placed */
 type AchroPlaced = { r: AchroRegion; start: number; end: number; approx: boolean; how: string };
 /** the chromosome a region's name starts with (1q21.1… → chr1) */
@@ -710,7 +712,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }
   const yDgv = dgvShown ? y : -1; if (dgvShown) y += keep('dgv', Math.max(1, ...dgvItems.map(d => d.lane + 1)) * DGV_LANE_H) + 10;
   // AChro-Puce: one bar per region (upper half the deletion's class, lower half the duplication's), its name and classes after it
-  const ACHRO_LANE_H = 18;
+  const ACHRO_LANE_H = 30;
   const achroItems: { p: AchroPlaced; lane: number; a: number; b: number; text: string }[] = [];
   if (showAchro) {
     const ends: number[] = [];
@@ -718,7 +720,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const a = cx(refX(p.start)), b = Math.max(cx(refX(p.end)), a + 3);
       if (b < X0 || a > X1) continue;
       const text = `${p.approx ? '≈ ' : ''}${p.r.name}`;
-      const right = Math.max(a, X0) + Math.max(b - Math.max(a, X0), 0) + 6 + textWidth(text) * 0.9 + 90;
+      const right = Math.max(a, X0) + Math.max(b - Math.max(a, X0), 0) + 6 + textWidth(text) * 0.9 + 110;
       let lane = ends.findIndex(e => e + 6 < a);
       if (lane < 0) { lane = ends.length; ends.push(right); } else ends[lane] = right;
       achroItems.push({ p, lane, a, b, text });
@@ -749,8 +751,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const hoverOn = (key: string, dgv?: PopulationSv) => (e: React.MouseEvent) => {
     if (dragRef.current?.moved) return;
     const p = boxPos(e); lastTipPos.current = p;
-    const achro = key.startsWith('achro:') ? achroPlaced.find(x => `achro:${x.r.id}` === key) : undefined;
-    if (tip?.gene !== key) setTip({ ...p, gene: key, dgv, achro }); else placeTip(p.x, p.y);
+    const achro = key.startsWith('achro:') ? achroPlaced.find(x => x.r.id === key.split(':')[1]) : undefined, achroType = achro ? key.split(':')[2] as 'del' | 'dup' : undefined;
+    if (tip?.gene !== key) setTip({ ...p, gene: key, dgv, achro, achroType }); else placeTip(p.x, p.y);
   };
   const hoverOff = () => setTip(null);
   useLayoutEffect(() => { if (tip) placeTip(lastTipPos.current.x, lastTipPos.current.y); });
@@ -758,9 +760,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     e.stopPropagation();
     if (suppressClick.current) return;
     const p = boxPos(e);
-    const achro = key.startsWith('achro:') ? achroPlaced.find(x => `achro:${x.r.id}` === key) : undefined;
+    const achro = key.startsWith('achro:') ? achroPlaced.find(x => x.r.id === key.split(':')[1]) : undefined, achroType = achro ? key.split(':')[2] as 'del' | 'dup' : undefined;
     if (!dgv && !achro) setLinked(key);
-    setPinned(cur => (cur?.gene === key ? null : { ...p, gene: key, dgv, achro }));
+    setPinned(cur => (cur?.gene === key ? null : { ...p, gene: key, dgv, achro, achroType }));
   };
   // the card points at its gene where it was: it closes when the view moves
   useEffect(() => { if (pinned && !anim.current.fly) setPinned(null); }, [Math.round(vp.s / Math.max(1, span) * 50), Math.round(Math.log(span) * 20)]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -971,23 +973,28 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {yDgv >= 0 && !dgvItems.length && <text x={X0 + 6} y={yDgv + 8} fontSize={9.5} fill={C.faint}>{span > DGV_MAX_SPAN ? `zoom in below ${kb(DGV_MAX_SPAN)} to see the population CNVs` : dgvView.loading ? 'loading the DGV Gold Standard…' : dgvView.error ? `DGV Gold Standard unavailable: ${dgvView.error}` : 'no DGV Gold Standard CNV here'}</text>}
         {/* AChro-Puce recurrent CNVs */}
         {yAchro >= 0 && achroItems.map(({ p, lane, a, b, text }) => {
-          const yy = yAchro + lane * ACHRO_LANE_H, key = `achro:${p.r.id}`;
-          const del = p.r.rows.find(r2 => r2.type === 'del' && r2.sex !== 'female'), dup = p.r.rows.find(r2 => r2.type === 'dup' && r2.sex !== 'female');
-          const half = (row: AchroRow | undefined, y0: number) => row
-            ? <rect x={a} y={y0} width={b - a} height={4.5} fill={ACHRO_COLOR[row.cls]} />
-            : <rect x={a} y={y0} width={b - a} height={4.5} fill="#e5e7eb" />;
-          const lx = Math.max(a, X0) + Math.min(b - Math.max(a, X0), PW) + 5;
-          const chip = (row: AchroRow | undefined, t: string) => row ? `${t} ${achroShort(row.cls)}${row.also ? `+${achroShort(row.also.cls)}` : ''}` : '';
-          return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key)} onMouseMove={hoverOn(key)} onMouseLeave={hoverOff} onClick={pinOn(key)}>
-              <rect x={a} y={yy} width={Math.max(b - a, 3)} height={ACHRO_LANE_H - 4} fill="transparent" />
-              {half(del, yy + 2)}{half(dup, yy + 7)}
-              <rect x={a} y={yy + 1.5} width={b - a} height={10} rx={1.5} fill="none" stroke="#334155" strokeWidth={0.7} strokeDasharray={p.approx ? '3 2' : undefined} />
-              {lx + 40 < X1 && <text x={lx} y={yy + 10} fontSize={9.5} fontWeight={700} fill={C.text}>{text}
-                {del && <tspan dx={6} fill={ACHRO_COLOR[del.cls]}>{chip(del, 'del')}</tspan>}
-                {dup && <tspan dx={5} fill={ACHRO_COLOR[dup.cls]}>{chip(dup, 'dup')}</tspan>}</text>}
-            </g>
-          );
+          // two bars, each its own target: the deletion (red) above, the duplication (blue) below, its class after it
+          const yy = yAchro + lane * ACHRO_LANE_H;
+          const lx = Math.max(a, X0) + Math.min(b - Math.max(a, X0), PW) + 6;
+          const bar = (type: 'del' | 'dup', y0: number, first: boolean) => {
+            const row = p.r.rows.find(r2 => r2.type === type && r2.sex !== 'female');
+            if (!row) return null;
+            const key = `achro:${p.r.id}:${type}`, col = ACHRO_TYPE_COLOR[type];
+            const cls = `${row.cls === 'PIEV' ? 'PIEV' : `class ${row.cls}`}${row.also ? ` + ${row.also.cls === 'PIEV' ? 'PIEV' : `class ${row.also.cls}`} (${row.also.label})` : ''}${p.r.rows.some(r2 => r2.sex) ? ' (male)' : ''}`;
+            const labelW = (first ? textWidth(text) * 0.88 + 8 : 0) + 30 + cls.length * 5.4;
+            return (
+              <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key)} onMouseMove={hoverOn(key)} onMouseLeave={hoverOff} onClick={pinOn(key)}>
+                <rect x={Math.min(a, lx - 6)} y={y0 - 2} width={Math.max(b - a, 6) + 6 + labelW} height={13} fill="transparent" />
+                <rect x={a} y={y0} width={Math.max(b - a, 3)} height={9} rx={2} fill={col} fillOpacity={0.85} stroke={col} strokeWidth={0.8} strokeDasharray={p.approx ? '3 2' : undefined} />
+                {lx + 30 < X1 && <text x={lx} y={y0 + 8} fontSize={9.5} fill={C.text}>
+                  {first && <tspan fontWeight={700}>{text}  </tspan>}
+                  <tspan fontWeight={700} fill={col}>{type === 'del' ? 'del' : 'dup'}</tspan>
+                  <tspan dx={4} fontWeight={600}>{cls}</tspan></text>}
+              </g>
+            );
+          };
+          const hasDel = p.r.rows.some(r2 => r2.type === 'del');
+          return <g key={`achro${p.r.id}`}>{bar('del', yy + 1, true)}{bar('dup', yy + 14, !hasDel)}</g>;
         })}
         {yAchro >= 0 && !achroItems.length && <text x={X0 + 6} y={yAchro + 10} fontSize={9.5} fill={C.faint}>{ACHRO_REGIONS.some(r => achroChrom(r) === chrom) ? 'no AChro-Puce recurrent CNV in view' : `no AChro-Puce sheet on ${chrom}`}</text>}
         {/* reference band: the event's segments */}
@@ -1172,7 +1179,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const card = (at: TipAt, isPin: boolean) => {
     const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, (boxRef.current?.clientWidth ?? 900) - 400)), ...(at.y > (boxRef.current?.clientHeight ?? 400) - 160 ? { bottom: (boxRef.current?.clientHeight ?? 400) - at.y + 14 } : { top: at.y + 14 }) };
     const ref = isPin ? undefined : (el: HTMLDivElement | null) => { tipEl.current = el; };
-    if (at.achro) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><AchroCard p={at.achro} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} /></div>;
+    if (at.achro) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><AchroCard p={at.achro} type={at.achroType} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} /></div>;
     if (at.dgv) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><DgvCard v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} /></div>;
     const gi = impactOf.get(at.gene), g = gi?.gene ?? geneBySym.get(at.gene);
     if (!g) return null;
@@ -1271,7 +1278,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
-        {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: upper half the deletion's class, lower half the duplication's — {(['5', 'PIEV', '3', '2', '1'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-0.5"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: ACHRO_COLOR[k2] }} />{k2 === 'PIEV' ? 'PIEV' : `class ${k2}`}</span>)}; dashed: placed approximately</span>}
+        {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.del }} /> deletion <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.dup }} /> duplication, the network's class after each bar (click a bar for its sheet); dashed: placed approximately</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)} <span className="text-gray-400">(♂ / ♀: imprinted, the paternal / maternal allele expressed)</span></span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
@@ -1307,7 +1314,7 @@ const typeWord = (r: AchroRow) => `${r.type === 'del' ? 'Deletion' : 'Duplicatio
 const achroOverlap = (ev: CnvEvent, p: AchroPlaced) => Math.max(0, Math.min(ev.end, p.end) - Math.max(ev.start, p.start)) / Math.max(ev.end - ev.start, p.end - p.start, 1);
 
 /** The card of an AChro-Puce region: its classes, a summary, how it was placed, the event's matching loss or gain, the sheet. */
-function AchroCard({ p, chrom, cnv, pinned, place, onClose, onZoom }: { p: AchroPlaced; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
+function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom }: { p: AchroPlaced; type?: 'del' | 'dup'; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
   const hits = cnv.filter(c => achroOverlap(c.ev, p) >= RO_MATCH);
   return (
     <div className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
@@ -1316,7 +1323,7 @@ function AchroCard({ p, chrom, cnv, pinned, place, onClose, onZoom }: { p: Achro
         {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
       <table className="mt-1 w-full"><tbody>
         {p.r.rows.map((r, i) => (
-          <tr key={i} className="align-top"><td className="pr-2 py-0.5 whitespace-nowrap text-gray-300">{typeWord(r)}</td>
+          <tr key={i} className={`align-top ${type && r.type !== type ? 'opacity-45' : ''}`}><td className="pr-2 py-0.5 whitespace-nowrap font-bold" style={{ color: r.type === 'del' ? '#fca5a5' : '#93c5fd' }}>{typeWord(r)}</td>
             <td className="py-0.5"><span className="font-bold" style={{ color: ACHRO_COLOR[r.cls] === '#64748b' ? '#cbd5e1' : ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `Class ${r.cls}`}</span> <span className="text-gray-300">{r.label}</span>
               {r.also && <div><span className="font-bold" style={{ color: ACHRO_COLOR[r.also.cls] }}>{r.also.cls === 'PIEV' ? 'PIEV' : `Class ${r.also.cls}`}</span> <span className="text-gray-300">{r.also.label}</span></div>}</td></tr>
         ))}
@@ -1341,8 +1348,8 @@ function AchroSummary({ cnv, placed }: { cnv: { ev: CnvEvent }[]; placed: AchroP
     <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}: a loss or gain of the event overlapping a region reciprocally by ${Math.round(RO_MATCH * 100)} % or more`}>
       <span className="text-gray-500 self-center">AChro-Puce:</span>
       {hits.map(({ ev, p, rows }) => (
-        <span key={`${ev.start}${p.r.id}`} className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border bg-white" style={{ borderColor: `${ACHRO_COLOR[rows[0]?.cls ?? '3']}66` }}>
-          <b>{ev.kind} {ev.letters}</b> ≈ {p.r.name} {ev.kind === 'loss' ? 'deletion' : 'duplication'}:
+        <span key={`${ev.start}${p.r.id}`} className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border bg-white" style={{ borderColor: `${ev.kind === 'loss' ? ACHRO_TYPE_COLOR.del : ACHRO_TYPE_COLOR.dup}66` }}>
+          <b style={{ color: ev.kind === 'loss' ? ACHRO_TYPE_COLOR.del : ACHRO_TYPE_COLOR.dup }}>{ev.kind} {ev.letters}</b> ≈ {p.r.name} {ev.kind === 'loss' ? 'deletion' : 'duplication'}:
           {rows.length ? rows.map((r, i) => <b key={i} style={{ color: ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}{r.sex ? ` (${r.sex})` : ''}{r.also ? ` + ${r.also.cls === 'PIEV' ? 'PIEV' : `class ${r.also.cls}`} (${r.also.label})` : ''}</b>) : <span className="text-gray-500">not classified for this type</span>}
         </span>
       ))}
