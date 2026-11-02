@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { ElsewhereLink, LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
 import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
@@ -2503,6 +2503,27 @@ export default function SashimiViewer({
   }, []);
 
   // ---- Mouse interaction ----
+  /**
+   * The popover of an arc, exon or site: in the window's coordinates (the plot's scroll box would cut it), next to the
+   * click, below it or above it whichever has more room, as tall as that room (its content scrolls past it); it follows
+   * the page when it scrolls.
+   */
+  const [, popoverMoved] = useReducer((x: number) => x + 1, 0);
+  const popoverShown = !!popover;
+  useEffect(() => {
+    if (!popoverShown) return;
+    addEventListener('scroll', popoverMoved, true); addEventListener('resize', popoverMoved);
+    return () => { removeEventListener('scroll', popoverMoved, true); removeEventListener('resize', popoverMoved); };
+  }, [popoverShown]);
+  const popoverPlace = (p: { x: number; y: number }): React.CSSProperties => {
+    const r = svgRef.current?.getBoundingClientRect();
+    const px = (r?.left ?? 0) + p.x, py = (r?.top ?? 0) + p.y;
+    const w = Math.min(560, innerWidth - 16), left = Math.max(8, Math.min(px + 12, innerWidth - w - 8));
+    const below = innerHeight - py - 20, above = py - 20;
+    return below >= 420 || below >= above
+      ? { left, width: w, top: py + 12, maxHeight: Math.max(160, below - 4) }
+      : { left, width: w, bottom: innerHeight - py + 12, maxHeight: Math.max(160, above - 4) };
+  };
   const svgPoint = (e: { clientX: number; clientY: number }) => {
     const rect = svgRef.current?.getBoundingClientRect();
     return { x: rect ? e.clientX - rect.left : 0, y: rect ? e.clientY - rect.top : 0 };
@@ -7596,13 +7617,8 @@ export default function SashimiViewer({
           </div>
         )}
         {popover && popoverContent && (
-          <div className="absolute z-30 w-[540px] max-w-[95%] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs overflow-y-auto"
-            // opened in the lower half of the plot (an arc under the baseline, a low track): above the click, so the plot's
-            // scroll box does not cut it
-            style={{ left: Math.min(popover.x + 12, Math.max(8, svgWidth - 552)),
-              ...(popover.y > totalHeight / 2
-                ? { bottom: totalHeight - popover.y + 20, maxHeight: Math.max(160, popover.y - 8) }
-                : { top: Math.max(RULER_H, popover.y + 12), maxHeight: Math.max(160, totalHeight - popover.y - 12) }) }}
+          <div className="fixed z-[45] rounded-lg border border-gray-300 bg-white shadow-2xl text-xs overflow-y-auto"
+            style={popoverPlace(popover)}
             onMouseDown={e => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-2 px-3 pt-2">
               <div>
