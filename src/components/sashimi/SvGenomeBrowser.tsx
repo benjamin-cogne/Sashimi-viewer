@@ -744,7 +744,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const placeTip = (x: number, yy: number) => {
     const el = tipEl.current, box = boxRef.current; if (!el || !box) return;
     const w = box.clientWidth, h = box.clientHeight;
-    el.style.left = `${Math.max(0, Math.min(x + 14, w - 400))}px`;
+    // next to the pointer, kept inside the figure by the card's own width (left of the pointer near the right edge)
+    const cw = el.offsetWidth || 400;
+    el.style.left = `${Math.max(0, x + 14 + cw <= w ? x + 14 : Math.max(0, x - 14 - cw))}px`;
     if (yy > h - 160) { el.style.top = ''; el.style.bottom = `${h - yy + 14}px`; } else { el.style.bottom = ''; el.style.top = `${yy + 14}px`; }
   };
   const lastTipPos = useRef({ x: 0, y: 0 });
@@ -1175,12 +1177,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   );
 
   // ---- the card of the gene or population CNV under the pointer, or kept open ----
-  useEffect(() => { const sym = (pinned && !pinned.dgv ? pinned.gene : null) ?? (tip && !tip.dgv ? tip.gene : null); if (sym) wantModes([sym]); }, [pinned?.gene, tip?.gene]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const isGene = (t: TipAt | null) => !!t && !t.dgv && !t.achro; const sym = (isGene(pinned) ? pinned!.gene : null) ?? (isGene(tip) ? tip!.gene : null); if (sym) wantModes([sym]); }, [pinned?.gene, tip?.gene]); // eslint-disable-line react-hooks/exhaustive-deps
   const card = (at: TipAt, isPin: boolean) => {
     const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, (boxRef.current?.clientWidth ?? 900) - 400)), ...(at.y > (boxRef.current?.clientHeight ?? 400) - 160 ? { bottom: (boxRef.current?.clientHeight ?? 400) - at.y + 14 } : { top: at.y + 14 }) };
     const ref = isPin ? undefined : (el: HTMLDivElement | null) => { tipEl.current = el; };
-    if (at.achro) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><AchroCard p={at.achro} type={at.achroType} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} /></div>;
-    if (at.dgv) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><DgvCard v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} /></div>;
+    if (at.achro) return <AchroCard key={isPin ? 'pin' : 'tip'} cardRef={ref} p={at.achro} type={at.achroType} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} />;
+    if (at.dgv) return <DgvCard key={isPin ? 'pin' : 'tip'} cardRef={ref} v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} />;
     const gi = impactOf.get(at.gene), g = gi?.gene ?? geneBySym.get(at.gene);
     if (!g) return null;
     const r = gi ? dosageReading(gi, annotations) : null;
@@ -1193,7 +1195,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const dot = { intolerant: '#fca5a5', constrained: '#fdba74', tolerant: '#cbd5e1', unknown: '#cbd5e1' }[loeufClass(c2)];
     const tx = gi?.principal.tx ?? g.principal;
     return (
-      <div key={isPin ? 'pin' : 'tip'} ref={ref} className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl max-w-[390px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={isPin ? place : undefined}
+      <div key={isPin ? 'pin' : 'tip'} ref={ref} className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[390px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={isPin ? place : undefined}
         onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
         <div className="font-semibold flex items-start gap-2"><span className="flex-1"><i>{g.symbol}</i>{gi ? ` · ${IMPACT[gi.kind].label}` : ''}</span>
           {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
@@ -1314,10 +1316,10 @@ const typeWord = (r: AchroRow) => `${r.type === 'del' ? 'Deletion' : 'Duplicatio
 const achroOverlap = (ev: CnvEvent, p: AchroPlaced) => Math.max(0, Math.min(ev.end, p.end) - Math.max(ev.start, p.start)) / Math.max(ev.end - ev.start, p.end - p.start, 1);
 
 /** The card of an AChro-Puce region: its classes, a summary, how it was placed, the event's matching loss or gain, the sheet. */
-function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom }: { p: AchroPlaced; type?: 'del' | 'dup'; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
+function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRef }: { p: AchroPlaced; type?: 'del' | 'dup'; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void; cardRef?: (el: HTMLDivElement | null) => void }) {
   const hits = cnv.filter(c => achroOverlap(c.ev, p) >= RO_MATCH);
   return (
-    <div className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+    <div ref={cardRef} className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
       onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
       <div className="font-semibold flex items-start gap-2"><span className="flex-1">{p.r.name} <span className="font-normal text-gray-400">· AChro-Puce</span></span>
         {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
@@ -1364,12 +1366,12 @@ const pct = (v: number) => `${Math.round(v * 100)} %`;
 const evName = (ev: CnvEvent) => `${ev.kind} ${ev.letters} (${kb(ev.end - ev.start)})`;
 
 /** The card of a population CNV: its extents, its frequency, its overlap with the event's losses and gains, and every field the source gives. */
-function DgvCard({ v, chrom, cnv, pinned, place, onClose, onZoom }: { v: PopulationSv; chrom: string; cnv: { ev: CnvEvent; matches: PopMatch[] }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
+function DgvCard({ v, chrom, cnv, pinned, place, onClose, onZoom, cardRef }: { v: PopulationSv; chrom: string; cnv: { ev: CnvEvent; matches: PopMatch[] }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void; cardRef?: (el: HTMLDivElement | null) => void }) {
   const span = (r: [number, number]) => `${chrom}:${fmt(r[0] + 1)}-${fmt(r[1])} (${kb(r[1] - r[0])})`;
   const sameInner = v.inner[0] === v.outer[0] && v.inner[1] === v.outer[1];
   const rows = cnv.map(c => ({ ev: c.ev, m: c.matches.find(m => m.sv.id === v.id && m.sv.outer[0] === v.outer[0]) })).filter(x => x.m);
   return (
-    <div className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg max-w-[400px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+    <div ref={cardRef} className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg w-max max-w-[400px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
       onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
       <div className="font-semibold flex items-start gap-2"><span className="flex-1"><span style={{ color: { loss: '#fca5a5', gain: '#93c5fd', both: '#c4b5fd', unknown: '#cbd5e1' }[v.type] }}>●</span> {v.id} · population {TYPE_LABEL[v.type]} (DGV Gold Standard)</span>
         {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
