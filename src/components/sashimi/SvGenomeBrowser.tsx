@@ -142,41 +142,52 @@ const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, na
  * glyphs alone are packed (sharing a lane past the cap), and a label is drawn only where it fits in its lane, clear of
  * the other glyphs and labels: the items worth a label first, then the others (`labeled`; the rest show on hover).
  */
-function pack<T extends { x0: number; x1: number; xg: number; h: number; worth: boolean; lw: number }>(items: T[], maxLanes = MAX_LANES): { items: (T & { lane: number; labeled: boolean })[]; laneY: number[]; height: number } {
-  const lanes: number[] = [], laneH0: number[] = [];
-  const sorted = items.map((it, i) => ({ it, i })).sort((a, b) => a.it.x0 - b.it.x0);
-  const lane0: number[] = new Array(items.length);
-  for (const { it, i } of sorted) {
-    let l = lanes.findIndex(end => end + 8 < it.x0);
-    if (l < 0) { l = lanes.length; lanes.push(-Infinity); laneH0.push(0); }
-    lanes[l] = Math.max(lanes[l], it.x1); laneH0[l] = Math.max(laneH0[l], it.h); lane0[i] = l;
-  }
-  let lane = lane0, laneH = laneH0;
-  const labeled = new Uint8Array(items.length);
-  if (laneH0.length <= maxLanes) labeled.fill(1);
-  else {
-    const spans: [number, number][][] = []; laneH = []; lane = new Array(items.length);
+function pack<T extends { x0: number; x1: number; xg: number; h: number; worth: boolean; lw: number }>(items: T[], maxLanes = MAX_LANES, prev?: Map<string, number>, key?: (it: T) => string, moving = false): { items: (T & { lane: number; labeled: boolean })[]; laneY: number[]; height: number } {
+  // `prev`: the lanes of the last drawing. The items drawn then are placed first, each in its lane while it still fits
+  // there, the newcomers in the gaps left: zooming and panning do not shuffle the labels (the map is then updated).
+  // `moving` (a zoom or a pan under way): an item keeps its lane, its label hidden while it does not fit, as maps do;
+  // everything is laid out again once the view rests.
+  // the lanes of the last drawing hold only while the view moves; at rest everything is packed afresh (once)
+  const pref = (it: T) => (moving && prev && key ? prev.get(key(it)) : undefined);
+  const order = items.map((it, i) => ({ it, i, p: pref(it) }))
+    .sort((a, b) => Number(a.p == null) - Number(b.p == null) || Number(b.it.worth) - Number(a.it.worth) || a.it.x0 - b.it.x0);
+  const place = (cap: number, compact: boolean) => {
+    const spans: [number, number][][] = [], laneH: number[] = [], lane = new Array<number>(items.length), labeled = new Uint8Array(items.length);
     const fits = (l: number, a: number, b: number) => spans[l].every(([x, y]) => y + 8 < a || x - 8 > b);
-    const put = (a: number, b: number): number => {
+    const put = (a: number, b: number, p?: number): number => {
+      // its lane of the last drawing, created when the items placed so far did not need it yet
+      if (p != null && p < cap) { while (spans.length <= p) { spans.push([]); laneH.push(0); } if (fits(p, a, b)) return p; }
       for (let l = 0; l < spans.length; l++) if (fits(l, a, b)) return l;
-      if (spans.length < maxLanes) { spans.push([]); laneH.push(0); return spans.length - 1; }
+      if (spans.length < cap) { spans.push([]); laneH.push(0); return spans.length - 1; }
       return -1;
     };
-    const order = items.map((it, i) => ({ it, i })).sort((p, q) => Number(q.it.worth) - Number(p.it.worth) || p.it.x0 - q.it.x0);
-    for (const { it, i } of order) {
-      let l = put(it.x0, Math.max(it.xg, it.x0 + it.lw));
-      if (l >= 0) { labeled[i] = 1; spans[l].push([it.x0, Math.max(it.xg, it.x0 + it.lw)]); }
+    for (const { it, i, p } of order) {
+      const withLabel = Math.max(it.xg, it.x1, it.x0 + it.lw);
+      if (moving && p != null && p < cap) {
+        while (spans.length <= p) { spans.push([]); laneH.push(0); }
+        // its lane whatever (glyphs may touch for a moment), its label only where it fits
+        const full = fits(p, it.x0, withLabel);
+        if (full) labeled[i] = 1;
+        spans[p].push([it.x0, full ? withLabel : it.xg]); lane[i] = p; laneH[p] = Math.max(laneH[p], it.h); continue;
+      }
+      let l = put(it.x0, withLabel, p);
+      if (l >= 0) { labeled[i] = 1; spans[l].push([it.x0, withLabel]); }
+      else if (!compact) return null;
       else {
-        l = put(it.x0, it.xg);
+        l = put(it.x0, it.xg, p);
         if (l < 0) l = spans.reduce((best, sp, k) => (sp.length < spans[best].length ? k : best), 0);
         spans[l].push([it.x0, it.xg]);
       }
       lane[i] = l; laneH[l] = Math.max(laneH[l], it.h);
     }
-  }
+    return { lane, laneH, labeled };
+  };
+  // every label in its own lane if they fit in maxLanes lanes; else the glyphs packed and the labels drawn where they fit
+  const r = place(maxLanes, false) ?? place(maxLanes, true)!;
+  if (prev && key) { prev.clear(); items.forEach((it, i) => prev.set(key(it), r.lane[i])); }
   const laneY: number[] = []; let y = 0;
-  for (const h of laneH) { laneY.push(y); y += h + LANE_GAP; }
-  return { items: items.map((it, i) => ({ ...it, lane: lane[i], labeled: !!labeled[i] })), laneY, height: Math.max(26, y) };
+  for (const h of r.laneH) { laneY.push(y); y += h + LANE_GAP; }
+  return { items: items.map((it, i) => ({ ...it, lane: r.lane[i], labeled: !!r.labeled[i] })), laneY, height: Math.max(26, y) };
 }
 
 /**
@@ -205,34 +216,7 @@ function glyphPaths(t: SvTranscript, X: (p: number) => number, yy: number, lo = 
 /** Breakpoint arcs and segments of the rebuilt chromosome: each piece's reference stretch, the first and last reaching the chromosome's ends. */
 const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first ? 0 : dp.seg.start, dp.seg.last ? L : dp.seg.end];
 
-/**
- * Where the rebuilt chromosome should sit under reference position `c`: its own position of `c` (the nearest retained
- * edge when `c` was lost); among several copies, the one nearest `current`, so the drawing does not jump.
- */
-function derTarget(d: DerLayout, c: number, current: number | null, L: number): { piece: number; pos: number } {
-  let best: { piece: number; pos: number; pen: number } | null = null;
-  for (const dp of d.pieces) {
-    const [lo, hi] = pieceRange(dp, L);
-    const cc = Math.min(hi, Math.max(lo, c)), pen = Math.abs(c - cc), pos = toDer(dp, cc);
-    if (!best || pen < best.pen - 1 || (Math.abs(pen - best.pen) <= 1 && current != null && Math.abs(pos - current) < Math.abs(best.pos - current))) best = { piece: dp.index, pos, pen };
-  }
-  return best ? { piece: best.piece, pos: best.pos } : { piece: -1, pos: c };
-}
 
-/**
- * The rebuilt chromosome's position under one edge of the reference view: its own copy of that position (the nearest
- * retained edge when the position was lost); among several copies, the leftmost for the left edge and the rightmost
- * for the right one, so every copy between them shows.
- */
-function derEdge(d: DerLayout, pos: number, side: 'left' | 'right', L: number): number {
-  let best: { pos: number; pen: number } | null = null;
-  for (const dp of d.pieces) {
-    const [lo, hi] = pieceRange(dp, L);
-    const cc = Math.min(hi, Math.max(lo, pos)), pen = Math.abs(pos - cc), dpos = toDer(dp, cc);
-    if (!best || pen < best.pen - 1 || (Math.abs(pen - best.pen) <= 1 && (side === 'left' ? dpos < best.pos : dpos > best.pos))) best = { pos: dpos, pen };
-  }
-  return best ? best.pos : pos;
-}
 
 /** Modes of inheritance (PanelApp), as colours and words. */
 const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
@@ -248,35 +232,6 @@ const MOI: Record<MoiClass | 'none', { color: string; short: string; label: stri
   none: { color: '#cbd5e1', short: '—', label: 'not in PanelApp' },
 };
 
-/**
- * What a gene's mode of inheritance makes of what the rearrangement does to it: red when the change can be enough
- * (one allele of a monoallelic gene, both of a biallelic one, an extra copy of a triplosensitive one), amber when it
- * depends on something else (the other allele, the sex, the parent of origin, the gene's sensitivity), null when it
- * does not bear on it. A draft for the report's reasoning, not a classification.
- */
-function moiVerdict(gi: GeneImpact, m: MoiClass, hom: boolean, ts: number | null | undefined, hi: number | null | undefined): { level: 'red' | 'amber'; text: string } | null {
-  const k = gi.kind;
-  const loss = k === 'deleted' || k === 'disrupted' || k === 'fusion' || k === 'intragenic-del' || ((k === 'intragenic-dup' || k === 'partial-copy') && gi.principal.frame === 'shifted');
-  const gain = k === 'duplicated';
-  const position = k === 'domain' || k === 'moved' || k === 'nearby';
-  const hiTxt = hi != null ? ` (ClinGen haploinsufficiency ${hi})` : '';
-  if (m === 'MT' || m === '?') return null;
-  if (loss) {
-    if (m === 'AD') return { level: 'red', text: `One allele hit, and one is enough for a monoallelic gene: fits its mode, if the disease arises by loss of function${hiTxt}.` };
-    if (m === 'AD+AR') return { level: 'red', text: `One allele hit: may be enough (its monoallelic form); both alleles hit give the biallelic form.${hiTxt}` };
-    if (m === 'AR') return hom ? { level: 'red', text: 'Both alleles hit: fits a biallelic gene.' } : { level: 'amber', text: 'One allele hit in a biallelic gene: a carrier, unless the other allele carries a variant too: look at it in the reads.' };
-    if (m === 'XLR') return { level: 'amber', text: 'X-linked: enough in a male (hemizygous); a female is usually a carrier (both alleles needed): depends on the sex.' };
-    if (m === 'XLD') return { level: 'red', text: 'X-linked: enough in a male (hemizygous); a female may be affected too, often less severely.' };
-    return { level: 'amber', text: `Imprinted, ${m === 'AD-pat' ? 'paternal' : 'maternal'} allele expressed: harmful if the allele hit is the ${m === 'AD-pat' ? 'paternal' : 'maternal'} one; the parent of origin decides.` };
-  }
-  if (gain) {
-    if (m === 'AR' || m === 'XLR') return null;
-    if (m === 'AD-pat' || m === 'AD-mat') return { level: 'amber', text: `An extra copy of an imprinted gene: depends on the parent of origin (an extra ${m === 'AD-pat' ? 'paternal' : 'maternal'} copy doubles its expression).` };
-    return ts != null && ts >= 2 ? { level: 'red', text: `An extra copy of a triplosensitive gene (ClinGen triplosensitivity ${ts}): fits.` } : { level: 'amber', text: `An extra copy of a ${MOI[m].label} gene: pathogenic only if the gene is sensitive to gains (ClinGen triplosensitivity ${ts ?? 'not curated'}).` };
-  }
-  if (position && (m === 'AD' || m === 'AD+AR' || m === 'XLD' || m === 'AD-pat' || m === 'AD-mat')) return { level: 'amber', text: 'Intact, but its regulatory context changed: for a monoallelic gene a position effect could be enough.' };
-  return null;
-}
 
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
@@ -297,9 +252,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return () => ro.disconnect();
   }, []);
   const L = useMemo(() => chromLength(build as GenomeBuild, chrom) ?? Math.max(eventWin.end * 1.5, 2e6), [build, chrom, eventWin.end]);
+  /** how far the view may go: the reference, and past its ends as far as a longer derivative reaches (set below) */
+  const boundsRef = useRef({ lo: 0, hi: L });
   const clampVp = (s: number, e: number): Vp => {
-    const span = Math.min(L, Math.max(MIN_SPAN, e - s));
-    const c = Math.min(L - span / 2, Math.max(span / 2, (s + e) / 2));
+    const { lo, hi } = boundsRef.current;
+    const span = Math.min(hi - lo, Math.max(MIN_SPAN, e - s));
+    const c = Math.min(hi - span / 2, Math.max(lo + span / 2, (s + e) / 2));
     return { s: c - span / 2, e: c + span / 2 };
   };
   const [mode, setMode] = useState<'mane' | 'all'>('mane');
@@ -330,7 +288,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const raf = useRef(0);
   const anim = useRef<{ fly?: { from: Vp; to: Vp; t0: number; dur: number }; fling?: { v: number; t: number } }>({});
   /** the rebuilt chromosomes' offset from where they should sit, decaying to 0 (a slide instead of a jump) */
-  const derState = useRef(new Map<string, { l: number; r: number; ol: number; or: number }>());
+
   const lastMove = useRef(0);
   const [, settle] = useReducer((x: number) => x + 1, 0);
   const settleTimer = useRef(0);
@@ -351,12 +309,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const sh = a.fling.v * dt;
       next = clampVp(next.s + sh, next.e + sh);
       a.fling.v *= Math.pow(0.9, dt / 16);
-      if (Math.abs(a.fling.v) * 16 > (next.e - next.s) / PW * 0.25 && next.s > 0 && next.e < L) more = true; else a.fling = undefined;
-    }
-    const bpPerPx = (next.e - next.s) / PW;
-    for (const st of derState.current.values()) {
-      if (Math.abs(st.ol) > bpPerPx * 0.5) { st.ol *= 0.8; more = true; } else st.ol = 0;
-      if (Math.abs(st.or) > bpPerPx * 0.5) { st.or *= 0.8; more = true; } else st.or = 0;
+      if (Math.abs(a.fling.v) * 16 > (next.e - next.s) / PW * 0.25 && next.s > boundsRef.current.lo && next.e < boundsRef.current.hi) more = true; else a.fling = undefined;
     }
     vpRef.current = next;
     lastMove.current = now;
@@ -371,15 +324,24 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const flyTo = (s: number, e: number, dur = 480) => { anim.current = { fly: { from: vpRef.current, to: clampVp(s, e), t0: performance.now(), dur } }; kick(); };
   useEffect(() => () => { cancelAnimationFrame(raf.current); window.clearTimeout(settleTimer.current); }, []);
   // a new chromosome or event: start over on it
-  useEffect(() => { derState.current.clear(); const v = initialVp(); anim.current = {}; vpRef.current = v; setVpState(v); }, [chrom, build, eventWin.start, eventWin.end]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const v = eventRec ? clampVp(eventRange().s, eventRange().e) : initialVp(); anim.current = {}; vpRef.current = v; setVpState(v); }, [chrom, build, eventWin.start, eventWin.end]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (focus) flyTo(focus.start, focus.end, 700); }, [focus?.key]); // eslint-disable-line react-hooks/exhaustive-deps
   const span = vp.e - vp.s;
   /** px per base, shared by the reference and the rebuilt chromosomes (set once their stretches are known, below) */
   let ppb = PW / span;
   /** bases per px as drawn, for the gestures */
   const bppRef = useRef(span / PW);
+  bppRef.current = span / PW;
   const refX = (pos: number) => X0 + (pos - vp.s) * ppb;
-  const lod: 'full' | 'bars' | 'density' = span <= LOD_FULL ? 'full' : span <= LOD_BARS ? 'bars' : 'density';
+  // the level of detail changes 15 % past its thresholds, so a zoom hovering at one does not flip it back and forth
+  const lodRef = useRef<'full' | 'bars' | 'density'>(span <= LOD_FULL ? 'full' : span <= LOD_BARS ? 'bars' : 'density');
+  {
+    const up = (t: number) => span > t * 1.15, down = (t: number) => span < t / 1.15, cur = lodRef.current;
+    if (cur === 'full' && up(LOD_FULL)) lodRef.current = up(LOD_BARS) ? 'density' : 'bars';
+    else if (cur === 'bars') { if (down(LOD_FULL)) lodRef.current = 'full'; else if (up(LOD_BARS)) lodRef.current = 'density'; }
+    else if (cur === 'density' && down(LOD_BARS)) lodRef.current = down(LOD_FULL) ? 'full' : 'bars';
+  }
+  const lod = lodRef.current;
   const interacting = performance.now() - lastMove.current < 420;
 
   // ======================== the event: its genes, worked out at full detail ========================
@@ -465,54 +427,71 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   };
   void modesVersion;
   useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const verdictOf = (sym: string) => {
-    const gi = impactOf.get(sym); if (!gi) return null;
-    const mo = modeOf(sym); if (mo.cls === 'none') return null;
-    const d = ann.dosage.get(sym);
-    return moiVerdict(gi, mo.cls, zygosity === 'hom', d?.ts, d?.hi);
-  };
   const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : colorBy === 'moi' ? MOI[modeOf(symbol).cls].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
   /** worth a label in a crowded view: changed by the event, or in the panel, dosage-sensitive or LoF-intolerant */
   const worthSym = (sym: string) => { const gi = impactOf.get(sym); return (!!gi && gi.kind !== 'unaffected' && gi.kind !== 'nearby') || notableSym(sym, annotations); };
 
-  // ======================== the rebuilt chromosomes: under the reference, sliding where the two part ways ========================
+  // ======================== the rebuilt chromosomes: on the reference's axis ========================
+  // One scale for all, and one axis: outside the event each rebuilt chromosome lies exactly under the reference it
+  // carries (the flank before the event at its own offset, the flank after at its own, the difference being the event's
+  // gain or loss); across the event the offset goes from one to the other in proportion to where the view's middle is.
+  // So zooming never moves anything, panning slides the rebuilt chromosome smoothly across the event, and its length
+  // shows: a longer one runs past the reference's end (or starts before its start), a shorter one stops before.
   const ders = story.ders.filter(d => d.rearranged);
-  // Each edge of the reference view maps onto the rebuilt chromosome, which is drawn from one to the other: a longer
-  // derivative (duplications) is drawn a little tighter and both its ends show; zoomed within one segment the two scales
-  // are the same. When the edges do not give a sensible stretch (both inside an inverted segment), the derivative keeps
-  // the reference's scale, centred under the view's middle. A jump (an edge entering another copy) becomes a slide.
-  const c = (vp.s + vp.e) / 2;
-  const derWin = new Map<DerLayout, { l: number; r: number }>();
-  for (const d of ders) {
-    let l = derEdge(d, vp.s, 'left', L), r = derEdge(d, vp.e, 'right', L);
-    if (!(r - l > span * 0.2 && r - l < span * 5)) { const st0 = derState.current.get(d.name); const t = derTarget(d, c, st0 ? (st0.l + st0.r) / 2 : null, L); l = t.pos - span / 2; r = t.pos + span / 2; }
-    const st = derState.current.get(d.name);
-    if (!st) derState.current.set(d.name, { l, r, ol: 0, or: 0 });
-    else {
-      if (Math.abs(l - st.l) > span * 0.3) { st.ol += st.l - l; kick(); }
-      if (Math.abs(r - st.r) > span * 0.3) { st.or += st.r - r; kick(); }
-      st.l = l; st.r = r;
-    }
-    const s2 = derState.current.get(d.name)!;
-    derWin.set(d, { l: s2.l + s2.ol, r: Math.max(s2.l + s2.ol + 1, s2.r + s2.or) });
-  }
-  // one scale for the reference and the rebuilt chromosomes, the longer of the two filling the width: a derivative
-  // longer than the reference (duplications) runs past the reference's end, a shorter one (deletions) stops before it
-  /** each rebuilt chromosome's whole extent (its ends are the reference's), and its length */
+  /** each rebuilt chromosome's whole extent in its own positions (its ends are the reference's), and its length */
   const derExtent = (d: DerLayout) => { let lo = Infinity, hi = -Infinity; for (const dp of d.pieces) { const [a, b] = pieceRange(dp, L); for (const v of [toDer(dp, a), toDer(dp, b)]) { lo = Math.min(lo, v); hi = Math.max(hi, v); } } return { lo, hi, len: hi - lo }; };
-  let D = Math.max(span, ...[...derWin.values()].map(w => w.r - w.l));
-  // the reference's end (qter) in view: the rebuilt chromosomes' ends too, so their lengths compare at a glance
-  if (vp.s + D >= L - 1) for (const d of ders) { const w = derWin.get(d); if (w) D = Math.max(D, derExtent(d).hi - w.l); }
-  ppb = PW / D; bppRef.current = D / PW;
-  /** the reference drawn: the view, and on past it when the derivative is longer */
-  const ve = Math.min(L, vp.s + D);
-  const derX = (d: DerLayout, dpos: number) => { const w = derWin.get(d); return w ? X0 + (dpos - w.l) * ppb : XC; };
+  const bpList = bpKey ? bpKey.split(',').map(Number) : [];
+  const evL = bpList.length ? bpList[0] : 0, evR = bpList.length ? bpList[bpList.length - 1] : 0;
+  /** the offset (derivative position − reference position) of each flank: the pieces holding the chromosome's two ends */
+  const flankOff = useMemo(() => new Map(ders.map(d => {
+    const at = (pos: number) => { for (const dp of d.pieces) { const [lo, hi] = pieceRange(dp, L); if (pos >= lo && pos <= hi && !dp.piece.reversed) return toDer(dp, pos) - pos; } return null; };
+    const ext = derExtent(d);
+    return [d.name, { l: at(Math.max(0, evL - 1)) ?? ext.lo, r: at(Math.min(L, evR + 1)) ?? ext.hi - L }];
+  })), [story, L, evL, evR]); // eslint-disable-line react-hooks/exhaustive-deps
+  const offsetAt = (d: DerLayout, c: number) => {
+    const f = flankOff.get(d.name); if (!f) return 0;
+    if (c <= evL || evR <= evL) return f.l;
+    if (c >= evR) return f.r;
+    return f.l + (f.r - f.l) * (c - evL) / (evR - evL);
+  };
+  const c = (vp.s + vp.e) / 2;
+  const derOff = new Map(ders.map(d => [d, offsetAt(d, c)]));
+  const derX = (d: DerLayout, dpos: number) => X0 + (dpos - (derOff.get(d) ?? 0) - vp.s) * ppb;
+  /** the reference drawn: the view (it may reach past the reference's ends, where a longer derivative goes on) */
+  const ve = Math.min(L, vp.e);
+  // how far past the reference's ends the view may go: as far as the longest derivative reaches
+  const extra = Math.max(0, ...ders.map(d => derExtent(d).len - L));
+  boundsRef.current = { lo: -extra, hi: L + extra };
+  /**
+   * The event in full: its stretch of the reference, and that of each rebuilt chromosome (longer when it gained), as
+   * they stand when the view is centred on the event.
+   */
+  const eventRange = (): Vp => {
+    const pad = Math.max(2000, (eventWin.end - eventWin.start) * 0.12);
+    let lo = eventWin.start, hi = eventWin.end;
+    for (let it = 0; it < 2; it++) {
+      const cc = (lo + hi) / 2;
+      for (const d of ders) { const f = flankOff.get(d.name); if (!f) continue; const off = offsetAt(d, cc); lo = Math.min(lo, evL + f.l - off); hi = Math.max(hi, evR + f.r - off); }
+    }
+    return { s: lo - pad, e: hi + pad };
+  };
+  /** the whole chromosome, with its derivatives' ends, from where the view would stand */
+  const wholeView = (): Vp => {
+    let lo = 0, hi = L;
+    for (let it = 0; it < 2; it++) {
+      const cc = (lo + hi) / 2; let a = 0, b = L;
+      for (const d of ders) { const e = derExtent(d), off = offsetAt(d, cc); a = Math.min(a, e.lo - off); b = Math.max(b, e.hi - off); }
+      lo = a; hi = b;
+    }
+    const pad = (hi - lo) * 0.01;
+    return { s: lo - pad, e: hi + pad };
+  };
 
   /** the stretches of the reference the rebuilt chromosomes show (their genes are fetched and drawn too) */
   let needS = vp.s, needE = ve;
   for (const d of ders) {
-    const w = derWin.get(d)!, dl = w.l, dr = w.r;
+    const off = derOff.get(d) ?? 0, dl = vp.s + off, dr = vp.e + off;
     for (const dp of d.pieces) {
       const [lo, hi] = pieceRange(dp, L);
       const a = Math.min(toDer(dp, lo), toDer(dp, hi)), b = Math.max(toDer(dp, lo), toDer(dp, hi));
@@ -522,7 +501,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       needS = Math.min(needS, back(oa), back(ob)); needE = Math.max(needE, back(oa), back(ob));
     }
   }
-  needS = Math.max(0, needS); needE = Math.min(L, needE);
+  needS = Math.max(0, needS); needE = Math.min(L, Math.max(needE, needS + 1));
 
   // ======================== wherever the view goes: genes and population CNVs by tiles ========================
   const [tilesVersion, bumpTiles] = useReducer((x: number) => x + 1, 0);
@@ -575,7 +554,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [visKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const zoomTo = (lo: number, hi: number) => { const pad = (hi - lo) * 0.15 + 200; flyTo(lo - pad, hi + pad); };
-  const eventView = () => { const pad = Math.max(2000, (eventWin.end - eventWin.start) * 0.12); flyTo(eventWin.start - pad, eventWin.end + pad); };
+  const eventView = () => { const r = eventRange(); flyTo(r.s, r.e); };
 
   // ======================== layout ========================
   const shown = (g: SvGene) => (mode === 'mane' || lod !== 'full' ? [g.principal] : g.transcripts);
@@ -585,7 +564,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const sticky = useRef(new Map<string, number>());
   const keep = (key: string, h: number) => { const prev = sticky.current.get(key) ?? 0; const v = interacting ? Math.max(h, prev) : h; sticky.current.set(key, v); return v; };
 
-  // reference genes
+  // reference genes (their lanes kept from one drawing to the next)
+  const refLanes = useRef(new Map<string, number>()), derLanes = useRef(new Map<string, Map<string, number>>());
   const refItems = (() => {
     if (lod === 'density') {
       const worth = visGenes.filter(g => worthSym(g.symbol));
@@ -594,7 +574,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return pack(visGenes.filter(g => inView(refX(g.start), refX(g.end))).map(g => {
       const a = Math.max(X0 + 2, refX(g.start)), b = refX(g.end), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0);
       return { g, x0: a, x1: Math.max(b, a + lw), xg: Math.max(b, a + 3), h: LABEL_H + (lod === 'full' ? shown(g).length * TX_H : 8), worth: worthSym(g.symbol), lw };
-    }));
+    }), MAX_LANES, refLanes.current, it => it.g.symbol, interacting);
   })();
   /** a density profile of the genes, for a chromosome seen whole */
   const density = useMemo(() => {
@@ -651,7 +631,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         }
       }
     }
-    return pack(list);
+    if (!derLanes.current.has(d.name)) derLanes.current.set(d.name, new Map());
+    return pack(list, MAX_LANES, derLanes.current.get(d.name), b => `${b.label}|${b.flank ? 'flank' : b.chains[0]?.parts[0]?.dp.index ?? ''}`, interacting);
   });
 
   // ---- vertical layout ----
@@ -800,7 +781,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   // ---- ruler ----
   const step = niceStep(ve - vp.s, 9);
   const ticks: number[] = [];
-  for (let t = Math.ceil(vp.s / step) * step; t <= ve; t += step) ticks.push(t);
+  for (let t = Math.max(0, Math.ceil(vp.s / step) * step); t <= ve; t += step) ticks.push(t);
   const ix = (pos: number) => X0 + (pos / L) * PW;
 
   const torn = (x: number, yy: number, color: string, key: string) => <path key={key} d={`M${x},${yy - 8} l-3,3 l3,3 l-3,3 l3,3 l-3,3`} fill="none" stroke={color} strokeWidth={1.4} />;
@@ -828,7 +809,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   });
 
   // ---- the SVG ----
-  const vl = Math.max(2, ix(ve) - ix(vp.s));
+  const vl = Math.max(2, ix(Math.min(L, ve)) - ix(Math.max(0, vp.s)));
   const svg = (
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: dragRef.current?.moved && dragRef.current.kind === 'pan' ? 'grabbing' : 'grab', fontFamily: FONT, touchAction: 'pan-y' }} className="block select-none"
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
@@ -854,8 +835,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} rx={IDEO_H / 2} fill="none" stroke="#94a3b8" strokeWidth={0.8} />
       {bands.filter(b => ix(b.end) - ix(b.start) > textWidth(b.name) * 0.78 + 6 && b.stain !== 'acen').map(b => <text key={`bl${b.name}${b.start}`} x={(ix(b.start) + ix(b.end)) / 2} y={IDEO_Y - 3} fontSize={8} textAnchor="middle" fill={C.faint}>{b.name}</text>)}
       {rec && bpKey.split(',').filter(Boolean).map(p => <path key={`ibp${p}`} d={`M${ix(+p)},${IDEO_Y - 1} l-3,-5 h6 z`} fill={C.lost} />)}
-      <path d={`M${ix(vp.s)},${IDEO_Y + IDEO_H} L${X0},${IDEO_Y + IDEO_H + LENS_H} H${X1} L${ix(vp.s) + vl},${IDEO_Y + IDEO_H} Z`} fill="url(#svb-lens)" />
-      <rect x={ix(vp.s) - 1} y={IDEO_Y - 2} width={vl + 2} height={IDEO_H + 4} rx={3} fill={C.accent} fillOpacity={0.12} stroke={C.accent} strokeWidth={1.4} />
+      <path d={`M${ix(Math.max(0, vp.s))},${IDEO_Y + IDEO_H} L${X0},${IDEO_Y + IDEO_H + LENS_H} H${X1} L${ix(Math.max(0, vp.s)) + vl},${IDEO_Y + IDEO_H} Z`} fill="url(#svb-lens)" />
+      <rect x={ix(Math.max(0, vp.s)) - 1} y={IDEO_Y - 2} width={vl + 2} height={IDEO_H + 4} rx={3} fill={C.accent} fillOpacity={0.12} stroke={C.accent} strokeWidth={1.4} />
       {/* track names */}
       <g fontSize={10.5} fill={C.muted}>
         {domains.length > 0 && <text x={14} y={yRefTad + TAD_H - 6}>TADs</text>}
@@ -891,8 +872,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const dot = panelDot(g.symbol), lx = Math.max(X0 + 2, refX(g.start));
           return (
             <g key={`rg${g.symbol}`} onMouseEnter={hoverOn(g.symbol)} onMouseMove={hoverOn(g.symbol)} onMouseLeave={hoverOff} style={{ cursor: 'pointer' }} onClick={pinOn(g.symbol)}>
-              {(() => { const v = lod !== 'density' ? verdictOf(g.symbol) : null; const it = refItems.items.find(x => x.g === g); if (!v || !it) return null;
-                return <rect x={lx - 4} y={yy - 3} width={Math.max(it.xg, it.x0 + (labeled ? it.lw : 0)) - lx + 8} height={it.h + 5} rx={6} fill={v.level === 'red' ? '#fee2e2' : '#fef3c7'} fillOpacity={0.55} stroke={v.level === 'red' ? '#dc2626' : '#d97706'} strokeWidth={1.4}><title>{v.text}</title></rect>; })()}
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
               {labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={col}>{g.symbol}</text>}
               {lod === 'density'
@@ -1117,13 +1096,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <div className="text-gray-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
         {gi && <div className="mt-0.5">{gi.principal.text}</div>}
         {(() => {
-          const mo = modeOf(g.symbol), v = gi ? verdictOf(g.symbol) : null;
+          const mo = modeOf(g.symbol);
           if (!mo.m && !mo.fromPanel && mo.cls === '?') return <div className="mt-0.5 text-gray-400">Inheritance (PanelApp): loading…</div>;
           const parts = mo.m?.parts.filter(p => p.cls !== '?' || mo.m!.parts.length === 1) ?? [];
           return <>
             <div className="mt-0.5"><span style={{ color: MOI[mo.cls].color === '#cbd5e1' ? '#94a3b8' : MOI[mo.cls].color }}>■</span> Inheritance: <b>{MOI[mo.cls].label}</b>
               <span className="text-gray-400">{mo.fromPanel ? ` (in ${mo.fromPanel})` : ''}{parts.length ? ` · ${mo.m!.source}: ${parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}${p.green ? ` (${p.green} green)` : ''}`).join(', ')}` : mo.cls === 'none' ? ` · ${moiSrc.label}` : ''}</span></div>
-            {v && <div className={`mt-0.5 ${v.level === 'red' ? 'text-red-300' : 'text-amber-200'}`}>{v.level === 'red' ? '▲' : '△'} {v.text} <span className="text-gray-400">(automated draft)</span></div>}
           </>;
         })()}
         {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure (the links stay when this card is closed; click the background to clear them)' : ''}</div>; })()}
@@ -1172,7 +1150,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           <button className={btn} onClick={() => flyTo(vp.s - span * 0.5, vp.e + span * 0.5, 300)} title="Zoom out (−, Ctrl + wheel, Shift + double-click)">−</button>
           <button className={btn} onClick={() => flyTo(vp.s + span * 0.25, vp.e - span * 0.25, 300)} title="Zoom in (+, Ctrl + wheel, double-click)">+</button>
           {rec && <button className={btn} onClick={eventView} title="Fit the event (E)">event</button>}
-          <button className={btn} onClick={() => flyTo(0, L, 700)} title="The whole chromosome">{chrom.replace(/^chr/, 'chr ')}</button>
+          <button className={btn} onClick={() => { const w = wholeView(); flyTo(w.s, w.e, 700); }} title="The whole chromosome (and the rebuilt one's ends)">{chrom.replace(/^chr/, 'chr ')}</button>
         </span>
       </div>
       {rec && showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
@@ -1190,7 +1168,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
-        {rec && <span className="inline-flex items-center gap-1"><span className="inline-block w-4 h-3 rounded border-[1.5px] border-red-600 bg-red-100" />the change can be enough for the gene's mode of inheritance <span className="inline-block w-4 h-3 rounded border-[1.5px] border-amber-600 bg-amber-100 ml-1" />it depends (the other allele, the sex, the parent of origin, sensitivity to gains) — PanelApp modes, automated draft</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
