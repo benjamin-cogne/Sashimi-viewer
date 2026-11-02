@@ -236,6 +236,17 @@ const MOI: Record<MoiClass | 'none', { color: string; short: string; label: stri
 };
 
 
+/** Which genes are drawn: every criterion set must hold (empty or 'any' = not filtering on it). */
+interface GeneFilter {
+  panel: 'any' | 'in' | 'green';
+  moi: (MoiClass | 'none')[];
+  /** LOEUF strictly below this, or null */
+  loeuf: number | null;
+  changed: 'any' | 'changed' | 'near';
+}
+const NO_FILTER: GeneFilter = { panel: 'any', moi: [], loeuf: null, changed: 'any' };
+const filterCount = (f: GeneFilter, hasPanel: boolean, hasEvent: boolean) => (hasPanel && f.panel !== 'any' ? 1 : 0) + (f.moi.length ? 1 : 0) + (f.loeuf != null ? 1 : 0) + (hasEvent && f.changed !== 'any' ? 1 : 0);
+
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
 type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: AchroPlaced; achroType?: 'del' | 'dup' };
@@ -287,6 +298,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [pop, setPop] = useState<{ list: PopulationSv[]; loading: boolean; error?: string }>({ list: [], loading: false });
   /** the AChro-Puce recurrent CNVs (their sheets' classes), drawn under the population CNVs */
   const [showAchro, setShowAchro] = useState<boolean>(() => store.get<boolean>('sashimi.svAchro') ?? true);
+  /** the genes drawn: in the panel, of some modes of inheritance, under a LOEUF, changed by the SV (kept) */
+  const [geneFilter, setGeneFilterState] = useState<GeneFilter>(() => ({ ...NO_FILTER, ...(store.get<GeneFilter>('sashimi.svGeneFilter') ?? {}) }));
+  const setGeneFilter = (f: GeneFilter) => { setGeneFilterState(f); store.set('sashimi.svGeneFilter', f); };
   /** coordinates published in the other build, moved to this one (Ensembl), by region id; null when they could not be */
   const [achroLifted, setAchroLifted] = useState<Map<string, { start: number; end: number } | null>>(new Map());
   const [bands, setBands] = useState<Cytoband[]>([]);
@@ -450,6 +464,21 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <title>{`Mode of inheritance (PanelApp): ${MOI[m.cls].label}${m.fromPanel ? ` in ${m.fromPanel}` : m.m ? ` · ${m.m.parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}`).join(', ')}` : ''}`}</title></g>;
   };
   useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** does a gene pass the gene filter (a criterion whose data is still on its way does not hold yet) */
+  const passes = (sym: string): boolean => {
+    const f = geneFilter;
+    if (panel && f.panel !== 'any') { const pg = panel.genes.get(sym.toUpperCase()); if (!pg || (f.panel === 'green' && pg.confidence !== 3)) return false; }
+    if (f.loeuf != null) { const c = ann.constraint.get(sym); if (c?.loeuf == null || c.loeuf >= f.loeuf) return false; }
+    if (rec && f.changed !== 'any') { const k = impactOf.get(sym)?.kind; if (!k || k === 'unaffected' || (f.changed === 'changed' && k === 'nearby')) return false; }
+    if (f.moi.length) {
+      const m = modes.current.get(sym), pg = panel?.genes.get(sym.toUpperCase());
+      if (!pg?.moi && (m === undefined || m === 'loading')) return false;
+      const cls = modeOf(sym).cls;
+      if (!f.moi.includes(cls)) return false;
+    }
+    return true;
+  };
+  const filtering = filterCount(geneFilter, !!panel, !!rec) > 0;
   const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : colorBy === 'moi' ? MOI[modeOf(symbol).cls].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
   /** worth a label in a crowded view: changed by the event, or in the panel, dosage-sensitive or LoF-intolerant */
@@ -624,10 +653,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const refLanes = useRef(new Map<string, number>()), derLanes = useRef(new Map<string, Map<string, number>>());
   const refItems = (() => {
     if (lod === 'density') {
-      const worth = visGenes.filter(g => worthSym(g.symbol));
+      const worth = visGenes.filter(g => worthSym(g.symbol) && (!filtering || passes(g.symbol)));
       return pack(worth.map(g => { const a = Math.max(X0 + 2, refX(g.start)); const lw = labelW(g.symbol) + badgeW(g.symbol); return { g, x0: a, x1: a + lw, xg: a + 3, h: LABEL_H + 2, worth: true, lw }; }), 3);
     }
-    return pack(visGenes.filter(g => inView(refX(g.start), refX(g.end))).map(g => {
+    return pack(visGenes.filter(g => inView(refX(g.start), refX(g.end)) && (!filtering || passes(g.symbol))).map(g => {
       const a = Math.max(X0 + 2, refX(g.start)), b = refX(g.end), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0) + badgeW(g.symbol);
       return { g, x0: a, x1: Math.max(b, a + lw), xg: Math.max(b, a + 3), h: LABEL_H + (lod === 'full' ? shown(g).length * TX_H : 8), worth: worthSym(g.symbol), lw };
     }), MAX_LANES, refLanes.current, it => it.g.symbol, interacting);
@@ -637,6 +666,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     if (lod !== 'density') return null;
     const BIN = 3, n = Math.ceil(PW / BIN), counts = new Float32Array(n);
     for (const g of view.genes) {
+      if (filtering && !passes(g.symbol)) continue;
       const a = Math.floor((refX(g.start) - X0) / BIN), b = Math.floor((refX(g.end) - X0) / BIN);
       for (let i = Math.max(0, a); i <= Math.min(n - 1, b); i++) counts[i]++;
     }
@@ -656,6 +686,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       for (const ch of story.chains) {
         if (story.ders[ch.der] !== d || !keepC(ch)) continue;
         const geneList = [...new Set(ch.parts.map(p => p.tx.gene))];
+        if (filtering && !geneList.some(passes)) continue;
         const xs = ch.parts.flatMap(p => [derX(d, toDer(p.dp, p.lo)), derX(d, toDer(p.dp, p.hi))]);
         if (!inView(Math.min(...xs), Math.max(...xs))) continue;
         const x0 = Math.max(X0 + 2, Math.min(...xs)), x1 = Math.max(...xs);
@@ -679,7 +710,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         if (!dp.seg.first && !dp.seg.last) continue;
         const [lo, hi] = pieceRange(dp, L);
         for (const g of view.genes) {
-          if (impactOf.has(g.symbol) || g.start < lo || g.end > hi || (g.end > win.start && g.start < win.end)) continue;
+          if (impactOf.has(g.symbol) || g.start < lo || g.end > hi || (g.end > win.start && g.start < win.end) || (filtering && !passes(g.symbol))) continue;
           const xa = derX(d, toDer(dp, g.start)), xb = derX(d, toDer(dp, g.end));
           if (!inView(xa, xb)) continue;
           const x0 = Math.max(X0 + 2, Math.min(xa, xb)), x1 = Math.max(xa, xb), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0) + badgeW(g.symbol);
@@ -1233,6 +1264,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {(['loeuf', 'impact', 'moi'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : m === 'moi' ? `Genes coloured by their mode of inheritance in PanelApp (${moiSrc.label}): the loaded panel's own value, else the commonest among the gene's panels, green ratings first` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : m === 'moi' ? 'colour: inheritance' : 'colour: impact'}</button>)}
         </span>
         <PanelPicker panel={panelData} onPanel={p => { setPanelData(p); store.set('sashimi.svPanel', p); }} />
+        <GeneFilterControl filter={geneFilter} onChange={setGeneFilter} hasPanel={!!panel} panelName={panel?.name ?? null} hasEvent={!!rec}
+          counts={(() => { const inV = visGenes.filter(g => g.end > vp.s && g.start < ve); const shownN = filtering ? inV.filter(g => passes(g.symbol)).length : inV.length; const waiting = geneFilter.moi.length ? inV.filter(g => { const m = modes.current.get(g.symbol); return m === undefined || m === 'loading'; }).length : 0; return { shown: shownN, total: inV.length, waiting }; })()} />
         {loaders.getPopulationSvs && (
           <button onClick={() => { setShowDgv(v => { store.set('sashimi.svDgv', !v); return !v; }); }} aria-pressed={showDgv}
             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${showDgv ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-600'} hover:bg-gray-50`}
@@ -1307,6 +1340,54 @@ function notableSym(sym: string, a: GeneAnnotations): boolean {
   const d = a.dosage.get(sym), c = a.constraint.get(sym);
   return !!a.panel?.genes.has(sym.toUpperCase()) || [2, 3].includes(d?.hi ?? -1) || [2, 3].includes(d?.ts ?? -1)
     || (c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? LOEUF_INTOLERANT.v4)) || (c?.pli != null && c.pli >= PLI_INTOLERANT);
+}
+
+// ======================== Gene filter ========================
+
+/** The gene filter: a button with the number of criteria set, opening the criteria; every criterion set must hold. */
+function GeneFilterControl({ filter, onChange, hasPanel, panelName, hasEvent, counts }: { filter: GeneFilter; onChange: (f: GeneFilter) => void; hasPanel: boolean; panelName: string | null; hasEvent: boolean; counts: { shown: number; total: number; waiting: number } }) {
+  const [open, setOpen] = useState(false);
+  const [custom, setCustom] = useState<string>(filter.loeuf != null && ![0.35, 0.45, 0.6].includes(filter.loeuf) ? String(filter.loeuf) : '');
+  const n = filterCount(filter, hasPanel, hasEvent);
+  const seg = <T extends string | number | null>(value: T, options: { v: T; label: string; title?: string }[], set: (v: T) => void, disabled = false) => (
+    <span className={`inline-flex rounded-md border border-gray-300 overflow-hidden ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
+      {options.map(o => <button key={String(o.v)} onClick={() => set(o.v)} title={o.title} className={`px-2 py-0.5 whitespace-nowrap ${value === o.v ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>{o.label}</button>)}
+    </span>
+  );
+  const MOIS: (MoiClass | 'none')[] = ['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT', '?', 'none'];
+  return (
+    <span className="relative">
+      <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${n ? 'border-accent-400 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-700'} hover:bg-gray-50`}
+        title="Show only some genes: in the panel, of some modes of inheritance, under a LOEUF, changed by the SV">
+        ⚲ Genes{n ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{n}</span> : null}{n ? <span className="text-gray-500">· {counts.shown}/{counts.total}</span> : null}
+      </button>
+      {open && (
+        <div className="absolute z-40 mt-1 w-[470px] rounded-lg border border-gray-300 bg-white shadow-2xl p-3 text-xs space-y-2.5" onMouseDown={e => e.stopPropagation()}>
+          <div className="flex items-center justify-between"><b>Show the genes</b><span className="flex items-center gap-2">
+            <button onClick={() => { onChange(NO_FILTER); setCustom(''); }} className="text-accent-700 hover:underline">all genes</button>
+            <button onClick={() => setOpen(false)} className="px-1.5 text-gray-400 hover:text-gray-700">×</button></span></div>
+          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">in the gene panel</span>
+            {seg(filter.panel, [{ v: 'any', label: 'any' }, { v: 'in', label: 'in the panel' }, { v: 'green', label: 'green only' }], v => onChange({ ...filter, panel: v }), !hasPanel)}
+            {!hasPanel && <span className="text-gray-400">load a panel first</span>}{hasPanel && <span className="text-gray-400 truncate max-w-[110px]" title={panelName ?? ''}>{panelName}</span>}</div>
+          <div className="flex items-start gap-2"><span className="w-36 text-gray-600 pt-0.5">mode of inheritance</span>
+            <span className="flex flex-wrap gap-1 flex-1">
+              {MOIS.map(m => { const on = filter.moi.includes(m); return (
+                <button key={m} onClick={() => onChange({ ...filter, moi: on ? filter.moi.filter(x => x !== m) : [...filter.moi, m] })} title={MOI[m].label}
+                  className="px-1.5 py-0.5 rounded-full border text-[10.5px] font-bold" style={on ? { background: MOI[m].color, color: '#fff', borderColor: MOI[m].color } : { color: MOI[m].color === '#cbd5e1' ? '#64748b' : MOI[m].color, borderColor: `${MOI[m].color}88` }}>
+                  {m === 'none' ? 'not in PanelApp' : m === '?' ? 'unknown' : MOI[m].short}</button>); })}
+              <span className="text-gray-400 w-full">{filter.moi.length ? 'genes of any of these modes' : 'any mode'}</span>
+            </span></div>
+          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">LOEUF below</span>
+            {seg(filter.loeuf, [{ v: null, label: 'off' }, { v: 0.35, label: '0.35', title: 'gnomAD v2.1.1 LoF-intolerance cut-off' }, { v: 0.45, label: '0.45', title: 'gnomAD v4 browser threshold for Mendelian disorders' }, { v: 0.6, label: '0.6', title: 'gnomAD v4.0 general cut-off' }], v => { setCustom(''); onChange({ ...filter, loeuf: v }); })}
+            <input value={custom} onChange={e => { setCustom(e.target.value); const v = Number(e.target.value.replace(',', '.')); if (e.target.value.trim() && Number.isFinite(v) && v > 0) onChange({ ...filter, loeuf: v }); }} placeholder="other" className="w-14 border rounded px-1 py-0.5" /></div>
+          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">changed by the SV</span>
+            {seg(filter.changed, [{ v: 'any', label: 'any' }, { v: 'changed', label: 'changed' }, { v: 'near', label: 'changed or near a breakpoint' }], v => onChange({ ...filter, changed: v }), !hasEvent)}
+            {!hasEvent && <span className="text-gray-400">no SV drawn</span>}</div>
+          <div className="text-gray-500 border-t border-gray-100 pt-1.5">{counts.shown} of {counts.total} genes in view shown{counts.waiting ? ` · ${counts.waiting} waiting for their PanelApp modes` : ''}. Every criterion set must hold; a gene without the data a criterion needs (no LOEUF, not yet looked up) is hidden.</div>
+        </div>
+      )}
+    </span>
+  );
 }
 
 // ======================== AChro-Puce ========================
