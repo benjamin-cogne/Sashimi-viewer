@@ -4,7 +4,7 @@
  * the same chromosome, else the reference alone). GRCh38 by default, GRCh37 on demand: an `NC_` accession's version
  * picks its build by itself.
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
 import { parseSv, type ParsedSv } from './svNomenclature';
@@ -94,6 +94,13 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
     if (text.trim()) void draw(text, b);
   };
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
   const sv = shown?.kind === 'sv' ? shown.parsed : null;
   const chrom = sv ? sv.chrom : shown?.kind === 'region' ? shown.chrom : '';
   const bands = useCytobands(chrom || 'chr1', loaders.getCytobands);
@@ -101,9 +108,16 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const full = useMemo<SvGeneLoaders>(() => ({ ...loaders, fallback: [] }), [loaders]);
   const rec = sv?.rec;
   return (
-    <div className="fixed inset-0 z-[70] bg-slate-900/85 flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-[1240px] text-gray-900" onMouseDown={e => e.stopPropagation()} style={{ fontFamily: FONT }}>
-        <div className="flex items-start justify-between px-5 pt-4 pb-2">
+    <div className="fixed inset-0 z-[70] bg-white overflow-y-auto text-gray-900" style={{ fontFamily: FONT }}>
+      <div className="w-full min-h-full">
+        {/* a full-screen page: back to the Sashimi viewer from its bar (or Esc) */}
+        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-11 border-b border-gray-200 bg-white/95 shadow-sm">
+          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-gray-300 bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
+          <span className="text-gray-300">/</span>
+          <span className="text-sm font-bold">SV browser</span>
+          <span className="ml-auto text-[11px] text-gray-400">Esc: back to the viewer</span>
+        </div>
+        <div className="flex items-start justify-between px-5 pt-3 pb-2">
           <div>
             <div className="text-base font-bold flex items-center gap-2">SV browser
               {loadersFor
@@ -114,7 +128,6 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
             </div>
             <div className="text-xs text-gray-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb) or a gene name</div>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none px-1" title="Close">×</button>
         </div>
         <div className="px-5 pb-3">
           <div className="flex gap-2">

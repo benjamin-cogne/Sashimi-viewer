@@ -29,7 +29,14 @@ import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-const VW = 1200, X0 = 112, X1 = 1186, PW = X1 - X0, XC = (X0 + X1) / 2;
+/**
+ * The drawing's width in px (one unit per pixel, so a wider screen shows more of the genome at the same text size),
+ * the plot's left and right edges, its width and centre. Set by the browser from its box at each render (one browser
+ * drawn at a time).
+ */
+const X0 = 112;
+let VW = 1200, X1 = VW - 14, PW = X1 - X0, XC = (X0 + X1) / 2;
+const setWidth = (w: number) => { VW = w; X1 = w - 14; PW = X1 - X0; XC = (X0 + X1) / 2; };
 const DGV_LANE_H = 9, DGV_MAX_LANES = 8;
 const DGV_COLOR = { loss: '#dc2626', gain: '#2563eb', both: '#7c3aed', unknown: '#64748b' } as const;
 const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H = 20, RIB_H = 118;
@@ -219,6 +226,17 @@ type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv };
 // ======================== Component ========================
 
 export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus }: Props) {
+  // the drawing as wide as its box, in px
+  const [vw, setVw] = useState(1200);
+  setWidth(vw);
+  const widthBox = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = widthBox.current; if (!el) return;
+    const measure = () => setVw(Math.max(760, Math.round(el.clientWidth)));
+    measure();
+    const ro = new ResizeObserver(measure); ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const L = useMemo(() => chromLength(build as GenomeBuild, chrom) ?? Math.max(eventWin.end * 1.5, 2e6), [build, chrom, eventWin.end]);
   const clampVp = (s: number, e: number): Vp => {
     const span = Math.min(L, Math.max(MIN_SPAN, e - s));
@@ -966,7 +984,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         </span>
       </div>
       {rec && showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
-      <div className="px-3 mt-2 relative" ref={boxRef}>
+      <div className="px-3 mt-2"><div ref={widthBox} className="w-full" /></div>
+      <div className="px-3 mt-0 relative" ref={boxRef}>
         {svg}
         {pinned && card(pinned, true)}
         {tip && tip.gene !== pinned?.gene && card(tip, false)}
