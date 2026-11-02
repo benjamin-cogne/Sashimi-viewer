@@ -287,7 +287,7 @@ export interface DomainStatus {
   /** the gene whose protein carries the domain, in a fusion */
   gene?: string;
   /** residue ranges drawn on each row (0-based half-open), when they do not follow from the diff (a fusion) */
-  rows?: { canonical: [number, number][]; observed: [number, number][] };
+  rows?: { canonical: [number, number][]; observed: [number, number][]; /** a fusion's 3′ partner, on its own protein */ partner?: [number, number][] };
 }
 
 /** UniProt domains first, then Pfam, SMART, PANTHER / Superfamily; overlapping hits of the same id merged. */
@@ -352,6 +352,10 @@ export interface FusionStoryInfo {
   partnerFrom: number | null;
   /** the start codon used: the 5′ partner's, or the 3′ partner's when the junction is in the 5′ partner's 5′ UTR */
   startFrom: 'five' | 'three' | null;
+  /** the 3′ partner's own transcript, spliced and translated as it is without the fusion */
+  partner: Isoform;
+  /** fused residue i is the 3′ partner's residue i − shift (null: not read in the 3′ partner's frame) */
+  shift: number | null;
 }
 
 export function spliceStory(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[], seqAt: (s: number, e: number) => string, features: ProteinDomain[]): SpliceStory {
@@ -500,21 +504,21 @@ export function fusionStory(five: FusionEnd, three: FusionEnd, seqAt: (s: number
   const domsA = domainStatus(pickDomains(featuresFive), diff.kind === 'identical' ? diff : { ...diff, kind: 'truncation' })
     .map(ds => {
       const s = ds.domain.start - 1, e = ds.domain.end;
-      return { ...ds, gene: gA, note: ds.state === 'lost' ? `not in the fusion (after ${gA} p.${prefix})` : ds.note, rows: { canonical: [[s, e]] as [number, number][], observed: (e <= prefix ? [[s, e]] : s >= prefix ? [] : [[s, prefix]]) as [number, number][] } };
+      return { ...ds, gene: gA, note: ds.state === 'lost' ? `not in the fusion (after ${gA} p.${prefix})` : ds.note, rows: { canonical: [[s, e]] as [number, number][], observed: (e <= prefix ? [[s, e]] : s >= prefix ? [] : [[s, prefix]]) as [number, number][], partner: [] } };
     });
   const domsB = pickDomains(featuresThree).map((dom): DomainStatus => {
     const s = dom.start - 1, e = dom.end;
-    if (!partnerResidues || shift == null) return { domain: dom, state: 'lost', note: frame.verdict === 'frameshift' ? `${gB} read out of its frame` : `${gB}'s protein not carried`, gene: gB, rows: { canonical: [], observed: [] } };
+    if (!partnerResidues || shift == null) return { domain: dom, state: 'lost', note: frame.verdict === 'frameshift' ? `${gB} read out of its frame` : `${gB}'s protein not carried`, gene: gB, rows: { canonical: [], observed: [], partner: [[s, e]] } };
     const a = Math.max(s + shift, partnerResidues[0]), b = Math.min(e + shift, partnerResidues[1]);
     const state: DomainState = b <= a ? 'lost' : b - a === e - s ? 'intact' : 'disrupted';
     const note = state === 'intact' ? `carried in frame (fusion residues ${a + 1}–${b})` : state === 'lost' ? (e + shift <= partnerResidues[0] ? `before the junction in ${gB}` : 'after the premature stop') : `${b - a} of ${e - s} aa carried`;
-    return { domain: dom, state, note, gene: gB, rows: { canonical: [], observed: b > a ? [[a, b]] : [] } };
+    return { domain: dom, state, note, gene: gB, rows: { canonical: [], observed: b > a ? [[a, b]] : [], partner: [[s, e]] } };
   });
 
   const rankA = blocks[nA - 1]?.rank, rankB = blocks[nA]?.rank;
   const event: SpliceEvent = { kind: 'fusion', text: `${gA}${rankA != null ? ` exon ${rankA}` : ''} → ${gB}${rankB != null ? ` exon ${rankB}` : ''} fusion transcript`, affected: [], blocks, canonical: canonBlocks };
   return { event, canonical, aberrant, verdict, diff, domains: [...domsA, ...domsB],
-    fusion: { five: A, three: B, frame, partnerResidues, partnerLength: partner.protein.length, partnerFrom, startFrom } };
+    fusion: { five: A, three: B, frame, partnerResidues, partnerLength: partner.protein.length, partnerFrom, startFrom, partner, shift: partnerResidues ? shift : null } };
 }
 
 export { type Exon0 };

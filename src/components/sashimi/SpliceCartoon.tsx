@@ -19,6 +19,13 @@ const T_MRNA = 6.2;     // cap, poly(A), EJCs
 const T_TRANS = 11.2;   // translation
 const T_END = 14.5;     // verdict
 export const CARTOON_DURATION = T_END;
+/**
+ * A fusion opens with its own act before the splicing: the two partners appear, a breakpoint marks the part of each
+ * that goes into the fusion, and those exons travel to the middle row where they meet at the fusion junction. The
+ * rest of the timeline follows, shifted by this much.
+ */
+const T_FUSE = 1.6;
+const F_SHOW: [number, number] = [0.1, 0.7], F_CUT: [number, number] = [0.45, 0.9], F_FLY: [number, number] = [0.85, 2.0], F_SPARK: [number, number] = [1.9, 2.6];
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const easeInOut = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
@@ -52,7 +59,11 @@ function domainColors(domains: DomainStatus[]): string[] {
 
 const VW = 1200, VH = 640;
 const X0 = 150, X1 = 1180;                 // drawable band
-const ROW = [{ mrna: 128, protein: 218 }, { mrna: 378, protein: 468 }];   // canonical, observed
+type RowY = { mrna: number; protein: number };
+const ROWS2: RowY[] = [{ mrna: 128, protein: 218 }, { mrna: 378, protein: 468 }];   // canonical, observed
+/** a fusion: the 5′ partner, the fusion, the 3′ partner */
+const ROWS3: RowY[] = [{ mrna: 116, protein: 194 }, { mrna: 332, protein: 410 }, { mrna: 548, protein: 626 }];
+const VH3 = 760;
 const EXON_H = 26, UTR_H = 14;
 const GAP_PRE = 44;                        // intron width in the pre-mRNA
 const CHAIN_Y_OFF = 0;
@@ -139,15 +150,20 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
   const last = useRef<number | null>(null);
   const tRef = useRef(0);
   tRef.current = t;
+  const fz = story?.fusion;
+  /** the fusion's opening act shifts the rest; a fusion scene is taller (three rows) */
+  const shift = fz ? T_FUSE : 0, tEnd = T_END + shift, vh = fz ? VH3 : VH;
+  const tEndRef = useRef(tEnd);
+  tEndRef.current = tEnd;
 
   // ---- playback loop (one rAF, delta-time based, so it is fluid whatever the refresh rate) ----
   useEffect(() => {
     if (!playing || !story) { last.current = null; return; }
     const step = (now: number) => {
       if (last.current != null) {
-        const next = Math.min(T_END, tRef.current + ((now - last.current) / 1000) * speed);
+        const next = Math.min(tEndRef.current, tRef.current + ((now - last.current) / 1000) * speed);
         setT(next);
-        if (next >= T_END) { setPlaying(false); setExplore(true); return; }
+        if (next >= tEndRef.current) { setPlaying(false); setExplore(true); return; }
       }
       last.current = now;
       raf.current = requestAnimationFrame(step);
@@ -167,16 +183,16 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
 
   const togglePlay = useCallback(() => {
     setExplore(false);
-    setPlaying(p => { if (!p && tRef.current >= T_END) setT(0); return !p; });
+    setPlaying(p => { if (!p && tRef.current >= tEndRef.current) setT(0); return !p; });
   }, []);
-  const seek = (v: number) => { setT(v); last.current = null; setExplore(v >= T_END); };
+  const seek = (v: number) => { setT(v); last.current = null; setExplore(v >= tEnd); };
   const resetView = () => setView({ k: 1, x: 0, y: 0 });
   /** pointer position in viewBox units */
   const toScene = (e: { clientX: number; clientY: number }) => {
     const r = svgRef.current!.getBoundingClientRect();
-    return { x: ((e.clientX - r.left) / r.width) * VW, y: ((e.clientY - r.top) / r.height) * VH };
+    return { x: ((e.clientX - r.left) / r.width) * VW, y: ((e.clientY - r.top) / r.height) * vh };
   };
-  const zoomAt = (factor: number, cx = VW / 2, cy = VH / 2) => setView(v => {
+  const zoomAt = (factor: number, cx = VW / 2, cy = vh / 2) => setView(v => {
     const k = Math.max(0.5, Math.min(8, v.k * factor));
     // keep the scene point under (cx, cy) fixed
     return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
@@ -202,7 +218,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
     const p = panRef.current;
     if (!p) return;
     const r = svgRef.current!.getBoundingClientRect();
-    const dx = ((e.clientX - p.x) / r.width) * VW, dy = ((e.clientY - p.y) / r.height) * VH;
+    const dx = ((e.clientX - p.x) / r.width) * VW, dy = ((e.clientY - p.y) / r.height) * vh;
     if (Math.abs(dx) + Math.abs(dy) > 2) p.moved = true;
     setView(v => ({ ...v, x: p.vx + dx, y: p.vy + dy }));
   };
@@ -216,7 +232,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
     const svg = svgRef.current; if (!svg) return;
     const clone = svg.cloneNode(true) as SVGSVGElement;
     clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    clone.setAttribute('width', String(VW)); clone.setAttribute('height', String(VH));
+    clone.setAttribute('width', String(VW)); clone.setAttribute('height', String(vh));
     const blob = new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${story?.fusion ? `fusion_${story.fusion.five.geneName}-${story.fusion.three.geneName}` : `splicing_${tx.geneName}`}_${sampleName}.svg`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -224,28 +240,43 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
   const exportPng = async () => {
     const svg = svgRef.current; if (!svg) return;
     const clone = svg.cloneNode(true) as SVGSVGElement;
-    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); clone.setAttribute('width', String(VW)); clone.setAttribute('height', String(VH));
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg'); clone.setAttribute('width', String(VW)); clone.setAttribute('height', String(vh));
     const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml;charset=utf-8' }));
     const img = new Image();
     await new Promise<void>((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error('render')); img.src = url; });
-    const c = document.createElement('canvas'); c.width = VW * 2; c.height = VH * 2;
-    const g = c.getContext('2d')!; g.scale(2, 2); g.fillStyle = '#fff'; g.fillRect(0, 0, VW, VH); g.drawImage(img, 0, 0, VW, VH);
+    const c = document.createElement('canvas'); c.width = VW * 2; c.height = vh * 2;
+    const g = c.getContext('2d')!; g.scale(2, 2); g.fillStyle = '#fff'; g.fillRect(0, 0, VW, vh); g.drawImage(img, 0, 0, VW, vh);
     URL.revokeObjectURL(url);
     c.toBlob(b => { if (!b) return; const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `${story?.fusion ? `fusion_${story.fusion.five.geneName}-${story.fusion.three.geneName}` : `splicing_${tx.geneName}`}_${sampleName}.png`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }, 'image/png');
   };
-  const chapters = [
+  const chapters = fz ? [
+    { label: 'partners', at: 0 }, { label: 'fusion', at: F_CUT[0] + 0.3 }, { label: 'splicing', at: shift + T_PRE }, { label: 'mRNA', at: shift + T_JOIN }, { label: 'translation', at: shift + T_MRNA }, { label: 'outcome', at: shift + T_TRANS },
+  ] : [
     { label: 'pre-mRNA', at: 0 }, { label: 'splicing', at: T_PRE }, { label: 'mRNA', at: T_JOIN }, { label: 'translation', at: T_MRNA }, { label: 'outcome', at: T_TRANS },
   ];
 
   const scene = useMemo(() => {
     if (!story) return null;
-    const { k, gapK, minW } = fitScale([story.canonical, story.aberrant]);
+    const f = story.fusion;
+    const { k, gapK, minW } = fitScale(f ? [story.canonical, story.aberrant, f.partner] : [story.canonical, story.aberrant]);
     const canon = place(story.canonical, tx, k, gapK, minW), ab = place(story.aberrant, tx, k, gapK, minW);
-    // the spliced mRNA stretches to fill the band (same factor for both rows so exon sizes stay comparable)
-    const widest = Math.max(canon.reduce((a, p) => a + p.w, 0), ab.reduce((a, p) => a + p.w, 0));
+    const partner = f ? place(f.partner, f.three, k, gapK, minW) : null;
+    // the spliced mRNA stretches to fill the band (same factor for every row so exon sizes stay comparable)
+    const widest = Math.max(...[canon, ab, partner ?? []].map(r => r.reduce((a, p) => a + p.w, 0)));
     const expand = Math.max(1, Math.min(1.9, (X1 - X0 - 90) / Math.max(1, widest)));
-    return { canon, ab, expand };
+    if (!f || !partner) return { canon, ab, partner, expand, from: null, keepFive: null, keepThree: null };
+    // where each exon of the fusion comes from (its partner's row, in the pre-mRNA), and the part of each partner kept
+    const gA = f.five.geneName, gB = f.three.geneName;
+    const from = ab.map(b => {
+      const src = b.gene === gB ? partner : canon, i = src.findIndex(s => s.rank === b.rank);
+      return i < 0 ? null : { x: src[i].xPre, y: (b.gene === gB ? ROWS3[2] : ROWS3[0]).mrna };
+    });
+    const ranksA = new Set(ab.filter(b => b.gene === gA).map(b => b.rank)), ranksB = new Set(ab.filter(b => b.gene === gB).map(b => b.rank));
+    const span = (r: Placed[], ranks: Set<number | undefined>) => { const ix = r.map((p, i) => (ranks.has(p.rank) ? i : -1)).filter(i => i >= 0); return ix.length ? { from: ix[0], to: ix[ix.length - 1] } : null; };
+    return { canon, ab, partner, expand, from, keepFive: span(canon, ranksA), keepThree: span(partner, ranksB) };
   }, [story, tx]);
+  const tRow = explore ? T_END : t - shift;
+  const flyP = explore ? 1 : phase(t, F_FLY[0], F_FLY[1]);
 
   return (
     <div className="fixed inset-0 z-[70] bg-slate-900/85 flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
@@ -257,7 +288,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
             <div className="text-xs text-gray-500">{story ? story.event.text : loading || error || ''} · observed in {sampleName}</div>
           </div>
           <div className="flex items-center gap-2">
-            {story && <VerdictBadge story={story} reveal={t >= T_TRANS + 1.2} />}
+            {story && <VerdictBadge story={story} reveal={explore || t >= shift + T_TRANS + 1.2} />}
             <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none px-1" title="Close (Esc)">×</button>
           </div>
         </div>
@@ -265,7 +296,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
         {/* scene */}
         <div className="px-3 relative" ref={sceneRef}>
           {story && scene ? (
-            <svg ref={svgRef} viewBox={`0 0 ${VW} ${VH}`} width="100%" className="block select-none" style={{ aspectRatio: `${VW} / ${VH}`, cursor: explore ? (panRef.current ? 'grabbing' : 'grab') : 'default' }} fontFamily={FONT}
+            <svg ref={svgRef} viewBox={`0 0 ${VW} ${vh}`} width="100%" className="block select-none" style={{ aspectRatio: `${VW} / ${vh}`, cursor: explore ? (panRef.current ? 'grabbing' : 'grab') : 'default' }} fontFamily={FONT}
               onMouseDown={onPanStart} onMouseMove={onPanMove} onMouseUp={onPanEnd} onMouseLeave={() => { onPanEnd(); setTip(null); }} onDoubleClick={resetView}>
               <defs>
                 <linearGradient id="sc-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#f8fafc" /><stop offset="1" stopColor="#ddf1ee" /></linearGradient>
@@ -275,14 +306,24 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
                 <pattern id="sc-hatch-lost" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fef2f2" /><line x1="0" y1="0" x2="0" y2="6" stroke={C.lost} strokeWidth="1.5" /></pattern>
                 <filter id="sc-shadow" x="-20%" y="-50%" width="140%" height="220%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" floodColor="#0f172a" floodOpacity="0.18" /></filter>
               </defs>
-              <rect x={0} y={0} width={VW} height={VH} fill="url(#sc-bg)" rx={14} />
+              <rect x={0} y={0} width={VW} height={vh} fill="url(#sc-bg)" rx={14} />
               <g transform={explore ? `translate(${view.x}, ${view.y}) scale(${view.k})` : undefined}>
-                <Row iso={story.canonical} placed={scene.canon} expand={scene.expand} row={0} t={explore ? T_END : t} tx={tx} story={story} kind="canonical" color={C.exon} label={story.fusion ? [`5′ partner ${tx.geneName}`, tx.transcriptId] : ['MANE Select', tx.transcriptId]}
+                <Row iso={story.canonical} placed={scene.canon} expand={scene.expand} row={0} ys={fz ? ROWS3[0] : ROWS2[0]} t={tRow} tx={tx} story={story} kind="canonical" color={C.exon} label={fz ? [`5′ partner ${tx.geneName}`, tx.transcriptId] : ['MANE Select', tx.transcriptId]}
+                  appearP={fz ? (explore ? 1 : phase(t, F_SHOW[0], F_SHOW[1], easeOut)) : undefined}
+                  keep={fz && scene.keepFive ? { ...scene.keepFive, side: 'five', p: explore ? 1 : phase(t, F_CUT[0], F_CUT[1], easeOut) } : undefined}
                   explore={explore} onHover={hover} selected={selected} onSelect={setSelected} />
-                <Row iso={story.aberrant} placed={scene.ab} expand={scene.expand} row={1} t={explore ? T_END : t} tx={tx} story={story} kind="observed" color={sampleColor} label={[story.fusion ? 'Fusion' : 'Observed', sampleName]}
+                <Row iso={story.aberrant} placed={scene.ab} expand={scene.expand} row={1} ys={fz ? ROWS3[1] : ROWS2[1]} t={tRow} tx={tx} story={story} kind="observed" color={sampleColor} label={[fz ? 'Fusion' : 'Observed', sampleName]}
+                  appearP={fz ? (explore ? 1 : phase(t, F_FLY[1] - 0.15, F_FLY[1] + 0.3, easeOut)) : undefined}
+                  fly={fz && scene.from ? { p: flyP, from: scene.from, spark: explore ? 1 : phase(t, F_SPARK[0], F_SPARK[1], easeOut) } : undefined}
                   explore={explore} onHover={hover} selected={selected} onSelect={setSelected} />
+                {fz && scene.partner && (
+                  <Row iso={fz.partner} placed={scene.partner} expand={scene.expand} row={2} ys={ROWS3[2]} t={tRow} tx={fz.three} story={story} kind="partner" color={C.partner} label={[`3′ partner ${fz.three.geneName}`, fz.three.transcriptId]}
+                    appearP={explore ? 1 : phase(t, F_SHOW[0] + 0.1, F_SHOW[1] + 0.1, easeOut)}
+                    keep={scene.keepThree ? { ...scene.keepThree, side: 'three', p: explore ? 1 : phase(t, F_CUT[0], F_CUT[1], easeOut) } : undefined}
+                    explore={explore} onHover={hover} selected={selected} onSelect={setSelected} />
+                )}
               </g>
-              {explore ? <Legend story={story} color={sampleColor} /> : <Caption t={t} story={story} />}
+              {explore ? <Legend story={story} color={sampleColor} vh={vh} /> : <Caption t={t} shift={shift} story={story} vh={vh} />}
             </svg>
           ) : (
             <div className="h-[420px] flex items-center justify-center text-sm text-gray-500">{error ? <span className="text-red-600">{error}</span> : loading || 'preparing the scene…'}</div>
@@ -307,12 +348,12 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
         {/* controls */}
         <div className="px-5 pt-3 pb-2 flex items-center gap-3 text-xs">
           <button onClick={togglePlay} className="w-9 h-9 rounded-full bg-accent-600 text-white text-base flex items-center justify-center shadow hover:bg-accent-700" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
-          <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
-          <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
+          <input type="range" min={0} max={tEnd} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
+          <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {tEnd.toFixed(1)} s</span>
           <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
             {[0.5, 1, 1.5, 2].map(v => <option key={v} value={v}>{v}×</option>)}
           </select>
-          <button onClick={() => { setPlaying(false); setT(T_END); setExplore(true); }} disabled={!story}
+          <button onClick={() => { setPlaying(false); setT(tEnd); setExplore(true); }} disabled={!story}
             className={`px-2.5 py-1 rounded-full border text-xs font-semibold ${explore ? 'bg-accent-600 border-accent-600 text-white' : 'border-accent-300 text-accent-700 hover:bg-accent-50'}`} title="Skip to the final picture and explore it">🔍 Final picture</button>
         </div>
         <div className="px-5 pb-3 flex flex-wrap gap-1.5 text-[11px]">
@@ -344,7 +385,13 @@ function VerdictBadge({ story, reveal }: { story: SpliceStory; reveal: boolean }
 // ======================== One transcript row ========================
 
 interface RowProps {
-  iso: Isoform; placed: Placed[]; expand: number; row: 0 | 1; t: number; tx: TxModel; story: SpliceStory; kind: 'canonical' | 'observed'; color: string; label: [string, string];
+  iso: Isoform; placed: Placed[]; expand: number; row: 0 | 1 | 2; ys: RowY; t: number; tx: TxModel; story: SpliceStory; kind: 'canonical' | 'observed' | 'partner'; color: string; label: [string, string];
+  /** how far the row has appeared, when the parent sets it (a fusion's opening act) */
+  appearP?: number;
+  /** a fusion: its exons travel from their partner's row (`from`, per block) to their place, `p` of the way; then the junction flashes */
+  fly?: { p: number; from: ({ x: number; y: number } | null)[]; spark: number };
+  /** a fusion partner: the blocks [from, to] that go into the fusion, and the breakpoint after (5′) or before (3′) them */
+  keep?: { from: number; to: number; side: 'five' | 'three'; p: number };
   /** still-picture mode: no dissolve, hover tooltips, click to highlight an exon in both rows */
   explore?: boolean;
   onHover?: (lines: string[] | null, e?: React.MouseEvent) => void;
@@ -352,17 +399,18 @@ interface RowProps {
   onSelect?: (rank: number | null) => void;
 }
 
-function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, label, explore, onHover, selected, onSelect }: RowProps) {
-  const y = ROW[row].mrna, yP = ROW[row].protein;
+function Row({ iso, placed: placed0, expand, row, ys, t, tx, story, kind, color, label, appearP, fly, keep, explore, onHover, selected, onSelect }: RowProps) {
+  const y = ys.mrna, yP = ys.protein;
   const plus = tx.strand > 0;
-  const appear = phase(t, 0.1 + row * 0.25, T_PRE, easeOut);
+  const appear = appearP ?? phase(t, 0.1 + row * 0.25, T_PRE, easeOut);
   const loop = phase(t, T_PRE, T_LOOP);
   const cut = phase(t, T_LOOP, T_CUT, easeOut);
   const join = phase(t, T_CUT, T_JOIN);
   const mrna = phase(t, T_JOIN, T_MRNA, easeOut);
   const trans = phase(t, T_MRNA, T_TRANS);
   const outcome = phase(t, T_TRANS, T_END, easeOut);
-  const isObserved = kind === 'observed';
+  const isObserved = kind === 'observed', isPartner = kind === 'partner';
+  const rowKey: RowKey = isObserved ? 'observed' : isPartner ? 'partner' : 'canonical';
   const degraded = isObserved && story.verdict.degraded;
   const dissolve = degraded && !explore ? phase(t, T_TRANS + 1.3, T_TRANS + 2.6, easeOut) : 0;
   const hov = (lines: string[]) => (explore && onHover ? { onMouseEnter: (e: React.MouseEvent) => onHover(lines, e), onMouseMove: (e: React.MouseEvent) => onHover(lines, e), onMouseLeave: () => onHover(null) } : {});
@@ -392,13 +440,13 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
   const cds = iso.cdsStart, stop = iso.stopIndex ?? iso.mrna.length;
   // both ribosomes advance at the same speed (nt per second); the observed one stops early at a PTC
   const spanOf = (x: Isoform) => (x.cdsStart != null ? (x.stopIndex ?? x.mrna.length) - x.cdsStart : 0);
-  const span = Math.max(spanOf(story.canonical), spanOf(story.aberrant), 1);
+  const span = Math.max(spanOf(story.canonical), spanOf(story.aberrant), story.fusion ? spanOf(story.fusion.partner) : 0, 1);
   const readPos = cds != null ? Math.min(stop, cds + span * trans) : null;   // mRNA index under the ribosome
   const tArrive = T_MRNA + (T_TRANS - T_MRNA) * ((stop - (cds ?? 0)) / span);   // when this ribosome reaches its stop
   const aaMade = cds != null && readPos != null ? Math.max(0, Math.floor((readPos - cds) / 3)) : 0;
   const protLen = iso.protein.length;
   // one scale for both rows: a fusion protein can be longer than the 5′ partner's
-  const aaPx = Math.min(2.4, (X1 - X0 - 80) / Math.max(1, story.canonical.protein.length, story.fusion ? story.aberrant.protein.length : 0));
+  const aaPx = Math.min(2.4, (X1 - X0 - 80) / Math.max(1, story.canonical.protein.length, story.fusion ? Math.max(story.aberrant.protein.length, story.fusion.partner.protein.length) : 0));
   const chainX0 = X0;
 
   // ---- the skipped / affected exons in the pre-mRNA of the observed row (drawn as ghosts that leave with the lariat) ----
@@ -477,19 +525,57 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       : isExt ? [`Intron retained into exon ${p.rank} · ${p.len} nt`, `${p.chrom ?? tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`]
       : [`${exonName}${affected ? ' · affected' : ''} · ${p.len} nt`, `${p.chrom ?? tx.chrom}:${(p.start + 1).toLocaleString('en-US')}-${p.end.toLocaleString('en-US')}`, `${cpos(first)} → ${cpos(lastB)}`, p.cds ? `coding: ${p.cds[1] - p.cds[0]} nt` : 'non-coding (UTR)'];
     const isSel = explore && selected != null && p.rank === selected && !isCryptic && !isExt;
+    // a fusion's exon on its way from its partner's row: it leaves once the breakpoint is marked, and lands in place
+    const src = fly?.from[i];
+    const flying = !!fly && fly.p < 1 && !!src;
+    const fp = fly ? easeInOut(fly.p) : 1;
+    const flyT = flying ? `translate(${(src!.x - x) * (1 - fp)}, ${(src!.y - y) * (1 - fp) - Math.sin(Math.PI * fp) * 26})` : undefined;
+    const blockOp = fly ? (fly.p > 0 ? 1 : 0) : appear;
     return (
-      <g key={`b${i}`} opacity={appear * vis * (1 - dissolve * 0.85)} filter="url(#sc-shadow)" {...hov(lines)}
+      <g key={`b${i}`} opacity={blockOp * vis * (1 - dissolve * 0.85)} filter="url(#sc-shadow)" {...hov(lines)}
         style={explore ? { cursor: 'pointer' } : undefined}
         onClick={explore && onSelect && p.rank != null && !isCryptic && !isExt ? (e => { e.stopPropagation(); onSelect(selected === p.rank ? null : p.rank!); }) : undefined}
-        transform={dissolve ? `translate(${(i % 2 ? 1 : -1) * 18 * dissolve}, ${(i % 3 - 1) * 22 * dissolve}) rotate(${(i % 2 ? 8 : -8) * dissolve}, ${x + p.w / 2}, ${y})` : undefined}>
+        transform={flyT ?? (dissolve ? `translate(${(i % 2 ? 1 : -1) * 18 * dissolve}, ${(i % 3 - 1) * 22 * dissolve}) rotate(${(i % 2 ? 8 : -8) * dissolve}, ${x + p.w / 2}, ${y})` : undefined)}>
         {isSel && <rect x={x - 4} y={y - EXON_H / 2 - 4} width={p.w + 8} height={EXON_H + 8} rx={7} fill="none" stroke="#14857a" strokeWidth={2.5} opacity={0.9} />}
         {parts}
         {affected && <rect x={x - 1.5} y={y - EXON_H / 2 - 1.5} width={p.w + 3} height={EXON_H + 3} rx={5} fill="none" stroke={C.lost} strokeWidth={1.5} strokeDasharray="3 2" />}
         {p.w >= 16 && <text x={x + p.w / 2} y={y + 4} textAnchor="middle" fill={isCryptic || isExt ? C.cryptic : '#fff'} fontSize={isCryptic || isExt ? 9 : 11} fontWeight={700}>{labelTxt}</text>}
-        {fz && isObserved && (i === 0 || placed[i - 1].gene !== p.gene) && <text x={x} y={y + EXON_H / 2 + 13} fontSize={10} fontWeight={700} fill={fromPartner ? C.partner : C.text}>{p.gene} ▸</text>}
+        {fz && isObserved && (i === 0 || placed[i - 1].gene !== p.gene) && <text x={x} y={y + EXON_H / 2 + 13} fontSize={10} fontWeight={700} fill={fromPartner ? C.partner : C.text} opacity={fly ? phase(fly.p, 0.8, 1) : 1}>{p.gene} ▸</text>}
       </g>
     );
   });
+
+  // ---- a fusion: the junction where the partners meet (a flash when they land), the breakpoint and kept part of each partner ----
+  const fusionMarks: JSX.Element[] = [];
+  if (fz && isObserved && fly && fly.p >= 1) {
+    const k = placed.findIndex((p, i) => i > 0 && p.gene !== placed[i - 1].gene);
+    if (k > 0) {
+      const a = xs[k - 1] + placed[k - 1].w, b = xs[k], mx = (a + b) / 2;
+      fusionMarks.push(
+        <g key="fj" {...hov(['Fusion junction', `${fz.five.geneName} exon ${placed[k - 1].rank} → ${fz.three.geneName} exon ${placed[k].rank}`, fz.frame.verdict === 'in-frame' ? `${fz.three.geneName} read in its own frame` : fz.frame.verdict === 'frameshift' ? `${fz.three.geneName} read out of its frame` : fz.frame.verdict])}>
+          {fly.spark > 0 && fly.spark < 1 && <circle cx={mx} cy={y} r={6 + 26 * fly.spark} fill="none" stroke={C.neo} strokeWidth={3 * (1 - fly.spark) + 0.5} opacity={1 - fly.spark} />}
+          <line x1={mx} y1={y + EXON_H / 2 + 2} x2={mx} y2={y + EXON_H / 2 + 17} stroke={C.neo} strokeWidth={1.5} strokeDasharray="2 2" opacity={(1 - dissolve) * phase(fly.spark, 0, 0.5)} />
+          <text x={mx} y={y + EXON_H / 2 + 27} textAnchor="middle" fontSize={9.5} fontWeight={700} fill="#b45309" opacity={(1 - dissolve) * phase(fly.spark, 0, 0.5)}>fusion junction</text>
+        </g>,
+      );
+    }
+  }
+  if (keep && keep.p > 0 && placed[keep.from] && placed[keep.to]) {
+    const xa = xs[keep.from], xb = xs[keep.to] + placed[keep.to].w;
+    // the breakpoint: halfway into the intron after the last kept exon (5′ partner) or before the first one (3′ partner)
+    const nb = keep.side === 'five' ? keep.to + 1 : keep.from - 1;
+    const bx = placed[nb] ? (keep.side === 'five' ? (xb + xs[nb]) / 2 : (xs[nb] + placed[nb].w + xa) / 2) : keep.side === 'five' ? xb + 8 : xa - 8;
+    const by = y + EXON_H / 2 + 9, col = keep.side === 'five' ? C.text : C.partner;
+    const into = keep.side === 'five' ? `exons ${placed[keep.from].rank}–${placed[keep.to].rank} into the fusion ▾` : `▴ exons ${placed[keep.from].rank}–${placed[keep.to].rank} into the fusion`;
+    fusionMarks.push(
+      <g key="keep" opacity={keep.p} {...hov([`${tx.geneName}: the part in the fusion`, `exons ${placed[keep.from].rank}–${placed[keep.to].rank}, ${keep.side === 'five' ? 'up to its donor at the breakpoint' : 'from its acceptor at the breakpoint'}`])}>
+        <path d={`M${xa},${by - 4} L${xa},${by} L${xb},${by} L${xb},${by - 4}`} fill="none" stroke={col} strokeWidth={1.5} opacity={0.7} />
+        <text x={keep.side === 'five' ? xa : xb} y={by + 12} textAnchor={keep.side === 'five' ? 'start' : 'end'} fontSize={9.5} fontWeight={600} fill={col}>{into}</text>
+        <line x1={bx} y1={y - EXON_H / 2 - 12} x2={bx} y2={y + EXON_H / 2 + 4} stroke={C.lost} strokeWidth={1.8} strokeDasharray="4 3" />
+        <text x={bx} y={y - EXON_H / 2 - 16} textAnchor="middle" fontSize={10} fontWeight={700} fill={C.lost}>✂</text>
+      </g>,
+    );
+  }
 
   // ---- mRNA decorations: cap, poly(A), EJCs ----
   const deco: JSX.Element[] = [];
@@ -554,11 +640,11 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
         {...hov([`${fz.three.geneName} p.${fz.partnerFrom}–${fz.partnerLength}`, `fusion residues ${fz.partnerResidues[0] + 1}–${fz.partnerResidues[1]}, in ${fz.three.geneName}'s frame`])} />);
     }
     // domains: canonical coordinates; on the observed row map through the diff
-    const labels = domainLabels(story.domains, isObserved, diff, aaPx, chainX0), colors = domainColors(story.domains);
+    const labels = domainLabels(story.domains, rowKey, diff, aaPx, chainX0), colors = domainColors(story.domains);
     story.domains.forEach((ds, di) => {
       const colr = colors[di];
       const lab = labels.get(di);
-      const segs = domainSegments(ds, isObserved, diff);
+      const segs = domainSegments(ds, rowKey, diff);
       segs.forEach((sg, k) => {
         const a = Math.min(sg[0], shown), b = Math.min(sg[1], shown);
         if (b <= a) return;
@@ -584,10 +670,16 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       const nx = chainX0 + diff.prefix * aaPx + (diff.inserted.length * aaPx) / 2;
       chain.push(<path key="notch" d={`M${nx - 6},${yP - 12} L${nx},${yP - 3} L${nx + 6},${yP - 12}`} fill="none" stroke={C.lost} strokeWidth={2} strokeLinecap="round" opacity={1 - dissolve} />);
     }
-    if (!isObserved && diff.lost[1] > diff.lost[0] && shown >= protLen) {
+    if (kind === 'canonical' && diff.lost[1] > diff.lost[0] && shown >= protLen) {
       const a = diff.lost[0], b = Math.min(diff.lost[1], protLen);
       chain.push(<rect key="ghost" x={chainX0 + a * aaPx} y={yP - 12} width={(b - a) * aaPx} height={24} rx={6} fill="url(#sc-hatch-lost)" opacity={0.6 * outcome} stroke={C.lost} strokeWidth={1}
         {...hov([fz ? `Residues ${a + 1}–${b} of ${tx.geneName} are not in the fusion` : `Residues ${a + 1}–${b} of the MANE protein are ${diff.kind === 'frameshift' || diff.kind === 'truncation' ? 'not made' : 'deleted'}`, diff.text])} />);
+    }
+    // the 3′ partner's residues the fusion does not carry: before the junction, or all of them out of frame
+    if (isPartner && fz && shown >= protLen) {
+      const b = fz.partnerResidues && fz.partnerFrom != null ? fz.partnerFrom - 1 : protLen;
+      if (b > 0) chain.push(<rect key="ghost" x={chainX0} y={yP - 12} width={b * aaPx} height={24} rx={6} fill="url(#sc-hatch-lost)" opacity={0.6 * outcome} stroke={C.lost} strokeWidth={1}
+        {...hov(fz.partnerResidues ? [`Residues 1–${b} of ${fz.three.geneName} are not in the fusion`, `the fusion carries ${fz.three.geneName} p.${fz.partnerFrom}–${protLen}`] : [`${fz.three.geneName}'s protein is not carried`, story.diff.text])} />);
     }
     // stop marker
     if (shown >= protLen) {
@@ -605,6 +697,7 @@ function Row({ iso, placed: placed0, expand, row, t, tx, story, kind, color, lab
       <line x1={X0} y1={y} x2={right} y2={y} stroke={C.intron} strokeWidth={1.2} opacity={appear * (1 - dissolve) * (mrna > 0 ? 0.35 : 0)} />
       {introns}
       {blocks}
+      {fusionMarks}
       {deco}
       {chain}
       {ribo}
@@ -623,8 +716,9 @@ const LABEL_LANES = [13, 24];
  * (…) to end before the next label of its lane, and left out under three characters (the domain keeps its tooltip and
  * its line in the list). Laid out on the whole protein, so the labels do not move while the chain grows.
  */
-function domainLabels(domains: DomainStatus[], observed: boolean, diff: SpliceStory['diff'], aaPx: number, x0: number): Map<number, { text: string; lane: number; x: number }> {
-  const items = domains.map((ds, di) => ({ di, seg: domainSegments(ds, observed, diff)[0], name: ds.domain.description || ds.domain.id }))
+type RowKey = 'canonical' | 'observed' | 'partner';
+function domainLabels(domains: DomainStatus[], rowKey: RowKey, diff: SpliceStory['diff'], aaPx: number, x0: number): Map<number, { text: string; lane: number; x: number }> {
+  const items = domains.map((ds, di) => ({ di, seg: domainSegments(ds, rowKey, diff)[0], name: ds.domain.description || ds.domain.id }))
     .filter((it): it is { di: number; seg: [number, number]; name: string } => !!it.seg && it.seg[1] > it.seg[0])
     .sort((a, b) => a.seg[0] - b.seg[0]);
   // repeats: one label for each run of one name
@@ -653,8 +747,10 @@ function domainLabels(domains: DomainStatus[], observed: boolean, diff: SpliceSt
 }
 
 /** Amino-acid ranges (0-based half-open, in the row's own protein coordinates) drawn for a domain. */
-function domainSegments(ds: DomainStatus, observed: boolean, diff: SpliceStory['diff']): [number, number][] {
-  if (ds.rows) return observed ? ds.rows.observed : ds.rows.canonical;
+function domainSegments(ds: DomainStatus, rowKey: RowKey, diff: SpliceStory['diff']): [number, number][] {
+  if (ds.rows) return rowKey === 'partner' ? ds.rows.partner ?? [] : rowKey === 'observed' ? ds.rows.observed : ds.rows.canonical;
+  if (rowKey === 'partner') return [];
+  const observed = rowKey === 'observed';
   const s = ds.domain.start - 1, e = ds.domain.end;
   if (!observed || diff.kind === 'identical') return [[s, e]];
   const [a, b] = diff.lost;
@@ -671,14 +767,18 @@ function domainSegments(ds: DomainStatus, observed: boolean, diff: SpliceStory['
 
 // ======================== Caption ========================
 
-function Caption({ t, story }: { t: number; story: SpliceStory }) {
+function Caption({ t, shift, story, vh }: { t: number; shift: number; story: SpliceStory; vh: number }) {
   const fz = story.fusion;
+  const gA = fz?.five.geneName, gB = fz?.three.geneName;
+  const lastA = story.event.blocks.filter(b => b.gene === gA).pop()?.rank, firstB = story.event.blocks.find(b => b.gene === gB)?.rank;
   const lines: [number, string][] = fz ? [
-    [0, `Pre-mRNA: ${fz.five.geneName}'s transcript (top), and the fusion transcript below: ${fz.five.geneName}'s exons up to the junction, then ${fz.three.geneName}'s (teal) from it.`],
-    [T_PRE, `Splicing: the introns loop out; ${fz.five.geneName}'s donor is joined to ${fz.three.geneName}'s acceptor, and what lies between them leaves with the lariat.`],
-    [T_JOIN, 'Mature mRNA: 5′ cap, poly(A) tail, and an exon junction complex (EJC) ~20 nt upstream of every splice junction, the fusion junction included.'],
-    [T_MRNA, `Translation from ${fz.startFrom === 'three' ? `${fz.three.geneName}'s` : `${fz.five.geneName}'s`} start codon: ${fz.frame.verdict === 'in-frame' ? `across the junction in ${fz.three.geneName}'s frame` : fz.frame.verdict === 'frameshift' ? `across the junction, ${fz.three.geneName} read out of its frame` : 'through the junction'}.`],
-    [T_TRANS, story.verdict.text],
+    [0, `The two partners as they are without the fusion: ${gA}'s transcript (top) and ${gB}'s (bottom, teal).`],
+    [F_CUT[0], `The rearrangement breaks ${gA} after exon ${lastA ?? '?'} and ${gB} before exon ${firstB ?? '?'} (✂): ${gA}'s 5′ part and ${gB}'s 3′ part come together in the fusion gene (middle).`],
+    [F_SPARK[0], `They meet at the fusion junction: ${gA}'s exons, from its promoter, then ${gB}'s, in one pre-mRNA.`],
+    [shift + T_PRE, `Splicing, in the three transcripts: the introns loop out; in the fusion, ${gA}'s donor is joined to ${gB}'s acceptor${story.event.canonical.some(cb => !story.event.blocks.some(b => b.rank === cb.rank && b.gene === cb.gene)) ? ', and what lies between them leaves with the lariat' : ''}.`],
+    [shift + T_JOIN, 'Mature mRNA: 5′ cap, poly(A) tail, and an exon junction complex (EJC) ~20 nt upstream of every splice junction, the fusion junction included.'],
+    [shift + T_MRNA, `Translation of the fusion from ${fz.startFrom === 'three' ? `${gB}'s` : `${gA}'s`} start codon: ${fz.frame.verdict === 'in-frame' ? `across the junction in ${gB}'s frame` : fz.frame.verdict === 'frameshift' ? `across the junction, ${gB} read out of its frame` : 'through the junction'}; each partner's own protein, above and below, for comparison.`],
+    [shift + T_TRANS, story.verdict.text],
   ] : [
     [0, 'Pre-mRNA: exons (numbered) and introns of the MANE transcript; the observed transcript starts from the same gene.'],
     [T_PRE, 'Splicing: the spliceosome loops each intron into a lariat and joins the flanking exons.' + (story.event.kind === 'skip' ? ' The skipped exon leaves with the lariat.' : story.event.kind === 'cryptic_exon' ? ' A cryptic exon is recognised inside the intron.' : story.event.kind === 'exonic_site' ? ' A cryptic splice site inside the exon trims it.' : story.event.kind === 'intronic_site' ? ' A cryptic site in the intron retains part of it.' : '')],
@@ -690,8 +790,8 @@ function Caption({ t, story }: { t: number; story: SpliceStory }) {
   const fade = phase(t, cur[0], cur[0] + 0.5, easeOut);
   return (
     <g opacity={fade}>
-      <rect x={20} y={VH - 62} width={VW - 40} height={46} rx={10} fill="#ffffff" opacity={0.85} />
-      <foreignObject x={30} y={VH - 58} width={VW - 60} height={40}>
+      <rect x={20} y={vh - 62} width={VW - 40} height={46} rx={10} fill="#ffffff" opacity={0.85} />
+      <foreignObject x={30} y={vh - 58} width={VW - 60} height={40}>
         <div style={{ font: `12.5px ${FONT}`, color: '#1f2937', lineHeight: '19px' }}>{cur[1]}</div>
       </foreignObject>
     </g>
@@ -700,8 +800,8 @@ function Caption({ t, story }: { t: number; story: SpliceStory }) {
 
 // ======================== Legend of the still picture ========================
 
-function Legend({ story, color }: { story: SpliceStory; color: string }) {
-  const y = VH - 30;
+function Legend({ story, color, vh }: { story: SpliceStory; color: string; vh: number }) {
+  const y = vh - 30;
   const items: { w: number; el: JSX.Element }[] = [];
   const add = (w: number, el: JSX.Element) => items.push({ w, el });
   const fz = story.fusion;
@@ -720,7 +820,7 @@ function Legend({ story, color }: { story: SpliceStory; color: string }) {
   let x = 24;
   return (
     <g>
-      <rect x={16} y={VH - 48} width={VW - 32} height={36} rx={8} fill="#ffffff" opacity={0.96} stroke="#e3e8ee" />
+      <rect x={16} y={vh - 48} width={VW - 32} height={36} rx={8} fill="#ffffff" opacity={0.96} stroke="#e3e8ee" />
       {items.map((it, i) => { const el = <g key={i} transform={`translate(${x}, 0)`}>{it.el}</g>; x += it.w + 18; return el; })}
     </g>
   );
@@ -746,7 +846,8 @@ function Details({ story }: { story: SpliceStory }) {
   const from = Math.max(0, diff.prefix - 15), to = diff.prefix + 30;
   const canon = canonical.protein, ab = aberrant.protein;
   const cell = (ch: string, cls: string, key: number) => <span key={key} className={`inline-block w-[13px] text-center ${cls}`}>{ch}</span>;
-  const rowC: JSX.Element[] = [], rowA: JSX.Element[] = [];
+  const rowC: JSX.Element[] = [], rowA: JSX.Element[] = [], rowB: JSX.Element[] = [];
+  const fz = story.fusion, pb = fz?.partner.protein ?? '';
   for (let i = from; i < to; i++) {
     const inLost = i >= diff.lost[0] && i < diff.lost[1];
     if (i < canon.length) rowC.push(cell(canon[i], inLost ? 'text-red-600 line-through' : 'text-gray-700', i));
@@ -756,6 +857,11 @@ function Details({ story }: { story: SpliceStory }) {
     if (i < ab.length) rowA.push(cell(ab[i], inNew ? (diff.kind === 'fusion' ? 'text-teal-700 font-bold' : 'text-amber-600 font-bold') : 'text-gray-700', i));
     else if (i === ab.length) rowA.push(cell(aberrant.stopIndex != null ? '*' : '…', verdict.verdict === 'no_ptc' ? 'text-emerald-600 font-bold' : 'text-red-600 font-bold', i));
     else rowA.push(cell(' ', '', i));
+    // the 3′ partner under the fusion: its residue i − shift, carried from the junction on
+    if (fz && fz.shift != null) {
+      const j = i - fz.shift, carriedHere = fz.partnerResidues != null && i >= fz.partnerResidues[0] && i < fz.partnerResidues[1];
+      rowB.push(j >= 0 && j < pb.length ? cell(pb[j], carriedHere ? 'text-teal-700 font-bold' : 'text-gray-400', i) : j === pb.length ? cell('*', 'text-emerald-600 font-bold', i) : cell(' ', '', i));
+    }
   }
   return (
     <div className="px-5 pb-4 grid grid-cols-[1fr_320px] gap-4 text-xs">
@@ -764,6 +870,9 @@ function Details({ story }: { story: SpliceStory }) {
         <div className="font-mono text-[12px] leading-5 overflow-x-auto">
           <div><span className="inline-block w-20 text-gray-500 text-[10px]">{story.fusion ? story.fusion.five.geneName : 'MANE'}</span>{rowC}</div>
           <div><span className="inline-block w-20 text-gray-500 text-[10px]">{story.fusion ? 'fusion' : 'observed'}</span>{rowA}</div>
+          {fz && (fz.shift != null
+            ? <div><span className="inline-block w-20 text-teal-700 text-[10px]">{fz.three.geneName}</span>{rowB}</div>
+            : <div className="text-[10.5px] text-gray-500 font-sans">{fz.three.geneName}: not read in its own frame in the fusion, so no residue lines up</div>)}
         </div>
         <div className="text-[10.5px] text-gray-500 mt-1">
           {verdict.ptc != null ? `PTC at codon ${verdict.ptcCodon}, ${verdict.distanceFromStart} nt after the AUG` : 'no premature stop'}
