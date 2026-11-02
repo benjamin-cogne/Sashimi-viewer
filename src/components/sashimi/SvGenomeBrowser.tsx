@@ -25,7 +25,7 @@ import { IMPACT, KIND_COLOR } from './svColors';
 import { cnvEvents, matchesOf, RO_MATCH, type PopulationSv, type PopMatch, type CnvEvent } from './svPopulation';
 import { TileCache, tileSizeFor } from './browserTiles';
 import { niceStep } from './geometry';
-import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, type PanelSummary, type LoadedPanel } from '../../standalone/panelapp';
+import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, geneModes, classifyMoi, type PanelSummary, type LoadedPanel, type GeneModes, type MoiClass } from '../../standalone/panelapp';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -234,6 +234,50 @@ function derEdge(d: DerLayout, pos: number, side: 'left' | 'right', L: number): 
   return best ? best.pos : pos;
 }
 
+/** Modes of inheritance (PanelApp), as colours and words. */
+const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
+  AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
+  'AD-pat': { color: '#ea580c', short: 'AD ♂exp', label: 'monoallelic, imprinted: paternal allele expressed' },
+  'AD-mat': { color: '#d97706', short: 'AD ♀exp', label: 'monoallelic, imprinted: maternal allele expressed' },
+  'AD+AR': { color: '#7c3aed', short: 'AD+AR', label: 'mono- or biallelic' },
+  AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },
+  XLR: { color: '#db2777', short: 'XLR', label: 'X-linked, females biallelic' },
+  XLD: { color: '#9d174d', short: 'XLD', label: 'X-linked, females may be affected' },
+  MT: { color: '#059669', short: 'MT', label: 'mitochondrial' },
+  '?': { color: '#94a3b8', short: '?', label: 'unknown / other' },
+  none: { color: '#cbd5e1', short: '—', label: 'not in PanelApp' },
+};
+
+/**
+ * What a gene's mode of inheritance makes of what the rearrangement does to it: red when the change can be enough
+ * (one allele of a monoallelic gene, both of a biallelic one, an extra copy of a triplosensitive one), amber when it
+ * depends on something else (the other allele, the sex, the parent of origin, the gene's sensitivity), null when it
+ * does not bear on it. A draft for the report's reasoning, not a classification.
+ */
+function moiVerdict(gi: GeneImpact, m: MoiClass, hom: boolean, ts: number | null | undefined, hi: number | null | undefined): { level: 'red' | 'amber'; text: string } | null {
+  const k = gi.kind;
+  const loss = k === 'deleted' || k === 'disrupted' || k === 'fusion' || k === 'intragenic-del' || ((k === 'intragenic-dup' || k === 'partial-copy') && gi.principal.frame === 'shifted');
+  const gain = k === 'duplicated';
+  const position = k === 'domain' || k === 'moved' || k === 'nearby';
+  const hiTxt = hi != null ? ` (ClinGen haploinsufficiency ${hi})` : '';
+  if (m === 'MT' || m === '?') return null;
+  if (loss) {
+    if (m === 'AD') return { level: 'red', text: `One allele hit, and one is enough for a monoallelic gene: fits its mode, if the disease arises by loss of function${hiTxt}.` };
+    if (m === 'AD+AR') return { level: 'red', text: `One allele hit: may be enough (its monoallelic form); both alleles hit give the biallelic form.${hiTxt}` };
+    if (m === 'AR') return hom ? { level: 'red', text: 'Both alleles hit: fits a biallelic gene.' } : { level: 'amber', text: 'One allele hit in a biallelic gene: a carrier, unless the other allele carries a variant too: look at it in the reads.' };
+    if (m === 'XLR') return { level: 'amber', text: 'X-linked: enough in a male (hemizygous); a female is usually a carrier (both alleles needed): depends on the sex.' };
+    if (m === 'XLD') return { level: 'red', text: 'X-linked: enough in a male (hemizygous); a female may be affected too, often less severely.' };
+    return { level: 'amber', text: `Imprinted, ${m === 'AD-pat' ? 'paternal' : 'maternal'} allele expressed: harmful if the allele hit is the ${m === 'AD-pat' ? 'paternal' : 'maternal'} one; the parent of origin decides.` };
+  }
+  if (gain) {
+    if (m === 'AR' || m === 'XLR') return null;
+    if (m === 'AD-pat' || m === 'AD-mat') return { level: 'amber', text: `An extra copy of an imprinted gene: depends on the parent of origin (an extra ${m === 'AD-pat' ? 'paternal' : 'maternal'} copy doubles its expression).` };
+    return ts != null && ts >= 2 ? { level: 'red', text: `An extra copy of a triplosensitive gene (ClinGen triplosensitivity ${ts}): fits.` } : { level: 'amber', text: `An extra copy of a ${MOI[m].label} gene: pathogenic only if the gene is sensitive to gains (ClinGen triplosensitivity ${ts ?? 'not curated'}).` };
+  }
+  if (position && (m === 'AD' || m === 'AD+AR' || m === 'XLD' || m === 'AD-pat' || m === 'AD-mat')) return { level: 'amber', text: 'Intact, but its regulatory context changed: for a monoallelic gene a position effect could be enough.' };
+  return null;
+}
+
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
 type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv };
@@ -269,7 +313,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   /** the gene joined to its copies: set by a click on it, kept when its card is closed, cleared by a click on the background */
   const [linked, setLinked] = useState<string | null>(null);
   const tipEl = useRef<HTMLDivElement | null>(null);
-  const [colorBy, setColorBy] = useState<'loeuf' | 'impact'>(() => store.get<'loeuf' | 'impact'>('sashimi.svColorBy') ?? 'loeuf');
+  const [colorBy, setColorBy] = useState<'loeuf' | 'impact' | 'moi'>(() => store.get<'loeuf' | 'impact' | 'moi'>('sashimi.svColorBy') ?? 'loeuf');
   const [near, setNear] = useState<number>(() => store.get<number>('sashimi.svNear') ?? NEAR_BREAKPOINT_DEFAULT);
   /** the population CNVs (DGV Gold Standard): drawn under the reference genes, and compared with the event's losses and gains */
   const [showDgv, setShowDgv] = useState<boolean>(() => store.get<boolean>('sashimi.svDgv') ?? true);
@@ -395,7 +439,39 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const popSame = useMemo(() => new Set(cnv.flatMap(c => c.matches.filter(m => m.sameType && m.ro >= RO_MATCH).map(m => `${m.sv.id}:${m.sv.outer[0]}`))), [cnv]);
   const annotations: GeneAnnotations = useMemo(() => ({ dosage: ann.dosage, constraint: ann.constraint, panel }), [ann, panel]);
   const impactOf = useMemo(() => new Map(story.genes.map(g => [g.gene.symbol, g])), [story]);
-  const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : IMPACT[gi?.kind ?? 'unaffected'].color);
+  // ---- modes of inheritance (PanelApp, every panel): asked for the event's changed genes, the genes in view in the
+  //      inheritance colouring, and the gene of an open card; four requests at a time, cached ----
+  const moiSrc = PANEL_SOURCES.find(s => s.label === panelData?.source) ?? PANEL_SOURCES[0];
+  const modes = useRef(new Map<string, GeneModes | 'loading' | 'error'>());
+  const [modesVersion, bumpModes] = useReducer((x: number) => x + 1, 0);
+  const modeQueue = useRef<string[]>([]), modeActive = useRef(0), modeBump = useRef(0);
+  useEffect(() => { modes.current = new Map(); modeQueue.current = []; bumpModes(); }, [moiSrc.id]);
+  const pumpModes = () => {
+    while (modeActive.current < 4 && modeQueue.current.length) {
+      const sym = modeQueue.current.shift()!, src = moiSrc;
+      modeActive.current++;
+      geneModes(src, sym).then(m => { if (src === moiSrc) modes.current.set(sym, m); }, () => { modes.current.set(sym, 'error'); })
+        .finally(() => { modeActive.current--; pumpModes(); window.clearTimeout(modeBump.current); modeBump.current = window.setTimeout(bumpModes, 120); });
+    }
+  };
+  const wantModes = (syms: string[]) => { let any = false; for (const s2 of syms) if (!modes.current.has(s2)) { modes.current.set(s2, 'loading'); modeQueue.current.push(s2); any = true; } if (any) pumpModes(); };
+  /** a gene's mode: the loaded panel's own value first, else the commonest among its PanelApp entries (green first) */
+  const modeOf = (sym: string): { cls: MoiClass | 'none'; m: GeneModes | null; fromPanel: string | null } => {
+    const pg = panel?.genes.get(sym.toUpperCase()), m = modes.current.get(sym);
+    const mm = m && typeof m === 'object' ? m : null;
+    if (pg?.moi) return { cls: classifyMoi(pg.moi), m: mm, fromPanel: panel!.name };
+    if (!mm) return { cls: m === 'loading' || m === undefined ? '?' : 'none', m: null, fromPanel: null };
+    return { cls: mm.entries.length ? mm.main : 'none', m: mm, fromPanel: null };
+  };
+  void modesVersion;
+  useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const verdictOf = (sym: string) => {
+    const gi = impactOf.get(sym); if (!gi) return null;
+    const mo = modeOf(sym); if (mo.cls === 'none') return null;
+    const d = ann.dosage.get(sym);
+    return moiVerdict(gi, mo.cls, zygosity === 'hom', d?.ts, d?.hi);
+  };
+  const geneColor = (symbol: string, gi: GeneImpact | undefined) => (colorBy === 'loeuf' ? LOEUF_CLASS[loeufClass(ann.constraint.get(symbol))].color : colorBy === 'moi' ? MOI[modeOf(symbol).cls].color : IMPACT[gi?.kind ?? 'unaffected'].color);
   const panelDot = (sym: string) => { const pg = panel?.genes.get(sym.toUpperCase()); return pg ? CONF[pg.confidence].color : null; };
   /** worth a label in a crowded view: changed by the event, or in the panel, dosage-sensitive or LoF-intolerant */
   const worthSym = (sym: string) => { const gi = impactOf.get(sym); return (!!gi && gi.kind !== 'unaffected' && gi.kind !== 'nearby') || notableSym(sym, annotations); };
@@ -479,6 +555,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [tilesVersion, tileSize, Math.floor(vp.s / tileSize), Math.floor(ve / tileSize), dgvTiles, showDgv, span > DGV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneBySym = useMemo(() => new Map(view.genes.map(g => [g.symbol, g])), [view.genes]);
   const visGenes = view.genes.filter(g => g.end >= vp.s - span * 0.02 && g.start <= ve + span * 0.02);
+  // in the inheritance colouring, the modes of the genes in view (the named ones when a crowd), once the view rests
+  useEffect(() => {
+    if (colorBy !== 'moi') return;
+    const id = window.setTimeout(() => { const vis = visGenes.length <= 250 ? visGenes : visGenes.filter(g => worthSym(g.symbol)); wantModes(vis.slice(0, 250).map(g => g.symbol)); }, 400);
+    return () => window.clearTimeout(id);
+  }, [colorBy, visGenes.length, Math.round(vp.s / Math.max(1, span) * 20), Math.round(Math.log(span) * 10)]); // eslint-disable-line react-hooks/exhaustive-deps
   // constraint and dosage of the genes in view, asked once each, when the view rests
   const visKey = span <= LOD_BARS ? visGenes.map(g => g.symbol).join(',') : '';
   useEffect(() => {
@@ -809,6 +891,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const dot = panelDot(g.symbol), lx = Math.max(X0 + 2, refX(g.start));
           return (
             <g key={`rg${g.symbol}`} onMouseEnter={hoverOn(g.symbol)} onMouseMove={hoverOn(g.symbol)} onMouseLeave={hoverOff} style={{ cursor: 'pointer' }} onClick={pinOn(g.symbol)}>
+              {(() => { const v = lod !== 'density' ? verdictOf(g.symbol) : null; const it = refItems.items.find(x => x.g === g); if (!v || !it) return null;
+                return <rect x={lx - 4} y={yy - 3} width={Math.max(it.xg, it.x0 + (labeled ? it.lw : 0)) - lx + 8} height={it.h + 5} rx={6} fill={v.level === 'red' ? '#fee2e2' : '#fef3c7'} fillOpacity={0.55} stroke={v.level === 'red' ? '#dc2626' : '#d97706'} strokeWidth={1.4}><title>{v.text}</title></rect>; })()}
               {dot && <circle cx={lx + 3.5} cy={yy + 6.5} r={3.5} fill={dot} />}
               {labeled && <text x={lx + (dot ? 10 : 0)} y={yy + 10} fontSize={11} fontWeight={700} fontStyle="italic" fill={col}>{g.symbol}</text>}
               {lod === 'density'
@@ -1009,6 +1093,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   );
 
   // ---- the card of the gene or population CNV under the pointer, or kept open ----
+  useEffect(() => { const sym = (pinned && !pinned.dgv ? pinned.gene : null) ?? (tip && !tip.dgv ? tip.gene : null); if (sym) wantModes([sym]); }, [pinned?.gene, tip?.gene]); // eslint-disable-line react-hooks/exhaustive-deps
   const card = (at: TipAt, isPin: boolean) => {
     const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, (boxRef.current?.clientWidth ?? 900) - 400)), ...(at.y > (boxRef.current?.clientHeight ?? 400) - 160 ? { bottom: (boxRef.current?.clientHeight ?? 400) - at.y + 14 } : { top: at.y + 14 }) };
     const ref = isPin ? undefined : (el: HTMLDivElement | null) => { tipEl.current = el; };
@@ -1031,6 +1116,16 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
         <div className="text-gray-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
         {gi && <div className="mt-0.5">{gi.principal.text}</div>}
+        {(() => {
+          const mo = modeOf(g.symbol), v = gi ? verdictOf(g.symbol) : null;
+          if (!mo.m && !mo.fromPanel && mo.cls === '?') return <div className="mt-0.5 text-gray-400">Inheritance (PanelApp): loading…</div>;
+          const parts = mo.m?.parts.filter(p => p.cls !== '?' || mo.m!.parts.length === 1) ?? [];
+          return <>
+            <div className="mt-0.5"><span style={{ color: MOI[mo.cls].color === '#cbd5e1' ? '#94a3b8' : MOI[mo.cls].color }}>■</span> Inheritance: <b>{MOI[mo.cls].label}</b>
+              <span className="text-gray-400">{mo.fromPanel ? ` (in ${mo.fromPanel})` : ''}{parts.length ? ` · ${mo.m!.source}: ${parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}${p.green ? ` (${p.green} green)` : ''}`).join(', ')}` : mo.cls === 'none' ? ` · ${moiSrc.label}` : ''}</span></div>
+            {v && <div className={`mt-0.5 ${v.level === 'red' ? 'text-red-300' : 'text-amber-200'}`}>{v.level === 'red' ? '▲' : '△'} {v.text} <span className="text-gray-400">(automated draft)</span></div>}
+          </>;
+        })()}
         {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure (the links stay when this card is closed; click the background to clear them)' : ''}</div>; })()}
         {r?.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
         <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>
@@ -1051,7 +1146,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {(['mane', 'all'] as const).map(m => <button key={m} onClick={() => setMode(m)} className={`px-2 py-0.5 ${mode === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'mane' ? 'One model per gene: MANE Select (else RefSeq Select, else the longest coding sequence)' : `Every RefSeq NM_ model of each gene (no XM_ prediction, no NR_ non-coding): the consequence can differ between isoforms. Drawn below ${kb(LOD_FULL)} in view.`}>{m === 'mane' ? 'MANE Select' : 'all NM_ transcripts'}</button>)}
         </span>
         <span className="inline-flex rounded-md border border-gray-300 overflow-hidden" role="group" aria-label="Gene colour">
-          {(['loeuf', 'impact'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : 'colour: impact'}</button>)}
+          {(['loeuf', 'impact', 'moi'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : m === 'moi' ? `Genes coloured by their mode of inheritance in PanelApp (${moiSrc.label}): the loaded panel's own value, else the commonest among the gene's panels, green ratings first` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : m === 'moi' ? 'colour: inheritance' : 'colour: impact'}</button>)}
         </span>
         <PanelPicker panel={panelData} onPanel={p => { setPanelData(p); store.set('sashimi.svPanel', p); }} />
         {loaders.getPopulationSvs && (
@@ -1089,11 +1184,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       </div>
       {/* legend */}
       <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gray-500">
-        {colorBy === 'impact'
+        {colorBy === 'moi' ? (Object.keys(MOI) as (MoiClass | 'none')[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: MOI[k2].color }} />{MOI[k2].label}</span>)
+          : colorBy === 'impact'
           ? (['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'nearby', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)
           : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
+        {rec && <span className="inline-flex items-center gap-1"><span className="inline-block w-4 h-3 rounded border-[1.5px] border-red-600 bg-red-100" />the change can be enough for the gene's mode of inheritance <span className="inline-block w-4 h-3 rounded border-[1.5px] border-amber-600 bg-amber-100 ml-1" />it depends (the other allele, the sex, the parent of origin, sensitivity to gains) — PanelApp modes, automated draft</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>

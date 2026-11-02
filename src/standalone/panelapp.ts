@@ -77,3 +77,76 @@ export function parsePanelFile(name: string, text: string): LoadedPanel {
   }
   return { source: 'file', id: name, name: name.replace(/\.(tsv|txt|csv)$/i, ''), version: '', genes };
 }
+
+// ======================== A gene's modes of inheritance across panels ========================
+
+/**
+ * PanelApp's mode_of_inheritance values, by what they require:
+ * AD     MONOALLELIC, autosomal or pseudoautosomal (NOT imprinted, or imprinted status unknown)
+ * AD-pat MONOALLELIC … maternally imprinted (paternal allele expressed)
+ * AD-mat MONOALLELIC … paternally imprinted (maternal allele expressed)
+ * AR     BIALLELIC, autosomal or pseudoautosomal
+ * AD+AR  BOTH monoallelic and biallelic (including "biallelic mutations cause a more SEVERE disease form")
+ * XLR    X-LINKED: hemizygous mutation in males, biallelic mutations in females
+ * XLD    X-LINKED: hemizygous mutation in males, monoallelic mutations in females may cause disease
+ * MT     MITOCHONDRIAL
+ * ?      Unknown, Other, or not given
+ */
+export type MoiClass = 'AD' | 'AD-pat' | 'AD-mat' | 'AR' | 'AD+AR' | 'XLR' | 'XLD' | 'MT' | '?';
+export function classifyMoi(text: string | undefined | null): MoiClass {
+  const t = String(text ?? '').toLowerCase();
+  if (!t.trim()) return '?';
+  if (t.includes('x-linked') || t.includes('x linked')) return /monoallelic mutations in females|females may/.test(t) ? 'XLD' : 'XLR';
+  if (t.includes('mitochondrial')) return 'MT';
+  if (t.startsWith('both')) return 'AD+AR';
+  if (t.startsWith('biallelic')) return 'AR';
+  if (t.startsWith('monoallelic')) return t.includes('maternally imprinted') ? 'AD-pat' : t.includes('paternally imprinted') ? 'AD-mat' : 'AD';
+  return '?';
+}
+export interface GeneMode { panel: string; panelId: string; confidence: 1 | 2 | 3; moi: string; cls: MoiClass }
+export interface GeneModes { symbol: string; source: string; entries: GeneMode[]; main: MoiClass; parts: { cls: MoiClass; panels: number; green: number }[] }
+
+/** The modes of a gene's entries, the green ones first: the main mode is the commonest among the best-rated entries. */
+export function summarizeModes(symbol: string, source: string, entries: GeneMode[]): GeneModes {
+  const by = new Map<MoiClass, { cls: MoiClass; panels: number; green: number }>();
+  for (const e of entries) { const p = by.get(e.cls) ?? { cls: e.cls, panels: 0, green: 0 }; p.panels++; if (e.confidence === 3) p.green++; by.set(e.cls, p); }
+  const parts = [...by.values()].sort((a, b) => Number(a.cls === '?') - Number(b.cls === '?') || b.green - a.green || b.panels - a.panels);
+  return { symbol, source, entries, main: parts[0]?.cls ?? '?', parts };
+}
+
+const modeCache = new Map<string, Promise<GeneModes>>();
+/**
+ * Every panel entry of a gene (rated green, amber or red) with its mode of inheritance: `/genes/<symbol>/`, every page;
+ * PanelApp notes that this list can come in varying order with duplicates, so entries are kept once per panel; when it
+ * fails, `/entities/?entity_name=<symbol>`. Cached for the page's life.
+ */
+export function geneModes(src: PanelSource, symbol: string): Promise<GeneModes> {
+  const key = `${src.id}|${symbol.toUpperCase()}`;
+  if (!modeCache.has(key)) {
+    modeCache.set(key, (async () => {
+      const read = async (first: string): Promise<GeneMode[]> => {
+        const out = new Map<string, GeneMode>();
+        let url: string | null = first;
+        for (let guard = 0; url && guard < 20; guard++) {
+          const r = await fetch(url, { headers: { Accept: 'application/json' } });
+          if (!r.ok) throw new Error(`${src.label}: HTTP ${r.status}`);
+          const j: any = await r.json();
+          for (const g of Array.isArray(j) ? j : j?.results ?? []) {
+            const sym = String(g?.entity_name ?? g?.gene_data?.gene_symbol ?? '');
+            if (sym.toUpperCase() !== symbol.toUpperCase() || (g?.entity_type && g.entity_type !== 'gene')) continue;
+            const c = conf(g?.confidence_level), pid = String(g?.panel?.id ?? g?.panel ?? '');
+            if (!c || !pid || out.has(pid)) continue;
+            out.set(pid, { panel: String(g?.panel?.name ?? `panel ${pid}`), panelId: pid, confidence: c, moi: String(g?.mode_of_inheritance ?? ''), cls: classifyMoi(g?.mode_of_inheritance) });
+          }
+          url = typeof j?.next === 'string' ? j.next : null;
+        }
+        return [...out.values()];
+      };
+      let entries: GeneMode[];
+      try { entries = await read(`${src.base}/genes/${encodeURIComponent(symbol)}/`); }
+      catch { entries = await read(`${src.base}/entities/?entity_name=${encodeURIComponent(symbol)}`); }
+      return summarizeModes(symbol, src.label, entries);
+    })().catch(e => { modeCache.delete(key); throw e; }));
+  }
+  return modeCache.get(key)!;
+}
