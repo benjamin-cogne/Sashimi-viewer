@@ -7747,7 +7747,7 @@ export default function SashimiViewer({
 
   if (embedded) return content;
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 z-50 overflow-y-auto">
+    <div className="fixed inset-0 bg-black/75 flex items-start justify-center p-4 z-50 overflow-y-auto">
       {content}
     </div>
   );

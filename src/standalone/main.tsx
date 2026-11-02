@@ -8,6 +8,7 @@ import '../plugins';   // registered file kinds (fileKinds.ts), before anything 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import SvBrowserDialog from '../components/sashimi/SvBrowserDialog';
+import { svLoadersFor } from './svLoaders';
 import RecorderHost, { type RecorderHandle } from '../components/recorder/RecorderHost';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
@@ -1273,7 +1274,7 @@ function App() {
         </div></div>
       )}
       <RecorderHost ref={recorder} names={samples.map(x => x.name)} onRecording={setRecording} />
-      {svBrowser && <SvBrowserDialog build={build} loaders={svLoaders} onClose={() => setSvBrowser(false)} />}
+      {svBrowser && <SvBrowserDialog build={build} loaders={svLoaders} loadersFor={svLoadersFor} onClose={() => setSvBrowser(false)} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>

@@ -248,7 +248,7 @@ export default function SpliceCartoon({ story, loading, error, tx, sampleName, s
   }, [story, tx]);
 
   return (
-    <div className="fixed inset-0 z-[70] bg-slate-900/80 backdrop-blur-sm flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[70] bg-slate-900/85 flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-[1240px] text-gray-900" onMouseDown={e => e.stopPropagation()} style={{ fontFamily: FONT }}>
         {/* header */}
         <div className="flex items-start justify-between px-5 pt-4 pb-2">

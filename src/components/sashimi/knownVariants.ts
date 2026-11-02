@@ -54,6 +54,14 @@ const buildOfAccession = (chrom: string, version: number): KnownVariant['build']
   return null;
 };
 
+/** The build an `NC_…` accession with its version belongs to (`NC_000020.11` → GRCh38), null when unknown. */
+export function buildOfNc(acc: string): 'GRCh38' | 'GRCh37' | null {
+  const m = acc.trim().toUpperCase().match(/^NC_0*(\d+)\.(\d+)$/);
+  if (!m) return null;
+  const n = Number(m[1]), c = n === 23 ? 'X' : n === 24 ? 'Y' : String(n);
+  return buildOfAccession(c, Number(m[2]));
+}
+
 const LARGE = 50;   // bp: deletions / duplications at least this long are drawn as bands, below as marks
 
 /** `41,500,000`, `41.5 Mb`, `41500 kb` → bp. */

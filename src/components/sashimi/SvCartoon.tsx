@@ -210,7 +210,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const verdictText = !chosen.length ? 'no junction selected' : depth.verdict === 'explained' ? '✓ depth fits the rebuilt chromosome' : depth.verdict === 'balanced' ? '≈ balanced: depth cannot confirm it' : depth.verdict === 'unexplained' ? `✗ depth does not fit ${depth.segments.filter(s => s.fits === false).map(s => s.seg.letter).join(', ')}` : 'depth not measurable';
 
   return (
-    <div className="fixed inset-0 z-[70] bg-slate-900/80 backdrop-blur-sm flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
+    <div className="fixed inset-0 z-[70] bg-slate-900/85 flex items-start justify-center overflow-y-auto p-4" onMouseDown={onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-[1240px] text-gray-900" onMouseDown={e => e.stopPropagation()} style={{ fontFamily: FONT }}>
         <div className="flex items-start justify-between px-5 pt-4 pb-2">
           <div>
