@@ -224,8 +224,6 @@ const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first 
 /** Modes of inheritance (PanelApp), as colours and words. */
 const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
   AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
-  'AD-pat': { color: '#ea580c', short: 'AD♂', label: 'monoallelic, imprinted: paternal allele expressed' },
-  'AD-mat': { color: '#d97706', short: 'AD♀', label: 'monoallelic, imprinted: maternal allele expressed' },
   'AD+AR': { color: '#7c3aed', short: 'AD/AR', label: 'mono- or biallelic' },
   AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },
   XLR: { color: '#db2777', short: 'XLR', label: 'X-linked, females biallelic' },
@@ -299,7 +297,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   /** the AChro-Puce recurrent CNVs (their sheets' classes), drawn under the population CNVs */
   const [showAchro, setShowAchro] = useState<boolean>(() => store.get<boolean>('sashimi.svAchro') ?? true);
   /** the genes drawn: in the panel, of some modes of inheritance, under a LOEUF, changed by the SV (kept) */
-  const [geneFilter, setGeneFilterState] = useState<GeneFilter>(() => ({ ...NO_FILTER, ...(store.get<GeneFilter>('sashimi.svGeneFilter') ?? {}) }));
+  const [geneFilter, setGeneFilterState] = useState<GeneFilter>(() => { const f = { ...NO_FILTER, ...(store.get<GeneFilter>('sashimi.svGeneFilter') ?? {}) }; return { ...f, moi: (f.moi ?? []).filter(m => m in MOI) }; });
   const setGeneFilter = (f: GeneFilter) => { setGeneFilterState(f); store.set('sashimi.svGeneFilter', f); };
   /** coordinates published in the other build, moved to this one (Ensembl), by region id; null when they could not be */
   const [achroLifted, setAchroLifted] = useState<Map<string, { start: number; end: number } | null>>(new Map());
@@ -1315,7 +1313,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
         {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.del }} /> deletion <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.dup }} /> duplication, the network's class after each bar (click a bar for its sheet); dashed: placed approximately</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
-        <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)} <span className="text-gray-400">(♂ / ♀: imprinted, the paternal / maternal allele expressed)</span></span>
+        <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)}</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
         <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
@@ -1354,7 +1352,7 @@ function GeneFilterControl({ filter, onChange, hasPanel, panelName, hasEvent, co
       {options.map(o => <button key={String(o.v)} onClick={() => set(o.v)} title={o.title} className={`px-2 py-0.5 whitespace-nowrap ${value === o.v ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>{o.label}</button>)}
     </span>
   );
-  const MOIS: (MoiClass | 'none')[] = ['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT', '?', 'none'];
+  const MOIS: (MoiClass | 'none')[] = ['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT', '?', 'none'];
   return (
     <span className="relative">
       <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${n ? 'border-accent-400 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-700'} hover:bg-gray-50`}

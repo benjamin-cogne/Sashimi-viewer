@@ -82,9 +82,7 @@ export function parsePanelFile(name: string, text: string): LoadedPanel {
 
 /**
  * PanelApp's mode_of_inheritance values, by what they require:
- * AD     MONOALLELIC, autosomal or pseudoautosomal (NOT imprinted, or imprinted status unknown)
- * AD-pat MONOALLELIC … maternally imprinted (paternal allele expressed)
- * AD-mat MONOALLELIC … paternally imprinted (maternal allele expressed)
+ * AD     MONOALLELIC, autosomal or pseudoautosomal (imprinted or not: the imprinting stays in PanelApp's own words)
  * AR     BIALLELIC, autosomal or pseudoautosomal
  * AD+AR  BOTH monoallelic and biallelic (including "biallelic mutations cause a more SEVERE disease form")
  * XLR    X-LINKED: hemizygous mutation in males, biallelic mutations in females
@@ -92,7 +90,7 @@ export function parsePanelFile(name: string, text: string): LoadedPanel {
  * MT     MITOCHONDRIAL
  * ?      Unknown, Other, or not given
  */
-export type MoiClass = 'AD' | 'AD-pat' | 'AD-mat' | 'AR' | 'AD+AR' | 'XLR' | 'XLD' | 'MT' | '?';
+export type MoiClass = 'AD' | 'AR' | 'AD+AR' | 'XLR' | 'XLD' | 'MT' | '?';
 export function classifyMoi(text: string | undefined | null): MoiClass {
   const t = String(text ?? '').toLowerCase();
   if (!t.trim()) return '?';
@@ -100,7 +98,7 @@ export function classifyMoi(text: string | undefined | null): MoiClass {
   if (t.includes('mitochondrial')) return 'MT';
   if (t.startsWith('both')) return 'AD+AR';
   if (t.startsWith('biallelic')) return 'AR';
-  if (t.startsWith('monoallelic')) return t.includes('maternally imprinted') ? 'AD-pat' : t.includes('paternally imprinted') ? 'AD-mat' : 'AD';
+  if (t.startsWith('monoallelic')) return 'AD';
   return '?';
 }
 export interface GeneMode { panel: string; panelId: string; confidence: 1 | 2 | 3; moi: string; cls: MoiClass }
