@@ -7,6 +7,7 @@ import type { GenomeBuild } from './ensembl';
 import { chromLength } from './assembly';
 import { getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getTranscript } from './ucsc';
 import { getConstraint } from './gnomad';
+import { mapAssembly } from './ensembl';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
 import type { SvGeneLoaders } from '../components/sashimi/SvGenomeBrowser';
 import type { Constraint, DosageScore } from '../components/sashimi/svGenes';
@@ -27,6 +28,7 @@ export function svLoadersFor(build: GenomeBuild): Omit<SvGeneLoaders, 'fallback'
     getAnnotations: (c, a, b, sy) => geneAnnotations(build, c, a, b, sy),
     getCytobands: c => getCytobands(build, c, chromLength(build, c) ?? 300_000_000),
     getPopulationSvs: async (c, a, b) => (await getDgvGold(build, c, a, b)).map(parseDgvItem).filter((v): v is PopulationSv => !!v),
+    liftOver: (from, to, chrom, start, end) => mapAssembly(from, to, chrom, start, end),
     locateGene: async symbol => {
       const t = await getTranscript(build, symbol);
       // 1-based inclusive → 0-based half-open

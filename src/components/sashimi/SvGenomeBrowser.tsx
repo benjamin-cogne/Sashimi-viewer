@@ -24,6 +24,7 @@ import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, L
 import { IMPACT, KIND_COLOR } from './svColors';
 import { cnvEvents, matchesOf, RO_MATCH, type PopulationSv, type PopMatch, type CnvEvent } from './svPopulation';
 import { TileCache, tileSizeFor } from './browserTiles';
+import { ACHRO_REGIONS, ACHRO_SOURCE, ACHRO_COLOR, ACHRO_CLASS_LABEL, achroShort, type AchroRegion, type AchroRow } from './achropuce';
 import { niceStep } from './geometry';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, geneModes, classifyMoi, type PanelSummary, type LoadedPanel, type GeneModes, type MoiClass } from '../../standalone/panelapp';
 
@@ -77,6 +78,8 @@ export interface SvGeneLoaders {
   getPopulationSvs?: (chrom: string, start: number, end: number) => Promise<PopulationSv[]>;
   /** where a gene lies (0-based half-open): to go to a gene typed by name */
   locateGene?: (symbol: string) => Promise<{ chrom: string; start: number; end: number; name: string }>;
+  /** a stretch moved between builds (1-based inclusive), for coordinates published in the other build */
+  liftOver?: (from: GenomeBuild, to: GenomeBuild, chrom: string, start: number, end: number) => Promise<{ chrom: string; start: number; end: number } | null>;
   /** the models the viewer already has (the gene in view): used when the source cannot list a window's transcripts */
   fallback: SvTranscript[];
 }
@@ -235,7 +238,11 @@ const MOI: Record<MoiClass | 'none', { color: string; short: string; label: stri
 
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
-type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv };
+type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: AchroPlaced };
+/** an AChro-Puce region placed on the chromosome in view: 0-based half-open, and how it was placed */
+type AchroPlaced = { r: AchroRegion; start: number; end: number; approx: boolean; how: string };
+/** the chromosome a region's name starts with (1q21.1… → chr1) */
+const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1] ?? ''}`;
 
 // ======================== Component ========================
 
@@ -276,6 +283,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   /** the population CNVs (DGV Gold Standard): drawn under the reference genes, and compared with the event's losses and gains */
   const [showDgv, setShowDgv] = useState<boolean>(() => store.get<boolean>('sashimi.svDgv') ?? true);
   const [pop, setPop] = useState<{ list: PopulationSv[]; loading: boolean; error?: string }>({ list: [], loading: false });
+  /** the AChro-Puce recurrent CNVs (their sheets' classes), drawn under the population CNVs */
+  const [showAchro, setShowAchro] = useState<boolean>(() => store.get<boolean>('sashimi.svAchro') ?? true);
+  /** coordinates published in the other build, moved to this one (Ensembl), by region id; null when they could not be */
+  const [achroLifted, setAchroLifted] = useState<Map<string, { start: number; end: number } | null>>(new Map());
   const [bands, setBands] = useState<Cytoband[]>([]);
   const svgRef = useRef<SVGSVGElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -543,6 +554,40 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return { list, loading: got.loading, error: got.error };
   }, [tilesVersion, tileSize, Math.floor(vp.s / tileSize), Math.floor(ve / tileSize), dgvTiles, showDgv, span > DGV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneBySym = useMemo(() => new Map(view.genes.map(g => [g.symbol, g])), [view.genes]);
+  // AChro-Puce regions of this chromosome published only in the other build: moved to this one once
+  useEffect(() => {
+    setAchroLifted(new Map());
+    if (!loaders.liftOver) return;
+    let alive = true;
+    const b = build as GenomeBuild, other: GenomeBuild = b === 'GRCh38' ? 'GRCh37' : 'GRCh38';
+    for (const r of ACHRO_REGIONS) {
+      if (achroChrom(r) !== chrom || !r.coords || r.coords.some(c => c.build === b)) continue;
+      const c = r.coords.find(x => x.build === other)!;
+      loaders.liftOver(other, b, c.chrom, c.start, c.end)
+        .then(m => { if (alive) setAchroLifted(prev => new Map(prev).set(r.id, m && m.chrom === chrom ? { start: m.start - 1, end: m.end } : null)); })
+        .catch(() => { if (alive) setAchroLifted(prev => new Map(prev).set(r.id, null)); });
+    }
+    return () => { alive = false; };
+  }, [chrom, build, loaders]); // eslint-disable-line react-hooks/exhaustive-deps
+  /**
+   * The regions of this chromosome, placed: the sheet's coordinates in this build; else those of the other build moved
+   * here; else the span of the genes the sheet names, among the gene models loaded (so a region shows once its genes
+   * are near the view). Positions given to the Mb, moved, or taken from genes are approximate.
+   */
+  const achroPlaced: AchroPlaced[] = (() => {
+    if (!showAchro) return [];
+    const out: AchroPlaced[] = [];
+    for (const r of ACHRO_REGIONS) {
+      if (achroChrom(r) !== chrom) continue;
+      const own = r.coords?.find(c => c.build === build);
+      if (own) { out.push({ r, start: own.start - 1, end: own.end, approx: !!own.approx, how: `${own.build} coordinates of the sheet${own.note ? ` (${own.note})` : ''}` }); continue; }
+      const lifted = achroLifted.get(r.id), src = r.coords?.[0];
+      if (lifted) { out.push({ r, start: lifted.start, end: lifted.end, approx: true, how: `${src!.build} coordinates of the sheet${src!.note ? ` (${src!.note})` : ''}, moved to ${build} by Ensembl` }); continue; }
+      const found = r.genes.map(g => geneBySym.get(g)).filter((g): g is SvGene => !!g);
+      if (found.length) out.push({ r, start: Math.min(...found.map(g => g.start)), end: Math.max(...found.map(g => g.end)), approx: true, how: `span of the genes the sheet names (${found.map(g => g.symbol).join(', ')})` });
+    }
+    return out;
+  })();
   const visGenes = view.genes.filter(g => g.end >= vp.s - span * 0.02 && g.start <= ve + span * 0.02);
   // the modes of the genes in view (their badges; the named ones when a crowd), once the view rests
   useEffect(() => {
@@ -664,6 +709,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     }
   }
   const yDgv = dgvShown ? y : -1; if (dgvShown) y += keep('dgv', Math.max(1, ...dgvItems.map(d => d.lane + 1)) * DGV_LANE_H) + 10;
+  // AChro-Puce: one bar per region (upper half the deletion's class, lower half the duplication's), its name and classes after it
+  const ACHRO_LANE_H = 18;
+  const achroItems: { p: AchroPlaced; lane: number; a: number; b: number; text: string }[] = [];
+  if (showAchro) {
+    const ends: number[] = [];
+    for (const p of [...achroPlaced].sort((u, v) => u.start - v.start)) {
+      const a = cx(refX(p.start)), b = Math.max(cx(refX(p.end)), a + 3);
+      if (b < X0 || a > X1) continue;
+      const text = `${p.approx ? '≈ ' : ''}${p.r.name}`;
+      const right = Math.max(a, X0) + Math.max(b - Math.max(a, X0), 0) + 6 + textWidth(text) * 0.9 + 90;
+      let lane = ends.findIndex(e => e + 6 < a);
+      if (lane < 0) { lane = ends.length; ends.push(right); } else ends[lane] = right;
+      achroItems.push({ p, lane, a, b, text });
+    }
+  }
+  const yAchro = showAchro ? y : -1; if (showAchro) y += keep('achro', Math.max(1, ...achroItems.map(d => d.lane + 1)) * ACHRO_LANE_H) + 8;
   const yRefBand = rec ? y : -1; if (rec) y += BAND_H;
   const yRib = y; if (ders.length) y += RIB_H;
   const derY = ders.map((d, i) => {
@@ -688,7 +749,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const hoverOn = (key: string, dgv?: PopulationSv) => (e: React.MouseEvent) => {
     if (dragRef.current?.moved) return;
     const p = boxPos(e); lastTipPos.current = p;
-    if (tip?.gene !== key) setTip({ ...p, gene: key, dgv }); else placeTip(p.x, p.y);
+    const achro = key.startsWith('achro:') ? achroPlaced.find(x => `achro:${x.r.id}` === key) : undefined;
+    if (tip?.gene !== key) setTip({ ...p, gene: key, dgv, achro }); else placeTip(p.x, p.y);
   };
   const hoverOff = () => setTip(null);
   useLayoutEffect(() => { if (tip) placeTip(lastTipPos.current.x, lastTipPos.current.y); });
@@ -696,8 +758,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     e.stopPropagation();
     if (suppressClick.current) return;
     const p = boxPos(e);
-    if (!dgv) setLinked(key);
-    setPinned(cur => (cur?.gene === key ? null : { ...p, gene: key, dgv }));
+    const achro = key.startsWith('achro:') ? achroPlaced.find(x => `achro:${x.r.id}` === key) : undefined;
+    if (!dgv && !achro) setLinked(key);
+    setPinned(cur => (cur?.gene === key ? null : { ...p, gene: key, dgv, achro }));
   };
   // the card points at its gene where it was: it closes when the view moves
   useEffect(() => { if (pinned && !anim.current.fly) setPinned(null); }, [Math.round(vp.s / Math.max(1, span) * 50), Math.round(Math.log(span) * 20)]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -853,6 +916,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <text x={14} y={yRefGenes + 25} fontSize={9.5}>{lod === 'density' ? 'density' : lod === 'bars' || mode === 'mane' ? 'MANE Select' : 'all NM_'}</text>
         {view.loading && <text x={14} y={yRefGenes + 38} fontSize={9} fill={C.faint}>loading…</text>}
         {yDgv >= 0 && <text x={14} y={yDgv + 8} fontWeight={600} fill={C.text}>DGV Gold<title>DGV Gold Standard: copy-number variants of the general population (curated, found in two studies and two samples at least)</title></text>}
+        {yAchro >= 0 && <text x={14} y={yAchro + 10} fontWeight={600} fill={C.text}>AChro-Puce<title>{`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}`}</title></text>}
         {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
         {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
           <g key={d.name}><text x={14} y={derY[i].band + 9} fontWeight={700} fill={C.accent}>{d.name}</text>
@@ -905,6 +969,27 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           );
         })}
         {yDgv >= 0 && !dgvItems.length && <text x={X0 + 6} y={yDgv + 8} fontSize={9.5} fill={C.faint}>{span > DGV_MAX_SPAN ? `zoom in below ${kb(DGV_MAX_SPAN)} to see the population CNVs` : dgvView.loading ? 'loading the DGV Gold Standard…' : dgvView.error ? `DGV Gold Standard unavailable: ${dgvView.error}` : 'no DGV Gold Standard CNV here'}</text>}
+        {/* AChro-Puce recurrent CNVs */}
+        {yAchro >= 0 && achroItems.map(({ p, lane, a, b, text }) => {
+          const yy = yAchro + lane * ACHRO_LANE_H, key = `achro:${p.r.id}`;
+          const del = p.r.rows.find(r2 => r2.type === 'del' && r2.sex !== 'female'), dup = p.r.rows.find(r2 => r2.type === 'dup' && r2.sex !== 'female');
+          const half = (row: AchroRow | undefined, y0: number) => row
+            ? <rect x={a} y={y0} width={b - a} height={4.5} fill={ACHRO_COLOR[row.cls]} />
+            : <rect x={a} y={y0} width={b - a} height={4.5} fill="#e5e7eb" />;
+          const lx = Math.max(a, X0) + Math.min(b - Math.max(a, X0), PW) + 5;
+          const chip = (row: AchroRow | undefined, t: string) => row ? `${t} ${achroShort(row.cls)}${row.also ? `+${achroShort(row.also.cls)}` : ''}` : '';
+          return (
+            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key)} onMouseMove={hoverOn(key)} onMouseLeave={hoverOff} onClick={pinOn(key)}>
+              <rect x={a} y={yy} width={Math.max(b - a, 3)} height={ACHRO_LANE_H - 4} fill="transparent" />
+              {half(del, yy + 2)}{half(dup, yy + 7)}
+              <rect x={a} y={yy + 1.5} width={b - a} height={10} rx={1.5} fill="none" stroke="#334155" strokeWidth={0.7} strokeDasharray={p.approx ? '3 2' : undefined} />
+              {lx + 40 < X1 && <text x={lx} y={yy + 10} fontSize={9.5} fontWeight={700} fill={C.text}>{text}
+                {del && <tspan dx={6} fill={ACHRO_COLOR[del.cls]}>{chip(del, 'del')}</tspan>}
+                {dup && <tspan dx={5} fill={ACHRO_COLOR[dup.cls]}>{chip(dup, 'dup')}</tspan>}</text>}
+            </g>
+          );
+        })}
+        {yAchro >= 0 && !achroItems.length && <text x={X0 + 6} y={yAchro + 10} fontSize={9.5} fill={C.faint}>{ACHRO_REGIONS.some(r => achroChrom(r) === chrom) ? 'no AChro-Puce recurrent CNV in view' : `no AChro-Puce sheet on ${chrom}`}</text>}
         {/* reference band: the event's segments */}
         {rec && rec.segs.map(s => {
           const [lo, hi] = [s.first ? 0 : s.start, s.last ? L : s.end];
@@ -1087,6 +1172,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const card = (at: TipAt, isPin: boolean) => {
     const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, (boxRef.current?.clientWidth ?? 900) - 400)), ...(at.y > (boxRef.current?.clientHeight ?? 400) - 160 ? { bottom: (boxRef.current?.clientHeight ?? 400) - at.y + 14 } : { top: at.y + 14 }) };
     const ref = isPin ? undefined : (el: HTMLDivElement | null) => { tipEl.current = el; };
+    if (at.achro) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><AchroCard p={at.achro} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} /></div>;
     if (at.dgv) return <div key={isPin ? 'pin' : 'tip'} ref={ref} className={isPin ? '' : 'absolute z-20 pointer-events-none'}><DgvCard v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} /></div>;
     const gi = impactOf.get(at.gene), g = gi?.gene ?? geneBySym.get(at.gene);
     if (!g) return null;
@@ -1145,6 +1231,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             ▤ DGV Gold
           </button>
         )}
+        <button onClick={() => { setShowAchro(v => { store.set('sashimi.svAchro', !v); return !v; }); }} aria-pressed={showAchro}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${showAchro ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-600'} hover:bg-gray-50`}
+          title={`${ACHRO_SOURCE.title} (${ACHRO_SOURCE.version}): the recurrent CNVs the French network classifies, each with its class for the deletion and the duplication`}>
+          ▦ AChro-Puce
+        </button>
         {rec && <label className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 cursor-pointer" title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
           ◭ {domainsFile ? `TADs: ${domainsFile.name} (${domains.length})` : 'Add chromatin domains (BED)…'}
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
@@ -1165,6 +1256,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         </span>
       </div>
       {rec && showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
+      {rec && showAchro && <AchroSummary cnv={cnv} placed={achroPlaced} />}
       <div className="px-3 mt-2"><div ref={widthBox} className="w-full" /></div>
       <div className="px-3 mt-0 relative" ref={boxRef}>
         {svg}
@@ -1179,6 +1271,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           : (['intolerant', 'constrained', 'tolerant', 'unknown'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: LOEUF_CLASS[k2].color }} />{LOEUF_CLASS[k2].label('v4')}</span>)}
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
+        {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: upper half the deletion's class, lower half the duplication's — {(['5', 'PIEV', '3', '2', '1'] as const).map(k2 => <span key={k2} className="inline-flex items-center gap-0.5"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: ACHRO_COLOR[k2] }} />{k2 === 'PIEV' ? 'PIEV' : `class ${k2}`}</span>)}; dashed: placed approximately</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AD-pat', 'AD-mat', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)} <span className="text-gray-400">(♂ / ♀: imprinted, the paternal / maternal allele expressed)</span></span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
@@ -1205,6 +1298,56 @@ function notableSym(sym: string, a: GeneAnnotations): boolean {
   const d = a.dosage.get(sym), c = a.constraint.get(sym);
   return !!a.panel?.genes.has(sym.toUpperCase()) || [2, 3].includes(d?.hi ?? -1) || [2, 3].includes(d?.ts ?? -1)
     || (c?.loeuf != null && c.loeuf < (LOEUF_INTOLERANT[c.version] ?? LOEUF_INTOLERANT.v4)) || (c?.pli != null && c.pli >= PLI_INTOLERANT);
+}
+
+// ======================== AChro-Puce ========================
+
+const typeWord = (r: AchroRow) => `${r.type === 'del' ? 'Deletion' : 'Duplication'}${r.sex ? (r.sex === 'male' ? ' (male)' : ' (female, carrier)') : ''}`;
+/** reciprocal overlap of an event's loss or gain with a region */
+const achroOverlap = (ev: CnvEvent, p: AchroPlaced) => Math.max(0, Math.min(ev.end, p.end) - Math.max(ev.start, p.start)) / Math.max(ev.end - ev.start, p.end - p.start, 1);
+
+/** The card of an AChro-Puce region: its classes, a summary, how it was placed, the event's matching loss or gain, the sheet. */
+function AchroCard({ p, chrom, cnv, pinned, place, onClose, onZoom }: { p: AchroPlaced; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void }) {
+  const hits = cnv.filter(c => achroOverlap(c.ev, p) >= RO_MATCH);
+  return (
+    <div className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+      onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+      <div className="font-semibold flex items-start gap-2"><span className="flex-1">{p.r.name} <span className="font-normal text-gray-400">· AChro-Puce</span></span>
+        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+      <table className="mt-1 w-full"><tbody>
+        {p.r.rows.map((r, i) => (
+          <tr key={i} className="align-top"><td className="pr-2 py-0.5 whitespace-nowrap text-gray-300">{typeWord(r)}</td>
+            <td className="py-0.5"><span className="font-bold" style={{ color: ACHRO_COLOR[r.cls] === '#64748b' ? '#cbd5e1' : ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `Class ${r.cls}`}</span> <span className="text-gray-300">{r.label}</span>
+              {r.also && <div><span className="font-bold" style={{ color: ACHRO_COLOR[r.also.cls] }}>{r.also.cls === 'PIEV' ? 'PIEV' : `Class ${r.also.cls}`}</span> <span className="text-gray-300">{r.also.label}</span></div>}</td></tr>
+        ))}
+      </tbody></table>
+      <div className="mt-1 text-gray-200 leading-snug">{p.r.summary}</div>
+      {hits.map(h => <div key={h.ev.start} className="mt-1 text-emerald-300">The event's {h.ev.kind} {h.ev.letters} overlaps it ({Math.round(achroOverlap(h.ev, p) * 100)} % reciprocal): {p.r.rows.filter(r => r.type === (h.ev.kind === 'loss' ? 'del' : 'dup')).map(r => `${r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}${r.sex ? ` (${r.sex})` : ''}`).join(', ') || 'no class given for this type'}.</div>)}
+      <div className="mt-1 text-gray-400">{chrom}:{(p.start + 1).toLocaleString('en-US')}-{p.end.toLocaleString('en-US')} {p.approx ? '(approximate) ' : ''}· placed from the {p.how}.</div>
+      <div className="mt-0.5 text-gray-400">Sheet “{p.r.sheet}”, {p.r.authors} — {ACHRO_SOURCE.title}, {ACHRO_SOURCE.version}. The summary is written for this viewer: read the sheet.</div>
+      {pinned
+        ? <div className="mt-1.5 pt-1.5 border-t border-white/15 flex gap-2"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button>
+            <a href={ACHRO_SOURCE.url} target="_blank" rel="noreferrer" className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 the catalogue (PDF)</a></div>
+        : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
+    </div>
+  );
+}
+
+/** One chip per loss or gain of the event that matches an AChro-Puce region (reciprocal overlap ≥ RO_MATCH), with the region's class for that type. */
+function AchroSummary({ cnv, placed }: { cnv: { ev: CnvEvent }[]; placed: AchroPlaced[] }) {
+  const hits = cnv.flatMap(c => placed.filter(p => achroOverlap(c.ev, p) >= RO_MATCH).map(p => ({ ev: c.ev, p, rows: p.r.rows.filter(r => r.type === (c.ev.kind === 'loss' ? 'del' : 'dup')) })));
+  if (!hits.length) return null;
+  return (
+    <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}: a loss or gain of the event overlapping a region reciprocally by ${Math.round(RO_MATCH * 100)} % or more`}>
+      <span className="text-gray-500 self-center">AChro-Puce:</span>
+      {hits.map(({ ev, p, rows }) => (
+        <span key={`${ev.start}${p.r.id}`} className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border bg-white" style={{ borderColor: `${ACHRO_COLOR[rows[0]?.cls ?? '3']}66` }}>
+          <b>{ev.kind} {ev.letters}</b> ≈ {p.r.name} {ev.kind === 'loss' ? 'deletion' : 'duplication'}:
+          {rows.length ? rows.map((r, i) => <b key={i} style={{ color: ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}{r.sex ? ` (${r.sex})` : ''}{r.also ? ` + ${r.also.cls === 'PIEV' ? 'PIEV' : `class ${r.also.cls}`} (${r.also.label})` : ''}</b>) : <span className="text-gray-500">not classified for this type</span>}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 // ======================== PanelApp picker ========================

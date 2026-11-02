@@ -269,3 +269,22 @@ export async function getProteinDomains(build: GenomeBuild, translationId: strin
     .filter((f: any) => !skip.has(String(f.type || '')) && f.start != null && f.end != null)
     .map((f: any) => ({ type: String(f.type || ''), id: String(f.id || f.hseqname || ''), description: String(f.description || ''), interpro: f.interpro ?? null, start: Number(f.start), end: Number(f.end) }));
 }
+
+const mapCache = new Map<string, Promise<{ chrom: string; start: number; end: number } | null>>();
+/**
+ * A stretch moved from one build to the other (Ensembl /map, 1-based inclusive in and out): the span of the pieces
+ * that land on the same chromosome, null when none does. Cached.
+ */
+export function mapAssembly(from: GenomeBuild, to: GenomeBuild, chrom: string, start: number, end: number): Promise<{ chrom: string; start: number; end: number } | null> {
+  const c = chrom.replace(/^chr/i, '');
+  const key = `${from}>${to}|${c}:${start}-${end}`;
+  if (!mapCache.has(key)) {
+    mapCache.set(key, (async () => {
+      const j = await getJson(`${HOSTS.GRCh38}/map/human/${from}/${encodeURIComponent(`${c}:${start}..${end}:1`)}/${to}?content-type=application/json`);
+      const pieces = (j?.mappings ?? []).map((m: any) => m?.mapped).filter((m: any) => m && String(m.seq_region_name) === c);
+      if (!pieces.length) return null;
+      return { chrom: `chr${c}`, start: Math.min(...pieces.map((m: any) => Number(m.start))), end: Math.max(...pieces.map((m: any) => Number(m.end))) };
+    })().catch(e => { mapCache.delete(key); throw e; }));
+  }
+  return mapCache.get(key)!;
+}
