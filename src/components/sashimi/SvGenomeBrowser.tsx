@@ -219,6 +219,21 @@ function derTarget(d: DerLayout, c: number, current: number | null, L: number): 
   return best ? { piece: best.piece, pos: best.pos } : { piece: -1, pos: c };
 }
 
+/**
+ * The rebuilt chromosome's position under one edge of the reference view: its own copy of that position (the nearest
+ * retained edge when the position was lost); among several copies, the leftmost for the left edge and the rightmost
+ * for the right one, so every copy between them shows.
+ */
+function derEdge(d: DerLayout, pos: number, side: 'left' | 'right', L: number): number {
+  let best: { pos: number; pen: number } | null = null;
+  for (const dp of d.pieces) {
+    const [lo, hi] = pieceRange(dp, L);
+    const cc = Math.min(hi, Math.max(lo, pos)), pen = Math.abs(pos - cc), dpos = toDer(dp, cc);
+    if (!best || pen < best.pen - 1 || (Math.abs(pen - best.pen) <= 1 && (side === 'left' ? dpos < best.pos : dpos > best.pos))) best = { pos: dpos, pen };
+  }
+  return best ? best.pos : pos;
+}
+
 const EMPTY_STORY: GeneStory = { ders: [], genes: [], chains: [], fragments: [], domains: [], derDomains: [] };
 type Vp = { s: number; e: number };
 type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv };
@@ -269,7 +284,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const raf = useRef(0);
   const anim = useRef<{ fly?: { from: Vp; to: Vp; t0: number; dur: number }; fling?: { v: number; t: number } }>({});
   /** the rebuilt chromosomes' offset from where they should sit, decaying to 0 (a slide instead of a jump) */
-  const derState = useRef(new Map<string, { piece: number; target: number; offset: number }>());
+  const derState = useRef(new Map<string, { l: number; r: number; ol: number; or: number }>());
   const lastMove = useRef(0);
   const [, settle] = useReducer((x: number) => x + 1, 0);
   const settleTimer = useRef(0);
@@ -294,7 +309,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     }
     const bpPerPx = (next.e - next.s) / PW;
     for (const st of derState.current.values()) {
-      if (Math.abs(st.offset) > bpPerPx * 0.5) { st.offset *= 0.8; more = true; } else st.offset = 0;
+      if (Math.abs(st.ol) > bpPerPx * 0.5) { st.ol *= 0.8; more = true; } else st.ol = 0;
+      if (Math.abs(st.or) > bpPerPx * 0.5) { st.or *= 0.8; more = true; } else st.or = 0;
     }
     vpRef.current = next;
     lastMove.current = now;
@@ -380,24 +396,30 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
 
   // ======================== the rebuilt chromosomes: under the reference, sliding where the two part ways ========================
   const ders = story.ders.filter(d => d.rearranged);
+  // Each edge of the reference view maps onto the rebuilt chromosome, which is drawn from one to the other: a longer
+  // derivative (duplications) is drawn a little tighter and both its ends show; zoomed within one segment the two scales
+  // are the same. When the edges do not give a sensible stretch (both inside an inverted segment), the derivative keeps
+  // the reference's scale, centred under the view's middle. A jump (an edge entering another copy) becomes a slide.
   const c = (vp.s + vp.e) / 2;
-  const derCenter = new Map<DerLayout, number>();
+  const derWin = new Map<DerLayout, { l: number; r: number }>();
   for (const d of ders) {
+    let l = derEdge(d, vp.s, 'left', L), r = derEdge(d, vp.e, 'right', L);
+    if (!(r - l > span * 0.2 && r - l < span * 5)) { const st0 = derState.current.get(d.name); const t = derTarget(d, c, st0 ? (st0.l + st0.r) / 2 : null, L); l = t.pos - span / 2; r = t.pos + span / 2; }
     const st = derState.current.get(d.name);
-    const t = derTarget(d, c, st ? st.target + st.offset : null, L);
-    if (!st) derState.current.set(d.name, { piece: t.piece, target: t.pos, offset: 0 });
+    if (!st) derState.current.set(d.name, { l, r, ol: 0, or: 0 });
     else {
-      if (st.piece !== t.piece) { st.offset = st.target + st.offset - t.pos; st.piece = t.piece; kick(); }
-      st.target = t.pos;
+      if (Math.abs(l - st.l) > span * 0.3) { st.ol += st.l - l; kick(); }
+      if (Math.abs(r - st.r) > span * 0.3) { st.or += st.r - r; kick(); }
+      st.l = l; st.r = r;
     }
     const s2 = derState.current.get(d.name)!;
-    derCenter.set(d, s2.target + s2.offset);
+    derWin.set(d, { l: s2.l + s2.ol, r: Math.max(s2.l + s2.ol + 1, s2.r + s2.or) });
   }
-  const derX = (d: DerLayout, dpos: number) => XC + (dpos - (derCenter.get(d) ?? 0)) * ppb;
+  const derX = (d: DerLayout, dpos: number) => { const w = derWin.get(d); return w ? X0 + (dpos - w.l) * (PW / (w.r - w.l)) : XC; };
   /** the stretches of the reference the rebuilt chromosomes show (their genes are fetched and drawn too) */
   let needS = vp.s, needE = vp.e;
   for (const d of ders) {
-    const dc = derCenter.get(d) ?? 0, dl = dc + (X0 - XC) / ppb, dr = dc + (X1 - XC) / ppb;
+    const w = derWin.get(d)!, dl = w.l, dr = w.r;
     for (const dp of d.pieces) {
       const [lo, hi] = pieceRange(dp, L);
       const a = Math.min(toDer(dp, lo), toDer(dp, hi)), b = Math.max(toDer(dp, lo), toDer(dp, hi));
@@ -694,6 +716,18 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     );
   };
 
+  /** the gene whose card is open: outlined, and joined to its copies on the rebuilt chromosome */
+  const linkSym = pinned && !pinned.dgv ? pinned.gene : null;
+  /** each copy of a gene's principal model on the rebuilt chromosome: whole or which part, inverted or not */
+  const copiesOf = (gi: GeneImpact): string[] => story.chains.filter(ch => ch.parts.some(p => p.tx === gi.principal.tx)).map(ch => {
+    const parts = ch.parts.filter(p => p.tx === gi.principal.tx), first = parts[0], last = parts[parts.length - 1];
+    const five = first.tx.strand > 0 ? !first.cutLo || first.edgeLo : !first.cutHi || first.edgeHi;
+    const three = last.tx.strand > 0 ? !last.cutHi || last.edgeHi : !last.cutLo || last.edgeLo;
+    const what = five && three ? 'whole' : !five && !three ? 'inner part' : !five ? '3′ part' : '5′ part';
+    const fused = ch.parts.some(p => p.tx.gene !== gi.gene.symbol) ? ` fused to ${[...new Set(ch.parts.filter(p => p.tx.gene !== gi.gene.symbol).map(p => p.tx.gene))].join(', ')}` : '';
+    return `${what}${parts.some(p => p.dp.piece.reversed) ? ', inverted' : ''}${fused}`;
+  });
+
   // ---- the SVG ----
   const vl = Math.max(2, ix(vp.e) - ix(vp.s));
   const svg = (
@@ -795,8 +829,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {ders.map((d, di) => d.pieces.map(dp => {
           const [lo, hi] = pieceRange(dp, L), col = segColors.get(dp.seg.id)!;
           const ra = cx(refX(lo)), rb = cx(refX(hi));
-          let da = cx(derX(d, toDer(dp, lo))), db = cx(derX(d, toDer(dp, hi)));
-          if (dp.piece.reversed) [da, db] = [db, da];
+          // the ribbon joins each reference end to that end's place on the rebuilt chromosome: crossed when inverted
+          const da = cx(derX(d, toDer(dp, lo))), db = cx(derX(d, toDer(dp, hi)));
           if (Math.max(ra, rb, da, db) < X0 - 2 || Math.min(ra, rb, da, db) > X1 + 2) return null;
           const y0 = yRefBand + BAND_H, y1 = derY[di].band, m = (y0 + y1) / 2;
           return <path key={`rib${di}-${dp.index}`} d={`M${ra},${y0} C${ra},${m} ${da},${m} ${da},${y1} L${db},${y1} C${db},${m} ${rb},${m} ${rb},${y0} Z`} fill={col} fillOpacity={0.16} stroke={col} strokeOpacity={0.45} strokeWidth={0.9}><title>{`${dp.seg.letter}${dp.piece.reversed ? '′ (inverted)' : ''}: ${chrom}:${fmt(dp.seg.start + 1)}-${fmt(dp.seg.end)} → ${d.name}${dp.piece.copy ? ` (copy ${dp.piece.copy + 1})` : ''}`}</title></path>;
@@ -898,6 +932,28 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           );
         })}
       </g>
+      {/* the gene whose card is open, joined to each of its copies on the rebuilt chromosome */}
+      {linkSym && (() => {
+        const ri = refItems.items.find(it => it.g.symbol === linkSym);
+        const ref = ri ? { x0: Math.max(X0, ri.x0) - 4, x1: Math.min(X1, Math.max(ri.xg, ri.x0 + ri.lw)) + 4, y: yRefGenes + refItems.laneY[ri.lane] - 2, h: ri.h + 4 } : null;
+        const copies = ders.flatMap((d, di) => derPacked[di].items.filter(b => b.genes.includes(linkSym)).map(b => ({ x0: Math.max(X0, b.x0) - 4, x1: Math.min(X1, Math.max(b.xg, b.x0 + b.lw)) + 4, y: derY[di].genes + derPacked[di].laneY[b.lane] - 2, h: b.h + 4, xg: (Math.max(X0, b.x0) + Math.min(X1, b.xg)) / 2 })));
+        const rx = ri ? (Math.max(X0, ri.x0) + Math.min(X1, ri.xg)) / 2 : 0;
+        return (
+          <g pointerEvents="none" clipPath="url(#svb-clip)">
+            {ref && <rect x={ref.x0} y={ref.y} width={ref.x1 - ref.x0} height={ref.h} rx={6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeWidth={1.6} />}
+            {copies.map((k, i) => <rect key={`cp${i}`} x={k.x0} y={k.y} width={k.x1 - k.x0} height={k.h} rx={6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeWidth={1.6} />)}
+            {ref && copies.map((k, i) => {
+              const y0 = ref.y + ref.h, y1 = k.y, m = (y0 + y1) / 2;
+              return <g key={`ln${i}`}>
+                <path d={`M${rx},${y0} C${rx},${m} ${k.xg},${m} ${k.xg},${y1}`} fill="none" stroke="#fff" strokeWidth={4} strokeOpacity={0.85} />
+                <path d={`M${rx},${y0} C${rx},${m} ${k.xg},${m} ${k.xg},${y1}`} fill="none" stroke={C.accent} strokeWidth={1.8} />
+                <circle cx={k.xg} cy={y1} r={3} fill={C.accent} />
+              </g>;
+            })}
+            {ref && <circle cx={rx} cy={ref.y + ref.h} r={3} fill={C.accent} />}
+          </g>
+        );
+      })()}
       {domains.length > 0 && ders.map((d, i) => <text key={`tadl${i}`} x={14} y={derY[i].tad + 16} fontSize={10.5} fill={C.muted}>TADs</text>)}
       {/* the stretch being chosen on the ruler */}
       {band && <g pointerEvents="none">
@@ -935,6 +991,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
         <div className="text-gray-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
         {gi && <div className="mt-0.5">{gi.principal.text}</div>}
+        {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure' : ''}</div>; })()}
         {r?.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
         <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>
         {isPin
