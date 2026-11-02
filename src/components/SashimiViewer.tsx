@@ -392,6 +392,9 @@ const TRACK_GAP = 10;       // gap between panels (transcript, variants, reads)
 const SASHIMI_GAP = 4;      // gap between consecutive sample tracks, kept small so the samples read as one group
 const TRANSCRIPT_H = 78;
 const NEIGHBOUR_ROW_H = 22;    // one row per neighbouring gene drawn under the queried gene
+/** DNA samples only: the header line of the gene panel, above the gene rows (the queried gene drawn as one of them) */
+const DNA_TX_HEAD_H = 22;
+const QUERY_GENE_ID = '__queried_gene__';
 const ALT_TX_ROW_H = 18;       // one row per transcript model in the "All transcripts" panel
 const ALT_TX_HEADER_H = 22;
 const ALT_TX_MAX_ROWS = 40;
@@ -1753,10 +1756,15 @@ export default function SashimiViewer({
 
   /** Neighbouring genes visible in the window, packed into rows (a row holds genes that do not overlap on screen). */
   const neighbourRows = useMemo((): NeighbourModel[][] => {
-    if (!neighbours || neighbours.chrom !== currentChrom || !tx) return [];
+    if (!tx || (!dnaOnly && (!neighbours || neighbours.chrom !== currentChrom))) return [];
     const plotRight = PLOT_LEFT + plotWidth;
-    const visible = neighbours.models
-      .filter(m => m.geneEnd > viewStart && m.geneStart < viewEnd && m.geneName !== tx.geneName)
+    const others = neighbours?.chrom === currentChrom ? neighbours.models.filter(m => m.geneName !== tx.geneName) : [];
+    // DNA samples only: the queried gene is one gene among the others, drawn like them (no exon numbers, no reading-frame signs)
+    const own = neighbours?.chrom === currentChrom ? neighbours.models.find(m => m.geneName === tx.geneName) : undefined;
+    const query: NeighbourModel[] = dnaOnly ? [{ ...tx, geneId: QUERY_GENE_ID, biotype: own?.biotype ?? (tx.cdsStart != null ? 'protein_coding' : 'non-coding'), isCanonical: tx.isMane || !!own?.isCanonical,
+      geneStart: Math.min(tx.start, own?.geneStart ?? tx.start), geneEnd: Math.max(tx.end, own?.geneEnd ?? tx.end), otherExons: [] }] : [];
+    const visible = [...query, ...others]
+      .filter(m => m.geneEnd > viewStart && m.geneStart < viewEnd)
       .sort((a, b) => a.geneStart - b.geneStart);
     const rows: { items: NeighbourModel[]; spans: [number, number][] }[] = [];
     for (const m of visible) {
@@ -1770,8 +1778,10 @@ export default function SashimiViewer({
       row.items.push(m); row.spans.push(span);
     }
     return rows.map(r => r.items);
-  }, [neighbours, currentChrom, tx, viewStart, viewEnd, scale, plotWidth]);
-  const transcriptPanelH = TRANSCRIPT_H + neighbourRows.length * NEIGHBOUR_ROW_H;
+  }, [neighbours, currentChrom, tx, viewStart, viewEnd, scale, plotWidth, dnaOnly]);
+  /** DNA samples only: a header line, then the gene rows (the queried gene among them) */
+  const transcriptHeadH = dnaOnly && tx ? DNA_TX_HEAD_H : TRANSCRIPT_H;
+  const transcriptPanelH = transcriptHeadH + neighbourRows.length * NEIGHBOUR_ROW_H;
 
   /**
    * Which gene model a junction belongs to. The queried gene is tried first; when it does not
@@ -4849,7 +4859,7 @@ export default function SashimiViewer({
     items.push({
       w: 60, el: (
         <g key="l4">
-          <rect x={0} y={y - 6} width={14} height={12} fill={INK.exon} rx={1.5} />
+          <rect x={0} y={y - 6} width={14} height={12} fill={dnaOnly ? SAME_SENSE_COLOR : INK.exon} rx={1.5} />
           <text x={19} y={y + 3.5} fill={INK.muted} fontSize={9.5}>CDS</text>
         </g>
       ),
@@ -4857,12 +4867,12 @@ export default function SashimiViewer({
     items.push({
       w: 60, el: (
         <g key="l5">
-          <rect x={0} y={y - 3} width={14} height={6} fill={INK.utr} rx={1.5} />
+          <rect x={0} y={y - 3} width={14} height={6} fill={dnaOnly ? SAME_SENSE_COLOR : INK.utr} rx={1.5} />
           <text x={19} y={y + 3.5} fill={INK.muted} fontSize={9.5}>UTR</text>
         </g>
       ),
     });
-    if (tx && exonPhases(tx).some(p => !p.symmetric && !p.hasStart && !p.hasStop)) {
+    if (tx && !dnaOnly && exonPhases(tx).some(p => !p.symmetric && !p.hasStart && !p.hasStop)) {
       items.push({
         w: 236, el: (
           <g key="l5b">
@@ -5848,6 +5858,27 @@ export default function SashimiViewer({
         </text>
       );
     }
+    if (dnaOnly) {
+      return (
+        <g fontFamily={FONT}>
+          <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
+          <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10} fill={INK.muted}>
+            genes · {tx.geneName} {tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons{tx.cdsStart == null ? ' · non-coding' : ''}
+          </text>
+          {tx.strand < 0 && (
+            <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={INK.muted} fontSize={9.5}>
+              <title>{`${tx.geneName} is transcribed from the minus strand. Every shown sample is genomic DNA, so the axis keeps the genomic orientation (positions increase to the right, as in IGV).`}</title>
+              genomic orientation, positions increase to the right
+            </text>
+          )}
+          {neighbourError && <text x={plotRight - 6} y={yOff + (tx.strand < 0 ? 26 : 14)} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
+          <defs><clipPath id="sashimi-clip-tx"><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} /></clipPath></defs>
+          <g clipPath="url(#sashimi-clip-tx)">
+            {neighbourRows.map((row, ri) => renderNeighbourRow(row, yOff + DNA_TX_HEAD_H + ri * NEIGHBOUR_ROW_H))}
+          </g>
+        </g>
+      );
+    }
     const gA = scale.x(tx.start), gB = scale.x(tx.end);
     const gLeft = Math.max(PLOT_LEFT, Math.min(gA, gB)), gRight = Math.min(plotRight, Math.max(gA, gB));
 
@@ -6010,7 +6041,7 @@ export default function SashimiViewer({
       const inside = right - left > lw + 60;
       const lx = inside ? Math.max(PLOT_LEFT + 3, Math.min(left, plotRight - lw - 3))
         : right + 4 + lw <= plotRight ? right + 4 : Math.max(PLOT_LEFT + 3, left - lw - 4);
-      const relation = tx ? (same ? `same strand as ${tx.geneName}` : `antisense to ${tx.geneName}`) : '';
+      const relation = m.geneId === QUERY_GENE_ID ? 'the gene searched' : tx ? (same ? `same strand as ${tx.geneName}` : `antisense to ${tx.geneName}`) : '';
       const title = `${m.geneName} · ${m.transcriptId}${m.isCanonical ? (isEnsemblId(m.transcriptId) ? ' (Ensembl canonical)' : ' (RefSeq Select)') : ''} · ${m.biotype}\n` +
         `${currentChrom}:${(m.start + 1).toLocaleString('en-US')}-${m.end.toLocaleString('en-US')} · ${m.strand > 0 ? '+' : '−'} strand · ${relation}\n` +
         `${m.exons.length} exon${m.exons.length > 1 ? 's' : ''}${m.cdsStart == null ? ' · non-coding' : ''}` +
@@ -7183,8 +7214,8 @@ export default function SashimiViewer({
         >
           <rect width={svgWidth} height={totalHeight} fill={INK.bg} />
 
-          {/* Gene band */}
-          {(() => {
+          {/* Gene band (not with DNA samples only: there the queried gene is one gene among the others) */}
+          {!dnaOnly && (() => {
             const a = scale.x(currentGeneStart), b = scale.x(currentGeneEnd);
             const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
             return right > left ? <rect x={left} y={RULER_H} width={right - left} height={legendY - RULER_H} fill={INK.geneBand} /> : null;
