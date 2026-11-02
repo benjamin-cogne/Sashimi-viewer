@@ -98,21 +98,20 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
   const [useControls, setUseControls] = useState(true);
   const [t, setT] = useState(0);
-  // the cartoon sits below the genes: it plays the first time it comes into view
+  // the cartoon plays the first time it comes into view (at once on most screens; on a short one, once scrolled to)
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [explore, setExplore] = useState(false);
   const [view, setView] = useState({ k: 1, x: 0, y: 0 });
   const svgRef = useRef<SVGSVGElement>(null);
   const sceneRef = useRef<HTMLDivElement>(null);
-  const reconRef = useRef<HTMLDivElement>(null);
+  const reconRef = useRef<HTMLDivElement>(null), genesRef = useRef<HTMLDivElement>(null);
   const seen = useRef(false);
   useEffect(() => {
     const el = sceneRef.current; if (!el || typeof IntersectionObserver === 'undefined') return;
     const io = new IntersectionObserver(es => { if (!seen.current && es.some(e => e.isIntersecting)) { seen.current = true; if (tRef.current === 0) setPlaying(true); } }, { threshold: 0.4 });
-    // watched once the genes above have had time to take their height: not set off by the page's first, short layout
-    const timer = window.setTimeout(() => io.observe(el), 1500);
-    return () => { window.clearTimeout(timer); io.disconnect(); };
+    io.observe(el);
+    return () => io.disconnect();
   }, []);
   const panRef = useRef<{ x: number; y: number; vx: number; vy: number; moved: boolean } | null>(null);
   const raf = useRef<number | null>(null);
@@ -219,7 +218,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const verdictText = !chosen.length ? 'no junction selected' : depth.verdict === 'explained' ? '✓ depth fits the rebuilt chromosome' : depth.verdict === 'balanced' ? '≈ balanced: depth cannot confirm it' : depth.verdict === 'unexplained' ? `✗ depth does not fit ${depth.segments.filter(s => s.fits === false).map(s => s.seg.letter).join(', ')}` : 'depth not measurable';
 
   const ders = rec.ders.filter(d => d.rearranged || rec.ders.length === 1);
-  const toReconstruction = () => reconRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const toGenes = () => genesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   return (
     <div className="fixed inset-0 z-[70] bg-white overflow-y-auto text-gray-900" style={{ fontFamily: FONT }}>
       <div className="w-full min-h-full">
@@ -247,14 +246,12 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
               )) : <div className="text-gray-400 mt-0.5">no junction selected: tick the junctions of the event below</div>}
               {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
               {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-gray-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-gray-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
-              <div className="text-[10.5px] text-gray-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. <button onClick={toReconstruction} className="text-accent-700 hover:underline font-semibold">▶ the reconstruction from the reads</button> (cartoon, junctions, copy number per segment) is below the genes.</div>
+              <div className="text-[10.5px] text-gray-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
             </div>
             <SvNomenclatureBox rec={rec} build={build} bands={bands} />
           </div>
         </div>
-        {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
-
-        <div ref={reconRef} className="scroll-mt-12 border-t border-gray-200 mt-2 pt-3">
+        <div ref={reconRef} className="scroll-mt-12 border-t border-gray-200 pt-3">
           <div className="px-5 pb-2">
             <div className="text-base font-bold">Reconstruction from the reads <span className="font-normal text-gray-500">· {chosen.length} junction{chosen.length === 1 ? '' : 's'} · {sample.name}</span></div>
             <div className="text-xs text-gray-500">the reference cut at the breakpoints, the pieces joined by the junction reads, then the copy number of each segment against the read depth</div>
@@ -324,6 +321,8 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
           </div>
           <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} chrom={chrom} />
         </div>
+        <div ref={genesRef} className="scroll-mt-12" />
+        {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
       </div>
     </div>
   );
