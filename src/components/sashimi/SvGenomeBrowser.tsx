@@ -266,6 +266,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [tip, setTip] = useState<TipAt | null>(null);
   /** a card kept open by a click (the hover card follows the pointer and goes with it) */
   const [pinned, setPinned] = useState<TipAt | null>(null);
+  /** the gene joined to its copies: set by a click on it, kept when its card is closed, cleared by a click on the background */
+  const [linked, setLinked] = useState<string | null>(null);
   const tipEl = useRef<HTMLDivElement | null>(null);
   const [colorBy, setColorBy] = useState<'loeuf' | 'impact'>(() => store.get<'loeuf' | 'impact'>('sashimi.svColorBy') ?? 'loeuf');
   const [near, setNear] = useState<number>(() => store.get<number>('sashimi.svNear') ?? NEAR_BREAKPOINT_DEFAULT);
@@ -327,7 +329,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   // a new chromosome or event: start over on it
   useEffect(() => { derState.current.clear(); const v = initialVp(); anim.current = {}; vpRef.current = v; setVpState(v); }, [chrom, build, eventWin.start, eventWin.end]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (focus) flyTo(focus.start, focus.end, 700); }, [focus?.key]); // eslint-disable-line react-hooks/exhaustive-deps
-  const span = vp.e - vp.s, ppb = PW / span;
+  const span = vp.e - vp.s;
+  /** px per base, shared by the reference and the rebuilt chromosomes (set once their stretches are known, below) */
+  let ppb = PW / span;
+  /** bases per px as drawn, for the gestures */
+  const bppRef = useRef(span / PW);
   const refX = (pos: number) => X0 + (pos - vp.s) * ppb;
   const lod: 'full' | 'bars' | 'density' = span <= LOD_FULL ? 'full' : span <= LOD_BARS ? 'bars' : 'density';
   const interacting = performance.now() - lastMove.current < 420;
@@ -415,9 +421,20 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const s2 = derState.current.get(d.name)!;
     derWin.set(d, { l: s2.l + s2.ol, r: Math.max(s2.l + s2.ol + 1, s2.r + s2.or) });
   }
-  const derX = (d: DerLayout, dpos: number) => { const w = derWin.get(d); return w ? X0 + (dpos - w.l) * (PW / (w.r - w.l)) : XC; };
+  // one scale for the reference and the rebuilt chromosomes, the longer of the two filling the width: a derivative
+  // longer than the reference (duplications) runs past the reference's end, a shorter one (deletions) stops before it
+  /** each rebuilt chromosome's whole extent (its ends are the reference's), and its length */
+  const derExtent = (d: DerLayout) => { let lo = Infinity, hi = -Infinity; for (const dp of d.pieces) { const [a, b] = pieceRange(dp, L); for (const v of [toDer(dp, a), toDer(dp, b)]) { lo = Math.min(lo, v); hi = Math.max(hi, v); } } return { lo, hi, len: hi - lo }; };
+  let D = Math.max(span, ...[...derWin.values()].map(w => w.r - w.l));
+  // the reference's end (qter) in view: the rebuilt chromosomes' ends too, so their lengths compare at a glance
+  if (vp.s + D >= L - 1) for (const d of ders) { const w = derWin.get(d); if (w) D = Math.max(D, derExtent(d).hi - w.l); }
+  ppb = PW / D; bppRef.current = D / PW;
+  /** the reference drawn: the view, and on past it when the derivative is longer */
+  const ve = Math.min(L, vp.s + D);
+  const derX = (d: DerLayout, dpos: number) => { const w = derWin.get(d); return w ? X0 + (dpos - w.l) * ppb : XC; };
+
   /** the stretches of the reference the rebuilt chromosomes show (their genes are fetched and drawn too) */
-  let needS = vp.s, needE = vp.e;
+  let needS = vp.s, needE = ve;
   for (const d of ders) {
     const w = derWin.get(d)!, dl = w.l, dr = w.r;
     for (const dp of d.pieces) {
@@ -439,7 +456,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const firstFetch = useRef(true);
   // the tiles are asked for once the view rests a moment: a fast zoom does not fetch every level it crosses
   useEffect(() => {
-    const go = () => { geneTiles?.want(needS, needE, tileSize); if (showDgv && span <= DGV_MAX_SPAN) dgvTiles?.want(vp.s, vp.e, tileSize); };
+    const go = () => { geneTiles?.want(needS, needE, tileSize); if (showDgv && span <= DGV_MAX_SPAN) dgvTiles?.want(vp.s, ve, tileSize); };
     if (firstFetch.current) { firstFetch.current = false; go(); return; }
     const id = window.setTimeout(go, 140);
     return () => window.clearTimeout(id);
@@ -455,13 +472,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [tilesVersion, tileSize, i0, i1, txs.list, geneTiles]); // eslint-disable-line react-hooks/exhaustive-deps
   const dgvView = useMemo(() => {
     if (!dgvTiles || !showDgv || span > DGV_MAX_SPAN) return { list: [] as PopulationSv[], loading: false, error: null as string | null };
-    const got = dgvTiles.collect((Math.floor(vp.s / tileSize) - 1) * tileSize, (Math.floor(vp.e / tileSize) + 2) * tileSize, tileSize);
+    const got = dgvTiles.collect((Math.floor(vp.s / tileSize) - 1) * tileSize, (Math.floor(ve / tileSize) + 2) * tileSize, tileSize);
     const seen = new Set<string>(), list: PopulationSv[] = [];
     for (const v of got.items) { const k = `${v.id}:${v.outer[0]}`; if (!seen.has(k)) { seen.add(k); list.push(v); } }
     return { list, loading: got.loading, error: got.error };
-  }, [tilesVersion, tileSize, Math.floor(vp.s / tileSize), Math.floor(vp.e / tileSize), dgvTiles, showDgv, span > DGV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tilesVersion, tileSize, Math.floor(vp.s / tileSize), Math.floor(ve / tileSize), dgvTiles, showDgv, span > DGV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneBySym = useMemo(() => new Map(view.genes.map(g => [g.symbol, g])), [view.genes]);
-  const visGenes = view.genes.filter(g => g.end >= vp.s - span * 0.02 && g.start <= vp.e + span * 0.02);
+  const visGenes = view.genes.filter(g => g.end >= vp.s - span * 0.02 && g.start <= ve + span * 0.02);
   // constraint and dosage of the genes in view, asked once each, when the view rests
   const visKey = span <= LOD_BARS ? visGenes.map(g => g.symbol).join(',') : '';
   useEffect(() => {
@@ -607,6 +624,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     e.stopPropagation();
     if (suppressClick.current) return;
     const p = boxPos(e);
+    if (!dgv) setLinked(key);
     setPinned(cur => (cur?.gene === key ? null : { ...p, gene: key, dgv }));
   };
   // the card points at its gene where it was: it closes when the view moves
@@ -635,7 +653,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const gEl = guideRef.current, x = guideX.current; if (!gEl) return;
     if (x == null || x < X0 || x > X1) { gEl.style.display = 'none'; return; }
     gEl.setAttribute('transform', `translate(${x.toFixed(1)},0)`); gEl.style.display = '';
-    const t = gEl.querySelector('text'); if (t) t.textContent = `${chrom}:${fmt(vpRef.current.s + (x - X0) / (PW / (vpRef.current.e - vpRef.current.s)) + 1)}`;
+    const t = gEl.querySelector('text'); if (t) t.textContent = `${chrom}:${fmt(vpRef.current.s + (x - X0) * bppRef.current + 1)}`;
   };
   useLayoutEffect(updateGuide);
   const onPointerMove = (e: React.PointerEvent) => {
@@ -645,7 +663,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     if (!d.moved && Math.abs(x - d.x0) < 4) return;
     if (!d.moved) { d.moved = true; svgRef.current?.setPointerCapture(e.pointerId); setTip(null); }
     d.samples.push({ x: e.clientX, t: performance.now() }); if (d.samples.length > 6) d.samples.shift();
-    if (d.kind === 'pan') { const sp = d.vp0.e - d.vp0.s, sh = -(x - d.x0) / PW * sp; moveTo(d.vp0.s + sh, d.vp0.e + sh); }
+    if (d.kind === 'pan') { const sh = -(x - d.x0) * bppRef.current; moveTo(d.vp0.s + sh, d.vp0.e + sh); }
     else if (d.kind === 'band') setBand({ a: Math.max(X0, Math.min(X1, d.x0)), b: Math.max(X0, Math.min(X1, x)) });
     else { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); moveTo(p - sp / 2, p + sp / 2); }
   };
@@ -654,15 +672,14 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     dragRef.current = null; suppressClick.current = d.moved;
     if (d.kind === 'band' && band) {
       const a = Math.min(band.a, band.b), b = Math.max(band.a, band.b); setBand(null);
-      if (b - a > 4) { const sp = vpRef.current.e - vpRef.current.s, s0 = vpRef.current.s; flyTo(s0 + (a - X0) / PW * sp, s0 + (b - X0) / PW * sp); }
+      if (b - a > 4) { const s0 = vpRef.current.s, k = bppRef.current; flyTo(s0 + (a - X0) * k, s0 + (b - X0) * k); }
       return;
     }
     if (d.kind === 'pan' && d.moved && d.samples.length > 1) {
       const p = d.samples[0], q = d.samples[d.samples.length - 1], dt = q.t - p.t;
       if (dt > 0 && performance.now() - q.t < 60) {
         const r = svgRef.current!.getBoundingClientRect(), pxPerMs = (q.x - p.x) / dt * (VW / r.width);
-        const sp = vpRef.current.e - vpRef.current.s;
-        if (Math.abs(pxPerMs) > 0.25) { anim.current = { fling: { v: -pxPerMs / PW * sp, t: performance.now() } }; kick(); }
+        if (Math.abs(pxPerMs) > 0.25) { anim.current = { fling: { v: -pxPerMs * bppRef.current, t: performance.now() } }; kick(); }
       }
     }
   };
@@ -674,11 +691,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const v = vpRef.current, sp = v.e - v.s;
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const f = Math.exp(e.deltaY * unit * 0.0022), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) / PW * sp;
+        const f = Math.exp(e.deltaY * unit * 0.0022), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
         moveTo(at - (at - v.s) * f, at + (v.e - at) * f);
       } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
         e.preventDefault();
-        const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit, sh = dx / r.width * VW / PW * sp;
+        const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit, sh = dx / r.width * VW * bppRef.current;
         moveTo(v.s + sh, v.e + sh);
       }
     };
@@ -687,7 +704,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [txs.loading, L]); // eslint-disable-line react-hooks/exhaustive-deps
   const onDoubleClick = (e: React.MouseEvent) => {
     const x = toSvgX(e.clientX); if (x < X0 || x > X1) return;
-    const v = vpRef.current, sp = v.e - v.s, at = v.s + (x - X0) / PW * sp, f = e.shiftKey ? 2 : 0.5;
+    const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : 0.5;
     flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320);
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -699,9 +716,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   };
 
   // ---- ruler ----
-  const step = niceStep(span, 9);
+  const step = niceStep(ve - vp.s, 9);
   const ticks: number[] = [];
-  for (let t = Math.ceil(vp.s / step) * step; t <= vp.e; t += step) ticks.push(t);
+  for (let t = Math.ceil(vp.s / step) * step; t <= ve; t += step) ticks.push(t);
   const ix = (pos: number) => X0 + (pos / L) * PW;
 
   const torn = (x: number, yy: number, color: string, key: string) => <path key={key} d={`M${x},${yy - 8} l-3,3 l3,3 l-3,3 l3,3 l-3,3`} fill="none" stroke={color} strokeWidth={1.4} />;
@@ -717,7 +734,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   };
 
   /** the gene whose card is open: outlined, and joined to its copies on the rebuilt chromosome */
-  const linkSym = pinned && !pinned.dgv ? pinned.gene : null;
+  const linkSym = linked;
   /** each copy of a gene's principal model on the rebuilt chromosome: whole or which part, inverted or not */
   const copiesOf = (gi: GeneImpact): string[] => story.chains.filter(ch => ch.parts.some(p => p.tx === gi.principal.tx)).map(ch => {
     const parts = ch.parts.filter(p => p.tx === gi.principal.tx), first = parts[0], last = parts[parts.length - 1];
@@ -729,12 +746,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   });
 
   // ---- the SVG ----
-  const vl = Math.max(2, ix(vp.e) - ix(vp.s));
+  const vl = Math.max(2, ix(ve) - ix(vp.s));
   const svg = (
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: dragRef.current?.moved && dragRef.current.kind === 'pan' ? 'grabbing' : 'grab', fontFamily: FONT, touchAction: 'pan-y' }} className="block select-none"
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
       onPointerLeave={() => { guideX.current = null; updateGuide(); }}
-      onClick={() => { if (!suppressClick.current) setPinned(null); }} onDoubleClick={onDoubleClick}>
+      onClick={() => { if (!suppressClick.current) { setPinned(null); setLinked(null); } }} onDoubleClick={onDoubleClick}>
       <defs>
         <clipPath id="svb-clip"><rect x={X0 - 2} y={0} width={PW + 4} height={H} /></clipPath>
         <clipPath id="svb-ideo"><rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} rx={IDEO_H / 2} /></clipPath>
@@ -764,8 +781,12 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <text x={14} y={yRefGenes + 25} fontSize={9.5}>{lod === 'density' ? 'density' : lod === 'bars' || mode === 'mane' ? 'MANE Select' : 'all NM_'}</text>
         {view.loading && <text x={14} y={yRefGenes + 38} fontSize={9} fill={C.faint}>loading…</text>}
         {yDgv >= 0 && <text x={14} y={yDgv + 8} fontWeight={600} fill={C.text}>DGV Gold<title>DGV Gold Standard: copy-number variants of the general population (curated, found in two studies and two samples at least)</title></text>}
-        {rec && <text x={14} y={yRefBand + 14} fontSize={9.5}>reference</text>}
-        {ders.map((d, i) => <g key={d.name}><text x={14} y={derY[i].band + 14} fontWeight={700} fill={C.accent}>{d.name}</text><text x={14} y={derY[i].band + 26} fontSize={9.5}>rebuilt</text></g>)}
+        {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
+        {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
+          <g key={d.name}><text x={14} y={derY[i].band + 9} fontWeight={700} fill={C.accent}>{d.name}</text>
+            <text x={14} y={derY[i].band + 21} fontSize={9.5} fontFamily={MONO}>{kb(len)}</text>
+            {Math.abs(diff) >= 1 && <text x={14} y={derY[i].band + 32} fontSize={9.5} fontWeight={700} fontFamily={MONO} fill={diff > 0 ? '#15803d' : C.lost}>{diff > 0 ? '+' : '−'}{kb(Math.abs(diff))}</text>}
+          </g>); })}
       </g>
       {/* ruler: drag along it to zoom on a stretch */}
       <rect x={X0} y={yRuler} width={PW} height={RULER_H - 4} fill="#eef2f6" rx={4} style={{ cursor: 'col-resize' }}><title>Drag along the ruler to zoom on a stretch</title></rect>
@@ -774,7 +795,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {/* grid lines through the tracks */}
         {ticks.map(t => <line key={`gl${t}`} x1={refX(t)} x2={refX(t)} y1={yRuler + RULER_H} y2={rec ? yRefBand : H - 8} stroke={C.grid} strokeWidth={0.6} />)}
         {/* reference TADs */}
-        {domains.filter(d => d.end > vp.s && d.start < vp.e).map((d, i) => {
+        {domains.filter(d => d.end > vp.s && d.start < ve).map((d, i) => {
           const a = cx(refX(d.start)), b = cx(refX(d.end)), h = Math.min(TAD_H - 6, (b - a) / 2);
           return <path key={`rt${d.start}`} d={`M${a},${yRefTad + TAD_H} L${(a + b) / 2},${yRefTad + TAD_H - h} L${b},${yRefTad + TAD_H} Z`} fill={i % 2 ? '#dfe5ee' : '#e9eef4'} stroke="#a9b6c6" strokeWidth={0.8}><title>{`domain ${d.name ?? ''}: ${chrom}:${fmt(d.start + 1)}-${fmt(d.end)} (${kb(d.end - d.start)})`}</title></path>;
         })}
@@ -932,6 +953,25 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           );
         })}
       </g>
+      {/* the chromosomes' ends (qter) in view: their lengths, and the difference between them */}
+      {rec && ders.map((d, di) => {
+        const ext = derExtent(d), xr = refX(L), xd = derX(d, ext.hi), diff = ext.len - L;
+        const refEnd = xr <= X1 + 2, derEnd = xd <= X1 + 2, yR = yRefBand, yD = derY[di].band;
+        return (
+          <g key={`ends${di}`} pointerEvents="none">
+            {refEnd && <text x={Math.min(xr, X1)} y={yR - 3} fontSize={9.5} fontWeight={700} textAnchor="end" fill={C.muted}>qter · {kb(L)}</text>}
+            {derEnd && <text x={Math.min(xd, X1)} y={yD + BAND_H + 21} fontSize={9.5} fontWeight={700} textAnchor="end" fill={C.accent}>qter · {kb(ext.len)}</text>}
+            {refEnd && derEnd && Math.abs(xd - xr) > 6 && (() => {
+              const a = Math.min(xr, xd), b = Math.max(xr, xd), yb = diff > 0 ? yD - 9 : yR + BAND_H + 9, col = diff > 0 ? '#15803d' : C.lost;
+              return <g>
+                <line x1={xr} x2={xr} y1={yR + BAND_H} y2={yD} stroke={C.muted} strokeWidth={0.8} strokeDasharray="3 3" />
+                <path d={`M${a},${yb - 4}v4H${b}v-4`} fill="none" stroke={col} strokeWidth={1.4} transform={diff > 0 ? undefined : `translate(0 0) scale(1 1)`} />
+                <text x={b - a < 170 ? b : (a + b) / 2} y={yb - 6} fontSize={10} fontWeight={700} textAnchor={b - a < 170 ? 'end' : 'middle'} fill={col}>{diff > 0 ? `${d.name} ${kb(diff)} longer` : `${d.name} ${kb(-diff)} shorter`}</text>
+              </g>;
+            })()}
+          </g>
+        );
+      })}
       {/* the gene whose card is open, joined to each of its copies on the rebuilt chromosome */}
       {linkSym && (() => {
         const ri = refItems.items.find(it => it.g.symbol === linkSym);
@@ -991,7 +1031,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
         <div className="text-gray-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
         {gi && <div className="mt-0.5">{gi.principal.text}</div>}
-        {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure' : ''}</div>; })()}
+        {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure (the links stay when this card is closed; click the background to clear them)' : ''}</div>; })()}
         {r?.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
         <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>
         {isPin
