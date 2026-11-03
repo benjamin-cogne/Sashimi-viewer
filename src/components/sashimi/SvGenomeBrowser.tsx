@@ -304,14 +304,19 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [bands, setBands] = useState<Cytoband[]>([]);
   const svgRef = useRef<SVGSVGElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
-  const guideRef = useRef<SVGGElement>(null);
 
   // ======================== the view: a stretch of the reference, moved once per frame ========================
   const initialVp = (): Vp => { const pad = Math.max(2000, (eventWin.end - eventWin.start) * (eventRec ? 0.12 : 0)); return clampVp(eventWin.start - pad, eventWin.end + pad); };
   const [vp, setVpState] = useState<Vp>(initialVp);
   const vpRef = useRef(vp);
   const raf = useRef(0);
-  const anim = useRef<{ fly?: { from: Vp; to: Vp; t0: number; dur: number }; fling?: { v: number; t: number } }>({});
+  const anim = useRef<{ fly?: { from: Vp; to: Vp; t0: number; dur: number; a0: number | null; a1: number | null }; fling?: { v: number; t: number } }>({});
+  /**
+   * Where along the reference the rebuilt chromosomes are lined up (their offset is read there): set by a zoom or a
+   * jump, kept by a pan, so that dragging moves the reference and the rebuilt chromosomes together, the figure whole.
+   * null: the view's centre.
+   */
+  const anchor = useRef<number | null>(null);
   /** the rebuilt chromosomes' offset from where they should sit, decaying to 0 (a slide instead of a jump) */
 
   const lastMove = useRef(0);
@@ -328,6 +333,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const l0 = Math.log(a.fly.from.e - a.fly.from.s), l1 = Math.log(a.fly.to.e - a.fly.to.s);
       const span = Math.exp(l0 + (l1 - l0) * k2), c = c0 + (c1 - c0) * k2;
       next = clampVp(c - span / 2, c + span / 2);
+      // the line-up glides with the flight, from where it was to the target's
+      const a0 = a.fly.a0 ?? c0, a1 = a.fly.a1 ?? c1;
+      anchor.current = a0 + (a1 - a0) * k2;
       if (t < 1) more = true; else a.fly = undefined;
     } else if (a.fling) {
       const dt = Math.min(48, now - a.fling.t); a.fling.t = now;
@@ -344,12 +352,25 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     settleTimer.current = window.setTimeout(settle, 450);
   };
   const kick = () => { if (!raf.current) raf.current = requestAnimationFrame(frame); };
-  /** a move by the user: animations stop, the view follows */
-  const moveTo = (s: number, e: number) => { anim.current = {}; vpRef.current = clampVp(s, e); kick(); };
-  const flyTo = (s: number, e: number, dur = 480) => { anim.current = { fly: { from: vpRef.current, to: clampVp(s, e), t0: performance.now(), dur } }; kick(); };
+  /**
+   * A move by the user: animations stop, the view follows. `at`: where the rebuilt chromosomes line up afterwards
+   * (a zoom: the point it zooms about); left out, the line-up stays (a pan moves the figure whole).
+   */
+  const moveTo = (s: number, e: number, at?: number) => {
+    anim.current = {};
+    const v = vpRef.current;
+    // a pan from the view's centre line-up: that line-up is fixed first (else it would follow the centre, cancelling the pan)
+    anchor.current = at !== undefined ? at : anchor.current ?? (v.s + v.e) / 2;
+    vpRef.current = clampVp(s, e); kick();
+  };
+  /** a flight there; `at`: the line-up at the end ('keep': as it is, a pan), the target's centre by default */
+  const flyTo = (s: number, e: number, dur = 480, at: number | 'keep' = (s + e) / 2) => {
+    const from = vpRef.current, a0 = anchor.current ?? (from.s + from.e) / 2;
+    anim.current = { fly: { from, to: clampVp(s, e), t0: performance.now(), dur, a0, a1: at === 'keep' ? a0 : at } }; kick();
+  };
   useEffect(() => () => { cancelAnimationFrame(raf.current); window.clearTimeout(settleTimer.current); }, []);
   // a new chromosome or event: start over on it
-  useEffect(() => { const v = eventRec ? clampVp(eventRange().s, eventRange().e) : initialVp(); anim.current = {}; vpRef.current = v; setVpState(v); }, [chrom, build, eventWin.start, eventWin.end]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const v = eventRec ? clampVp(eventRange().s, eventRange().e) : initialVp(); anim.current = {}; anchor.current = null; vpRef.current = v; setVpState(v); }, [chrom, build, eventWin.start, eventWin.end]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (focus) flyTo(focus.start, focus.end, 700); }, [focus?.key]); // eslint-disable-line react-hooks/exhaustive-deps
   const span = vp.e - vp.s;
   /** px per base, shared by the reference and the rebuilt chromosomes (set once their stretches are known, below) */
@@ -505,7 +526,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     if (c >= evR) return f.r;
     return f.l + (f.r - f.l) * (c - evL) / (evR - evL);
   };
-  const c = (vp.s + vp.e) / 2;
+  const c = anchor.current ?? (vp.s + vp.e) / 2;
   const derOff = new Map(ders.map(d => [d, offsetAt(d, c)]));
   const derX = (d: DerLayout, dpos: number) => X0 + (dpos - (derOff.get(d) ?? 0) - vp.s) * ppb;
   /** the reference drawn: the view (it may reach past the reference's ends, where a longer derivative goes on) */
@@ -815,25 +836,15 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId };
     if (kind === 'ideo') { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); flyTo(p - sp / 2, p + sp / 2, 320); }
   };
-  /** the guide line under the pointer and its position, moved without redrawing (and kept right as the view moves) */
-  const guideX = useRef<number | null>(null);
-  const updateGuide = () => {
-    const gEl = guideRef.current, x = guideX.current; if (!gEl) return;
-    if (x == null || x < X0 || x > X1) { gEl.style.display = 'none'; return; }
-    gEl.setAttribute('transform', `translate(${x.toFixed(1)},0)`); gEl.style.display = '';
-    const t = gEl.querySelector('text'); if (t) t.textContent = `${chrom}:${fmt(vpRef.current.s + (x - X0) * bppRef.current + 1)}`;
-  };
-  useLayoutEffect(updateGuide);
   const onPointerMove = (e: React.PointerEvent) => {
     const x = toSvgX(e.clientX);
-    guideX.current = x; updateGuide();
     const d = dragRef.current; if (!d || d.id !== e.pointerId) return;
     if (!d.moved && Math.abs(x - d.x0) < 4) return;
     if (!d.moved) { d.moved = true; svgRef.current?.setPointerCapture(e.pointerId); setTip(null); }
     d.samples.push({ x: e.clientX, t: performance.now() }); if (d.samples.length > 6) d.samples.shift();
     if (d.kind === 'pan') { const sh = -(x - d.x0) * bppRef.current; moveTo(d.vp0.s + sh, d.vp0.e + sh); }
     else if (d.kind === 'band') setBand({ a: Math.max(X0, Math.min(X1, d.x0)), b: Math.max(X0, Math.min(X1, x)) });
-    else { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); moveTo(p - sp / 2, p + sp / 2); }
+    else { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); moveTo(p - sp / 2, p + sp / 2, p); }
   };
   const onPointerUp = (e: React.PointerEvent) => {
     const d = dragRef.current; if (!d || d.id !== e.pointerId) return;
@@ -860,7 +871,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const f = Math.exp(e.deltaY * unit * 0.0022), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
-        moveTo(at - (at - v.s) * f, at + (v.e - at) * f);
+        moveTo(at - (at - v.s) * f, at + (v.e - at) * f, at);
       } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
         e.preventDefault();
         const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit, sh = dx / r.width * VW * bppRef.current;
@@ -873,11 +884,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const onDoubleClick = (e: React.MouseEvent) => {
     const x = toSvgX(e.clientX); if (x < X0 || x > X1) return;
     const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : 0.5;
-    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320);
+    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320, at);
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const v = vpRef.current, sp = v.e - v.s;
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const sh = (e.key === 'ArrowLeft' ? -1 : 1) * sp * 0.3; flyTo(v.s + sh, v.e + sh, 260); }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const sh = (e.key === 'ArrowLeft' ? -1 : 1) * sp * 0.3; flyTo(v.s + sh, v.e + sh, 260, 'keep'); }
     else if (e.key === '+' || e.key === '=') { e.preventDefault(); flyTo(v.s + sp * 0.25, v.e - sp * 0.25, 260); }
     else if (e.key === '-' || e.key === '_') { e.preventDefault(); flyTo(v.s - sp * 0.5, v.e + sp * 0.5, 260); }
     else if ((e.key === 'e' || e.key === 'E') && rec) { e.preventDefault(); eventView(); }
@@ -918,7 +929,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const svg = (
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: dragRef.current?.moved && dragRef.current.kind === 'pan' ? 'grabbing' : 'grab', fontFamily: FONT, touchAction: 'pan-y' }} className="block select-none"
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
-      onPointerLeave={() => { guideX.current = null; updateGuide(); }}
       onClick={() => { if (!suppressClick.current) { setPinned(null); setLinked(null); } }} onDoubleClick={onDoubleClick}>
       <defs>
         <clipPath id="svb-clip"><rect x={X0 - 2} y={0} width={PW + 4} height={H} /></clipPath>
@@ -1197,11 +1207,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <rect x={Math.min(band.a, band.b)} y={yRuler} width={Math.abs(band.b - band.a)} height={H - yRuler - 6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeDasharray="4 3" />
         <text x={(band.a + band.b) / 2} y={yRuler - 4} fontSize={10} fontWeight={700} textAnchor="middle" fill={C.accent}>{kb(Math.abs(band.b - band.a) / ppb)}</text>
       </g>}
-      {/* the pointer's position, moved directly (data-export="skip": not in the figure's export) */}
-      <g ref={guideRef} style={{ display: 'none' }} pointerEvents="none" data-export="skip">
-        <line x1={0} x2={0} y1={yRuler + RULER_H} y2={H - 8} stroke={C.accent} strokeWidth={0.8} strokeOpacity={0.5} />
-        <text x={4} y={yRuler + RULER_H + 10} fontSize={9.5} fill={C.accent} fontFamily={MONO} />
-      </g>
     </svg>
   );
 
