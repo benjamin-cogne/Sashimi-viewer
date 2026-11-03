@@ -115,10 +115,20 @@ export default function Timeline({ duration, lanes, idle, activity, clicks, play
         </div>
       </div>
       <div className="relative overflow-hidden" ref={lanesRef}>
-        {lanes.map(lane => (
+        {lanes.map(lane => {
+          // blocks overlapping in time take rows of their own (a highlight over a lower third, two zooms...), so each one's
+          // ends can be reached; rows from the items' own times, so a drag does not reshuffle them
+          const rowOf = new Map<string, number>(), ends: number[] = [];
+          for (const it of [...lane.items].filter(i => !(i.mark ?? lane.marks)).sort((a, b) => a.start - b.start)) {
+            let r = ends.findIndex(e => e <= it.start);
+            if (r < 0) { r = ends.length; ends.push(0); }
+            ends[r] = it.end; rowOf.set(it.id, r);
+          }
+          const rows = Math.max(1, ends.length), laneH = rows * LANE_H;
+          return (
           <div key={lane.key} className="flex items-center border-t border-gray-100">
             <div className="text-gray-600 font-semibold truncate pr-1" style={{ width: LABEL_W }}>{lane.label}</div>
-            <div className="relative cursor-pointer bg-gray-50 overflow-hidden" style={{ width, height: LANE_H }} onPointerDown={seekAt}>
+            <div className="relative cursor-pointer bg-gray-50 overflow-hidden" style={{ width, height: laneH }} onPointerDown={seekAt}>
               {lane.key === 'edit' && idle.map((c, i) => (
                 <div key={`i${i}`} className="absolute top-0 h-full" title="dropped by the pause shortening"
                   style={{ left: x(c.start), width: Math.max(1, x(c.end) - x(c.start)), background: 'repeating-linear-gradient(45deg,#e2e8f0 0 4px,#f8fafc 4px 8px)' }} />
@@ -135,18 +145,19 @@ export default function Timeline({ duration, lanes, idle, activity, clicks, play
                   </div>
                 );
                 return (
-                  <div key={it.id} className={`absolute top-0.5 rounded cursor-grab overflow-hidden text-white whitespace-nowrap ${sel ? 'ring-2 ring-offset-1 ring-gray-800 z-10' : ''}`}
-                    style={{ left: x(s), width: Math.max(4, x(e) - x(s)), height: LANE_H - 4, background: it.color, opacity: it.faded ? 0.45 : 1 }}
+                  <div key={it.id} className={`group absolute rounded cursor-grab overflow-hidden text-white whitespace-nowrap ${sel ? 'ring-2 ring-offset-1 ring-gray-800 z-10' : ''}`}
+                    style={{ left: x(s), top: (rowOf.get(it.id) ?? 0) * LANE_H + 2, width: Math.max(4, x(e) - x(s)), height: LANE_H - 4, background: it.color, opacity: it.faded ? 0.45 : 1 }}
                     onPointerDown={grab(lane.key, it, 'move')} title={`${it.label} · ${fmt(s)} → ${fmt(e)}`}>
-                    <div className="absolute left-0 top-0 h-full w-1.5 cursor-ew-resize" onPointerDown={grab(lane.key, it, 'start')} />
+                    <div className="absolute left-0 top-0 h-full w-2 cursor-ew-resize group-hover:bg-white/35" onPointerDown={grab(lane.key, it, 'start')} title="Drag to change when it starts" />
                     <span className="px-2 leading-[18px]">{it.label}</span>
-                    <div className="absolute right-0 top-0 h-full w-1.5 cursor-ew-resize" onPointerDown={grab(lane.key, it, 'end')} />
+                    <div className="absolute right-0 top-0 h-full w-2 cursor-ew-resize group-hover:bg-white/35" onPointerDown={grab(lane.key, it, 'end')} title="Drag to change how long it lasts" />
                   </div>
                 );
               })}
             </div>
           </div>
-        ))}
+          );
+        })}
         {playhead >= v0 && playhead <= v1 && <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none" style={{ left: LABEL_W + x(playhead) }} />}
       </div>
       {zoomed && (
