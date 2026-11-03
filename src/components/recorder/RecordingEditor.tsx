@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
 import { recordingToSvg, recordingToPlayer, playerHtml, packedPlayerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
-import { suggestCaptions, CAPTION_DEFAULT_MS, type Caption, type CaptionKind, type Chapter } from './captions';
+import { suggestCaptions, CAPTION_DEFAULT_MS, CHAPTER_CARD_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
 type Rect = [number, number, number, number];
 type Tab = 'zooms' | 'captions' | 'chapters' | 'pointer' | 'file';
@@ -180,6 +180,8 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const [playhead, setPlayhead] = useState(0);
   useEffect(() => { const id = setInterval(() => setPlayhead(invertTime(map, keep.current.t, rec.duration)), 200); return () => clearInterval(id); }, [map, rec.duration]);
   const [sel, setSel] = useState<string | null>(null);
+  /** where a chapter's title card ends, in recorded time (its length is kept in played time) */
+  const cardEnd = (c: Chapter) => invertTime(map, map(c.t) + (c.dur ?? CHAPTER_CARD_MS), rec.duration);
   const CAP_COLOR: Record<CaptionKind, string> = { title: '#0f1b2b', lower: '#475569', callout: '#14857a', highlight: '#7c3aed' };
   const lanes: TimelineLane[] = [
     { key: 'edit', label: 'Cut · speed', items: [
@@ -191,7 +193,9 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       ...drawn.map((z, i) => ({ id: `dz:${i}`, start: z.start, end: z.end, label: 'zoom', color: '#0f766e' })),
     ] },
     { key: 'cap', label: 'Captions', items: captions.map((c, i) => ({ id: `cp:${i}`, start: c.start, end: c.end, label: c.text || KIND_LABEL[c.kind], color: CAP_COLOR[c.kind] })) },
-    { key: 'ch', label: 'Chapters', marks: true, items: chapters.map((c, i) => ({ id: `ch:${i}`, start: c.t, end: c.t + 1, label: `${i + 1}. ${c.name}`, color: '#0f766e' })) },
+    // a chapter with a title card is a block, from its start to the end of its card (drag it, or its ends, to set when and
+    // how long the card shows); without a card, a mark
+    { key: 'ch', label: 'Chapters', items: chapters.map((c, i) => ({ id: `ch:${i}`, start: c.t, end: c.card ? cardEnd(c) : c.t + 1, mark: !c.card, label: `${i + 1}. ${c.name}`, color: '#0f766e' })) },
   ];
   const onTimelineChange = (_lane: string, id: string, start: number, end: number) => {
     const [kind, n] = id.split(':'), i = Number(n);
@@ -200,7 +204,11 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     else if (kind === 'az') { const z = autos[i]; setAutoOff(s => new Set([...s, i])); setDrawn(l => [...l, { ...z, start, end, source: 'drawn' }]); setSel(`dz:${drawn.length}`); }
     else if (kind === 'dz') setDrawn(l => l.map((x, k) => (k === i ? { ...x, start, end } : x)));
     else if (kind === 'cp') editCaption(i, { start, end });
-    else if (kind === 'ch') setChapters(l => l.map((x, k) => (k === i ? { ...x, t: start } : x)).sort((a, b) => a.t - b.t));
+    else if (kind === 'ch') setChapters(l => l.map((x, k) => {
+      if (k !== i) return x;
+      // a block's ends set its card's time on screen (in played time, as the card is shown)
+      return x.card ? { ...x, t: start, dur: Math.max(300, Math.round(map(end) - map(start))) } : { ...x, t: start };
+    }).sort((a, b) => a.t - b.t));
   };
   const removeSelected = () => {
     if (!sel) return;
@@ -386,8 +394,10 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
                     <span className="w-5 font-semibold text-gray-600">{i + 1}.</span>
                     <input type="number" step={0.1} min={0} value={(map(c.t) / 1000).toFixed(1)} className="border border-gray-300 rounded px-1 py-0.5 w-16" title="Time (s)"
                       onChange={e => { const t = invertTime(map, Math.max(0, Number(e.target.value) * 1000), rec.duration); setChapters(cs => cs.map((x, k) => (k === i ? { ...x, t } : x)).sort((a, b) => a.t - b.t)); }} /> s
-                    <input value={c.name} onChange={e => setChapters(cs => cs.map((x, k) => (k === i ? { ...x, name: e.target.value } : x)))} className="flex-1 border border-gray-300 rounded px-2 py-0.5" />
+                    <input value={c.name} onChange={e => setChapters(cs => cs.map((x, k) => (k === i ? { ...x, name: e.target.value } : x)))} className="flex-1 min-w-0 border border-gray-300 rounded px-2 py-0.5" title="The chapter's name (its title card shows it)" />
                     {check(c.card, v => setChapters(cs => cs.map((x, k) => (k === i ? { ...x, card: v } : x))), 'title card', 'Show the chapter name as a title card when it starts')}
+                    {c.card && <><input type="number" step={0.1} min={0.3} value={((c.dur ?? CHAPTER_CARD_MS) / 1000).toFixed(1)} className="border border-gray-300 rounded px-1 py-0.5 w-14" title="How long the title card stays on screen (s); or drag the chapter's end on the timeline"
+                      onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v > 0) setChapters(cs => cs.map((x, k) => (k === i ? { ...x, dur: Math.max(300, Math.round(v * 1000)) } : x))); }} /> s</>}
                     <button onClick={() => setChapters(cs => cs.filter((_, k) => k !== i))} className="text-gray-400 hover:text-red-600 text-base leading-none" title="Remove">×</button>
                   </div>
                 ))}

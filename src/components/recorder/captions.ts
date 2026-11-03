@@ -18,7 +18,11 @@ export interface Caption {
   /** highlight: the area (page coordinates), and whether the rest is dimmed */
   rect?: [number, number, number, number]; dim?: boolean;
 }
-export interface Chapter { t: number; name: string; card: boolean }
+export interface Chapter {
+  t: number; name: string; card: boolean;
+  /** how long its title card stays on screen (ms, in the played time); CHAPTER_CARD_MS when not set */
+  dur?: number;
+}
 
 export const CAPTION_DEFAULT_MS: Record<CaptionKind, number> = { title: 3000, lower: 4000, callout: 3000, highlight: 3000 };
 export const CHAPTER_CARD_MS = 2200;
@@ -132,7 +136,7 @@ export function renderCaptions(captions: Caption[], chapters: Chapter[], map: (t
   // chapters shown as a title card, faded in before their mark so a pause there shows it whole
   for (const ch of chapters) if (ch.card && ch.name) {
     const t = map(ch.t);
-    card(ch.name, '', Math.max(0, t - FADE_MS), t + CHAPTER_CARD_MS);
+    card(ch.name, '', Math.max(0, t - FADE_MS), t + Math.max(300, ch.dur ?? CHAPTER_CARD_MS));
   }
   return { css, screen, content };
 }

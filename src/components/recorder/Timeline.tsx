@@ -8,7 +8,9 @@
  */
 import { useEffect, useRef, useState } from 'react';
 
-export interface TimelineItem { id: string; start: number; end: number; label: string; color: string; faded?: boolean }
+export interface TimelineItem { id: string; start: number; end: number; label: string; color: string; faded?: boolean;
+  /** a point (a chapter without a title card) in a lane of blocks, or a block in a lane of marks */
+  mark?: boolean }
 export interface TimelineLane { key: string; label: string; items: TimelineItem[]; marks?: boolean }
 
 const fmt = (ms: number) => (ms >= 60000 ? `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
@@ -125,10 +127,11 @@ export default function Timeline({ duration, lanes, idle, activity, clicks, play
                 const d = drag && drag.id === it.id ? drag : null;
                 const s = d ? d.s : it.start, e = d ? d.e : it.end;
                 const sel = selected === it.id;
-                if (lane.marks) return (
+                if (it.mark ?? lane.marks) return (
                   <div key={it.id} className="absolute top-0 h-full cursor-ew-resize" style={{ left: x(s) - 6, width: 12 }} onPointerDown={grab(lane.key, { ...it, end: it.start + 1 }, 'move')} title={`${it.label} · ${fmt(s)}`}>
                     <div className="absolute left-[5px] top-0 h-full w-0.5" style={{ background: it.color }} />
-                    <div className={`absolute left-[7px] top-0.5 px-1 rounded text-white whitespace-nowrap ${sel ? 'ring-2 ring-offset-1 ring-gray-800' : ''}`} style={{ background: it.color }}>{it.label}</div>
+                    {/* the label kept short: a long name does not run over the lane (the whole name is in the tooltip) */}
+                    <div className={`absolute left-[7px] top-0.5 px-1 rounded text-white whitespace-nowrap truncate max-w-[140px] pointer-events-none ${sel ? 'ring-2 ring-offset-1 ring-gray-800' : ''}`} style={{ background: it.color }}>{it.label}</div>
                   </div>
                 );
                 return (
