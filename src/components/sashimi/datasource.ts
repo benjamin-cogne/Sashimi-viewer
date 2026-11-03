@@ -1,3 +1,4 @@
+import type { ClinvarVariant } from './clinvar';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import type { MethylWindow } from '../../standalone/methylation';
 import type { PopulationSv } from './svPopulation';
@@ -160,6 +161,8 @@ export interface SashimiDataSource {
   getCytobands?(chrom: string): Promise<{ start: number; end: number; name: string; stain: string }[]>;
   /** CNV regions of the general population (DGV Gold Standard) overlapping a 0-based half-open window. */
   getPopulationSvs?(chrom: string, start: number, end: number): Promise<PopulationSv[]>;
+  /** ClinVar variants classified pathogenic / likely pathogenic overlapping a 0-based half-open window (SVs ≥ 50 bp, or the shorter ones). */
+  getClinvar?(which: 'sv' | 'snv', chrom: string, start: number, end: number): Promise<ClinvarVariant[]>;
   /** Common variants (dbSNP 155 common via UCSC, Ensembl fallback) overlapping a 0-based half-open window. */
   getCommonSnps(chrom: string, start: number, end: number): Promise<CommonSnp[]>;
   /** GTEx tissues available for tissue tracks (rejects when GTEx cannot be used, e.g. GRCh37). */

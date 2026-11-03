@@ -81,6 +81,9 @@ a bookmark to the run folder.
   and reads can be grouped by haplotype. Split reads are joined on one row, clipped sequences shown on a click, and
   the consensus of a clip cluster is ready for BLAT.
 - Structural hints: deletions inside reads, split reads, discordant pairs, soft-clip clusters, duplicated stretches.
+- **SV browser**: a rearrangement rebuilt from the picked arcs, or typed (HGVS, ISCN, `DEL 20:399240-599326`), drawn
+  with its genes (LOEUF, ClinGen dosage, PanelApp mode of inheritance and diseases) over DGV Gold population CNVs,
+  AChro-Puce recurrent CNVs and ClinVar pathogenic / likely pathogenic SVs and SNVs.
 - **CpG methylation** of long reads (ONT, PacBio; MM / ML tags) in a panel under the coverage. A 5mC ribbon splits
   into HP1 / HP2 where both haplotagged copies are read (≥ 3 calls per CpG each, the minor ≥ 25 %, within one phase
   set) and joins elsewhere. The panel also shows the haplotypes' difference, the allele-specific stretches and the CpG

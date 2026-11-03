@@ -101,15 +101,39 @@ export function classifyMoi(text: string | undefined | null): MoiClass {
   if (t.startsWith('monoallelic')) return 'AD';
   return '?';
 }
-export interface GeneMode { panel: string; panelId: string; confidence: 1 | 2 | 3; moi: string; cls: MoiClass }
-export interface GeneModes { symbol: string; source: string; entries: GeneMode[]; main: MoiClass; parts: { cls: MoiClass; panels: number; green: number }[] }
+export interface GeneMode { panel: string; panelId: string; confidence: 1 | 2 | 3; moi: string; cls: MoiClass;
+  /** the diseases (phenotypes) the panel gives for the gene, as written */
+  phenotypes: string[] }
+export interface GeneModes { symbol: string; source: string; entries: GeneMode[]; main: MoiClass; parts: { cls: MoiClass; panels: number; green: number }[];
+  /** the diseases across the gene's panels, cleaned of identifiers and merged: those of green entries first */
+  diseases: { name: string; panels: number; green: number }[] }
+
+/**
+ * A disease name as PanelApp's panels write it, without the identifiers around it: "Alagille syndrome 1, 118450",
+ * "Alagille syndrome, OMIM:118450", "{Susceptibility to …}" → "Alagille syndrome 1", …; null when only an identifier.
+ */
+export function cleanDisease(text: string): string | null {
+  const t = String(text ?? '')
+    .replace(/[{}]/g, '')
+    .replace(/\b(?:OMIM|MIM|MONDO|ORPHA|Orphanet|HP|HPO)\s*[:#]?\s*\d+/gi, '')
+    .replace(/[,;\s]+\d{6}\s*$/, '')
+    .replace(/\(\s*\)|\[\s*\]/g, '')
+    .replace(/[\s,;:-]+$/, '').replace(/^[\s,;:-]+/, '').replace(/\s{2,}/g, ' ').trim();
+  return t && !/^\d+$/.test(t) ? t : null;
+}
 
 /** The modes of a gene's entries, the green ones first: the main mode is the commonest among the best-rated entries. */
 export function summarizeModes(symbol: string, source: string, entries: GeneMode[]): GeneModes {
   const by = new Map<MoiClass, { cls: MoiClass; panels: number; green: number }>();
   for (const e of entries) { const p = by.get(e.cls) ?? { cls: e.cls, panels: 0, green: 0 }; p.panels++; if (e.confidence === 3) p.green++; by.set(e.cls, p); }
   const parts = [...by.values()].sort((a, b) => Number(a.cls === '?') - Number(b.cls === '?') || b.green - a.green || b.panels - a.panels);
-  return { symbol, source, entries, main: parts[0]?.cls ?? '?', parts };
+  const dis = new Map<string, { name: string; panels: number; green: number }>();
+  for (const e of entries) for (const ph of new Set((e.phenotypes ?? []).map(cleanDisease).filter((x): x is string => !!x))) {
+    const k = ph.toLowerCase(), d = dis.get(k) ?? { name: ph, panels: 0, green: 0 };
+    d.panels++; if (e.confidence === 3) d.green++; dis.set(k, d);
+  }
+  const diseases = [...dis.values()].sort((a, b) => b.green - a.green || b.panels - a.panels || a.name.localeCompare(b.name));
+  return { symbol, source, entries, main: parts[0]?.cls ?? '?', parts, diseases };
 }
 
 const modeCache = new Map<string, Promise<GeneModes>>();
@@ -134,7 +158,8 @@ export function geneModes(src: PanelSource, symbol: string): Promise<GeneModes> 
             if (sym.toUpperCase() !== symbol.toUpperCase() || (g?.entity_type && g.entity_type !== 'gene')) continue;
             const c = conf(g?.confidence_level), pid = String(g?.panel?.id ?? g?.panel ?? '');
             if (!c || !pid || out.has(pid)) continue;
-            out.set(pid, { panel: String(g?.panel?.name ?? `panel ${pid}`), panelId: pid, confidence: c, moi: String(g?.mode_of_inheritance ?? ''), cls: classifyMoi(g?.mode_of_inheritance) });
+            out.set(pid, { panel: String(g?.panel?.name ?? `panel ${pid}`), panelId: pid, confidence: c, moi: String(g?.mode_of_inheritance ?? ''), cls: classifyMoi(g?.mode_of_inheritance),
+              phenotypes: Array.isArray(g?.phenotypes) ? g.phenotypes.map(String) : [] });
           }
           url = typeof j?.next === 'string' ? j.next : null;
         }

@@ -1382,6 +1382,7 @@ export default function SashimiViewer({
     getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
     getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
     getPopulationSvs: ds.getPopulationSvs ? (c: string, a: number, b: number) => ds.getPopulationSvs!(c, a, b) : undefined,
+    getClinvar: ds.getClinvar ? (w: 'sv' | 'snv', c: string, a: number, b: number) => ds.getClinvar!(w, c, a, b) : undefined,
   }), [ds]);
   /** The toolbar chip of the picked arcs: opens the SV cartoon on them, or unpicks them. */
   const svPickedChip = () => svPicked && (

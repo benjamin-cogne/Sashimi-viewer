@@ -5,7 +5,7 @@
  */
 import type { GenomeBuild } from './ensembl';
 import { chromLength } from './assembly';
-import { getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getTranscript } from './ucsc';
+import { getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getTranscript, getClinvar } from './ucsc';
 import { getConstraint } from './gnomad';
 import { mapAssembly } from './ensembl';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
@@ -29,6 +29,7 @@ export function svLoadersFor(build: GenomeBuild): Omit<SvGeneLoaders, 'fallback'
     getCytobands: c => getCytobands(build, c, chromLength(build, c) ?? 300_000_000),
     getPopulationSvs: async (c, a, b) => (await getDgvGold(build, c, a, b)).map(parseDgvItem).filter((v): v is PopulationSv => !!v),
     liftOver: (from, to, chrom, start, end) => mapAssembly(from, to, chrom, start, end),
+    getClinvar: (which, c, a, b) => getClinvar(build, which, c, a, b),
     locateGene: async symbol => {
       // as the Sashimi viewer's search: a symbol, or an Ensembl gene id
       const t = await getTranscript(build, symbol, /^ENSG\d+/i.test(symbol) ? symbol.replace(/\.\d+$/, '') : undefined);

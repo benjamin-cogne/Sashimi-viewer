@@ -23,7 +23,7 @@ import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
 import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
-import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold } from './ucsc';
+import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getClinvar } from './ucsc';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
 import { getConstraint } from './gnomad';
 import type { SvTranscript, DosageScore, Constraint } from '../components/sashimi/svGenes';
@@ -909,6 +909,7 @@ export class LocalDataSource implements SashimiDataSource {
   async getPopulationSvs(chrom: string, start: number, end: number): Promise<PopulationSv[]> {
     return (await getDgvGold(this.reference.build, chrom, start, end)).map(parseDgvItem).filter((v): v is PopulationSv => !!v);
   }
+  getClinvar(which: 'sv' | 'snv', chrom: string, start: number, end: number) { return getClinvar(this.reference.build, which, chrom, start, end); }
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.reference.build, model); }
   getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.reference.build, chrom, start, end); }
   getGtexTissues(): Promise<GtexTissue[]> {

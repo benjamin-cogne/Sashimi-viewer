@@ -13,6 +13,7 @@
  * Coordinates: the UCSC API is 0-based half-open; the viewer types are 1-based inclusive, as the
  * Ensembl payloads were, so the conversion happens here.
  */
+import { parseClinvarItem, type ClinvarVariant } from '../components/sashimi/clinvar';
 import type { TranscriptData, AllTranscripts, TranscriptModel, GeneModel, ProteinDomain, ProteinModelRef, RegionHint } from '../components/sashimi/types';
 import * as ensembl from './ensembl';
 import type { GenomeBuild } from './ensembl';
@@ -532,6 +533,14 @@ export async function getCytobands(build: GenomeBuild, chrom: string, length: nu
 /** The DGV Gold Standard CNV regions (track dgvGold) overlapping a 0-based half-open window, as the API gives them. */
 export async function getDgvGold(build: GenomeBuild, chrom: string, start: number, end: number): Promise<Record<string, unknown>[]> {
   return trackWindow(build, 'dgvGold', chrom, start, end);
+}
+
+/**
+ * ClinVar variants classified pathogenic or likely pathogenic over a window: `sv` from the track of variants of 50 bp
+ * or more (clinvarCnv), `snv` from that of the shorter ones (clinvarMain).
+ */
+export async function getClinvar(build: GenomeBuild, which: 'sv' | 'snv', chrom: string, start: number, end: number): Promise<ClinvarVariant[]> {
+  return (await trackWindow(build, which === 'sv' ? 'clinvarCnv' : 'clinvarMain', chrom, start, end)).map(parseClinvarItem).filter((v): v is ClinvarVariant => !!v);
 }
 
 export const _internal = { parseGenePred, codingOffset, searchHits, trackItems };
