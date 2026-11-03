@@ -42,6 +42,8 @@ const KIND_HELP: Record<CaptionKind, string> = {
 /** Everything the editor sets: saved with the page when it is kept editable, and read back to edit it again. */
 export interface Edits {
   title: string; format: 'svg' | 'html' | 'both'; shorten: boolean; loop: boolean; editable: boolean;
+  /** the page saved compressed (smaller, unpacked by the browser: needs DecompressionStream 'deflate-raw'); off, as it is, for old browsers */
+  compress?: boolean;
   anon: boolean; aliases: Record<string, string>;
   autoOn: boolean; level: number; autoOff: number[]; drawn: Zoom[];
   ptr: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
@@ -70,6 +72,8 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const [ed, setEd] = useState<Edits>(() => ({ ...DEFAULT_EDITS, ...initial }));
   const field = <K extends keyof Edits>(k: K) => (v: Upd<Edits[K]>) => setEd(e => ({ ...e, [k]: typeof v === 'function' ? (v as (p: Edits[K]) => Edits[K])(e[k]) : v }));
   const { format, shorten, loop, anon, title, autoOn, level, drawn, ptr, captions, chapters, cuts, speeds, editable } = ed;
+  const compress = ed.compress ?? true;
+  const setCompress = (v: boolean) => setEd(e => ({ ...e, compress: v }));
   const [setFormat, setShorten, setLoop, setAnon, setTitle, setAutoOn, setLevel, setDrawn, setPtr, setCaptions, setChapters, setCuts, setSpeeds, setEditable] =
     [field('format'), field('shorten'), field('loop'), field('anon'), field('title'), field('autoOn'), field('level'), field('drawn'), field('ptr'), field('captions'), field('chapters'), field('cuts'), field('speeds'), field('editable')];
   const autoOff = useMemo(() => new Set(ed.autoOff), [ed.autoOff]);
@@ -103,15 +107,16 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       const project = editable ? JSON.stringify({ v: 1, rec: anonymised(rec, replace), edits: { ...ed, anon: false, aliases: {}, captions: ed.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, replace).slice(1, -1) })) } }) : undefined;
       const out = recordingToPlayer(rec, opts);
       setSaving(true);
-      // saved compressed (the page unpacks itself); a browser without CompressionStream saves it as it is
-      try { download(await packedPlayerHtml(out, opts.title, project), 'text/html', `${base}.html`); }
+      // saved compressed (the page unpacks itself), unless asked as it is (for an old browser); a browser without
+      // CompressionStream saves it as it is
+      try { download(compress ? await packedPlayerHtml(out, opts.title, project) : playerHtml(out, opts.title, { project }), 'text/html', `${base}.html`); }
       catch { download(playerHtml(out, opts.title, { project }), 'text/html', `${base}.html`); }
       finally { setSaving(false); }
     }
   };
   const bytes = fmtOut === 'svg' ? out.bytes : fmtOut === 'html' ? utf8Length(html) : out.bytes + utf8Length(html);
   // the page is saved with its scene and timeline compressed (base64 of deflate, about 4/3 of the gzipped size)
-  const saved = gz && fmtOut !== 'svg' ? utf8Length(html) - packedPart + (gz * 4) / 3 + (fmtOut === 'both' ? out.bytes : 0) : null;
+  const saved = fmtOut !== 'svg' && !compress ? bytes : gz && fmtOut !== 'svg' ? utf8Length(html) - packedPart + (gz * 4) / 3 + (fmtOut === 'both' ? out.bytes : 0) : null;
 
   // ---- preview: the HTML page itself, in a frame; its time is kept when it is rebuilt ----
   const frame = useRef<HTMLIFrameElement>(null);
@@ -437,6 +442,10 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
                   ))}
                 </div>
                 {out.hasHtml && <div className="text-[11px] text-gray-500">a dialog is recorded with its text and tables: HTML page only</div>}
+                {fmtOut !== 'svg' && <label className="flex items-start gap-1.5" title="Compressed, the page holds its drawing deflated and unpacks it on opening, with the browser's DecompressionStream ('deflate-raw' format: Chrome and Edge 103, Firefox 113, Safari 16.4 and later, per MDN's compatibility data). Unticked, the page is saved as it is: several times larger, but it opens in older browsers too (its player is plain ES5 JavaScript).">
+                  <input type="checkbox" checked={compress} onChange={e => setCompress(e.target.checked)} className="accent-accent-600 mt-0.5" />
+                  <span>compressed page <span className="text-gray-500">{compress ? '(smaller; needs Chrome / Edge 103, Firefox 113, Safari 16.4 or later)' : '(saved uncompressed: larger, opens in older browsers too)'}</span></span>
+                </label>}
                 {!out.hasHtml && chapters.length > 0 && <div className="text-[11px] text-gray-500">chapters work in the HTML page; the SVG plays straight through</div>}
               </div>
               <div>

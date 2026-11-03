@@ -555,7 +555,10 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
   var camv=document.getElementById('camv');
   // a page saved compressed: the scene and its timeline are unpacked first (deflate, in the browser)
   var packed=document.getElementById('rec-packed');
-  if(packed){
+  if(packed&&typeof DecompressionStream==='undefined'){
+    // a browser too old to unpack it: say so, and how to get a page it can read
+    camv.insertAdjacentHTML('afterbegin','<p style="padding:24px;font:15px/1.5 sans-serif">This recording is saved compressed, and this browser cannot unpack it (it needs Chrome or Edge 103, Firefox 113, Safari 16.4 or later). Open it in a recent browser, or ask for a copy exported with \u201ccompressed page\u201d unticked, which opens in older browsers too.</p>');
+  }else if(packed){
     var b=atob(packed.textContent.trim()),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
     new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text().then(function(t){
       var v=JSON.parse(t);camv.insertAdjacentHTML('afterbegin',v[0]);packed.remove();start(v[1]);
