@@ -24,7 +24,7 @@ import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, L
 import { IMPACT, KIND_COLOR } from './svColors';
 import { cnvEvents, matchesOf, RO_MATCH, type PopulationSv, type PopMatch, type CnvEvent } from './svPopulation';
 import { TileCache, tileSizeFor } from './browserTiles';
-import { ACHRO_REGIONS, ACHRO_SOURCE, ACHRO_COLOR, ACHRO_CLASS_LABEL, achroShort, type AchroRegion, type AchroRow } from './achropuce';
+import { ACHRO_REGIONS, ACHRO_SOURCE, ACHRO_GUIDELINES, ACHRO_COLOR, ACHRO_CLASS_LABEL, achroShort, type AchroRegion, type AchroRow } from './achropuce';
 import { niceStep } from './geometry';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, geneModes, classifyMoi, type PanelSummary, type LoadedPanel, type GeneModes, type MoiClass } from '../../standalone/panelapp';
 
@@ -630,7 +630,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     for (const r of ACHRO_REGIONS) {
       if (achroChrom(r) !== chrom) continue;
       const own = r.coords?.find(c => c.build === build);
-      if (own) { out.push({ r, start: own.start - 1, end: own.end, approx: !!own.approx, how: `${own.build} coordinates of the sheet${own.note ? ` (${own.note})` : ''}` }); continue; }
+      if (own) { out.push({ r, start: own.start - 1, end: own.end, approx: !!own.approx, how: `${own.build} coordinates of ${own.from === 'table2' ? ACHRO_GUIDELINES.short : 'the sheet'}${own.note ? ` (${own.note})` : ''}` }); continue; }
       const lifted = achroLifted.get(r.id), src = r.coords?.[0];
       if (lifted) { out.push({ r, start: lifted.start, end: lifted.end, approx: true, how: `${src!.build} coordinates of the sheet${src!.note ? ` (${src!.note})` : ''}, moved to ${build} by Ensembl` }); continue; }
       const found = r.genes.map(g => geneBySym.get(g)).filter((g): g is SvGene => !!g);
@@ -1420,7 +1420,8 @@ function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRe
       <div className="mt-0.5 text-gray-400">Sheet “{p.r.sheet}”, {p.r.authors} — {ACHRO_SOURCE.title}, {ACHRO_SOURCE.version}. The summary is written for this viewer: read the sheet.</div>
       {pinned
         ? <div className="mt-1.5 pt-1.5 border-t border-white/15 flex gap-2"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button>
-            <a href={ACHRO_SOURCE.url} target="_blank" rel="noreferrer" className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 the catalogue (PDF)</a></div>
+            <a href={ACHRO_SOURCE.url} target="_blank" rel="noreferrer" className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 the catalogue (PDF)</a>
+            {p.r.coords?.some(c => c.from === 'table2') && <a href={ACHRO_GUIDELINES.url} target="_blank" rel="noreferrer" title={ACHRO_GUIDELINES.cite} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 guidelines, Table 2</a>}</div>
         : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
     </div>
   );
