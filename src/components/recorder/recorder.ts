@@ -184,6 +184,11 @@ export function startRecording(root: Document = document): Recorder {
    */
   const clipOf = (el: Element, r: DOMRect): Clip => {
     let x0 = r.left, y0 = r.top, x1 = r.right, y1 = r.bottom, clipped = false;
+    // a fixed element itself (a popover placed on the window) escapes the scrolling boxes that hold it, as on screen:
+    // only the window cuts it, and the export clips to the window anyway
+    let own = boxCache.get(el);
+    if (!own) { const cs = getComputedStyle(el); own = { clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible', fixed: cs.position === 'fixed' }; boxCache.set(el, own); }
+    if (own.fixed) return x1 <= 0 || y1 <= 0 || x0 >= innerWidth || y0 >= innerHeight ? [0, 0, 0, 0] : null;
     for (let a = el.parentElement; a && a !== root.body; a = a.parentElement) {
       let box = boxCache.get(a);
       if (!box) { const cs = getComputedStyle(a); box = { clips: cs.overflowX !== 'visible' || cs.overflowY !== 'visible', fixed: cs.position === 'fixed' }; boxCache.set(a, box); }
