@@ -276,7 +276,9 @@ type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: A
 /** AChro-Puce bars: deletions red, duplications blue */
 const ACHRO_TYPE_COLOR = { del: '#dc2626', dup: '#2563eb' } as const;
 /** an AChro-Puce region placed on the chromosome in view: 0-based half-open, and how it was placed */
-type AchroPlaced = { r: AchroRegion; start: number; end: number; approx: boolean; how: string };
+type AchroSpan = { start: number; end: number; approx: boolean; how: string };
+/** a region placed: the union of its types' stretches, and each type's own (a deletion and a duplication may lie apart) */
+type AchroPlaced = AchroSpan & { r: AchroRegion; types: Partial<Record<'del' | 'dup', AchroSpan>> };
 /** the chromosome a region's name starts with (1q21.1… → chr1) */
 const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1] ?? ''}`;
 
@@ -682,14 +684,28 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const achroPlaced: AchroPlaced[] = (() => {
     if (!showAchro) return [];
     const out: AchroPlaced[] = [];
+    const genesSpan = (names: string[]) => {
+      const found = names.map(g => geneBySym.get(g)).filter((g): g is SvGene => !!g);
+      return found.length ? { start: Math.min(...found.map(g => g.start)), end: Math.max(...found.map(g => g.end)), names: found.map(g => g.symbol).join(', ') } : null;
+    };
     for (const r of ACHRO_REGIONS) {
       if (achroChrom(r) !== chrom) continue;
-      const own = r.coords?.find(c => c.build === build);
-      if (own) { out.push({ r, start: own.start - 1, end: own.end, approx: !!own.approx, how: `${own.build} coordinates of ${own.from === 'table2' ? ACHRO_GUIDELINES.short : 'the sheet'}${own.note ? ` (${own.note})` : ''}` }); continue; }
-      const lifted = achroLifted.get(r.id), src = r.coords?.[0];
-      if (lifted) { out.push({ r, start: lifted.start, end: lifted.end, approx: true, how: `${src!.build} coordinates of the sheet${src!.note ? ` (${src!.note})` : ''}, moved to ${build} by Ensembl` }); continue; }
-      const found = r.genes.map(g => geneBySym.get(g)).filter((g): g is SvGene => !!g);
-      if (found.length) out.push({ r, start: Math.min(...found.map(g => g.start)), end: Math.max(...found.map(g => g.end)), approx: true, how: `span of the genes the sheet names (${found.map(g => g.symbol).join(', ')})` });
+      let base: AchroSpan | null = null;
+      const own = r.coords?.find(c => c.build === build), lifted = achroLifted.get(r.id), src = r.coords?.[0];
+      if (own) base = { start: own.start - 1, end: own.end, approx: !!own.approx, how: `${own.build} coordinates of ${own.from === 'table2' ? ACHRO_GUIDELINES.short : 'the sheet'}${own.note ? ` (${own.note})` : ''}` };
+      else if (lifted) base = { start: lifted.start, end: lifted.end, approx: true, how: `${src!.build} coordinates of the sheet${src!.note ? ` (${src!.note})` : ''}, moved to ${build} by Ensembl` };
+      else { const g = genesSpan(r.genes); if (g) base = { start: g.start, end: g.end, approx: true, how: `span of the genes the sheet names (${g.names})` }; }
+      // a type the sheet places on genes lies on their span (never on the region's coordinates, which are another stretch)
+      const types: AchroPlaced['types'] = {};
+      for (const t of ['del', 'dup'] as const) {
+        if (!r.rows.some(x => x.type === t)) continue;
+        const ty = r.typed?.[t];
+        if (ty?.genes) { const g = genesSpan(ty.genes); if (g) types[t] = { start: g.start, end: g.end, approx: false, how: `span of ${g.names} (${ty.note})` }; }
+        else if (base) types[t] = ty ? { ...base, how: `${base.how}; ${ty.note}` } : base;
+      }
+      const spans = Object.values(types);
+      if (!spans.length) continue;
+      out.push({ r, types, start: Math.min(...spans.map(x => x.start)), end: Math.max(...spans.map(x => x.end)), approx: spans.every(x => x.approx), how: base?.how ?? spans[0].how });
     }
     return out;
   })();
@@ -924,7 +940,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const a = cx(refX(p.start)), b = Math.max(cx(refX(p.end)), a + 3);
       if (b < X0 || a > X1) continue;
       const text = `${p.approx ? '≈ ' : ''}${p.r.name}`;
-      const right = Math.max(a, X0) + Math.max(b - Math.max(a, X0), 0) + 6 + textWidth(text) * 0.9 + 110;
+      // the labels follow each type's bar: the lane is free again after the farthest one
+      const right = Math.max(...Object.values(p.types).map(sp => { const bb = Math.max(cx(refX(sp.end)), cx(refX(sp.start)) + 3); return Math.max(bb, X0) + 6; })) + textWidth(text) * 0.9 + 110;
       let lane = ends.findIndex(e => e + 6 < a);
       if (lane < 0) { lane = ends.length; ends.push(right); } else ends[lane] = right;
       achroItems.push({ p, lane, a, b, text });
@@ -1270,20 +1287,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         })}
         {yClinSnv >= 0 && !clinSnvBins.length && !clinSnvSum?.bins.length && <text x={X0 + 6} y={yClinSnv + CLIN_SNV_H / 2 - 4} fontSize={9.5} fill={C.faint}>{span > CLIN_SNV_MAX_SPAN ? `zoom in below ${kb(CLIN_SNV_MAX_SPAN)} to see the ClinVar SNVs` : clinSnvView.loading ? 'loading ClinVar…' : clinSnvView.error ? `ClinVar unavailable: ${clinSnvView.error}` : 'no pathogenic or likely pathogenic ClinVar SNV here'}</text>}
         {/* AChro-Puce recurrent CNVs */}
-        {yAchro >= 0 && achroItems.map(({ p, lane, a, b, text }) => {
+        {yAchro >= 0 && achroItems.map(({ p, lane, text }) => {
           // two bars, each its own target: the deletion (red) above, the duplication (blue) below, its class after it
           const yy = yAchro + lane * ACHRO_LANE_H;
-          const lx = Math.max(a, X0) + Math.min(b - Math.max(a, X0), PW) + 6;
           const bar = (type: 'del' | 'dup', y0: number, first: boolean) => {
-            const row = p.r.rows.find(r2 => r2.type === type && r2.sex !== 'female');
-            if (!row) return null;
+            const row = p.r.rows.find(r2 => r2.type === type && r2.sex !== 'female'), sp = p.types[type];
+            if (!row || !sp) return null;
+            // each type on its own stretch (a deletion's critical gene, a duplication's smallest overlap)
+            const a = cx(refX(sp.start)), b = Math.max(cx(refX(sp.end)), a + 3);
+            const lx = Math.max(a, X0) + Math.max(0, Math.min(b - Math.max(a, X0), PW)) + 6;
             const key = `achro:${p.r.id}:${type}`, col = ACHRO_TYPE_COLOR[type];
             const cls = `${row.cls === 'PIEV' ? 'PIEV' : `class ${row.cls}`}${row.also ? ` + ${row.also.cls === 'PIEV' ? 'PIEV' : `class ${row.also.cls}`} (${row.also.label})` : ''}${p.r.rows.some(r2 => r2.sex) ? ' (male)' : ''}`;
             const labelW = (first ? textWidth(text) * 0.88 + 8 : 0) + 30 + cls.length * 5.4;
             return (
               <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key)} onMouseMove={hoverOn(key)} onMouseLeave={hoverOff} onClick={pinOn(key)}>
                 <rect x={Math.min(a, lx - 6)} y={y0 - 2} width={Math.max(b - a, 6) + 6 + labelW} height={13} fill="transparent" />
-                <rect x={a} y={y0} width={Math.max(b - a, 3)} height={9} rx={2} fill={col} fillOpacity={0.85} stroke={col} strokeWidth={0.8} strokeDasharray={p.approx ? '3 2' : undefined} />
+                <rect x={a} y={y0} width={Math.max(b - a, 3)} height={9} rx={2} fill={col} fillOpacity={0.85} stroke={col} strokeWidth={0.8} strokeDasharray={sp.approx ? '3 2' : undefined} />
                 {lx + 30 < X1 && <text x={lx} y={y0 + 8} fontSize={9.5} fill={C.text}>
                   {first && <tspan fontWeight={700}>{text}  </tspan>}
                   <tspan fontWeight={700} fill={col}>{type === 'del' ? 'del' : 'dup'}</tspan>
@@ -1291,7 +1310,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
               </g>
             );
           };
-          const hasDel = p.r.rows.some(r2 => r2.type === 'del');
+          const hasDel = !!p.types.del && p.r.rows.some(r2 => r2.type === 'del');
           return <g key={`achro${p.r.id}`}>{bar('del', yy + 1, true)}{bar('dup', yy + 14, !hasDel)}</g>;
         })}
         {yAchro >= 0 && !achroItems.length && <text x={X0 + 6} y={yAchro + 10} fontSize={9.5} fill={C.faint}>{ACHRO_REGIONS.some(r => achroChrom(r) === chrom) ? 'no AChro-Puce recurrent CNV in view' : `no AChro-Puce sheet on ${chrom}`}</text>}
@@ -1733,11 +1752,26 @@ function ClinvarCard({ vs, at, range, chrom, cnv, pinned, place, onClose, onZoom
     </div>
   );
 }
-const achroOverlap = (ev: CnvEvent, p: AchroPlaced) => Math.max(0, Math.min(ev.end, p.end) - Math.max(ev.start, p.start)) / Math.max(ev.end - ev.start, p.end - p.start, 1);
+/**
+ * How a loss (a deletion) or a gain (a duplication) of the event matches a region, in words, or null: by the rule the
+ * sheet gives that type (touching its critical gene, spanning its smallest region of overlap), else a reciprocal overlap.
+ */
+const achroMatch = (ev: CnvEvent, p: AchroPlaced): string | null => {
+  const t = ev.kind === 'loss' ? 'del' : 'dup', sp = p.types[t], rule = p.r.typed?.[t];
+  if (!sp) return null;
+  const ov = Math.max(0, Math.min(ev.end, sp.end) - Math.max(ev.start, sp.start)), len = Math.max(sp.end - sp.start, 1);
+  if (rule?.match === 'overlaps') return ov > 0 ? `takes ${ov >= len ? 'all' : `${Math.round((ov / len) * 100)} %`} of ${rule.genes?.join(', ') ?? 'the critical region'}` : null;
+  if (rule?.match === 'contains') return ov >= len ? 'spans the smallest region of overlap' : null;
+  const ro = ov / Math.max(ev.end - ev.start, len);
+  return ro >= RO_MATCH ? `overlaps it (${Math.round(ro * 100)} % reciprocal)` : null;
+};
 
 /** The card of an AChro-Puce region: its classes, a summary, how it was placed, the event's matching loss or gain, the sheet. */
 function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRef }: { p: AchroPlaced; type?: 'del' | 'dup'; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void; cardRef?: (el: HTMLDivElement | null) => void }) {
-  const hits = cnv.filter(c => achroOverlap(c.ev, p) >= RO_MATCH);
+  const hits = cnv.flatMap(c => { const m = achroMatch(c.ev, p); return m ? [{ ev: c.ev, m }] : []; });
+  const spans = (['del', 'dup'] as const).filter(t => p.types[t]);
+  const differ = spans.length === 2 && (p.types.del!.start !== p.types.dup!.start || p.types.del!.end !== p.types.dup!.end);
+  const where = (sp: AchroSpan) => `${chrom}:${(sp.start + 1).toLocaleString('en-US')}-${sp.end.toLocaleString('en-US')} ${sp.approx ? '(approximate) ' : ''}· placed from the ${sp.how}.`;
   return (
     <div ref={cardRef} className={`absolute z-20 rounded-lg bg-slate-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
       onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
@@ -1751,8 +1785,10 @@ function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRe
         ))}
       </tbody></table>
       <div className="mt-1 text-slate-200 leading-snug">{p.r.summary}</div>
-      {hits.map(h => <div key={h.ev.start} className="mt-1 text-emerald-300">The event's {h.ev.kind} {h.ev.letters} overlaps it ({Math.round(achroOverlap(h.ev, p) * 100)} % reciprocal): {p.r.rows.filter(r => r.type === (h.ev.kind === 'loss' ? 'del' : 'dup')).map(r => `${r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}${r.sex ? ` (${r.sex})` : ''}`).join(', ') || 'no class given for this type'}.</div>)}
-      <div className="mt-1 text-slate-400">{chrom}:{(p.start + 1).toLocaleString('en-US')}-{p.end.toLocaleString('en-US')} {p.approx ? '(approximate) ' : ''}· placed from the {p.how}.</div>
+      {hits.map(h => <div key={h.ev.start} className="mt-1 text-emerald-300">The event's {h.ev.kind} {h.ev.letters} {h.m}: {p.r.rows.filter(r => r.type === (h.ev.kind === 'loss' ? 'del' : 'dup')).map(r => `${r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}${r.sex ? ` (${r.sex})` : ''}`).join(', ') || 'no class given for this type'}.</div>)}
+      {differ
+        ? spans.map(t => <div key={t} className={`mt-1 text-slate-400 ${type && t !== type ? 'opacity-60' : ''}`}><b style={{ color: t === 'del' ? '#fca5a5' : '#93c5fd' }}>{t === 'del' ? 'Deletion' : 'Duplication'}</b> {where(p.types[t]!)}</div>)
+        : <div className="mt-1 text-slate-400">{where(p.types[spans[0]] ?? p)}</div>}
       <div className="mt-0.5 text-slate-400">Sheet “{p.r.sheet}”, {p.r.authors} — {ACHRO_SOURCE.title}, {ACHRO_SOURCE.version}. The summary is written for this viewer: read the sheet.</div>
       {pinned
         ? <div className="mt-1.5 pt-1.5 border-t border-white/15 flex gap-2"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button>
@@ -1763,12 +1799,12 @@ function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRe
   );
 }
 
-/** One chip per loss or gain of the event that matches an AChro-Puce region (reciprocal overlap ≥ RO_MATCH), with the region's class for that type. */
+/** One chip per loss or gain of the event that matches an AChro-Puce region (achroMatch), with the region's class for that type. */
 function AchroSummary({ cnv, placed }: { cnv: { ev: CnvEvent }[]; placed: AchroPlaced[] }) {
-  const hits = cnv.flatMap(c => placed.filter(p => achroOverlap(c.ev, p) >= RO_MATCH).map(p => ({ ev: c.ev, p, rows: p.r.rows.filter(r => r.type === (c.ev.kind === 'loss' ? 'del' : 'dup')) })));
+  const hits = cnv.flatMap(c => placed.filter(p => achroMatch(c.ev, p)).map(p => ({ ev: c.ev, p, rows: p.r.rows.filter(r => r.type === (c.ev.kind === 'loss' ? 'del' : 'dup')) })));
   if (!hits.length) return null;
   return (
-    <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}: a loss or gain of the event overlapping a region reciprocally by ${Math.round(RO_MATCH * 100)} % or more`}>
+    <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}: a loss or gain of the event overlapping a region reciprocally by ${Math.round(RO_MATCH * 100)} % or more; for a non-recurrent CNV, a loss touching the critical gene or a gain spanning the smallest region of overlap`}>
       <span className="text-slate-500 self-center">AChro-Puce:</span>
       {hits.map(({ ev, p, rows }) => (
         <span key={`${ev.start}${p.r.id}`} className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border bg-white" style={{ borderColor: `${ev.kind === 'loss' ? ACHRO_TYPE_COLOR.del : ACHRO_TYPE_COLOR.dup}66` }}>

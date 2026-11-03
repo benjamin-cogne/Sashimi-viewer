@@ -35,6 +35,13 @@ export interface AchroRegion {
     from?: 'table2' }[];
   /** genes the sheet names in the region: the span of those found places it when no coordinates fit the build */
   genes: string[];
+  /**
+   * For a non-recurrent CNV whose sheet defines the deletions and the duplications by different stretches: where each
+   * type lies and how an event's loss or gain matches it. `genes`: the type lies on their span (else on the region's
+   * coordinates); `match`: 'overlaps' when the event touches the stretch (a critical gene), 'contains' when it spans it
+   * all (a smallest region of overlap); without it, a reciprocal overlap as for recurrent CNVs.
+   */
+  typed?: Partial<Record<'del' | 'dup', { genes?: string[]; note: string; match: 'overlaps' | 'contains' }>>;
   rows: AchroRow[];
   summary: string;
 }
@@ -203,10 +210,14 @@ export const ACHRO_REGIONS: AchroRegion[] = [
   },
   {
     id: '2p25.3', name: '2p25.3 (MYT1L)', sheet: 'CNVs en 2p25.3 (rare)', authors: 'M. Bouassida, B. Hervé & F. Vialard, 2022',
-    coords: [{ build: 'GRCh37', chrom: 'chr2', start: 1716437, end: 1815909, note: 'smallest overlap of the duplications (PXDN intron 1 to MYT1L intron 22); deletions vary, all include MYT1L' }],
+    coords: [{ build: 'GRCh37', chrom: 'chr2', start: 1716437, end: 1815909, note: 'smallest region of overlap of the duplications, PXDN intron 1 to MYT1L intron 22' }],
     genes: ['MYT1L'],
+    typed: {
+      del: { genes: ['MYT1L'], match: 'overlaps', note: 'the minimal critical region of the deletions is MYT1L alone; the smallest reported deletion, 120 kb, takes only MYT1L' },
+      dup: { match: 'contains', note: 'duplications of 103 kb to 3.8 Mb share this stretch' },
+    },
     rows: [{ type: 'del', cls: '5', label: 'pathogenic' }, { type: 'dup', cls: 'PIEV', label: susceptibility('low') }],
-    summary: 'Not recurrent (no segmental duplications): sizes vary, deletions all include MYT1L. Deletion: pathogenic (mild to moderate intellectual disability, obesity or overweight, behavioural disorders). Duplication: susceptibility CNV (schizophrenia, developmental delay, autism), inherited in about half of cases. Parental segregation recommended for both.',
+    summary: 'Not recurrent (no segmental duplications): sizes vary (deletions mostly 0.37 to 3.13 Mb, up to 6 Mb; duplications 103 kb to 3.8 Mb). Deletion: pathogenic, minimal critical region MYT1L alone, intragenic deletions giving the same phenotype (mild to moderate intellectual disability, obesity or overweight, behavioural disorders). Duplication: susceptibility CNV (schizophrenia, developmental delay, autism), smallest region of overlap from PXDN intron 1 to MYT1L intron 22, inherited in about half of cases. Parental segregation recommended for both.',
   },
   {
     id: '2p16.3', name: '2p16.3 (NRXN1)', sheet: 'CNVs en 2p16.3 (rare)', authors: 'N. Celton, 2022',
