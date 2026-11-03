@@ -26,7 +26,7 @@ import { attachVariantWorker } from './variantClient';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
-import { describeLink, parseLink, variantOfInterest } from './link';
+import { describeLink, parseLink, variantOfInterest, parseSvLink } from './link';
 import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
 import { GeneSuggest } from '../components/sashimi/GeneSuggest';
 import { rememberGene } from './geneSuggest';
@@ -47,6 +47,8 @@ if (DEV) {
 
 /** Request carried by the URL (deep link from another tool), read once at start-up. */
 const LINK = parseLink(window.location.hash, window.location.search);
+/** a link to the SV browser (#sv=DEL 20:399240-599326): the page opens on it */
+const SV_LINK = parseSvLink(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 /** The data an exported page carries (null for the normal viewer). */
@@ -257,7 +259,15 @@ function App() {
   const recorder = useRef<RecorderHandle>(null);
   const [recording, setRecording] = useState(false);
   /** the SV browser (a rearrangement typed as HGVS or ISCN) and the gene loaders it uses */
-  const [svBrowser, setSvBrowser] = useState(false);
+  const [svBrowser, setSvBrowser] = useState(!!SV_LINK);
+  /** the search the SV browser opens with (a link), and a key to open it afresh when another link comes */
+  const [svInit, setSvInit] = useState<{ text: string; build?: GenomeBuild; key: number } | null>(() => (SV_LINK ? { ...SV_LINK, key: 0 } : null));
+  // a link pasted in the address bar while the page is open
+  useEffect(() => {
+    const onHash = () => { const l = parseSvLink(window.location.hash, window.location.search); if (l && (!svInit || l.text !== svInit.text || (l.build ?? '') !== (svInit.build ?? ''))) { setSvInit({ ...l, key: Date.now() }); setSvBrowser(true); } };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [svInit]);
   const svLoaders = useMemo(() => ({
     getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
     getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
@@ -1274,7 +1284,7 @@ function App() {
         </div></div>
       )}
       <RecorderHost ref={recorder} names={samples.map(x => x.name)} onRecording={setRecording} />
-      {svBrowser && <SvBrowserDialog build={build} loaders={svLoaders} loadersFor={svLoadersFor} onClose={() => setSvBrowser(false)} />}
+      {svBrowser && <SvBrowserDialog key={svInit?.key ?? 'sv'} build={build} loaders={svLoaders} loadersFor={svLoadersFor} initial={svInit ?? undefined} onClose={() => { setSvBrowser(false); setSvInit(null); }} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>

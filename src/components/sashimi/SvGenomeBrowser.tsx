@@ -96,6 +96,8 @@ interface Props {
   rebuild?: (w: { start: number; end: number }) => SvReconstruction;
   /** a place to go to: each new `key` flies there */
   focus?: { start: number; end: number; key: number } | null;
+  /** an interval to highlight (as a Ctrl / ⌘ + drag would): each new `key` sets it */
+  highlight?: { start: number; end: number; key: number } | null;
 }
 
 // ======================== Genes of the window ========================
@@ -258,7 +260,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -857,6 +859,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   /** an interval picked with Ctrl / ⌘ + drag: highlighted on the reference axis (it follows the view) until closed */
   const [sel, setSel] = useState<{ s: number; e: number } | null>(null);
   const [selCopied, setSelCopied] = useState(false);
+  // an interval asked for (typed coordinates): highlighted as a Ctrl / ⌘ + drag would, with its bar
+  useEffect(() => { if (highlight) { setSel({ s: highlight.start, e: highlight.end }); setSelCopied(false); } }, [highlight?.key]); // eslint-disable-line react-hooks/exhaustive-deps
   const toSvgX = (clientX: number) => { const r = svgRef.current!.getBoundingClientRect(); return ((clientX - r.left) / r.width) * VW; };
   const toSvgY = (clientY: number) => { const r = svgRef.current!.getBoundingClientRect(); return ((clientY - r.top) / r.height) * H; };
   const ideoPos = (x: number) => Math.max(0, Math.min(L, ((x - X0) / PW) * L));

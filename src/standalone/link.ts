@@ -137,3 +137,31 @@ export function describeLink(req: LinkRequest): string {
   const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString('en-US')}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString('en-US')}` : ''}`;
   return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString('en-US')}-${req.view.end.toLocaleString('en-US')}`;
 }
+
+/**
+ * A link to the SV browser: `#sv=DEL%2020:399240-599326` (or `?sv=…`), with `&build=GRCh37` when needed. `sv` holds what
+ * the SV browser's box takes: a rearrangement (HGVS, ISCN sequence form, or DEL / DUP / INV before coordinates),
+ * coordinates, a chromosome or a gene. The page opens on the SV browser with it, no alignment needed.
+ */
+export function parseSvLink(hash: string, search: string): { text: string; build?: GenomeBuild } | null {
+  for (const raw of [hash.replace(/^#\/?/, ''), search.replace(/^\?/, '')]) {
+    if (!raw.includes('sv=')) continue;
+    // `+` is a space here (a form-encoded link), as no SV notation holds a plus
+    const p = new URLSearchParams(raw);
+    const text = (p.get('sv') || '').trim();
+    if (!text) continue;
+    const b = (p.get('build') || p.get('genome') || '').toUpperCase();
+    return { text, build: /37|19/.test(b) ? 'GRCh37' : /38/.test(b) ? 'GRCh38' : undefined };
+  }
+  return null;
+}
+
+/** The page's address with the SV browser's search in its fragment (`sv`, and `build` when GRCh37); null text: without it. */
+export function svLinkHref(text: string | null, build: GenomeBuild): string {
+  const p = new URLSearchParams(window.location.hash.replace(/^#\/?/, '').includes('=') ? window.location.hash.replace(/^#\/?/, '') : '');
+  p.delete('sv');
+  if (text) { p.set('sv', text); if (build === 'GRCh37') p.set('build', 'GRCh37'); else if (!p.has('variant') && !p.has('locus')) p.delete('build'); }
+  else if (!p.has('variant') && !p.has('locus')) p.delete('build');
+  const h = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',');
+  return `${window.location.pathname}${window.location.search}${h ? `#${h}` : ''}`;
+}

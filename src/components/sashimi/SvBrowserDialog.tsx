@@ -16,6 +16,7 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 import { GeneSuggest } from './GeneSuggest';
 import { Segmented } from './controls';
 import { rememberGene } from '../../standalone/geneSuggest';
+import { svLinkHref } from '../../standalone/link';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -24,6 +25,7 @@ const EXAMPLES = [
   { label: 'inverted insertion', text: 'NC_000020.11:g.10807815_10807816ins10489766_10783340inv' },
   { label: 'ISCN sequence form', text: 'chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_cen_qter' },
   { label: 'coordinates', text: 'chr20:10,300,000-11,000,000' },
+  { label: 'DEL + coordinates', text: 'DEL 20:10489766-10783340' },
   { label: 'a chromosome', text: 'chr20' },
   { label: 'a gene', text: 'JAG1' },
 ];
@@ -32,19 +34,38 @@ const load = (k: string): string => { try { return localStorage.getItem(k) ?? ''
 const save = (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } };
 /** A single position opens this much around it. */
 const AROUND_POS = 50_000;
+/** An interval opens with this share of its length on each side (and at least PAD_MIN), highlighted. */
+const PAD_SHARE = 0.25, PAD_MIN = 2_000;
+/** `DEL 20:399240-599326`, `dup chr20:399,240-599,326`, `INV: 20:…`: the rearrangement in the HGVS form the box reads. */
+function typedSv(raw: string): string | null {
+  const m = raw.match(/^(del(?:etion)?|dup(?:lication)?|inv(?:ersion)?)\s*[:\s]\s*(.+)$/i);
+  if (!m) return null;
+  const loc = parseLocus(m[2].trim());
+  if (!loc || loc.end <= loc.start) return null;
+  const kind = m[1].slice(0, 3).toLowerCase();
+  return `${loc.chrom.startsWith('chr') ? loc.chrom : `chr${loc.chrom}`}:g.${loc.start}_${loc.end}${kind}`;
+}
 
 type Shown = { kind: 'sv'; parsed: ParsedSv; text: string } | { kind: 'region'; chrom: string; start: number; end: number };
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 
-export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose }: {
+export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose, initial }: {
   build: string; loaders: Loaders;
   /** loaders for another build (the SV browser's own switch); without it, the session's build only */
   loadersFor?: (build: GenomeBuild) => Loaders;
   onClose: () => void;
+  /** a search to run at once (a link: #sv=…), in its build when it gives one */
+  initial?: { text: string; build?: GenomeBuild };
 }) {
-  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? ((load(BUILD_KEY) as GenomeBuild) || 'GRCh38') : (sessionBuild as GenomeBuild)));
+  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? (initial?.build ?? ((load(BUILD_KEY) as GenomeBuild) || 'GRCh38')) : (sessionBuild as GenomeBuild)));
   const loaders = useMemo(() => (loadersFor ? loadersFor(build) : sessionLoaders), [build, loadersFor, sessionLoaders]);
-  const [text, setText] = useState(() => load(KEY));
+  const [text, setText] = useState(() => initial?.text ?? load(KEY));
+  /** the interval asked for, highlighted in the view (coordinates typed) */
+  const [mark, setMark] = useState<{ start: number; end: number; key: number } | null>(null);
+  const [linkCopied, setLinkCopied] = useState(false);
+  /** the address bar follows the search, so the page's address is a link to it */
+  const setLink = (t: string | null, b: GenomeBuild) => { try { history.replaceState(history.state, '', svLinkHref(t, b)); } catch { /* a sandboxed frame */ } setLinkCopied(false); };
+  const close = () => { setLink(null, build); onClose(); };
   const [shown, setShown] = useState<Shown | null>(null);
   const [focus, setFocus] = useState<{ start: number; end: number; key: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -52,11 +73,12 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const [busy, setBusy] = useState(false);
 
   /** Go to a place: with the rearrangement when it is on that chromosome (the view flies there), else the reference alone. */
-  const goRegion = (chrom: string, start: number, end: number, b: GenomeBuild) => {
+  const goRegion = (chrom: string, start: number, end: number, b: GenomeBuild, highlight?: { start: number; end: number }) => {
     const len = chromLength(b, chrom);
     if (!len) throw new Error(`Unknown chromosome ${chrom} on ${b}.`);
     if (start >= len) throw new Error(`${chrom} ends at ${len.toLocaleString('en-US')} on ${b}.`);
     const s = Math.max(0, start), e = Math.min(len, Math.max(end, s + 1));
+    setMark(highlight ? { start: Math.max(0, highlight.start), end: Math.min(len, highlight.end), key: Date.now() } : null);
     if (shown && (shown.kind === 'sv' ? shown.parsed.chrom : shown.chrom) === chrom && b === build) setFocus({ start: s, end: e, key: Date.now() });
     else { setShown({ kind: 'region', chrom, start: s, end: e }); setFocus(null); }
   };
@@ -65,11 +87,21 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
     const raw = t.trim();
     try {
       // coordinates: chr20:10,300,000-11,000,000, 20:10.3-11 Mb, chrX:31,100,000
+      // DEL / DUP / INV before coordinates: the rearrangement (read below as HGVS)
+      const sv0 = typedSv(raw);
+      if (sv0) {
+        const parsed = parseSv(sv0, b, c => chromLength(b, c));
+        setShown({ kind: 'sv', parsed, text: sv0 }); setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
+        setNote(`${raw.split(/[\s:]/)[0].toUpperCase()} read as ${sv0}`);
+        return;
+      }
+      // coordinates: the interval with some of the chromosome on each side, highlighted; a position, 50 kb around it
       const loc = parseLocus(raw);
       if (loc) {
         const single = loc.start === loc.end;
-        goRegion(loc.chrom, single ? loc.start - 1 - AROUND_POS : loc.start - 1, single ? loc.start + AROUND_POS : loc.end, b);
-        save(KEY, t); return;
+        const pad = single ? AROUND_POS : Math.max(PAD_MIN, Math.round((loc.end - loc.start + 1) * PAD_SHARE));
+        goRegion(loc.chrom, loc.start - 1 - pad, loc.end + pad, b, { start: loc.start - 1, end: loc.end });
+        save(KEY, t); setLink(raw, b); return;
       }
       // a whole chromosome: chr3, 3, X, chrM / MT
       const chr = raw.match(/^(?:chr)?(\d{1,2}|X|Y|M|MT)$/i);
@@ -78,7 +110,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         const len = chromLength(b, name);
         if (!len) throw new Error(`Unknown chromosome ${name} on ${b}.`);
         goRegion(name, 0, len, b);
-        save(KEY, t); return;
+        save(KEY, t); setLink(raw, b); return;
       }
       // a gene symbol or an Ensembl gene id (looked up as in the Sashimi viewer's search)
       if (/^[A-Za-z][A-Za-z0-9-]{0,19}(\.\d+)?$/.test(raw) && !/^NC_/i.test(raw) && !/:/.test(raw)) {
@@ -88,7 +120,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         const pad = Math.max(5000, (g.end - g.start) * 0.4);
         goRegion(g.chrom, g.start - pad, g.end + pad, b);
         setNote(`${g.name}${g.name.toUpperCase() !== raw.toUpperCase() ? ` (${raw})` : ''}: ${g.chrom}:${(g.start + 1).toLocaleString('en-US')}-${g.end.toLocaleString('en-US')} (${b})`);
-        rememberGene(g.name);
+        rememberGene(g.name); setLink(raw, b);
         save(KEY, t); return;
       }
       // an HGVS or ISCN description: an NC_ accession's version decides the build
@@ -99,7 +131,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         b = accBuild; setBuild(b); save(BUILD_KEY, b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
       }
       const parsed = parseSv(t, b, c => chromLength(b, c));
-      setShown({ kind: 'sv', parsed, text: t }); setFocus(null); save(KEY, t);
+      setShown({ kind: 'sv', parsed, text: t }); setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
     } catch (e) { setError((e as Error).message); }
   };
   const switchBuild = (b: GenomeBuild) => {
@@ -110,11 +142,13 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') close();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, build]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a link's search runs once, at the start
+  useEffect(() => { if (initial?.text.trim()) void draw(initial.text, build); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const sv = shown?.kind === 'sv' ? shown.parsed : null;
   const chrom = sv ? sv.chrom : shown?.kind === 'region' ? shown.chrom : '';
   const bands = useCytobands(chrom || 'chr1', loaders.getCytobands);
@@ -127,10 +161,13 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         {/* a full-screen page: back to the Sashimi viewer from its bar (or Esc) */}
         {/* the Sashimi viewer's app bar */}
         <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-12 bg-bar border-b border-bar-line">
-          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
+          <button onClick={close} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">SV browser</span>
-          <span className="ml-auto text-[11px] text-bar-muted">Esc: back to the viewer</span>
+          {shown && <button onClick={() => { void navigator.clipboard?.writeText(window.location.href).then(() => setLinkCopied(true), () => {}); }}
+            className="ml-auto inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300"
+            title={'A link to this search: the page opens on the SV browser with it (#sv=… after the page\'s address; add it to the viewer\'s address to share it)'}>{linkCopied ? '✓ link copied' : '🔗 copy link'}</button>}
+          <span className={`${shown ? '' : 'ml-auto '}text-[11px] text-bar-muted`}>Esc: back to the viewer</span>
         </div>
         <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm">
         <div className="flex items-start justify-between px-5 pt-3 pb-2">
@@ -141,7 +178,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                     options={[{ value: 'GRCh38', label: 'GRCh38', hint: 'GRCh38 / hg38 (default)' }, { value: 'GRCh37', label: 'GRCh37', hint: 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)' }]} />
                 : <span className="font-normal text-slate-500">· {build}</span>}
             </div>
-            <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
+            <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
         </div>
         <div className="px-5 pb-3">
@@ -177,7 +214,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
-            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} />
+            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark} />
           </div>
         )}
       </div>

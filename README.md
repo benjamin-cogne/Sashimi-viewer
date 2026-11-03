@@ -96,7 +96,8 @@ a bookmark to the run folder.
 - **Sessions** (JSON, files by name or run folder). The **HTML export** carries each view's coverage, junctions
   and filters, plus its reads, methylation and phasing when they are shown, for readers without the BAM files.
 - **Deep links** from another tool: `#variant=NC_000017.11:g.43094464G>A&label=BRCA1`. Other parameters are
-  `locus`, `pad`, `gene`, `build` and `reads=1`.
+  `locus`, `pad`, `gene`, `build` and `reads=1`. `#sv=DEL%2020:399240-599326` opens the SV browser on a rearrangement (or coordinates,
+  a chromosome, a gene).
 
 [Full manual](docs/manual.md) ·
 [Methods and validation](docs/algorithms.md) ·

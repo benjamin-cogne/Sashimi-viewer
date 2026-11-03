@@ -307,6 +307,16 @@ https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464
 Template: `href="…/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100"`. A GRCh37
 laboratory sends the hg19 accession or `build=GRCh37`; deep-intronic variants need a larger `pad` or a `locus`.
 
+**Links to the SV browser.** `#sv=` opens the page on the SV browser with what its box takes, no alignment needed:
+a rearrangement (HGVS, ISCN sequence form, or `DEL` / `DUP` / `INV` before coordinates), coordinates (opened with
+a quarter of the interval on each side, the interval highlighted), a chromosome or a gene. `build=GRCh37` for hg19
+positions. The SV browser keeps the address bar on its last search, and **🔗 copy link** copies it.
+
+```
+…/sashimi-viewer.html#sv=DEL%2020:399240-599326
+…/sashimi-viewer.html#sv=20:399240-599326&build=GRCh37
+```
+
 ## Sessions and HTML export
 
 **Save session** downloads a JSON file (`sashimi-session-GENE-DATE.json`): the build, the run folder and each file's
