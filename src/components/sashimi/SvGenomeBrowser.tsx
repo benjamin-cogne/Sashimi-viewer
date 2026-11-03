@@ -699,13 +699,17 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   interface DerBlock { der: DerLayout; chains: Chain[]; genes: string[]; label: string; x0: number; x1: number; xg: number; h: number; fusion: GeneImpact['principal']['fusions'][number] | null; worth: boolean; lw: number; flank?: { g: SvGene; dp: DerPiece } }
   const derPacked = ders.map(d => {
     const list: DerBlock[] = [];
-    if (lod !== 'density') {
+    // a chromosome seen whole: as on the reference, only the genes worth a label (changed by the event, in the panel,
+    // dosage-sensitive, LoF-intolerant), each at its place on the rebuilt chromosome, over a density profile (below)
+    const dens = lod === 'density';
+    {
       const keepC = (ch: Chain) => ch.parts.every(p => (mode === 'mane' || lod !== 'full' ? p.tx === impactOf.get(p.tx.gene)?.gene.principal : true));
       const copyNo = new Map<string, number>();
       for (const ch of story.chains) {
         if (story.ders[ch.der] !== d || !keepC(ch)) continue;
         const geneList = [...new Set(ch.parts.map(p => p.tx.gene))];
         if (filtering && !geneList.some(passes)) continue;
+        if (dens && geneList.length === 1 && !worthSym(geneList[0])) continue;
         const xs = ch.parts.flatMap(p => [derX(d, toDer(p.dp, p.lo)), derX(d, toDer(p.dp, p.hi))]);
         if (!inView(Math.min(...xs), Math.max(...xs))) continue;
         const x0 = Math.max(X0 + 2, Math.min(...xs)), x1 = Math.max(...xs);
@@ -722,23 +726,47 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         const same = list.find(b => b.genes.join() === geneList.join() && Math.abs(b.x0 - x0) < 2 && Math.abs(b.x1 - x1) < 2);
         if (same) { same.chains.push(ch); same.h += TX_H; continue; }
         const lw = labelW(label) + (fusion ? 80 : 0) + (geneList.length === 1 ? (panelDot(geneList[0]) ? 10 : 0) + badgeW(geneList[0]) : 0);
-        list.push({ der: d, chains: [ch], genes: geneList, label, x0, x1: Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: LABEL_H + (lod === 'full' ? TX_H : 8), fusion, worth: geneList.length > 1 || worthSym(geneList[0]), lw });
+        list.push({ der: d, chains: [ch], genes: geneList, label, x0, x1: dens ? x0 + lw : Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: dens ? LABEL_H + 2 : LABEL_H + (lod === 'full' ? TX_H : 8), fusion, worth: geneList.length > 1 || worthSym(geneList[0]), lw });
       }
       // genes of the view in the flanks (the chromosome on either side of the event's window), carried as they are
       for (const dp of d.pieces) {
         if (!dp.seg.first && !dp.seg.last) continue;
         const [lo, hi] = pieceRange(dp, L);
         for (const g of view.genes) {
-          if (impactOf.has(g.symbol) || g.start < lo || g.end > hi || (g.end > win.start && g.start < win.end) || (filtering && !passes(g.symbol))) continue;
+          if (impactOf.has(g.symbol) || g.start < lo || g.end > hi || (g.end > win.start && g.start < win.end) || (filtering && !passes(g.symbol)) || (dens && !worthSym(g.symbol))) continue;
           const xa = derX(d, toDer(dp, g.start)), xb = derX(d, toDer(dp, g.end));
           if (!inView(xa, xb)) continue;
           const x0 = Math.max(X0 + 2, Math.min(xa, xb)), x1 = Math.max(xa, xb), lw = labelW(g.symbol) + (panelDot(g.symbol) ? 10 : 0) + badgeW(g.symbol);
-          list.push({ der: d, chains: [], genes: [g.symbol], label: g.symbol, x0, x1: Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: LABEL_H + (lod === 'full' ? TX_H : 8), fusion: null, worth: worthSym(g.symbol), lw, flank: { g, dp } });
+          list.push({ der: d, chains: [], genes: [g.symbol], label: g.symbol, x0, x1: dens ? x0 + lw : Math.max(x1, x0 + lw), xg: Math.max(x1, x0 + 3), h: dens ? LABEL_H + 2 : LABEL_H + (lod === 'full' ? TX_H : 8), fusion: null, worth: worthSym(g.symbol), lw, flank: { g, dp } });
         }
       }
     }
     if (!derLanes.current.has(d.name)) derLanes.current.set(d.name, new Map());
+    if (dens) return pack(list, 3);
     return pack(list, MAX_LANES, derLanes.current.get(d.name), b => `${b.label}|${b.flank ? 'flank' : b.chains[0]?.parts[0]?.dp.index ?? ''}`, interacting);
+  });
+  /**
+   * The density profile of each rebuilt chromosome, for a chromosome seen whole: every gene of the view counted where it
+   * lies on the rebuilt chromosome (through each piece holding it), so a deleted gene drops out and those beyond a
+   * junction count at their new place.
+   */
+  const derDensity = lod !== 'density' ? ders.map(() => null) : ders.map(d => {
+    const BIN = 3, n = Math.ceil(PW / BIN), counts = new Float32Array(n);
+    for (const g of view.genes) {
+      if (filtering && !passes(g.symbol)) continue;
+      for (const dp of d.pieces) {
+        const [lo, hi] = pieceRange(dp, L);
+        const a0 = Math.max(lo, g.start), b0 = Math.min(hi, g.end);
+        if (b0 <= a0) continue;
+        const xa = derX(d, toDer(dp, a0)), xb = derX(d, toDer(dp, b0));
+        const ia = Math.floor((Math.min(xa, xb) - X0) / BIN), ib = Math.floor((Math.max(xa, xb) - X0) / BIN);
+        for (let i = Math.max(0, ia); i <= Math.min(n - 1, ib); i++) counts[i]++;
+      }
+    }
+    let max = 1; for (const v of counts) max = Math.max(max, v);
+    let path = `M${X0},0`;
+    for (let i = 0; i < n; i++) path += `L${X0 + i * BIN},${(-counts[i] / max).toFixed(3)}L${X0 + (i + 1) * BIN},${(-counts[i] / max).toFixed(3)}`;
+    return { d: `${path}L${X1},0Z`, max };
   });
 
   // ---- vertical layout ----
@@ -782,7 +810,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const derY = ders.map((d, i) => {
     const band = y; y += BAND_H;
     const ruler = y; y += 24;
-    const genesY = y; y += keep(`der${i}`, derPacked[i].height) + 4;
+    const genesY = y; y += keep(`der${i}`, lod === 'density' ? derPacked[i].height + 40 : derPacked[i].height) + 4;
     const tad = domains.length ? y : -1; if (domains.length) y += TAD_H;
     y += 18;
     return { band, ruler, genes: genesY, tad };
@@ -1076,9 +1104,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         }))}
         {/* rebuilt chromosomes */}
         {ders.map((d, di) => {
-          const Y = derY[di], packed = derPacked[di];
+          const Y = derY[di], packed = derPacked[di], dd = derDensity[di], yDd = Y.genes + packed.height + 2;
           return (
             <g key={`der${d.name}`}>
+              {dd && <path d={dd.d} transform={`translate(0 ${yDd + 34}) scale(1 34)`} fill="url(#svb-dens)" stroke="none"><title>{`genes per ${kb(3 / ppb)} on ${d.name}: up to ${dd.max}`}</title></path>}
               {d.pieces.map(dp => {
                 const [lo, hi] = pieceRange(dp, L);
                 let a = cx(derX(d, toDer(dp, lo))), b = cx(derX(d, toDer(dp, hi)));
@@ -1122,12 +1151,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                       <rect x={lx + labelW(b.label) - 4} y={yy + 1} width={b.fusion.kind === 'in-frame' ? 52 : b.fusion.kind === 'promoter-swap' ? 74 : 66} height={12} rx={6} fill={b.fusion.kind === 'in-frame' ? '#7c3aed' : '#ede9fe'} />
                       <text x={lx + labelW(b.label) + 2} y={yy + 10} fontSize={9} fontWeight={700} fill={b.fusion.kind === 'in-frame' ? '#fff' : '#6d28d9'}>{b.fusion.kind === 'in-frame' ? 'in frame' : b.fusion.kind === 'promoter-swap' ? 'promoter swap' : b.fusion.kind === 'out-of-frame' ? 'out of frame' : b.fusion.kind === 'five-cds-whole' ? '3′ UTR join' : 'frame ?'}</text>
                     </g>}
-                    {b.flank && (() => {
+                    {lod === 'density' && <line x1={lx} x2={lx} y1={yy + 12} y2={yDd + 6} stroke={head} strokeWidth={0.8} strokeOpacity={0.6} />}
+                    {lod !== 'density' && b.flank && (() => {
                       const { g, dp } = b.flank, X = (pos: number) => derX(d, toDer(dp, pos));
                       return lod === 'full' ? glyph(g.principal, X, yl, head, `fl${g.symbol}`, g.principal.start, g.principal.end, (dp.piece.reversed ? -g.strand : g.strand) as 1 | -1)
                         : <rect x={cx(Math.min(X(g.start), X(g.end)))} y={yy + LABEL_H + 3} width={Math.max(1.5, Math.abs(cx(X(g.end)) - cx(X(g.start))))} height={6} rx={1.5} fill={head} />;
                     })()}
-                    {b.chains.map((ch, ci) => {
+                    {lod !== 'density' && b.chains.map((ch, ci) => {
                       const ylc = yl + ci * TX_H;
                       if (lod !== 'full') {
                         const xs = ch.parts.flatMap(p => [derX(d, toDer(p.dp, p.lo)), derX(d, toDer(p.dp, p.hi))]);
