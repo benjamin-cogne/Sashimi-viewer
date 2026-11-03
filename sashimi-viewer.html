@@ -164,7 +164,8 @@ ${n.packed?`<script type="application/octet-stream" id="rec-packed">${n.packed.s
   var list=function(c){return Array.prototype.slice.call(document.getElementsByClassName(c));};
   // what the timeline drives, looked up once
   var wins=[], moves=[], fades=[], clicks=[], boxes=[];
-  for(var c in T.wins) wins.push({els:list(c),runs:T.wins[c],on:null});
+  // each element's own display, put back when it shows again (a dialog's block may be flex)
+  for(var c in T.wins){var we=list(c);wins.push({els:we,ds:we.map(function(el){return el.style.display;}),runs:T.wins[c],on:null});}
   for(var m in T.moves) moves.push({els:list(m),pts:T.moves[m],k:-2});
   // the dialogs' boxes, filled with the content of the moment (its pieces joined) when it changes
   var H=T.html;
@@ -187,7 +188,9 @@ ${n.packed?`<script type="application/octet-stream" id="rec-packed">${n.packed.s
   var camNow=[0,0,T.W,T.H], lastCam='', still=0;
   var render=function(t){
     var i,j;
-    for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++)w.els[j].style.visibility=on?'visible':'hidden';}}
+    // a drawing off screen is taken out of the page (display:none), not only hidden: hidden, it would still be laid out
+    // and walked at every repaint, and a long recording holds tens of thousands of them (20 fps against 60 on one)
+    for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++){var el=w.els[j];if(on){el.style.display=w.ds[j];el.style.visibility='visible';}else el.style.display='none';}}}
     for(i=0;i<boxes.length;i++){var bx=boxes[i],S=bx.seq,kb=0;for(j=1;j<S.length&&S[j][0]<=t;j++)kb=j;if(kb!==bx.k){bx.k=kb;var ids=H.contents[S[kb][1]],a=[];for(j=1;j<ids.length;j++)a.push(H.pieces[ids[j]]);bx.el.setAttribute('style',H.pieces[ids[0]]+';'+bx.base);bx.el.innerHTML=a.join('');}}
     for(i=0;i<moves.length;i++){var mv=moves[i],P=mv.pts,k=-1;for(j=0;j<P.length&&P[j][0]<=t;j++)k=j;if(k<0)k=0;if(k!==mv.k){mv.k=k;for(j=0;j<mv.els.length;j++)mv.els[j].style.transform='translate('+P[k][1]+'px,'+P[k][2]+'px)';}}
     for(i=0;i<fades.length;i++){var f=fades[i],F=${OW},o=t<f.a||t>f.b+F?0:t<f.a+F?(t-f.a)/F:t<=f.b?1:1-(t-f.b)/F;o=Math.round(o*100)/100;if(o!==f.o){f.o=o;f.el.style.opacity=o;}}
