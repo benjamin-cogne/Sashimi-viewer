@@ -164,12 +164,12 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     else setCaptions(cs => [...cs, base]);
   };
   const editCaption = (i: number, patch: Partial<Caption>) => setCaptions(cs => cs.map((c, k) => (k === i ? { ...c, ...patch } : c)));
-  const durOf = (c: { start: number; end: number }) => Math.round((map(c.end) - map(c.start)) / 500) * 500;
-  const DUR = [1500, 2500, 3000, 4000, 6000, 8000];
+  /** how long it stays on screen (s, played time): typed, or set by dragging its ends on the timeline, as a chapter's card */
   const durSelect = (c: { start: number; end: number }, set: (end: number) => void) => (
-    <select value={DUR.includes(durOf(c)) ? durOf(c) : 3000} onChange={e => set(invertTime(map, map(c.start) + Number(e.target.value), rec.duration))} className="border border-gray-300 rounded px-1 py-0.5">
-      {DUR.map(d => <option key={d} value={d}>{d / 1000} s</option>)}
-    </select>
+    <span className="inline-flex items-center gap-0.5" title="How long it stays on screen (s); or drag its ends on the timeline">
+      <input type="number" step={0.1} min={0.3} value={((map(c.end) - map(c.start)) / 1000).toFixed(1)} className="border border-gray-300 rounded px-1 py-0.5 w-14"
+        onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v > 0) set(invertTime(map, map(c.start) + Math.max(300, Math.round(v * 1000)), rec.duration)); }} /> s
+    </span>
   );
   const startInput = (c: { start: number; end: number }, set: (start: number, end: number) => void) => (
     <input type="number" step={0.1} min={0} value={(map(c.start) / 1000).toFixed(1)} className="border border-gray-300 rounded px-1 py-0.5 w-16" title="Start (s)"

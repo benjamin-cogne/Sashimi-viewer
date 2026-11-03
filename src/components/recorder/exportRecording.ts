@@ -587,7 +587,7 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
     return r(K[K.length-1][1]);
   };
   var ptrAt=function(t){var P=T.ptr;if(!P.length)return null;if(t<=P[0][0])return P[0];var lo=0,hi=P.length-1;if(t>=P[hi][0])return P[hi];while(hi-lo>1){var md=(lo+hi)>>1;if(P[md][0]<=t)lo=md;else hi=md;}var a=P[lo],b=P[hi],p=(t-a[0])/((b[0]-a[0])||1);return [t,a[1]+(b[1]-a[1])*p,a[2]+(b[2]-a[2])*p];};
-  var camNow=[0,0,T.W,T.H], lastCam='', still=0;
+  var camNow=[0,0,T.W,T.H], lastCam='';
   var render=function(t){
     var i,j;
     for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++)w.els[j].style.visibility=on?'visible':'hidden';}}
@@ -595,10 +595,10 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
     for(i=0;i<moves.length;i++){var mv=moves[i],P=mv.pts,k=-1;for(j=0;j<P.length&&P[j][0]<=t;j++)k=j;if(k<0)k=0;if(k!==mv.k){mv.k=k;for(j=0;j<mv.els.length;j++)mv.els[j].style.transform='translate('+P[k][1]+'px,'+P[k][2]+'px)';}}
     for(i=0;i<fades.length;i++){var f=fades[i],F=${CAPTION_FADE_MS},o=t<f.a||t>f.b+F?0:t<f.a+F?(t-f.a)/F:t<=f.b?1:1-(t-f.b)/F;o=Math.round(o*100)/100;if(o!==f.o){f.o=o;f.el.style.opacity=o;}}
     var fx=view.clientWidth/T.W;
-    // the camera: a layer of its own while it moves, drawn sharp again once it stops
+    // the camera: no layer of its own (will-change), so the browser draws the vectors at each frame's scale and a zoom
+    // stays sharp all along (a promoted layer is a bitmap of the start of the move, stretched: blurred while zooming in)
     camNow=camAt(t);var s=T.W/camNow[2],key=camNow.map(function(v){return v.toFixed(2);}).join(',')+fx;
-    if(key!==lastCam){lastCam=key;still=0;camv.style.willChange='transform';camv.style.transform='translate('+(-camNow[0]*s*fx)+'px,'+(-camNow[1]*s*fx)+'px) scale('+s+')';}
-    else if(++still===20)camv.style.willChange='auto';
+    if(key!==lastCam){lastCam=key;camv.style.transform='translate('+(-camNow[0]*s*fx)+'px,'+(-camNow[1]*s*fx)+'px) scale('+s+')';}
     var q=ptrAt(t);if(q)ptr.style.transform='translate('+(q[1]*fx)+'px,'+(q[2]*fx)+'px) scale('+fx+')';
     for(i=0;i<clicks.length;i++){var ck=clicks[i],p=(t-ck.t)/${CLICK_MS};if(p>=0&&p<=1){var sz=28*sc*fx,sc2=.5+1.1*p;ck.el.style.width=ck.el.style.height=sz+'px';ck.el.style.transform='translate('+(ck.x*fx-sz/2)+'px,'+(ck.y*fx-sz/2)+'px) scale('+sc2+')';ck.el.style.opacity=(p<.07?p/.07:1-p)*.9;ck.on=true;}else if(ck.on){ck.on=false;ck.el.style.opacity=0;}}
   };
