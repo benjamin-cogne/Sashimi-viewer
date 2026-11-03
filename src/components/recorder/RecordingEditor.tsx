@@ -192,7 +192,8 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       ...(autoOn ? autos.map((z, i) => ({ id: `az:${i}`, start: z.start, end: z.end, label: `click ${level}×`, color: '#4fb3a6', faded: autoOff.has(i) })) : []),
       ...drawn.map((z, i) => ({ id: `dz:${i}`, start: z.start, end: z.end, label: 'zoom', color: '#0f766e' })),
     ] },
-    { key: 'cap', label: 'Captions', items: captions.map((c, i) => ({ id: `cp:${i}`, start: c.start, end: c.end, label: c.text || KIND_LABEL[c.kind], color: CAP_COLOR[c.kind] })) },
+    // each block says what it is (a callout and a lower third both read "Text" by default), then its text
+    { key: 'cap', label: 'Captions', items: captions.map((c, i) => ({ id: `cp:${i}`, start: c.start, end: c.end, label: c.text ? `${KIND_LABEL[c.kind]} · ${c.text}` : KIND_LABEL[c.kind], color: CAP_COLOR[c.kind] })) },
     // a chapter with a title card is a block, from its start to the end of its card (drag it, or its ends, to set when and
     // how long the card shows); without a card, a mark
     { key: 'ch', label: 'Chapters', items: chapters.map((c, i) => ({ id: `ch:${i}`, start: c.t, end: c.card ? cardEnd(c) : c.t + 1, mark: !c.card, label: `${i + 1}. ${c.name}`, color: '#0f766e' })) },
