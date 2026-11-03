@@ -244,6 +244,9 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
 
   // frames shown for some time once the pauses are cut, with their window
   const shown = rec.frames.map((f, i) => ({ f, i, a: map(f.t), b: i + 1 < rec.frames.length ? map(rec.frames[i + 1].t) : Infinity })).filter(x => x.b > x.a);
+  // the first image is on from the very start (the first frame is taken a few ms in): a page stopped at its start shows
+  // it, not the empty stage
+  if (shown.length) shown[0].a = 0;
   const order = new Map(shown.map((x, k) => [x.i, k]));
   // a class showing an element during a set of frames (runs of consecutive shown frames), one per distinct set
   const winClass = new Map<string, string>();
