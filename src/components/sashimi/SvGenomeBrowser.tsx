@@ -821,10 +821,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
 
   // ---- gestures: drag to pan (a fling goes on), Ctrl / ⌘ + wheel or pinch to zoom, two-finger swipe to pan, double-click to zoom in,
   //      drag along the ruler to zoom on a stretch, click or drag on the ideogram to go there ----
-  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number } | null>(null);
+  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo' | 'select'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number } | null>(null);
   /** the click that ends a drag opens no card */
   const suppressClick = useRef(false);
   const [band, setBand] = useState<{ a: number; b: number } | null>(null);
+  /** an interval picked with Ctrl / ⌘ + drag: highlighted on the reference axis (it follows the view) until closed */
+  const [sel, setSel] = useState<{ s: number; e: number } | null>(null);
+  const [selCopied, setSelCopied] = useState(false);
   const toSvgX = (clientX: number) => { const r = svgRef.current!.getBoundingClientRect(); return ((clientX - r.left) / r.width) * VW; };
   const toSvgY = (clientY: number) => { const r = svgRef.current!.getBoundingClientRect(); return ((clientY - r.top) / r.height) * H; };
   const ideoPos = (x: number) => Math.max(0, Math.min(L, ((x - X0) / PW) * L));
@@ -832,7 +835,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     if (e.button !== 0) return;
     anim.current = {}; suppressClick.current = false;
     const x = toSvgX(e.clientX), yy = toSvgY(e.clientY);
-    const kind = yy < IDEO_Y + IDEO_H + 4 ? 'ideo' : yy >= yRuler && yy < yRuler + RULER_H ? 'band' : 'pan';
+    const kind = yy < IDEO_Y + IDEO_H + 4 ? 'ideo' : (e.ctrlKey || e.metaKey) && x >= X0 && x <= X1 ? 'select' : yy >= yRuler && yy < yRuler + RULER_H ? 'band' : 'pan';
     dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId };
     if (kind === 'ideo') { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); flyTo(p - sp / 2, p + sp / 2, 320); }
   };
@@ -843,12 +846,17 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     if (!d.moved) { d.moved = true; svgRef.current?.setPointerCapture(e.pointerId); setTip(null); }
     d.samples.push({ x: e.clientX, t: performance.now() }); if (d.samples.length > 6) d.samples.shift();
     if (d.kind === 'pan') { const sh = -(x - d.x0) * bppRef.current; moveTo(d.vp0.s + sh, d.vp0.e + sh); }
-    else if (d.kind === 'band') setBand({ a: Math.max(X0, Math.min(X1, d.x0)), b: Math.max(X0, Math.min(X1, x)) });
+    else if (d.kind === 'band' || d.kind === 'select') setBand({ a: Math.max(X0, Math.min(X1, d.x0)), b: Math.max(X0, Math.min(X1, x)) });
     else { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); moveTo(p - sp / 2, p + sp / 2, p); }
   };
   const onPointerUp = (e: React.PointerEvent) => {
     const d = dragRef.current; if (!d || d.id !== e.pointerId) return;
     dragRef.current = null; suppressClick.current = d.moved;
+    if (d.kind === 'select') {
+      const a = band ? Math.min(band.a, band.b) : d.x0, b = band ? Math.max(band.a, band.b) : d.x0; setBand(null);
+      if (d.moved && b - a > 2) { const s0 = vpRef.current.s, k = bppRef.current; setSel({ s: Math.max(0, Math.round(s0 + (a - X0) * k)), e: Math.min(L, Math.round(s0 + (b - X0) * k)) }); setSelCopied(false); }
+      return;
+    }
     if (d.kind === 'band' && band) {
       const a = Math.min(band.a, band.b), b = Math.max(band.a, band.b); setBand(null);
       if (b - a > 4) { const s0 = vpRef.current.s, k = bppRef.current; flyTo(s0 + (a - X0) * k, s0 + (b - X0) * k); }
@@ -892,7 +900,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     else if (e.key === '+' || e.key === '=') { e.preventDefault(); flyTo(v.s + sp * 0.25, v.e - sp * 0.25, 260); }
     else if (e.key === '-' || e.key === '_') { e.preventDefault(); flyTo(v.s - sp * 0.5, v.e + sp * 0.5, 260); }
     else if ((e.key === 'e' || e.key === 'E') && rec) { e.preventDefault(); eventView(); }
+    else if (e.key === 'Escape' && sel) { e.preventDefault(); e.stopPropagation(); setSel(null); }
   };
+  const zoomToSel = () => { if (sel) { const pad = Math.max(100, (sel.e - sel.s) * 0.04); flyTo(sel.s - pad, sel.e + pad); } };
+  const selText = sel ? `${chrom}:${fmt(sel.s + 1)}-${fmt(sel.e)}` : '';
 
   // ---- ruler ----
   const step = niceStep(ve - vp.s, 9);
@@ -929,6 +940,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const svg = (
     <svg ref={svgRef} viewBox={`0 0 ${VW} ${H}`} width="100%" style={{ aspectRatio: `${VW} / ${H}`, cursor: dragRef.current?.moved && dragRef.current.kind === 'pan' ? 'grabbing' : 'grab', fontFamily: FONT, touchAction: 'pan-y' }} className="block select-none"
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+      onContextMenu={e => { if (e.ctrlKey) e.preventDefault(); /* Ctrl + click on a Mac: the selection, not the menu */ }}
       onClick={() => { if (!suppressClick.current) { setPinned(null); setLinked(null); } }} onDoubleClick={onDoubleClick}>
       <defs>
         <clipPath id="svb-clip"><rect x={X0 - 2} y={0} width={PW + 4} height={H} /></clipPath>
@@ -1203,9 +1215,18 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       })()}
       {domains.length > 0 && ders.map((d, i) => <text key={`tadl${i}`} x={14} y={derY[i].tad + 16} fontSize={10.5} fill={C.muted}>TADs</text>)}
       {/* the stretch being chosen on the ruler */}
+      {sel && (() => {
+        const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e));
+        if (b <= a) return null;
+        return <g pointerEvents="none" data-export="skip">
+          <rect x={a} y={yRuler} width={Math.max(1, b - a)} height={H - yRuler - 6} fill="#f59e0b" fillOpacity={0.12} />
+          {refX(sel.s) >= X0 && <line x1={a} x2={a} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+          {refX(sel.e) <= X1 && <line x1={b} x2={b} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+        </g>;
+      })()}
       {band && <g pointerEvents="none">
         <rect x={Math.min(band.a, band.b)} y={yRuler} width={Math.abs(band.b - band.a)} height={H - yRuler - 6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeDasharray="4 3" />
-        <text x={(band.a + band.b) / 2} y={yRuler - 4} fontSize={10} fontWeight={700} textAnchor="middle" fill={C.accent}>{kb(Math.abs(band.b - band.a) / ppb)}</text>
+        <text x={(band.a + band.b) / 2} y={yRuler - 4} fontSize={10} fontWeight={700} textAnchor="middle" fill={C.accent}>{kb(Math.abs(band.b - band.a) / ppb)}{dragRef.current?.kind === 'select' ? ' · release to highlight' : ''}</text>
       </g>}
     </svg>
   );
@@ -1305,6 +1326,26 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <div className="px-3 mt-2"><div ref={widthBox} className="w-full" /></div>
       <div className="px-3 mt-0 relative" ref={boxRef}>
         {svg}
+        {sel && (() => {
+          // the bar over the highlighted interval, in the box's pixels (centred on its visible part)
+          const r = svgRef.current?.getBoundingClientRect(), br = boxRef.current?.getBoundingClientRect();
+          if (!r || !br) return null;
+          const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e)), k = r.width / VW;
+          const inView = b > a, mid = inView ? (a + b) / 2 : refX(sel.s) < X0 ? X0 : X1;
+          const left = r.left - br.left + mid * k, top = r.top - br.top + (yRuler + RULER_H / 2) * k;
+          return (
+            <div className="absolute z-30 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1 rounded-md border border-amber-300 bg-white/95 shadow-md px-1.5 py-0.5 text-[11px] whitespace-nowrap"
+              style={{ left: Math.max(170, Math.min(br.width - 170, left)), top }} onMouseDown={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+              {!inView && refX(sel.e) <= X0 ? <span className="text-gray-400">◂</span> : null}
+              <span className="font-mono text-gray-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
+              <span className="text-gray-400">· {kb(sel.e - sel.s)}</span>
+              <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title="Zoom to the highlighted interval">🔍 zoom to region</button>
+              <button onClick={() => { void navigator.clipboard?.writeText(selText).then(() => setSelCopied(true), () => {}); }} className="px-1.5 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50" title="Copy the coordinates">{selCopied ? '✓ copied' : 'copy'}</button>
+              <button onClick={() => setSel(null)} className="px-1 text-gray-400 hover:text-gray-700 text-sm leading-none" title="Remove the highlight (Esc)">×</button>
+              {!inView && refX(sel.s) >= X1 ? <span className="text-gray-400">▸</span> : null}
+            </div>
+          );
+        })()}
         {pinned && card(pinned, true)}
         {tip && tip.gene !== pinned?.gene && card(tip, false)}
       </div>
@@ -1320,7 +1361,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)}</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
-        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
+        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
       <div className="px-5 mt-2 pb-1">
         {rec && !story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-gray-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
