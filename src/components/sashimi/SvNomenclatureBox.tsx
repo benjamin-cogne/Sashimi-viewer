@@ -29,21 +29,21 @@ export default function SvNomenclatureBox({ rec, build, bands }: { rec: SvRecons
   };
   const row = (label: string, text: string, title: string) => (
     <div className="mt-0.5" title={title}>
-      <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mr-1">{label}</span>
+      <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide mr-1">{label}</span>
       <span className="font-mono text-[11px] bg-accent-50 text-accent-900 rounded px-1.5 py-0.5 select-all break-all">{text}</span>
     </div>
   );
   return (
     <div className="mt-1">
       <div className="flex items-center gap-2">
-        <span className="text-[10.5px] font-semibold text-gray-700">Nomenclature (draft)</span>
+        <span className="text-[10.5px] font-semibold text-slate-700">Nomenclature (draft)</span>
         <button onClick={copy} className="text-[10.5px] text-accent-700 hover:underline">{copied ? 'copied' : 'copy'}</button>
       </div>
       {n.hgvs.map(h => row('HGVS', h, 'HGVS allele form: the changes on the reference from pter to qter (HGVS recommendations, complex HGVS/ISCN). Best positions from the reads, not shifted by the 3′ rule.'))}
-      {n.uncertainty && <div className="text-[10.5px] text-gray-500">breakpoints {n.uncertainty} around the positions given</div>}
+      {n.uncertainty && <div className="text-[10.5px] text-slate-500">breakpoints {n.uncertainty} around the positions given</div>}
       {n.iscn && row('ISCN', n.iscn, 'ISCN: the rebuilt chromosome, with the bands of its breakpoints (UCSC cytoBand)')}
       {n.iscnSeq.map(s => row('ISCN seq', s, 'ISCN sequence form: the rebuilt chromosome from pter to qter, :: at each junction'))}
-      {!n.iscn && <div className="text-[10.5px] text-gray-500">bands unavailable: ISCN with bands not given</div>}
+      {!n.iscn && <div className="text-[10.5px] text-slate-500">bands unavailable: ISCN with bands not given</div>}
       <div className="text-[11px] font-semibold text-amber-800 mt-1">⚠ {NOMENCLATURE_WARNING}</div>
     </div>
   );

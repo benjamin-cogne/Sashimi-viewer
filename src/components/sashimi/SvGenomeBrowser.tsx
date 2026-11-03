@@ -24,6 +24,7 @@ import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, L
 import { IMPACT, KIND_COLOR } from './svColors';
 import { cnvEvents, matchesOf, RO_MATCH, type PopulationSv, type PopMatch, type CnvEvent } from './svPopulation';
 import { TileCache, tileSizeFor } from './browserTiles';
+import { Icon, Pill, Segmented } from './controls';
 import { ACHRO_REGIONS, ACHRO_SOURCE, ACHRO_GUIDELINES, ACHRO_COLOR, ACHRO_CLASS_LABEL, achroShort, type AchroRegion, type AchroRow } from './achropuce';
 import { niceStep } from './geometry';
 import { PANEL_SOURCES, listPanels, loadPanel, parsePanelFile, geneModes, classifyMoi, type PanelSummary, type LoadedPanel, type GeneModes, type MoiClass } from '../../standalone/panelapp';
@@ -1280,75 +1281,70 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     const dot = { intolerant: '#fca5a5', constrained: '#fdba74', tolerant: '#cbd5e1', unknown: '#cbd5e1' }[loeufClass(c2)];
     const tx = gi?.principal.tx ?? g.principal;
     return (
-      <div key={isPin ? 'pin' : 'tip'} ref={ref} className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[390px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={isPin ? place : undefined}
+      <div key={isPin ? 'pin' : 'tip'} ref={ref} className={`absolute z-20 rounded-lg bg-slate-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[390px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={isPin ? place : undefined}
         onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
         <div className="font-semibold flex items-start gap-2"><span className="flex-1"><i>{g.symbol}</i>{gi ? ` · ${IMPACT[gi.kind].label}` : ''}</span>
-          {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
-        <div className="text-gray-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
+          {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-slate-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+        <div className="text-slate-300">{tx.id}{tx.status === 'mane' ? ' (MANE Select)' : tx.status === 'select' ? ' (RefSeq Select)' : ''} · {chrom}:{fmt(g.start + 1)}-{fmt(g.end)} ({kb(g.end - g.start)}, {g.strand > 0 ? '+' : '−'} strand)</div>
         {gi && <div className="mt-0.5">{gi.principal.text}</div>}
         {(() => {
           const mo = modeOf(g.symbol);
-          if (!mo.m && !mo.fromPanel && mo.cls === '?') return <div className="mt-0.5 text-gray-400">Inheritance (PanelApp): loading…</div>;
+          if (!mo.m && !mo.fromPanel && mo.cls === '?') return <div className="mt-0.5 text-slate-400">Inheritance (PanelApp): loading…</div>;
           const parts = mo.m?.parts.filter(p => p.cls !== '?' || mo.m!.parts.length === 1) ?? [];
           return <>
             <div className="mt-0.5"><span style={{ color: MOI[mo.cls].color === '#cbd5e1' ? '#94a3b8' : MOI[mo.cls].color }}>■</span> Inheritance: <b>{MOI[mo.cls].label}</b>
-              <span className="text-gray-400">{mo.fromPanel ? ` (in ${mo.fromPanel})` : ''}{parts.length ? ` · ${mo.m!.source}: ${parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}${p.green ? ` (${p.green} green)` : ''}`).join(', ')}` : mo.cls === 'none' ? ` · ${moiSrc.label}` : ''}</span></div>
+              <span className="text-slate-400">{mo.fromPanel ? ` (in ${mo.fromPanel})` : ''}{parts.length ? ` · ${mo.m!.source}: ${parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}${p.green ? ` (${p.green} green)` : ''}`).join(', ')}` : mo.cls === 'none' ? ` · ${moiSrc.label}` : ''}</span></div>
           </>;
         })()}
         {gi && ders.length > 0 && (() => { const cp = copiesOf(gi); return <div className="mt-0.5 text-teal-200">On {ders.map(d => d.name).join(', ')}: {cp.length ? `${cp.length} cop${cp.length > 1 ? 'ies' : 'y'} (${cp.join('; ')})` : 'none'}{isPin && cp.length ? ', joined in the figure (the links stay when this card is closed; click the background to clear them)' : ''}</div>; })()}
         {r?.text && <div className="mt-0.5 text-amber-200">{r.text}</div>}
-        <div className="mt-0.5 text-gray-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>
+        <div className="mt-0.5 text-slate-300"><span style={{ color: dot }}>●</span> {parts.join(' · ')}</div>
         {isPin
           ? <div className="mt-1.5 pt-1.5 border-t border-white/15"><button onClick={() => zoomTo(g.start, g.end)} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on <i>{g.symbol}</i></button></div>
-          : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
+          : <div className="mt-0.5 text-slate-400">click to keep this card open</div>}
       </div>
     );
   };
 
-  const btn = 'min-w-[28px] px-1.5 h-6 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 font-semibold';
+  // the Sashimi viewer's zoom group: one bordered strip of buttons
+  const btn = 'min-w-[28px] h-[26px] grid place-items-center text-slate-600 hover:bg-slate-50';
   return (
-    <div className="mt-2 border-t border-gray-200 pt-3 outline-none" style={{ fontFamily: FONT }} tabIndex={0} onKeyDown={onKeyDown}>
+    <div className="mt-2 border-t border-slate-200 pt-3 outline-none" style={{ fontFamily: FONT }} tabIndex={0} onKeyDown={onKeyDown}>
       {/* header */}
       <div className="px-5 flex flex-wrap items-center gap-2 text-xs">
-        <div className="text-sm font-bold mr-1">{rec ? 'Genes on the rebuilt chromosome' : 'Genes'}</div>
-        <span className="inline-flex rounded-md border border-gray-300 overflow-hidden" role="group" aria-label="Transcripts">
-          {(['mane', 'all'] as const).map(m => <button key={m} onClick={() => setMode(m)} className={`px-2 py-0.5 ${mode === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'mane' ? 'One model per gene: MANE Select (else RefSeq Select, else the longest coding sequence)' : `Every RefSeq NM_ model of each gene (no XM_ prediction, no NR_ non-coding): the consequence can differ between isoforms. Drawn below ${kb(LOD_FULL)} in view.`}>{m === 'mane' ? 'MANE Select' : 'all NM_ transcripts'}</button>)}
-        </span>
-        <span className="inline-flex rounded-md border border-gray-300 overflow-hidden" role="group" aria-label="Gene colour">
-          {(['loeuf', 'impact', 'moi'] as const).map(m => <button key={m} onClick={() => { setColorBy(m); store.set('sashimi.svColorBy', m); }} className={`px-2 py-0.5 ${colorBy === m ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : m === 'moi' ? `Genes coloured by their mode of inheritance in PanelApp (${moiSrc.label}): the loaded panel's own value, else the commonest among the gene's panels, green ratings first` : 'Genes coloured by what the rearrangement does to them'}>{m === 'loeuf' ? 'colour: LOEUF' : m === 'moi' ? 'colour: inheritance' : 'colour: impact'}</button>)}
-        </span>
+        <div className="text-sm font-bold text-slate-900 mr-1">{rec ? 'Genes on the rebuilt chromosome' : 'Genes'}</div>
+        <Segmented size="sm" label="Transcripts" title="The transcripts drawn" value={mode} onChange={setMode}
+          options={(['mane', 'all'] as const).map(m => ({ value: m, label: m === 'mane' ? 'MANE Select' : 'all NM_ transcripts', hint: m === 'mane' ? 'One model per gene: MANE Select (else RefSeq Select, else the longest coding sequence)' : `Every RefSeq NM_ model of each gene (no XM_ prediction, no NR_ non-coding): the consequence can differ between isoforms. Drawn below ${kb(LOD_FULL)} in view.` }))} />
+        <Segmented size="sm" label="Gene colour" title="What the genes are coloured by" value={colorBy} onChange={m => { setColorBy(m); store.set('sashimi.svColorBy', m); }}
+          options={(['loeuf', 'impact', 'moi'] as const).map(m => ({ value: m, label: m === 'loeuf' ? 'colour: LOEUF' : m === 'moi' ? 'colour: inheritance' : 'colour: impact', hint: m === 'loeuf' ? `Genes coloured by their gnomAD LoF constraint (LOEUF): below ${LOEUF_INTOLERANT.v4} red (Mendelian threshold), ${LOEUF_INTOLERANT.v4}–${LOEUF_CONSTRAINED.v4} orange (gnomAD v4 general cut-off), above grey; v2.1.1 scores: below ${LOEUF_INTOLERANT['v2.1.1']} red` : m === 'moi' ? `Genes coloured by their mode of inheritance in PanelApp (${moiSrc.label}): the loaded panel's own value, else the commonest among the gene's panels, green ratings first` : 'Genes coloured by what the rearrangement does to them' }))} />
         <PanelPicker panel={panelData} onPanel={p => { setPanelData(p); store.set('sashimi.svPanel', p); }} />
         <GeneFilterControl filter={geneFilter} onChange={setGeneFilter} hasPanel={!!panel} panelName={panel?.name ?? null} hasEvent={!!rec}
           counts={(() => { const inV = visGenes.filter(g => g.end > vp.s && g.start < ve); const shownN = filtering ? inV.filter(g => passes(g.symbol)).length : inV.length; const waiting = geneFilter.moi.length ? inV.filter(g => { const m = modes.current.get(g.symbol); return m === undefined || m === 'loading'; }).length : 0; return { shown: shownN, total: inV.length, waiting }; })()} />
         {loaders.getPopulationSvs && (
-          <button onClick={() => { setShowDgv(v => { store.set('sashimi.svDgv', !v); return !v; }); }} aria-pressed={showDgv}
-            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${showDgv ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-600'} hover:bg-gray-50`}
-            title="DGV Gold Standard (UCSC track dgvGold): curated copy-number variants of the general population, each found in two studies and two samples at least; drawn under the genes and compared with the event's losses and gains">
-            ▤ DGV Gold
-          </button>
+          <Pill size="sm" icon="users" label="DGV Gold" on={showDgv} onChange={v => { setShowDgv(v); store.set('sashimi.svDgv', v); }}
+            title="DGV Gold Standard (UCSC track dgvGold): curated copy-number variants of the general population, each found in two studies and two samples at least; drawn under the genes and compared with the event's losses and gains" />
         )}
-        <button onClick={() => { setShowAchro(v => { store.set('sashimi.svAchro', !v); return !v; }); }} aria-pressed={showAchro}
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${showAchro ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-600'} hover:bg-gray-50`}
-          title={`${ACHRO_SOURCE.title} (${ACHRO_SOURCE.version}): the recurrent CNVs the French network classifies, each with its class for the deletion and the duplication`}>
-          ▦ AChro-Puce
-        </button>
-        {rec && <label className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-gray-300 bg-white hover:bg-gray-50 cursor-pointer" title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
-          ◭ {domainsFile ? `TADs: ${domainsFile.name} (${domains.length})` : 'Add chromatin domains (BED)…'}
+        <Pill size="sm" icon="grid" label="AChro-Puce" on={showAchro} onChange={v => { setShowAchro(v); store.set('sashimi.svAchro', v); }}
+          title={`${ACHRO_SOURCE.title} (${ACHRO_SOURCE.version}): the recurrent CNVs the French network classifies, each with its class for the deletion and the duplication`} />
+        {rec && <label className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium cursor-pointer whitespace-nowrap ${domainsFile ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`} title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
+          <Icon name="upload" size={13} />{domainsFile ? `TADs: ${domainsFile.name} (${domains.length})` : 'Add chromatin domains (BED)…'}
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
         </label>}
-        {rec && domainsFile && <button onClick={() => { setDomainsFile(null); store.set('sashimi.svDomains', null); }} className="text-gray-400 hover:text-red-600" title="Remove the domains">×</button>}
-        {rec && <label className="inline-flex items-center gap-1 text-gray-600" title={`Without chromatin domains, an intact gene within this distance of a breakpoint is reported as a possible position effect. TADs average about 1 Mb; position effects have been documented 1.3 Mb from a breakpoint (SOX9) and further.${domains.length ? ' With domains loaded, the domains are used instead.' : ''}`}>
+        {rec && domainsFile && <button onClick={() => { setDomainsFile(null); store.set('sashimi.svDomains', null); }} className="text-slate-400 hover:text-red-600" title="Remove the domains">×</button>}
+        {rec && <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-xs text-slate-500" title={`Without chromatin domains, an intact gene within this distance of a breakpoint is reported as a possible position effect. TADs average about 1 Mb; position effects have been documented 1.3 Mb from a breakpoint (SOX9) and further.${domains.length ? ' With domains loaded, the domains are used instead.' : ''}`}>
           near a breakpoint ≤
-          <select value={near} onChange={e => { const v = Number(e.target.value); setNear(v); store.set('sashimi.svNear', v); }} className="border rounded px-1 py-0.5">
+          <select value={near} onChange={e => { const v = Number(e.target.value); setNear(v); store.set('sashimi.svNear', v); }} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
             {[0, 250e3, 500e3, 1e6, 2e6, 3e6].map(v => <option key={v} value={v}>{v === 0 ? 'off' : v >= 1e6 ? `${v / 1e6} Mb` : `${v / 1e3} kb`}</option>)}
           </select>
         </label>}
         <span className="ml-auto flex items-center gap-1">
-          <span className="font-mono text-[11px] text-gray-600 mr-1 tabular-nums" title="The stretch in view">{chrom}:{fmt(vp.s + 1)}-{fmt(vp.e)} <span className="text-gray-400">· {kb(span)}</span></span>
-          <button className={btn} onClick={() => flyTo(vp.s - span * 0.5, vp.e + span * 0.5, 300)} title="Zoom out (−, Ctrl + wheel, Shift + double-click)">−</button>
-          <button className={btn} onClick={() => flyTo(vp.s + span * 0.25, vp.e - span * 0.25, 300)} title="Zoom in (+, Ctrl + wheel, double-click)">+</button>
-          {rec && <button className={btn} onClick={eventView} title="Fit the event (E)">event</button>}
-          <button className={btn} onClick={() => { const w = wholeView(); flyTo(w.s, w.e, 700); }} title="The whole chromosome (and the rebuilt one's ends)">{chrom.replace(/^chr/, 'chr ')}</button>
+          <span className="font-mono text-[11px] text-slate-600 mr-1 tabular-nums" title="The stretch in view">{chrom}:{fmt(vp.s + 1)}-{fmt(vp.e)} <span className="text-slate-400">· {kb(span)}</span></span>
+          <span className="inline-flex border border-slate-200 rounded-[6px] overflow-hidden bg-white" role="group" aria-label="Zoom">
+            <button className={btn} onClick={() => flyTo(vp.s - span * 0.5, vp.e + span * 0.5, 300)} title="Zoom out (−, Ctrl + wheel, Shift + double-click)" aria-label="Zoom out"><Icon name="minus" size={14} /></button>
+            <button className={`${btn} border-l border-slate-200`} onClick={() => flyTo(vp.s + span * 0.25, vp.e - span * 0.25, 300)} title="Zoom in (+, Ctrl + wheel, double-click)" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
+            {rec && <button className={`${btn} border-l border-slate-200 px-2 text-xs font-medium`} onClick={eventView} title="Fit the event (E)">event</button>}
+            <button className={`${btn} border-l border-slate-200 px-2 text-xs font-medium`} onClick={() => { const w = wholeView(); flyTo(w.s, w.e, 700); }} title="The whole chromosome (and the rebuilt one's ends)">{chrom.replace(/^chr/, 'chr ')}</button>
+          </span>
         </span>
       </div>
       {rec && showDgv && loaders.getPopulationSvs && <DgvSummary cnv={cnv} loading={pop.loading} error={pop.error} />}
@@ -1366,13 +1362,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           return (
             <div className="absolute z-30 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1 rounded-md border border-amber-300 bg-white/95 shadow-md px-1.5 py-0.5 text-[11px] whitespace-nowrap"
               style={{ left: Math.max(170, Math.min(br.width - 170, left)), top }} onMouseDown={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-              {!inView && refX(sel.e) <= X0 ? <span className="text-gray-400">◂</span> : null}
-              <span className="font-mono text-gray-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
-              <span className="text-gray-400">· {kb(sel.e - sel.s)}</span>
+              {!inView && refX(sel.e) <= X0 ? <span className="text-slate-400">◂</span> : null}
+              <span className="font-mono text-slate-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
+              <span className="text-slate-400">· {kb(sel.e - sel.s)}</span>
               <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title="Zoom to the highlighted interval">🔍 zoom to region</button>
-              <button onClick={() => { void navigator.clipboard?.writeText(selText).then(() => setSelCopied(true), () => {}); }} className="px-1.5 py-0.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50" title="Copy the coordinates">{selCopied ? '✓ copied' : 'copy'}</button>
-              <button onClick={() => setSel(null)} className="px-1 text-gray-400 hover:text-gray-700 text-sm leading-none" title="Remove the highlight (Esc)">×</button>
-              {!inView && refX(sel.s) >= X1 ? <span className="text-gray-400">▸</span> : null}
+              <button onClick={() => { void navigator.clipboard?.writeText(selText).then(() => setSelCopied(true), () => {}); }} className="px-1.5 py-0.5 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy the coordinates">{selCopied ? '✓ copied' : 'copy'}</button>
+              <button onClick={() => setSel(null)} className="px-1 text-slate-400 hover:text-slate-700 text-sm leading-none" title="Remove the highlight (Esc)">×</button>
+              {!inView && refX(sel.s) >= X1 ? <span className="text-slate-400">▸</span> : null}
             </div>
           );
         })()}
@@ -1380,7 +1376,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {tip && tip.gene !== pinned?.gene && card(tip, false)}
       </div>
       {/* legend */}
-      <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-gray-500">
+      <div className="px-5 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-slate-500">
         {colorBy === 'moi' ? (Object.keys(MOI) as (MoiClass | 'none')[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: MOI[k2].color }} />{MOI[k2].label}</span>)
           : colorBy === 'impact'
           ? (['fusion', 'disrupted', 'deleted', 'intragenic-del', 'intragenic-dup', 'partial-copy', 'duplicated', 'domain', 'moved', 'nearby', 'unaffected'] as ImpactKind[]).map(k2 => <span key={k2} className="inline-flex items-center gap-1"><span className="inline-block w-3 h-2.5 rounded-sm" style={{ background: IMPACT[k2].color }} />{IMPACT[k2].label}</span>)
@@ -1394,8 +1390,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
       <div className="px-5 mt-2 pb-1">
-        {rec && !story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-gray-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
-        <div className="text-[10.5px] text-gray-500 mt-2 leading-4">
+        {rec && !story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-slate-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
+        <div className="text-[10.5px] text-slate-500 mt-2 leading-4">
           Genes: RefSeq NM_ models (UCSC ncbiRefSeqCurated), MANE status from the UCSC mane track, loaded by tiles around the view{view.error ? <span className="text-amber-700"> · {view.error}</span> : null}{txs.error ? <span className="text-amber-700"> · {txs.error}</span> : null}. {ann.loading ? 'Annotations loading… ' : ann.notes.length ? `${ann.notes.join(' · ')}. ` : ''}
           {rec && <>Copies count the {zygosity === 'het' ? `${flankCopies - 1} intact homologue${flankCopies - 1 === 1 ? '' : 's'} and the rearranged one` : 'rearranged homologues'}; a fusion needs both partners on the same strand of the rebuilt chromosome, its frame is read from the coding phases of the two exons joined (breakpoints in introns); a breakpoint inside an exon leaves the frame undetermined. </>}
           LoF-intolerant: LOEUF &lt; {LOEUF_INTOLERANT.v4} (gnomAD v4, the browser's threshold for Mendelian cases; &lt; {LOEUF_INTOLERANT['v2.1.1']} for v2.1.1) or pLI ≥ {PLI_INTOLERANT}; constrained: LOEUF &lt; {LOEUF_CONSTRAINED.v4} (gnomAD v4.0's general cut-off). LOEUF is best read as a continuous value: hover a gene for it. ClinGen scores: 3 sufficient, 2 some, 1 little, 0 no evidence, 30 autosomal recessive, 40 dosage sensitivity unlikely.
@@ -1424,40 +1420,40 @@ function GeneFilterControl({ filter, onChange, hasPanel, panelName, hasEvent, co
   const [custom, setCustom] = useState<string>(filter.loeuf != null && ![0.35, 0.45, 0.6].includes(filter.loeuf) ? String(filter.loeuf) : '');
   const n = filterCount(filter, hasPanel, hasEvent);
   const seg = <T extends string | number | null>(value: T, options: { v: T; label: string; title?: string }[], set: (v: T) => void, disabled = false) => (
-    <span className={`inline-flex rounded-md border border-gray-300 overflow-hidden ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
-      {options.map(o => <button key={String(o.v)} onClick={() => set(o.v)} title={o.title} className={`px-2 py-0.5 whitespace-nowrap ${value === o.v ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>{o.label}</button>)}
+    <span className={`inline-flex rounded-md border border-slate-300 overflow-hidden ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
+      {options.map(o => <button key={String(o.v)} onClick={() => set(o.v)} title={o.title} className={`px-2 py-0.5 whitespace-nowrap ${value === o.v ? 'bg-accent-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{o.label}</button>)}
     </span>
   );
   const MOIS: (MoiClass | 'none')[] = ['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT', '?', 'none'];
   return (
     <span className="relative">
-      <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${n ? 'border-accent-400 bg-accent-50 text-accent-800' : 'border-gray-300 bg-white text-gray-700'} hover:bg-gray-50`}
+      <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium whitespace-nowrap ${n ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
         title="Show only some genes: in the panel, of some modes of inheritance, under a LOEUF, changed by the SV">
-        ⚲ Genes{n ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{n}</span> : null}{n ? <span className="text-gray-500">· {counts.shown}/{counts.total}</span> : null}
+        <Icon name="filter" size={13} />Genes{n ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{n}</span> : null}{n ? <span className="text-slate-500">· {counts.shown}/{counts.total}</span> : null}
       </button>
       {open && (
-        <div className="absolute z-40 mt-1 w-[470px] rounded-lg border border-gray-300 bg-white shadow-2xl p-3 text-xs space-y-2.5" onMouseDown={e => e.stopPropagation()}>
+        <div className="absolute z-40 mt-1 w-[470px] rounded-lg border border-slate-300 bg-white shadow-2xl p-3 text-xs space-y-2.5" onMouseDown={e => e.stopPropagation()}>
           <div className="flex items-center justify-between"><b>Show the genes</b><span className="flex items-center gap-2">
             <button onClick={() => { onChange(NO_FILTER); setCustom(''); }} className="text-accent-700 hover:underline">all genes</button>
-            <button onClick={() => setOpen(false)} className="px-1.5 text-gray-400 hover:text-gray-700">×</button></span></div>
-          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">in the gene panel</span>
+            <button onClick={() => setOpen(false)} className="px-1.5 text-slate-400 hover:text-slate-700">×</button></span></div>
+          <div className="flex items-center gap-2"><span className="w-36 text-slate-600">in the gene panel</span>
             {seg(filter.panel, [{ v: 'any', label: 'any' }, { v: 'in', label: 'in the panel' }, { v: 'green', label: 'green only' }], v => onChange({ ...filter, panel: v }), !hasPanel)}
-            {!hasPanel && <span className="text-gray-400">load a panel first</span>}{hasPanel && <span className="text-gray-400 truncate max-w-[110px]" title={panelName ?? ''}>{panelName}</span>}</div>
-          <div className="flex items-start gap-2"><span className="w-36 text-gray-600 pt-0.5">mode of inheritance</span>
+            {!hasPanel && <span className="text-slate-400">load a panel first</span>}{hasPanel && <span className="text-slate-400 truncate max-w-[110px]" title={panelName ?? ''}>{panelName}</span>}</div>
+          <div className="flex items-start gap-2"><span className="w-36 text-slate-600 pt-0.5">mode of inheritance</span>
             <span className="flex flex-wrap gap-1 flex-1">
               {MOIS.map(m => { const on = filter.moi.includes(m); return (
                 <button key={m} onClick={() => onChange({ ...filter, moi: on ? filter.moi.filter(x => x !== m) : [...filter.moi, m] })} title={MOI[m].label}
                   className="px-1.5 py-0.5 rounded-full border text-[10.5px] font-bold" style={on ? { background: MOI[m].color, color: '#fff', borderColor: MOI[m].color } : { color: MOI[m].color === '#cbd5e1' ? '#64748b' : MOI[m].color, borderColor: `${MOI[m].color}88` }}>
                   {m === 'none' ? 'not in PanelApp' : m === '?' ? 'unknown' : MOI[m].short}</button>); })}
-              <span className="text-gray-400 w-full">{filter.moi.length ? 'genes of any of these modes' : 'any mode'}</span>
+              <span className="text-slate-400 w-full">{filter.moi.length ? 'genes of any of these modes' : 'any mode'}</span>
             </span></div>
-          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">LOEUF below</span>
+          <div className="flex items-center gap-2"><span className="w-36 text-slate-600">LOEUF below</span>
             {seg(filter.loeuf, [{ v: null, label: 'off' }, { v: 0.35, label: '0.35', title: 'gnomAD v2.1.1 LoF-intolerance cut-off' }, { v: 0.45, label: '0.45', title: 'gnomAD v4 browser threshold for Mendelian disorders' }, { v: 0.6, label: '0.6', title: 'gnomAD v4.0 general cut-off' }], v => { setCustom(''); onChange({ ...filter, loeuf: v }); })}
             <input value={custom} onChange={e => { setCustom(e.target.value); const v = Number(e.target.value.replace(',', '.')); if (e.target.value.trim() && Number.isFinite(v) && v > 0) onChange({ ...filter, loeuf: v }); }} placeholder="other" className="w-14 border rounded px-1 py-0.5" /></div>
-          <div className="flex items-center gap-2"><span className="w-36 text-gray-600">changed by the SV</span>
+          <div className="flex items-center gap-2"><span className="w-36 text-slate-600">changed by the SV</span>
             {seg(filter.changed, [{ v: 'any', label: 'any' }, { v: 'changed', label: 'changed' }, { v: 'near', label: 'changed or near a breakpoint' }], v => onChange({ ...filter, changed: v }), !hasEvent)}
-            {!hasEvent && <span className="text-gray-400">no SV drawn</span>}</div>
-          <div className="text-gray-500 border-t border-gray-100 pt-1.5">{counts.shown} of {counts.total} genes in view shown{counts.waiting ? ` · ${counts.waiting} waiting for their PanelApp modes` : ''}. Every criterion set must hold; a gene without the data a criterion needs (no LOEUF, not yet looked up) is hidden.</div>
+            {!hasEvent && <span className="text-slate-400">no SV drawn</span>}</div>
+          <div className="text-slate-500 border-t border-slate-100 pt-1.5">{counts.shown} of {counts.total} genes in view shown{counts.waiting ? ` · ${counts.waiting} waiting for their PanelApp modes` : ''}. Every criterion set must hold; a gene without the data a criterion needs (no LOEUF, not yet looked up) is hidden.</div>
         </div>
       )}
     </span>
@@ -1474,26 +1470,26 @@ const achroOverlap = (ev: CnvEvent, p: AchroPlaced) => Math.max(0, Math.min(ev.e
 function AchroCard({ p, type, chrom, cnv, pinned, place, onClose, onZoom, cardRef }: { p: AchroPlaced; type?: 'del' | 'dup'; chrom: string; cnv: { ev: CnvEvent }[]; pinned: boolean; place: React.CSSProperties; onClose: () => void; onZoom: () => void; cardRef?: (el: HTMLDivElement | null) => void }) {
   const hits = cnv.filter(c => achroOverlap(c.ev, p) >= RO_MATCH);
   return (
-    <div ref={cardRef} className={`absolute z-20 rounded-lg bg-gray-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+    <div ref={cardRef} className={`absolute z-20 rounded-lg bg-slate-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[440px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
       onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-      <div className="font-semibold flex items-start gap-2"><span className="flex-1">{p.r.name} <span className="font-normal text-gray-400">· AChro-Puce</span></span>
-        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+      <div className="font-semibold flex items-start gap-2"><span className="flex-1">{p.r.name} <span className="font-normal text-slate-400">· AChro-Puce</span></span>
+        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-slate-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
       <table className="mt-1 w-full"><tbody>
         {p.r.rows.map((r, i) => (
           <tr key={i} className={`align-top ${type && r.type !== type ? 'opacity-45' : ''}`}><td className="pr-2 py-0.5 whitespace-nowrap font-bold" style={{ color: r.type === 'del' ? '#fca5a5' : '#93c5fd' }}>{typeWord(r)}</td>
-            <td className="py-0.5"><span className="font-bold" style={{ color: ACHRO_COLOR[r.cls] === '#64748b' ? '#cbd5e1' : ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `Class ${r.cls}`}</span> <span className="text-gray-300">{r.label}</span>
-              {r.also && <div><span className="font-bold" style={{ color: ACHRO_COLOR[r.also.cls] }}>{r.also.cls === 'PIEV' ? 'PIEV' : `Class ${r.also.cls}`}</span> <span className="text-gray-300">{r.also.label}</span></div>}</td></tr>
+            <td className="py-0.5"><span className="font-bold" style={{ color: ACHRO_COLOR[r.cls] === '#64748b' ? '#cbd5e1' : ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `Class ${r.cls}`}</span> <span className="text-slate-300">{r.label}</span>
+              {r.also && <div><span className="font-bold" style={{ color: ACHRO_COLOR[r.also.cls] }}>{r.also.cls === 'PIEV' ? 'PIEV' : `Class ${r.also.cls}`}</span> <span className="text-slate-300">{r.also.label}</span></div>}</td></tr>
         ))}
       </tbody></table>
-      <div className="mt-1 text-gray-200 leading-snug">{p.r.summary}</div>
+      <div className="mt-1 text-slate-200 leading-snug">{p.r.summary}</div>
       {hits.map(h => <div key={h.ev.start} className="mt-1 text-emerald-300">The event's {h.ev.kind} {h.ev.letters} overlaps it ({Math.round(achroOverlap(h.ev, p) * 100)} % reciprocal): {p.r.rows.filter(r => r.type === (h.ev.kind === 'loss' ? 'del' : 'dup')).map(r => `${r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}${r.sex ? ` (${r.sex})` : ''}`).join(', ') || 'no class given for this type'}.</div>)}
-      <div className="mt-1 text-gray-400">{chrom}:{(p.start + 1).toLocaleString('en-US')}-{p.end.toLocaleString('en-US')} {p.approx ? '(approximate) ' : ''}· placed from the {p.how}.</div>
-      <div className="mt-0.5 text-gray-400">Sheet “{p.r.sheet}”, {p.r.authors} — {ACHRO_SOURCE.title}, {ACHRO_SOURCE.version}. The summary is written for this viewer: read the sheet.</div>
+      <div className="mt-1 text-slate-400">{chrom}:{(p.start + 1).toLocaleString('en-US')}-{p.end.toLocaleString('en-US')} {p.approx ? '(approximate) ' : ''}· placed from the {p.how}.</div>
+      <div className="mt-0.5 text-slate-400">Sheet “{p.r.sheet}”, {p.r.authors} — {ACHRO_SOURCE.title}, {ACHRO_SOURCE.version}. The summary is written for this viewer: read the sheet.</div>
       {pinned
         ? <div className="mt-1.5 pt-1.5 border-t border-white/15 flex gap-2"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button>
             <a href={ACHRO_SOURCE.url} target="_blank" rel="noreferrer" className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 the catalogue (PDF)</a>
             {p.r.coords?.some(c => c.from === 'table2') && <a href={ACHRO_GUIDELINES.url} target="_blank" rel="noreferrer" title={ACHRO_GUIDELINES.cite} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">📄 guidelines, Table 2</a>}</div>
-        : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
+        : <div className="mt-0.5 text-slate-400">click to keep this card open</div>}
     </div>
   );
 }
@@ -1504,11 +1500,11 @@ function AchroSummary({ cnv, placed }: { cnv: { ev: CnvEvent }[]; placed: AchroP
   if (!hits.length) return null;
   return (
     <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}: a loss or gain of the event overlapping a region reciprocally by ${Math.round(RO_MATCH * 100)} % or more`}>
-      <span className="text-gray-500 self-center">AChro-Puce:</span>
+      <span className="text-slate-500 self-center">AChro-Puce:</span>
       {hits.map(({ ev, p, rows }) => (
         <span key={`${ev.start}${p.r.id}`} className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border bg-white" style={{ borderColor: `${ev.kind === 'loss' ? ACHRO_TYPE_COLOR.del : ACHRO_TYPE_COLOR.dup}66` }}>
           <b style={{ color: ev.kind === 'loss' ? ACHRO_TYPE_COLOR.del : ACHRO_TYPE_COLOR.dup }}>{ev.kind} {ev.letters}</b> ≈ {p.r.name} {ev.kind === 'loss' ? 'deletion' : 'duplication'}:
-          {rows.length ? rows.map((r, i) => <b key={i} style={{ color: ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}{r.sex ? ` (${r.sex})` : ''}{r.also ? ` + ${r.also.cls === 'PIEV' ? 'PIEV' : `class ${r.also.cls}`} (${r.also.label})` : ''}</b>) : <span className="text-gray-500">not classified for this type</span>}
+          {rows.length ? rows.map((r, i) => <b key={i} style={{ color: ACHRO_COLOR[r.cls] }}>{r.cls === 'PIEV' ? 'PIEV' : `class ${r.cls}`}{r.sex ? ` (${r.sex})` : ''}{r.also ? ` + ${r.also.cls === 'PIEV' ? 'PIEV' : `class ${r.also.cls}`} (${r.also.label})` : ''}</b>) : <span className="text-slate-500">not classified for this type</span>}
         </span>
       ))}
     </div>
@@ -1527,25 +1523,25 @@ function DgvCard({ v, chrom, cnv, pinned, place, onClose, onZoom, cardRef }: { v
   const sameInner = v.inner[0] === v.outer[0] && v.inner[1] === v.outer[1];
   const rows = cnv.map(c => ({ ev: c.ev, m: c.matches.find(m => m.sv.id === v.id && m.sv.outer[0] === v.outer[0]) })).filter(x => x.m);
   return (
-    <div ref={cardRef} className={`absolute z-20 rounded-md bg-gray-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg w-max max-w-[400px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
+    <div ref={cardRef} className={`absolute z-20 rounded-md bg-slate-900 text-white text-[11px] px-2.5 py-1.5 shadow-lg w-max max-w-[400px] ${pinned ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={place}
       onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
       <div className="font-semibold flex items-start gap-2"><span className="flex-1"><span style={{ color: { loss: '#fca5a5', gain: '#93c5fd', both: '#c4b5fd', unknown: '#cbd5e1' }[v.type] }}>●</span> {v.id} · population {TYPE_LABEL[v.type]} (DGV Gold Standard)</span>
-        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-gray-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
-      <div className="text-gray-300">{sameInner ? span(v.outer) : <>outer {span(v.outer)}<br />inner {span(v.inner)}</>}</div>
+        {pinned && <button onClick={onClose} className="-mr-1 -mt-0.5 px-1 text-slate-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+      <div className="text-slate-300">{sameInner ? span(v.outer) : <>outer {span(v.outer)}<br />inner {span(v.inner)}</>}</div>
       <div className="mt-0.5">{[v.freqText != null ? `frequency ${v.freqText}` : 'frequency not given', v.samples != null ? `${fmt(v.samples)} samples` : '', v.studies != null ? `${fmt(v.studies)} studies` : ''].filter(Boolean).join(' · ')}</div>
       {rows.map(({ ev, m }) => (
-        <div key={ev.start} className={`mt-0.5 ${m!.sameType && m!.ro >= RO_MATCH ? 'text-emerald-300' : 'text-gray-300'}`}>
+        <div key={ev.start} className={`mt-0.5 ${m!.sameType && m!.ro >= RO_MATCH ? 'text-emerald-300' : 'text-slate-300'}`}>
           vs the {evName(ev)}: reciprocal overlap {pct(m!.ro)}{sameInner ? '' : ` (inner ${pct(m!.roInner)}, outer ${pct(m!.roOuter)})`}{m!.covers ? ', its inner extent holds the whole event' : ''}{m!.sameType ? '' : ', other type'}
         </div>
       ))}
       {pinned && v.fields.length > 0 && (
-        <details className="mt-1 text-gray-400"><summary className="cursor-pointer">all fields ({v.fields.length})</summary>
-          <div className="mt-0.5 max-h-40 overflow-auto font-mono text-[10px] leading-snug">{v.fields.map(([k2, val]) => <div key={k2}><span className="text-gray-500">{k2}</span> {val.length > 160 ? `${val.slice(0, 160)}…` : val}</div>)}</div>
+        <details className="mt-1 text-slate-400"><summary className="cursor-pointer">all fields ({v.fields.length})</summary>
+          <div className="mt-0.5 max-h-40 overflow-auto font-mono text-[10px] leading-snug">{v.fields.map(([k2, val]) => <div key={k2}><span className="text-slate-500">{k2}</span> {val.length > 160 ? `${val.slice(0, 160)}…` : val}</div>)}</div>
         </details>
       )}
       {pinned
         ? <div className="mt-1.5 pt-1.5 border-t border-white/15"><button onClick={onZoom} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button></div>
-        : <div className="mt-0.5 text-gray-400">click to keep this card open</div>}
+        : <div className="mt-0.5 text-slate-400">click to keep this card open</div>}
     </div>
   );
 }
@@ -1559,13 +1555,13 @@ function DgvSummary({ cnv, loading, error }: { cnv: { ev: CnvEvent; matches: Pop
   const tip = `DGV Gold Standard: curated CNV regions of the general population, each found in two studies and two samples at least. A loss or gain counts as seen when a population CNV of the same type overlaps it reciprocally by ${pct(RO_MATCH)} or more (inner or outer extent). Seen in the population is evidence towards benign; not seen is not evidence of pathogenicity.`;
   return (
     <div className="px-5 mt-1.5 flex flex-wrap gap-1.5 text-[11.5px]" title={tip}>
-      <span className="text-gray-500 self-center">DGV Gold:</span>
-      {loading ? <span className="text-gray-500">loading…</span> : error ? <span className="text-gray-500">unavailable ({error})</span> : cnv.map(({ ev, matches }) => {
+      <span className="text-slate-500 self-center">DGV Gold:</span>
+      {loading ? <span className="text-slate-500">loading…</span> : error ? <span className="text-slate-500">unavailable ({error})</span> : cnv.map(({ ev, matches }) => {
         const same = matches.filter(m => m.sameType && m.ro >= RO_MATCH);
         const best = matches.find(m => m.sameType);
         const seen = same.length > 0, top = same.sort((a, b) => (b.sv.freq ?? 0) - (a.sv.freq ?? 0))[0];
         return (
-          <span key={ev.start} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border ${seen ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-gray-50 border-gray-300 text-gray-700'}`}>
+          <span key={ev.start} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 border ${seen ? 'bg-emerald-50 border-emerald-300 text-emerald-800' : 'bg-slate-50 border-slate-300 text-slate-700'}`}>
             <b>{evName(ev)}</b>
             {seen
               ? <>seen in the population: {same.length} CNV{same.length > 1 ? 's' : ''} ≥ {pct(RO_MATCH)} overlap{top ? `, e.g. ${top.sv.id}${top.sv.freqText != null ? ` (frequency ${top.sv.freqText})` : ''}` : ''}</>
@@ -1596,30 +1592,30 @@ function PanelPicker({ panel, onPanel }: { panel: LoadedPanel | null; onPanel: (
   const hits = list.items.filter(p => words.every(w => p.name.toLowerCase().includes(w) || p.disorders.some(d => d.toLowerCase().includes(w)))).slice(0, 80);
   return (
     <span className="relative">
-      <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border ${panel ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-gray-300 bg-white text-gray-700'} hover:bg-gray-50`}
+      <button onClick={() => setOpen(o => !o)} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium whitespace-nowrap ${panel ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`}
         title="Rate the genes against a PanelApp gene panel (green / amber / red)">
-        ▤ {panel ? `${panel.name}${panel.version ? ` v${panel.version}` : ''} · ${panel.genes.length} genes` : 'Gene panel (PanelApp)…'}
+        <Icon name="layers" size={13} />{panel ? `${panel.name}${panel.version ? ` v${panel.version}` : ''} · ${panel.genes.length} genes` : 'Gene panel (PanelApp)…'}
       </button>
-      {panel && <button onClick={() => onPanel(null)} className="ml-1 text-gray-400 hover:text-red-600" title="Remove the panel">×</button>}
+      {panel && <button onClick={() => onPanel(null)} className="ml-1 text-slate-400 hover:text-red-600" title="Remove the panel">×</button>}
       {open && (
-        <div className="absolute z-40 mt-1 w-[460px] rounded-lg border border-gray-300 bg-white shadow-2xl p-2 text-xs" onMouseDown={e => e.stopPropagation()}>
+        <div className="absolute z-40 mt-1 w-[460px] rounded-lg border border-slate-300 bg-white shadow-2xl p-2 text-xs" onMouseDown={e => e.stopPropagation()}>
           <div className="flex gap-1.5">
             <select value={src} onChange={e => setSrc(e.target.value)} className="border rounded px-1 py-1">{PANEL_SOURCES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
             <input autoFocus value={q} onChange={e => setQ(e.target.value)} placeholder="search a panel or a disorder" className="flex-1 border rounded px-2 py-1 outline-none focus:border-accent-300" />
-            <button onClick={() => setOpen(false)} className="px-1.5 text-gray-400 hover:text-gray-700">×</button>
+            <button onClick={() => setOpen(false)} className="px-1.5 text-slate-400 hover:text-slate-700">×</button>
           </div>
           <div className="mt-1.5 max-h-[260px] overflow-y-auto">
-            {list.loading && <div className="text-gray-500 p-2">loading the panels of {source.label}…</div>}
+            {list.loading && <div className="text-slate-500 p-2">loading the panels of {source.label}…</div>}
             {list.error && <div className="text-amber-700 p-2">{list.error}</div>}
             {hits.map(p => (
               <button key={p.id} disabled={!!busy} onClick={async () => { setBusy(p.id); try { const lp = await loadPanel(source, p.id); onPanel(lp); setOpen(false); } catch (e: any) { setList(l => ({ ...l, error: `${p.name}: ${e?.message || e}` })); } finally { setBusy(null); } }}
                 className="w-full text-left px-2 py-1 rounded hover:bg-accent-50 flex justify-between gap-2">
-                <span className="truncate">{p.name}</span><span className="text-gray-400 whitespace-nowrap">{busy === p.id ? 'loading…' : `v${p.version} · ${p.genes} genes`}</span>
+                <span className="truncate">{p.name}</span><span className="text-slate-400 whitespace-nowrap">{busy === p.id ? 'loading…' : `v${p.version} · ${p.genes} genes`}</span>
               </button>
             ))}
-            {!list.loading && !list.error && !hits.length && <div className="text-gray-400 p-2">no panel matches</div>}
+            {!list.loading && !list.error && !hits.length && <div className="text-slate-400 p-2">no panel matches</div>}
           </div>
-          <label className="mt-1.5 block border-t border-gray-100 pt-1.5 text-gray-600 cursor-pointer hover:text-accent-700">
+          <label className="mt-1.5 block border-t border-slate-100 pt-1.5 text-slate-600 cursor-pointer hover:text-accent-700">
             or load a file: a panel downloaded from PanelApp (TSV) or a list of gene symbols
             <input type="file" accept=".tsv,.txt,.csv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { onPanel(parsePanelFile(f.name, await f.text())); setOpen(false); } e.target.value = ''; }} />
           </label>

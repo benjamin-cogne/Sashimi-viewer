@@ -14,6 +14,7 @@ import { buildOfNc } from './knownVariants';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { GeneSuggest } from './GeneSuggest';
+import { Segmented } from './controls';
 import { rememberGene } from '../../standalone/geneSuggest';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
@@ -121,25 +122,26 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const full = useMemo<SvGeneLoaders>(() => ({ ...loaders, fallback: [] }), [loaders]);
   const rec = sv?.rec;
   return (
-    <div className="fixed inset-0 z-[70] bg-white overflow-y-auto text-gray-900" style={{ fontFamily: FONT }}>
-      <div className="w-full min-h-full">
+    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
+      <div className="w-full min-h-full pb-4">
         {/* a full-screen page: back to the Sashimi viewer from its bar (or Esc) */}
-        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-11 border-b border-gray-200 bg-white/95 shadow-sm">
-          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-gray-300 bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
-          <span className="text-gray-300">/</span>
-          <span className="text-sm font-bold">SV browser</span>
-          <span className="ml-auto text-[11px] text-gray-400">Esc: back to the viewer</span>
+        {/* the Sashimi viewer's app bar */}
+        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-12 bg-bar border-b border-bar-line">
+          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
+          <span className="text-bar-muted">/</span>
+          <span className="text-sm font-semibold text-bar-text">SV browser</span>
+          <span className="ml-auto text-[11px] text-bar-muted">Esc: back to the viewer</span>
         </div>
+        <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm">
         <div className="flex items-start justify-between px-5 pt-3 pb-2">
           <div>
             <div className="text-base font-bold flex items-center gap-2">SV browser
               {loadersFor
-                ? <span className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs font-semibold" role="group" aria-label="Genome build">
-                    {(['GRCh38', 'GRCh37'] as const).map(b => <button key={b} onClick={() => switchBuild(b)} className={`px-2 py-0.5 ${build === b ? 'bg-accent-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`} title={b === 'GRCh38' ? 'GRCh38 / hg38 (default)' : 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)'}>{b}</button>)}
-                  </span>
-                : <span className="font-normal text-gray-500">· {build}</span>}
+                ? <Segmented size="sm" label="Genome build" title="The genome build of the positions" value={build} onChange={switchBuild}
+                    options={[{ value: 'GRCh38', label: 'GRCh38', hint: 'GRCh38 / hg38 (default)' }, { value: 'GRCh37', label: 'GRCh37', hint: 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)' }]} />
+                : <span className="font-normal text-slate-500">· {build}</span>}
             </div>
-            <div className="text-xs text-gray-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
+            <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
         </div>
         <div className="px-5 pb-3">
@@ -148,10 +150,10 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
             <GeneSuggest value={text} onChange={setText} width={420} autoFocus ariaLabel="Rearrangement, place or gene"
               placeholder="NC_000020.11:g.[10489766_10783340del;10783341_10807815inv;10807816_10808805del]  ·  chr20:10,300,000-11,000,000  ·  chr20  ·  JAG1"
               title={'A rearrangement (HGVS or ISCN sequence form), coordinates (chr20:10.3-11 Mb), a chromosome (chr3 or 3), or a gene symbol or ENSG id.\nGene names are suggested from the third letter (HGNC), with their previous symbols and aliases.'}
-              className="flex-1 min-w-0 font-mono text-[12.5px] h-9 px-3 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-300" />
-            <button type="submit" disabled={busy} className="h-9 px-4 rounded-md bg-accent-600 text-white text-sm font-semibold hover:bg-accent-700 disabled:opacity-60">{busy ? '…' : 'Go'}</button>
+              className="flex-1 min-w-0 font-mono text-[12.5px] h-[34px] px-3 rounded-[6px] border border-slate-200 bg-white text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-accent-300 focus:ring-2 focus:ring-accent-100" />
+            <button type="submit" disabled={busy} className="h-[34px] px-4 rounded-[6px] bg-accent-600 text-white text-[12.5px] font-semibold hover:bg-accent-700 disabled:opacity-60">{busy ? '…' : 'Go'}</button>
           </form>
-          <div className="text-[11px] text-gray-500 mt-1">
+          <div className="text-[11px] text-slate-500 mt-1">
             examples: {EXAMPLES.map((x, i) => <span key={x.label}>{i ? ' · ' : ''}<button className="text-accent-700 hover:underline" onClick={() => { setText(x.text); void draw(x.text); }}>{x.label}</button></span>)}
             {' '}· band-level ISCN has no positions and is not drawn; one chromosome at a time (no translocation yet)
           </div>
@@ -160,20 +162,23 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           {sv && rec && (
             <div className="mt-2 grid grid-cols-[1fr_1fr] gap-4 text-xs">
               <div>
-                <div className="text-[10.5px] font-semibold text-gray-700">Rebuilt chromosome</div>
-                <div className="font-mono text-[11px] bg-gray-50 border border-gray-200 rounded px-2 py-1 mt-0.5">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
+                <div className="text-[10.5px] font-semibold text-slate-700">Rebuilt chromosome</div>
+                <div className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-0.5">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
                 {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(s => s.letter).join(', ')}.</div>}
-                {sv.notes.map((n, i) => <div key={i} className="text-[10.5px] text-gray-500">{n}</div>)}
-                <div className="text-[10.5px] text-gray-500 mt-0.5">Drawn as heterozygous, 2 copies on the flanks; no read depth (open the cartoon on a sample for that).</div>
+                {sv.notes.map((n, i) => <div key={i} className="text-[10.5px] text-slate-500">{n}</div>)}
+                <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as heterozygous, 2 copies on the flanks; no read depth (open the cartoon on a sample for that).</div>
               </div>
               <SvNomenclatureBox rec={rec} build={build} bands={bands} />
             </div>
           )}
         </div>
+        </div>
         {shown && (
+          <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
             segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} />
+          </div>
         )}
       </div>
     </div>

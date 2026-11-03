@@ -214,47 +214,49 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
 
   const tt = explore ? T_END : t;
   const chapters = [{ label: 'reference', at: 0 }, { label: 'breaks', at: T_BREAK }, { label: 'joins', at: T_J0 }, { label: 'lost', at: scene.tLost }, { label: 'copy number', at: scene.tCn }];
-  const verdictCls = depth.verdict === 'explained' ? 'bg-emerald-600 text-white' : depth.verdict === 'balanced' ? 'bg-sky-600 text-white' : depth.verdict === 'unexplained' ? 'bg-red-600 text-white' : 'bg-gray-400 text-white';
+  const verdictCls = depth.verdict === 'explained' ? 'bg-emerald-600 text-white' : depth.verdict === 'balanced' ? 'bg-sky-600 text-white' : depth.verdict === 'unexplained' ? 'bg-red-600 text-white' : 'bg-slate-400 text-white';
   const verdictText = !chosen.length ? 'no junction selected' : depth.verdict === 'explained' ? '✓ depth fits the rebuilt chromosome' : depth.verdict === 'balanced' ? '≈ balanced: depth cannot confirm it' : depth.verdict === 'unexplained' ? `✗ depth does not fit ${depth.segments.filter(s => s.fits === false).map(s => s.seg.letter).join(', ')}` : 'depth not measurable';
 
   const ders = rec.ders.filter(d => d.rearranged || rec.ders.length === 1);
   const toGenes = () => genesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   return (
-    <div className="fixed inset-0 z-[70] bg-white overflow-y-auto text-gray-900" style={{ fontFamily: FONT }}>
-      <div className="w-full min-h-full">
+    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
+      <div className="w-full min-h-full pb-4">
         {/* the SV browser's full-screen page, with the reconstruction from the reads added: back to the viewer from its bar (or Esc) */}
-        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-11 border-b border-gray-200 bg-white/95 shadow-sm">
-          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-md border border-gray-300 bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
-          <span className="text-gray-300">/</span>
-          <span className="text-sm font-bold">SV browser</span>
-          <span className="text-sm text-gray-500 truncate">· rebuilt from <span className="inline-block w-2.5 h-2.5 rounded-full align-[-1px]" style={{ background: sample.color }} /> {sample.name}</span>
+        {/* the Sashimi viewer's app bar */}
+        <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-12 bg-bar border-b border-bar-line">
+          <button onClick={onClose} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the Sashimi viewer (Esc)">← Sashimi viewer</button>
+          <span className="text-bar-muted">/</span>
+          <span className="text-sm font-semibold text-bar-text">SV browser</span>
+          <span className="text-sm text-bar-muted truncate">· rebuilt from <span className="inline-block w-2.5 h-2.5 rounded-full align-[-1px]" style={{ background: sample.color }} /> {sample.name}</span>
           <span className={`ml-auto px-3 py-1 rounded-full text-xs font-semibold ${verdictCls}`}>{verdictText}</span>
-          <span className="text-[11px] text-gray-400">Esc: back to the viewer</span>
+          <span className="text-[11px] text-bar-muted">Esc: back to the viewer</span>
         </div>
+        <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="flex items-start justify-between px-5 pt-3 pb-2">
           <div>
-            <div className="text-base font-bold flex items-center gap-2">SV browser <span className="font-normal text-gray-500">· {build} · {chrom}:{fmt(win.start + 1)}-{fmt(win.end)}</span></div>
-            <div className="text-xs text-gray-500">the rearrangement rebuilt from {chosen.length} junction{chosen.length === 1 ? '' : 's'} seen in {sample.name}{sample.sampled ? ' (sampled window: depths are estimates)' : ''}, checked against the read depth · evidence, not a call</div>
+            <div className="text-base font-bold flex items-center gap-2">SV browser <span className="font-normal text-slate-500">· {build} · {chrom}:{fmt(win.start + 1)}-{fmt(win.end)}</span></div>
+            <div className="text-xs text-slate-500">the rearrangement rebuilt from {chosen.length} junction{chosen.length === 1 ? '' : 's'} seen in {sample.name}{sample.sampled ? ' (sampled window: depths are estimates)' : ''}, checked against the read depth · evidence, not a call</div>
           </div>
         </div>
         <div className="px-5 pb-3">
           <div className="grid grid-cols-[1fr_1fr] gap-4 text-xs">
             <div>
-              <div className="text-[10.5px] font-semibold text-gray-700">Rebuilt chromosome{ders.length > 1 ? 's' : ''}</div>
+              <div className="text-[10.5px] font-semibold text-slate-700">Rebuilt chromosome{ders.length > 1 ? 's' : ''}</div>
               {chosen.length ? ders.map(d => (
-                <div key={d.name} className="font-mono text-[11px] bg-gray-50 border border-gray-200 rounded px-2 py-1 mt-0.5">{d.name} = {d.pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ') || '—'}{d.ends && <span className="text-gray-400 font-sans"> ({d.ends})</span>}</div>
-              )) : <div className="text-gray-400 mt-0.5">no junction selected: tick the junctions of the event below</div>}
+                <div key={d.name} className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-0.5">{d.name} = {d.pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ') || '—'}{d.ends && <span className="text-slate-400 font-sans"> ({d.ends})</span>}</div>
+              )) : <div className="text-slate-400 mt-0.5">no junction selected: tick the junctions of the event below</div>}
               {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
-              {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-gray-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-gray-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
-              <div className="text-[10.5px] text-gray-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
+              {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-slate-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-slate-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
+              <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
             </div>
             <SvNomenclatureBox rec={rec} build={build} bands={bands} />
           </div>
         </div>
-        <div ref={reconRef} className="scroll-mt-12 border-t border-gray-200 pt-3">
+        <div ref={reconRef} className="scroll-mt-12 border-t border-slate-200 pt-3">
           <div className="px-5 pb-2">
-            <div className="text-base font-bold">Reconstruction from the reads <span className="font-normal text-gray-500">· {chosen.length} junction{chosen.length === 1 ? '' : 's'} · {sample.name}</span></div>
-            <div className="text-xs text-gray-500">the reference cut at the breakpoints, the pieces joined by the junction reads, then the copy number of each segment against the read depth</div>
+            <div className="text-base font-bold">Reconstruction from the reads <span className="font-normal text-slate-500">· {chosen.length} junction{chosen.length === 1 ? '' : 's'} · {sample.name}</span></div>
+            <div className="text-xs text-slate-500">the reference cut at the breakpoints, the pieces joined by the junction reads, then the copy number of each segment against the read depth</div>
           </div>
           <div className="px-5 max-w-[1280px]">
             <div className="relative" ref={sceneRef}>
@@ -271,12 +273,12 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
               </svg>
               {explore && (
                 <div className="absolute top-3 right-6 flex items-center gap-1 text-xs" onMouseDown={e => e.stopPropagation()}>
-                  <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-gray-200 text-gray-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, double-click to reset</span>
+                  <span className="mr-1 px-2 py-0.5 rounded-full bg-white/90 border border-slate-200 text-slate-600">final picture · Ctrl / ⌘ + scroll to zoom, drag to pan, double-click to reset</span>
                   {([['−', () => zoomAt(1 / 1.3)], ['+', () => zoomAt(1.3)], ['fit', resetView]] as [string, () => void][]).map(([lab, fn]) => (
-                    <button key={lab} onClick={fn} className="w-7 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50 font-semibold">{lab}</button>
+                    <button key={lab} onClick={fn} className="w-7 h-7 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 font-semibold">{lab}</button>
                   ))}
-                  <button onClick={exportSvg} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">SVG</button>
-                  <button onClick={exportPng} className="px-2 h-7 rounded bg-white border border-gray-300 text-gray-700 hover:bg-gray-50">PNG</button>
+                  <button onClick={exportSvg} className="px-2 h-7 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">SVG</button>
+                  <button onClick={exportPng} className="px-2 h-7 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-50">PNG</button>
                 </div>
               )}
             </div>
@@ -285,7 +287,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
             <div className="pt-3 pb-2 flex items-center gap-3 text-xs">
               <button onClick={togglePlay} disabled={!chosen.length} className="w-9 h-9 rounded-full bg-accent-600 text-white text-base flex items-center justify-center shadow hover:bg-accent-700 disabled:opacity-40" title="Play / pause (space)">{playing ? '❚❚' : '▶'}</button>
               <input type="range" min={0} max={T_END} step={0.01} value={t} onChange={e => seek(parseFloat(e.target.value))} className="flex-1 accent-accent-600" />
-              <span className="font-mono w-16 text-right text-gray-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
+              <span className="font-mono w-16 text-right text-slate-500">{t.toFixed(1)} / {T_END.toFixed(1)} s</span>
               <select value={speed} onChange={e => setSpeed(parseFloat(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
                 {[0.5, 1, 1.5, 2].map(v => <option key={v} value={v}>{v}×</option>)}
               </select>
@@ -295,9 +297,9 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
             <div className="pb-3 flex flex-wrap items-center gap-1.5 text-[11px]">
               {chapters.map(c => (
                 <button key={c.label} onClick={() => { seek(c.at + 0.001); setPlaying(true); }}
-                  className={`px-2 py-0.5 rounded-full border ${tt >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > tt ? 'bg-accent-600 border-accent-600 text-white' : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>{c.label}</button>
+                  className={`px-2 py-0.5 rounded-full border ${tt >= c.at && (chapters.find(o => o.at > c.at)?.at ?? Infinity) > tt ? 'bg-accent-600 border-accent-600 text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{c.label}</button>
               ))}
-              <span className="ml-auto flex items-center gap-3 text-gray-600">
+              <span className="ml-auto flex items-center gap-3 text-slate-600">
                 <label className="flex items-center gap-1" title="One homologue rearranged and the others intact (a constitutional, heterozygous event), or every homologue (homozygous). On a chromosome with one copy the two coincide.">
                   zygosity
                   <select value={zygosity} onChange={e => { setZygosity(e.target.value as 'het' | 'hom'); }} className="border rounded px-1 py-0.5 text-xs" disabled={copies === 1}>
@@ -323,6 +325,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
         </div>
         <div ref={genesRef} className="scroll-mt-12" />
         {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
+        </div>
       </div>
     </div>
   );
@@ -487,27 +490,27 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
   return (
     <div className="px-5 pb-4 grid grid-cols-[320px_1fr_1fr] gap-4 text-xs">
       <div>
-        <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Junctions in the window ({candidates.length}) · tick the ones of one event</div>
+        <div className="text-[10.5px] font-semibold text-slate-700 mb-1">Junctions in the window ({candidates.length}) · tick the ones of one event</div>
         <div className="space-y-1 max-h-[260px] overflow-y-auto pr-1">
           {candidates.map(j => (
-            <label key={j.id} className={`grid grid-cols-[16px_26px_1fr] gap-1.5 items-start p-1.5 rounded-md cursor-pointer ${selected.has(j.id) ? 'bg-accent-50' : 'hover:bg-gray-50'}`}>
+            <label key={j.id} className={`grid grid-cols-[16px_26px_1fr] gap-1.5 items-start p-1.5 rounded-md cursor-pointer ${selected.has(j.id) ? 'bg-accent-50' : 'hover:bg-slate-50'}`}>
               <input type="checkbox" checked={selected.has(j.id)} onChange={() => onToggle(j.id)} className="mt-0.5 accent-accent-600" />
               <span className="font-bold">{j.id}</span>
               <span className="min-w-0">
                 <span className="inline-block text-[9px] font-bold tracking-wide uppercase px-1 rounded text-white mr-1" style={{ background: KIND_COLOR[j.kind] }}>{j.kind}</span>
-                <span className="font-mono text-[11px] text-gray-700">{fmt(j.a.pos)} {side(j.a)}—{side(j.b)} {fmt(j.b.pos)}</span>
-                <div className="text-[11px] text-gray-500">{fmt(j.reads)} reads · {j.evidence} · ±{j.precision} bp{j.assumed ? ` · ${j.assumed}` : ''}</div>
+                <span className="font-mono text-[11px] text-slate-700">{fmt(j.a.pos)} {side(j.a)}—{side(j.b)} {fmt(j.b.pos)}</span>
+                <div className="text-[11px] text-slate-500">{fmt(j.reads)} reads · {j.evidence} · ±{j.precision} bp{j.assumed ? ` · ${j.assumed}` : ''}</div>
               </span>
             </label>
           ))}
-          {!candidates.length && <div className="text-gray-400">no structural arc in this window above the minimum reads</div>}
+          {!candidates.length && <div className="text-slate-400">no structural arc in this window above the minimum reads</div>}
         </div>
-        <div className="text-[10.5px] text-gray-500 mt-1">▸ keeps the sequence left of the breakpoint, ◂ the sequence right of it. An inversion arc gives its two junctions.</div>
+        <div className="text-[10.5px] text-slate-500 mt-1">▸ keeps the sequence left of the breakpoint, ◂ the sequence right of it. An inversion arc gives its two junctions.</div>
       </div>
       <div>
-        <div className="text-[10.5px] font-semibold text-gray-700 mb-1">Copy number against the read depth · reference: {depth.reference.note}</div>
+        <div className="text-[10.5px] font-semibold text-slate-700 mb-1">Copy number against the read depth · reference: {depth.reference.note}</div>
         <table className="w-full border-collapse tabular-nums">
-          <thead><tr className="text-[10px] text-gray-500 border-b border-gray-200"><th className="text-left font-semibold py-0.5">segment</th><th className="text-left font-semibold">content</th><th className="text-right font-semibold">expected</th><th className="text-right font-semibold">observed ± 2 SE</th><th className="text-right font-semibold">bins</th><th></th></tr></thead>
+          <thead><tr className="text-[10px] text-slate-500 border-b border-slate-200"><th className="text-left font-semibold py-0.5">segment</th><th className="text-left font-semibold">content</th><th className="text-right font-semibold">expected</th><th className="text-right font-semibold">observed ± 2 SE</th><th className="text-right font-semibold">bins</th><th></th></tr></thead>
           <tbody>
             {depth.segments.map(d => {
               const seg = d.seg as PlacedSeg;
@@ -516,14 +519,14 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
                 const parts = [gn.whole.length ? `${exonRun(gn.whole)}${changes && gn.frame === 'shifted' ? ' (frame shifts)' : changes && gn.frame === 'kept' ? ' (frame kept)' : ''}` : '', gn.cut.length ? `cuts ${exonRun(gn.cut)}` : ''].filter(Boolean).join(', ');
                 return `${gn.name}: ${parts || 'intronic'}`;
               }).join('; ') || 'no gene model';
-              const cls = d.fits == null ? 'text-gray-400' : d.fits ? 'text-emerald-600' : 'text-red-600';
+              const cls = d.fits == null ? 'text-slate-400' : d.fits ? 'text-emerald-600' : 'text-red-600';
               return (
-                <tr key={seg.id} className="border-b border-gray-100 align-top">
-                  <td className="py-0.5 whitespace-nowrap"><span className="inline-block w-2.5 h-2.5 rounded-sm mr-1 align-[-1px]" style={{ background: seg.color }} /><b>{seg.letter}</b> <span className="text-gray-400 font-mono text-[10px]">{seg.first ? '…' : fmt(seg.start + 1)}–{seg.last ? '…' : fmt(seg.end)}</span></td>
-                  <td className="py-0.5 text-[10.5px] text-gray-600">{content}</td>
+                <tr key={seg.id} className="border-b border-slate-100 align-top">
+                  <td className="py-0.5 whitespace-nowrap"><span className="inline-block w-2.5 h-2.5 rounded-sm mr-1 align-[-1px]" style={{ background: seg.color }} /><b>{seg.letter}</b> <span className="text-slate-400 font-mono text-[10px]">{seg.first ? '…' : fmt(seg.start + 1)}–{seg.last ? '…' : fmt(seg.end)}</span></td>
+                  <td className="py-0.5 text-[10.5px] text-slate-600">{content}</td>
                   <td className="py-0.5 text-right font-mono">{d.expected}</td>
                   <td className="py-0.5 text-right font-mono">{d.observed == null ? '—' : `${d.observed.toFixed(2)} ± ${(2 * (d.se ?? 0)).toFixed(2)}`}</td>
-                  <td className="py-0.5 text-right font-mono text-gray-500">{d.bins}</td>
+                  <td className="py-0.5 text-right font-mono text-slate-500">{d.bins}</td>
                   <td className={`py-0.5 font-bold ${cls}`} title={d.fits == null ? `fewer than ${SV_DEPTH_MIN_BINS} bins inside the margins: too short to assess` : d.mosaic ? `the depth lies between ${depth.flankCopies} and ${d.expected} copies: it fits about ${Math.round(d.mosaic.fraction * 100)} % of cells carrying the event (${Math.round(d.mosaic.lo * 100)}–${Math.round(d.mosaic.hi * 100)} %)` : d.fits ? 'within max(0.25 copies, 3 SE) of the expected copies' : `nearest integer: ${d.nearest} cop${d.nearest === 1 ? 'y' : 'ies'}`}>
                     {d.fits == null ? '?' : d.fits ? '✓' : d.mosaic ? `≈${Math.round(d.mosaic.fraction * 100)} % mosaic` : `✗ ~${d.nearest}`}
                   </td>
@@ -532,21 +535,21 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
             })}
           </tbody>
         </table>
-        <div className="text-[10.5px] text-gray-500 mt-1">
+        <div className="text-[10.5px] text-slate-500 mt-1">
           Bins of {formatBp(depth.binBp)} inside each segment, {SV_DEPTH_MARGIN_BP} bp kept away from each breakpoint; a segment fits within max({SV_FIT_MIN_COPIES} copies, {SV_FIT_Z} SE), the SE taking the correlation of neighbouring bins into account; a mosaic is reported between {Math.round(SV_MOSAIC_MIN * 100)} and {Math.round(SV_MOSAIC_MAX * 100)} % of cells; the flanks give the reference when they hold {SV_FLANK_MIN_BINS} bins or more.
         </div>
       </div>
       <div>
         {ranked.length > 1 && (
           <div className="mb-2">
-            <div className="text-[10.5px] font-semibold text-gray-700 mb-0.5">{ranked.length} possible paths · the walk has a choice at some breakends</div>
+            <div className="text-[10.5px] font-semibold text-slate-700 mb-0.5">{ranked.length} possible paths · the walk has a choice at some breakends</div>
             <div className="space-y-0.5">
               {ranked.slice(0, 5).map((r, i) => {
                 const key = r.rec.choice.join(','), on = r.rec === rec;
                 return (
-                  <button key={key} onClick={() => onPath(key)} className={`w-full text-left rounded px-1.5 py-1 border ${on ? 'border-accent-400 bg-accent-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                  <button key={key} onClick={() => onPath(key)} className={`w-full text-left rounded px-1.5 py-1 border ${on ? 'border-accent-400 bg-accent-50' : 'border-slate-200 hover:bg-slate-50'}`}>
                     <div className="font-mono text-[11px]">{pathText(r.rec) || 'no rearranged chromosome'}</div>
-                    <div className="text-[10.5px] text-gray-600">
+                    <div className="text-[10.5px] text-slate-600">
                       {i === 0 && <span className="text-emerald-700 font-semibold">best fit · </span>}
                       <span className={r.misfits ? 'text-red-600' : 'text-emerald-700'}>{r.assessed ? (r.misfits ? `depth misfits ${r.misfits} of ${r.assessed} segments (${r.depth.segments.filter(d => d.fits === false).map(d => d.seg.letter).join(', ')})` : `depth fits all ${r.assessed} segments`) : 'depth not assessable'}</span>
                       {r.rec.unplaced.length > 0 && <> · leaves out {r.rec.unplaced.map(j => `${j.id} (${j.reads})`).join(', ')}</>}
@@ -555,21 +558,21 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
                 );
               })}
             </div>
-            {ranked.length > 5 && <div className="text-[10.5px] text-gray-500">{ranked.length - 5} less likely paths not listed</div>}
-            <div className="text-[10.5px] text-gray-500 mt-0.5">Ranked by the segments whose depth does not fit, then the reads left out, then the summed deviation. The junctions left out by the best path may belong to a second version of the rearrangement (another derivative, or a subclone): their share of the reads at the shared breakend is a rough fraction.</div>
+            {ranked.length > 5 && <div className="text-[10.5px] text-slate-500">{ranked.length - 5} less likely paths not listed</div>}
+            <div className="text-[10.5px] text-slate-500 mt-0.5">Ranked by the segments whose depth does not fit, then the reads left out, then the summed deviation. The junctions left out by the best path may belong to a second version of the rearrangement (another derivative, or a subclone): their share of the reads at the shared breakend is a rough fraction.</div>
           </div>
         )}
         {breakpoints.length > 0 && (
           <div>
-            <div className="text-[10.5px] font-semibold text-gray-700">Breakpoints ({chrom})</div>
-            <ul className="text-[11px] text-gray-600">
+            <div className="text-[10.5px] font-semibold text-slate-700">Breakpoints ({chrom})</div>
+            <ul className="text-[11px] text-slate-600">
               {breakpoints.map(p => <li key={p}><span className="font-mono">{fmt(p + 1)}</span> · {breakpointSite(p, models)}</li>)}
             </ul>
           </div>
         )}
-        {rec.merged.length > 0 && <div className="text-[10.5px] text-gray-600 mt-1">Breakends within {SV_BREAKEND_CLUSTER_BP} bp taken as one breakpoint: {rec.merged.join('; ')}.</div>}
+        {rec.merged.length > 0 && <div className="text-[10.5px] text-slate-600 mt-1">Breakends within {SV_BREAKEND_CLUSTER_BP} bp taken as one breakpoint: {rec.merged.join('; ')}.</div>}
         {rec.warnings.map((w, i) => <div key={i} className="text-[11px] text-amber-800 mt-1">⚠ {w}</div>)}
-        <div className="text-[10.5px] text-gray-500 mt-1.5">Breakpoints come from the reads, rounded to 5 bp (pairs alone: within an insert size); check them in the alignments before anything goes into a report. The scene draws segment widths on a log scale.</div>
+        <div className="text-[10.5px] text-slate-500 mt-1.5">Breakpoints come from the reads, rounded to 5 bp (pairs alone: within an insert size); check them in the alignments before anything goes into a report. The scene draws segment widths on a log scale.</div>
       </div>
     </div>
   );
