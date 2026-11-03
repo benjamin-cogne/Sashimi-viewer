@@ -37,7 +37,13 @@ export interface ExportOptions {
   pointer: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
   captions: Caption[];
   chapters: Chapter[];
+  /** where the HTML page stops (for a talk: → goes on): stops of their own (recorded time), and the moments that stop */
+  stops?: { t: number }[];
+  stopAt?: StopAt;
 }
+/** The moments the page stops at, besides its own stops: its start (the first image, still), each chapter, each title card, each caption. */
+export interface StopAt { start: boolean; chapters: boolean; titles: boolean; captions: boolean }
+export const STOP_AT_DEFAULT: StopAt = { start: true, chapters: true, titles: false, captions: false };
 /** The idle stretch kept by default, in ms. */
 export const MAX_IDLE_DEFAULT_MS = 1000;
 /** Auto-zoom: clicks closer than this in time (ms) share one zoom; the zoom starts ZOOM_IN_MS before the first and holds ZOOM_HOLD_MS after the last. */
@@ -177,7 +183,9 @@ function pointerPath(rec: Recording, map: (t: number) => number, smooth: boolean
   return out;
 }
 
-export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[] }
+export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[];
+  /** the times the HTML page stops at (played time, ms), sorted */
+  stops: number[] }
 
 export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
   return build(rec, opts, false) as Exported;
@@ -469,6 +477,15 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
   const cap = renderCaptions(opts.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, opts.replace).slice(1, -1) })), opts.chapters, map, D, { x0, y0, W, H }, rec.fontFamily, player ? tl.fades : undefined);
   css.push(...cap.css);
   const chapters = opts.chapters.map(c => ({ t: map(c.t), name: c.name })).sort((a, b) => a.t - b.t);
+  // the stops: a caption's once it has faded in (shown whole), a chapter's at its mark (its card is in by then)
+  const at = opts.stopAt ?? STOP_AT_DEFAULT, inFull = CAPTION_FADE_MS + 50;
+  const stopTimes = [
+    ...(at.start ? [0] : []),
+    ...(at.chapters ? chapters.map(c => c.t) : []),
+    ...opts.captions.filter(c => at.captions || (at.titles && c.kind === 'title')).map(c => map(c.start) + inFull),
+    ...(opts.stops ?? []).map(s => map(s.t)),
+  ].map(t => Math.max(0, Math.round(t))).filter(t => t < D).sort((a, b) => a - b);
+  const stops = stopTimes.filter((t, i) => i === 0 || t - stopTimes[i - 1] > 60);
 
   const clipDefs = [...clips].map(([k, id]) => { const [x, y, w, h] = k.split(','); return `<clipPath id="${id}"><rect x="${x}" y="${y}" width="${w}" height="${h}"/></clipPath>`; }).join('');
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${esc(rec.fontFamily)}">
@@ -492,7 +509,7 @@ ${player ? '' : cap.screen}
     for (const h of rec.html) for (const m of h.html.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (c) classes.add(c.replace(/&amp;/g, '&'));
     pageCss = rec.css.filter(r => r.classes.every(c => classes.has(c))).map(r => r.text).join('\n');
   }
-  const meta = { css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bounds: B, chapters };
+  const meta = { css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bounds: B, chapters, stops };
   if (player) {
     tl.W = W; tl.H = H;
     if (html.boxes.length) tl.html = html;
@@ -514,8 +531,10 @@ ${player ? '' : cap.screen}
 export function playerHtml(out: PlayerExport, title: string, extra: { bare?: boolean; project?: string; packed?: { scene: string; project?: string } } = {}): string {
   const tl = out.timeline, D = Math.round(out.duration);
   const ch = extra.bare ? [] : out.chapters.filter(c => c.t >= 0 && c.t < D).map(c => ({ t: Math.round(c.t), name: c.name }));
+  // the video plays straight through: no stop
+  const st = extra.bare ? [] : (out.stops ?? []).filter(t => t >= 0 && t < D);
   const json = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
-  const bar = extra.bare ? 0 : ch.length ? 118 : 80;
+  const bar = extra.bare ? 0 : ch.length || st.length ? 118 : 80;
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
@@ -536,6 +555,7 @@ body{margin:0;background:${extra.bare ? '#fff' : '#f4f6f8'};font:13px 'Inter Vie
 .rec-track{position:relative;flex:1;display:flex;align-items:center}
 .rec-track input{width:100%;accent-color:#0f766e;margin:0}
 .rec-tick{position:absolute;top:-7px;width:2px;height:8px;background:#0f766e;border-radius:1px;pointer-events:none}
+.rec-stop{position:absolute;top:9px;width:7px;height:7px;margin-left:-3.5px;background:#d97706;transform:rotate(45deg);border-radius:1px;pointer-events:none}
 .rec-time{font-variant-numeric:tabular-nums;color:#5b6b7e;min-width:90px;text-align:right}
 .rec-ch{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
 .rec-ch button{border:1px solid #d3dbe5;background:#fff;border-radius:999px;padding:3px 10px;font:inherit;font-size:12px;cursor:pointer;color:#334155}
@@ -547,7 +567,7 @@ body{margin:0;background:${extra.bare ? '#fff' : '#f4f6f8'};font:13px 'Inter Vie
 <div class="rec-screen">${out.screen}</div>
 </div></div>
 ${extra.bare ? '' : `<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
-${ch.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each chapter; → or PageDown goes on"><input type="checkbox" id="pauseAt" checked> pause at chapters</label></div>` : ''}`}
+${ch.length || st.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each stop (◆ on the time bar${ch.length ? ', the chapters among them' : ''}); → or PageDown goes on, ← or PageUp goes back"><input type="checkbox" id="pauseAt" checked> pause at stops</label></div>` : ''}`}
 </div>
 ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extra.packed.scene}</script>` : `<script type="application/json" id="rec-timeline">${json(tl)}</script>`}
 <script>
@@ -565,7 +585,7 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
     }).catch(function(e){camv.insertAdjacentHTML('afterbegin','<p style="padding:24px">This recording could not be unpacked by this browser ('+e+'). Open it in a recent Chrome, Edge, Firefox or Safari.</p>');});
   } else start(JSON.parse(document.getElementById('rec-timeline').textContent));
   function start(T){
-  var D=T.D, CH=${json(ch)}, BARE=${extra.bare ? 'true' : 'false'};
+  var D=T.D, CH=${json(ch)}, ST=${json(st)}, BARE=${extra.bare ? 'true' : 'false'};
   var view=document.getElementById('view'), ptr=document.getElementById('ptr'), clickBox=document.getElementById('clicks');
   var list=function(c){return Array.prototype.slice.call(document.getElementsByClassName(c));};
   // what the timeline drives, looked up once
@@ -610,7 +630,8 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
   };
   ptr.style.transformOrigin='0 0';
   // the clock
-  var cur=0, paused=BARE, t0=0, last=0, dragging=false;
+  // a stop at the start: the page opens still on its first image (play, space or → starts it)
+  var cur=0, paused=BARE||ST[0]===0, t0=0, last=0, dragging=false;
   var now=function(){return performance.now();};
   var time=function(){return paused?cur:Math.min(D,now()-t0);};
   var set=function(ms){cur=Math.max(0,Math.min(D,ms));t0=now()-cur;last=cur;render(cur);};
@@ -624,12 +645,16 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
     chList.insertBefore(b,chList.lastElementChild);chBtns.push(b);
     var k=document.createElement('div');k.className='rec-tick';k.style.left='calc('+(c.t/D*100)+'% - 1px)';k.title=c.name;document.getElementById('track').appendChild(k);
   });
+  ST.forEach(function(t){if(t>0){var k=document.createElement('div');k.className='rec-stop';k.style.left=(t/D*100)+'%';document.getElementById('track').appendChild(k);}});
   var chapterAt=function(t){var k=-1;CH.forEach(function(c,i){if(c.t<=t+1)k=i;});return k;};
-  var next=function(){var t=time();if(paused){setPaused(false);return;}for(var i=0;i<CH.length;i++)if(CH[i].t>t+50){if(pauseAt())setPaused(true);set(CH[i].t);return;}};
+  // → : on from a stop; while playing, the next stop or chapter
+  var marks=ST.concat(CH.map(function(c){return c.t;})).sort(function(a,b){return a-b;});
+  var next=function(){var t=time();if(paused){setPaused(false);return;}for(var i=0;i<marks.length;i++)if(marks[i]>t+50){if(pauseAt())setPaused(true);set(marks[i]);return;}};
   var prev=function(){var t=time(),k=chapterAt(t);if(k<0){setPaused(true);set(0);return;}if(t-CH[k].t<1000&&k>0)k--;setPaused(true);set(CH[k].t);};
   /** a point of the window (client coordinates) in the view's coordinates, under the current camera */
   var toView=function(x,y){var r=view.getBoundingClientRect(),u=(x-r.left)/r.width,v=(y-r.top)/r.height;return [camNow[0]+u*camNow[2],camNow[1]+v*camNow[3]];};
-  window.recPlayer={pause:function(){setPaused(true);},play:function(){if(BARE){set(0);}setPaused(false);},seek:function(ms){set(ms);},time:time,paused:function(){return paused;},duration:D,chapters:CH,toView:toView};
+  window.recPlayer={pause:function(){setPaused(true);},play:function(){if(BARE){set(0);}setPaused(false);},seek:function(ms){set(ms);},time:time,paused:function(){return paused;},duration:D,chapters:CH,stops:ST,toView:toView};
+  if(play)play.textContent=paused?'▶':'❚❚';
   if(play)play.onclick=toggle;
   if(!BARE)document.addEventListener('keydown',function(e){
     if(e.code==='Space'){e.preventDefault();toggle();}
@@ -641,9 +666,9 @@ ${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extr
   (function tick(){
     if(!paused){
       var t=now()-t0;
-      if(t>=D){if(T.loop){t=t%D;t0=now()-t;}else{t=D;cur=D;setPaused(true);}}
-      // stop at a chapter crossed while playing
-      if(!dragging&&pauseAt()&&t>=last){for(var i=0;i<CH.length;i++){if(CH[i].t>0&&CH[i].t>last&&CH[i].t<=t){setPaused(true);t=CH[i].t;cur=t;break;}}}
+      if(t>=D){if(T.loop){t=t%D;t0=now()-t;if(ST[0]===0&&pauseAt()){t=0;cur=0;paused=true;if(play)play.textContent='▶';}}else{t=D;cur=D;setPaused(true);}}
+      // stop at a stop crossed while playing
+      if(!dragging&&pauseAt()&&t>=last){for(var i=0;i<ST.length;i++){if(ST[i]>0&&ST[i]>last&&ST[i]<=t){setPaused(true);t=ST[i];cur=t;break;}}}
       last=t;render(t);
     } else render(cur);
     if(seek&&!dragging)seek.value=String(Math.round(time()));

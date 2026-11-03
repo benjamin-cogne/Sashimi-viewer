@@ -4,12 +4,12 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
-import { recordingToSvg, recordingToPlayer, playerHtml, packedPlayerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, type Zoom } from './exportRecording';
+import { recordingToSvg, recordingToPlayer, playerHtml, packedPlayerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, STOP_AT_DEFAULT, type StopAt, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
 import { suggestCaptions, CAPTION_DEFAULT_MS, CHAPTER_CARD_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
 type Rect = [number, number, number, number];
-type Tab = 'zooms' | 'captions' | 'chapters' | 'pointer' | 'file';
+type Tab = 'zooms' | 'captions' | 'chapters' | 'stops' | 'pointer' | 'file';
 /** What a drag (or a click) on the preview makes. */
 type Pick = null | 'zoom' | 'highlight' | 'callout';
 
@@ -49,6 +49,8 @@ export interface Edits {
   ptr: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
   captions: Caption[]; chapters: Chapter[];
   cuts: { start: number; end: number }[]; speeds: { start: number; end: number; factor: number }[];
+  /** where the HTML page stops: stops of its own (recorded time), and the moments that stop (start, chapters, titles, captions) */
+  stops?: { t: number }[]; stopAt?: StopAt;
 }
 const DEFAULT_EDITS: Edits = {
   title: 'Sashimi viewer recording', format: 'html', shorten: true, loop: true, editable: false, anon: false, aliases: {},
@@ -72,6 +74,9 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const [ed, setEd] = useState<Edits>(() => ({ ...DEFAULT_EDITS, ...initial }));
   const field = <K extends keyof Edits>(k: K) => (v: Upd<Edits[K]>) => setEd(e => ({ ...e, [k]: typeof v === 'function' ? (v as (p: Edits[K]) => Edits[K])(e[k]) : v }));
   const { format, shorten, loop, anon, title, autoOn, level, drawn, ptr, captions, chapters, cuts, speeds, editable } = ed;
+  const stops = useMemo(() => ed.stops ?? [], [ed.stops]), stopAt = ed.stopAt ?? STOP_AT_DEFAULT;
+  const setStops = (f: (l: { t: number }[]) => { t: number }[]) => setEd(e => ({ ...e, stops: f(e.stops ?? []).sort((a, b) => a.t - b.t) }));
+  const setStopAt = (patch: Partial<StopAt>) => setEd(e => ({ ...e, stopAt: { ...(e.stopAt ?? STOP_AT_DEFAULT), ...patch } }));
   const compress = ed.compress ?? true;
   const setCompress = (v: boolean) => setEd(e => ({ ...e, compress: v }));
   const [setFormat, setShorten, setLoop, setAnon, setTitle, setAutoOn, setLevel, setDrawn, setPtr, setCaptions, setChapters, setCuts, setSpeeds, setEditable] =
@@ -87,7 +92,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const zooms = useMemo(() => [...(autoOn ? autos.filter((_, i) => !autoOff.has(i)) : []), ...drawn], [autos, autoOn, autoOff, drawn]);
   const time = useMemo(() => ({ maxIdleMs: shorten ? MAX_IDLE_DEFAULT_MS : 0, cuts, speeds }), [shorten, cuts, speeds]);
   const map = useMemo(() => timeMap(rec, time), [rec, time]);
-  const opts = useMemo(() => ({ time, loop, title, zooms, pointer: ptr, captions, chapters, replace }), [time, loop, title, zooms, ptr, captions, chapters, replace]);
+  const opts = useMemo(() => ({ time, loop, title, zooms, pointer: ptr, captions, chapters, replace, stops, stopAt }), [time, loop, title, zooms, ptr, captions, chapters, replace, stops, stopAt]);
   // the preview is rebuilt once the edits settle (typing a caption does not rebuild it at every key)
   const [settled, setSettled] = useState(opts);
   useEffect(() => { if (settled === opts) return; const id = setTimeout(() => setSettled(opts), 350); return () => clearTimeout(id); }, [opts]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -123,7 +128,9 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
   const keep = useRef<{ t: number; paused: boolean }>({ t: 0, paused: false });
   const player = () => (frame.current?.contentWindow as any)?.recPlayer as { pause(): void; play(): void; seek(ms: number): void; time(): number; paused(): boolean } | undefined;
   const ready = useRef(false);
-  const onFrameLoad = () => { const p = player(); if (!p) return; if (keep.current.t > 0) p.seek(keep.current.t); if (keep.current.paused) p.pause(); ready.current = true; };
+  // the rebuilt preview takes up where it was: its time, paused or playing (a page with a stop at the start opens still,
+  // which shows at the start only)
+  const onFrameLoad = () => { const p = player(); if (!p) return; if (keep.current.t > 0) { p.seek(keep.current.t); if (keep.current.paused) p.pause(); else p.play(); } else if (keep.current.paused) p.pause(); ready.current = true; };
   useEffect(() => { ready.current = false; }, [preview]);
   useEffect(() => {
     const id = setInterval(() => { const p = player(); if (p && ready.current) keep.current = { t: p.time(), paused: p.paused() }; }, 200);
@@ -201,6 +208,13 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     { key: 'cap', label: 'Captions', items: captions.map((c, i) => ({ id: `cp:${i}`, start: c.start, end: c.end, label: c.text ? `${KIND_LABEL[c.kind]} · ${c.text}` : KIND_LABEL[c.kind], color: CAP_COLOR[c.kind] })) },
     // a chapter with a title card is a block, from its start to the end of its card (drag it, or its ends, to set when and
     // how long the card shows); without a card, a mark
+    // the page's stops: its own (drag them), and those it takes from the start, the chapters and the captions (faded)
+    { key: 'st', label: 'Stops', marks: true, items: [
+      ...(stopAt.start ? [{ id: 'sd:start', start: 0, end: 1, label: 'start', color: '#d97706', faded: true }] : []),
+      ...(stopAt.chapters ? chapters.map((c, i) => ({ id: `sd:ch${i}`, start: c.t, end: c.t + 1, label: `ch. ${i + 1}`, color: '#d97706', faded: true })) : []),
+      ...captions.filter(c => stopAt.captions || (stopAt.titles && c.kind === 'title')).map((c, i) => ({ id: `sd:cp${i}`, start: c.start, end: c.start + 1, label: KIND_LABEL[c.kind].toLowerCase(), color: '#d97706', faded: true })),
+      ...stops.map((x, i) => ({ id: `st:${i}`, start: x.t, end: x.t + 1, label: `◆ ${i + 1}`, color: '#d97706' })),
+    ] },
     { key: 'ch', label: 'Chapters', items: chapters.map((c, i) => ({ id: `ch:${i}`, start: c.t, end: c.card ? cardEnd(c) : c.t + 1, mark: !c.card, label: `${i + 1}. ${c.name}`, color: '#0f766e' })) },
   ];
   const onTimelineChange = (_lane: string, id: string, start: number, end: number) => {
@@ -210,6 +224,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     else if (kind === 'az') { const z = autos[i]; setAutoOff(s => new Set([...s, i])); setDrawn(l => [...l, { ...z, start, end, source: 'drawn' }]); setSel(`dz:${drawn.length}`); }
     else if (kind === 'dz') setDrawn(l => l.map((x, k) => (k === i ? { ...x, start, end } : x)));
     else if (kind === 'cp') editCaption(i, { start, end });
+    else if (kind === 'st') setStops(l => l.map((x, k) => (k === i ? { t: start } : x)));
     else if (kind === 'ch') setChapters(l => l.map((x, k) => {
       if (k !== i) return x;
       // a block's ends set its card's time on screen (in played time, as the card is shown)
@@ -223,6 +238,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
     if (kind === 'cut') setCuts(drop); else if (kind === 'sp') setSpeeds(drop);
     else if (kind === 'az') setAutoOff(s => new Set([...s, i])); else if (kind === 'dz') setDrawn(drop);
     else if (kind === 'cp') setCaptions(drop); else if (kind === 'ch') setChapters(drop);
+    else if (kind === 'st') setStops(drop);
     setSel(null);
   };
   useEffect(() => {
@@ -334,7 +350,7 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
             playhead={playhead} selected={sel} onSelect={setSel} onSeek={seekRec} onChange={onTimelineChange} />
         </div>
         <div className="px-5 pt-3 flex items-center gap-1 border-b border-gray-100 pb-2">
-          {tabBtn('zooms', 'Zooms', zooms.length)}{tabBtn('captions', 'Captions', captions.length)}{tabBtn('chapters', 'Chapters', chapters.length)}{tabBtn('pointer', 'Pointer & playback')}{tabBtn('file', 'File')}
+          {tabBtn('zooms', 'Zooms', zooms.length)}{tabBtn('captions', 'Captions', captions.length)}{tabBtn('chapters', 'Chapters', chapters.length)}{tabBtn('stops', 'Stops', stops.length)}{tabBtn('pointer', 'Pointer & playback')}{tabBtn('file', 'File')}
           <span className="ml-auto text-[11px] text-gray-500">new items start at the preview's moment</span>
         </div>
         <div className="px-5 py-3 text-xs min-h-[150px]">
@@ -408,6 +424,30 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
                   </div>
                 ))}
                 {!chapters.length && <div className="text-gray-400">no chapter · pause the preview where a part of the story starts, then add one</div>}
+              </div>
+            </div>
+          )}
+          {tab === 'stops' && (
+            <div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mb-2">
+                <button onClick={() => { const t = nowRec(); setStops(l => [...l, { t }]); }} className="h-7 px-2.5 rounded-md border border-amber-400 text-amber-700 hover:bg-amber-50 whitespace-nowrap"
+                  title={'A stop of its own, here (drag it on the timeline). In the page, → or PageDown (a presentation clicker) goes on from a stop, ← or PageUp goes back; its "pause at stops" box turns them off. The video plays straight through.'}>＋ stop here</button>
+                <span className="text-gray-600">and stop</span>
+                {check(stopAt.start, v => setStopAt({ start: v }), 'at the start', 'The page opens still on its first image; play, space or → starts it (and a loop stops there again)')}
+                {check(stopAt.chapters, v => setStopAt({ chapters: v }), 'at each chapter', 'At each chapter mark, its title card on screen')}
+                {check(stopAt.titles, v => setStopAt({ titles: v }), 'at each title card', 'At each title-card caption, once it has faded in')}
+                {check(stopAt.captions, v => setStopAt({ captions: v }), 'at every caption', 'At every caption (lower thirds, callouts, highlights, titles), once it has faded in')}
+              </div>
+              <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+                {stops.map((x, i) => (
+                  <div key={i} className="flex items-center gap-1.5 text-gray-700">
+                    <span className="w-6 font-semibold text-amber-700">◆ {i + 1}</span>
+                    <input type="number" step={0.1} min={0} value={(map(x.t) / 1000).toFixed(1)} className="border border-gray-300 rounded px-1 py-0.5 w-16" title="Time (s)"
+                      onChange={e => { const t = invertTime(map, Math.max(0, Number(e.target.value) * 1000), rec.duration); setStops(l => l.map((y, k) => (k === i ? { t } : y))); }} /> s
+                    <button onClick={() => setStops(l => l.filter((_, k) => k !== i))} className="text-gray-400 hover:text-red-600 text-base leading-none" title="Remove">×</button>
+                  </div>
+                ))}
+                {!stops.length && <div className="text-gray-400">no stop of its own · pause the preview where the talk should wait, then add one</div>}
               </div>
             </div>
           )}
