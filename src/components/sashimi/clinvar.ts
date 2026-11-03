@@ -5,6 +5,8 @@
  * pathogenic, also for "Pathogenic/Likely pathogenic") for the ones kept; conflicting interpretations are CF, left out.
  */
 export type ClinvarKind = 'loss' | 'gain' | 'inv' | 'complex' | 'snv' | 'indel' | 'other';
+/** what a short variant does to the protein: loss of function (truncating, canonical splice site, start lost), missense, in frame, other */
+export type ClinvarEffect = 'lof' | 'missense' | 'inframe' | 'other';
 export interface ClinvarVariant {
   /** the ClinVar VCV accession (or the item's name) */
   id: string;
@@ -25,6 +27,26 @@ export interface ClinvarVariant {
   /** a nucleotide HGVS, and a protein one when ClinVar gives it */
   hgvs: string | null; protein: string | null;
   len: number;
+  /** ClinVar's molecular consequence (the first one, as UCSC keeps it), and its class */
+  conseq: string; effect: ClinvarEffect;
+}
+
+/**
+ * The class of a molecular consequence, as UCSC's ClinVar track writes it (ClinVar VCF's MC, SO term with spaces):
+ * UCSC's truncating set (nonsense, frameshift, splice donor / acceptor) and a lost start codon are loss of function;
+ * missense; in-frame indels and a lost stop codon in frame; anything else (synonymous, intronic, UTR, non-coding) other.
+ * Without a consequence, the protein HGVS decides (a stop or a frameshift: loss of function; one residue for another: missense).
+ */
+export function clinvarEffect(conseq: string, protein: string | null): ClinvarEffect {
+  const c = conseq.toLowerCase().replace(/_/g, ' ');
+  if (/nonsense|stop gained|frameshift|splice (donor|acceptor)|initiator codon|start lost/.test(c)) return 'lof';
+  if (/missense/.test(c)) return 'missense';
+  if (/inframe|in-frame|stop lost/.test(c)) return 'inframe';
+  if (c) return 'other';
+  const p = protein ?? '';
+  if (/(Ter|\*|X)\)?$|fs/.test(p)) return 'lof';
+  if (/^p\.\(?[A-Z][a-z]{2}\d+[A-Z][a-z]{2}\)?$/.test(p)) return 'missense';
+  return 'other';
 }
 
 const KIND: Record<string, ClinvarKind> = { LOSS: 'loss', GAIN: 'gain', INV: 'inv', STRUCT: 'complex', SUBST: 'snv', INS: 'indel', SEQALT: 'other', SEQLEN: 'indel' };
@@ -53,6 +75,7 @@ export function parseClinvarItem(it: Record<string, unknown>): ClinvarVariant | 
     start, end, code, sign: strip(it.clinSign) || (code === 'PG' ? 'Pathogenic' : 'Likely pathogenic'),
     kind, type, genes, conditions: strip(it.phenotypeList), stars: Number(it._starCount ?? it.score) || 0, review,
     origin: ORIGIN[String(it._originCode ?? '').toUpperCase()] ?? strip(it.origin), hgvs, protein, len: Number(it._varLen) || end - start,
+    conseq: strip(it.molConseq), effect: clinvarEffect(strip(it.molConseq), protein),
   };
 }
 

@@ -49,12 +49,15 @@ const MIN_SPAN = 120, LOD_FULL = 3e6, LOD_BARS = 30e6;
 /** population CNVs are drawn up to this span (beyond, a chromosome's thousands of records would be a smear) */
 const DGV_MAX_SPAN = 30e6;
 /** ClinVar (pathogenic / likely pathogenic): SVs drawn up to this span in view (as DGV), SNVs and short indels up to the second */
-const CLIN_SV_MAX_SPAN = 30e6, CLIN_SNV_MAX_SPAN = 5e6, CLIN_SV_LANE_H = 9, CLIN_SV_MAX_LANES = 60, CLIN_SNV_H = 22;
+const CLIN_SV_MAX_SPAN = 30e6, CLIN_SNV_MAX_SPAN = 5e6, CLIN_SV_LANE_H = 9, CLIN_SV_MAX_LANES = 60, CLIN_SNV_H = 48;
 /** the ClinVar SV summary: a profile of the SVs over each point (losses up, gains down), and the bars matching the event under it */
 const CLIN_AGG_H = 30, CLIN_AGG_BIN = 2;
 const CLIN_KIND_COLOR: Record<string, string> = { loss: '#dc2626', gain: '#2563eb', inv: '#7c3aed', complex: '#7c3aed', other: '#64748b', snv: '#b91c1c', indel: '#b91c1c' };
 /** SNVs: pathogenic dark red, likely pathogenic orange */
 const CLIN_SIGN_COLOR = { PG: '#b91c1c', LP: '#f97316' } as const;
+/** SNVs by what they do: loss of function rises above the line, missense hangs below it, in frame and other sit on it */
+const CLIN_EFFECT_COLOR = { lof: '#be123c', missense: '#6d28d9', inframe: '#64748b', other: '#94a3b8' } as const;
+const CLIN_EFFECT_WORD = { lof: 'loss of function', missense: 'missense', inframe: 'in frame', other: 'other' } as const;
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
 /** cytogenetic band stains (UCSC gieStain) */
@@ -868,13 +871,18 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   /** the bars' top: under the profile in the summary */
   const yClinBars = yClinSv + (clinAgg ? CLIN_AGG_H + 2 : 0);
   if (clinSvShown) y += keep(clinSvAll ? 'clinsv-all' : 'clinsv', Math.max(clinAgg ? 0 : 1, ...clinSvItems.map(d => d.lane + 1)) * CLIN_SV_LANE_H + (clinAgg ? CLIN_AGG_H + 2 : 0) + 12) + 2;
-  // ClinVar SNVs and short indels: one lollipop per 3 px (the variants it holds in its card), pathogenic over likely
+  // ClinVar SNVs and short indels, mirrored: loss of function rises above a line, missense hangs below it, in frame and
+  // other sit on it; one mark per 3 px and class (its variants in its card), pathogenic filled over likely pathogenic hollow
   const clinSnvShown = showClinSnv && !!loaders.getClinvar;
-  const clinSnvBins: { x: number; vs: ClinvarVariant[]; code: 'PG' | 'LP' }[] = [];
+  const clinSnvBins: { x: number; vs: ClinvarVariant[]; code: 'PG' | 'LP'; side: 'lof' | 'missense' | 'mid' }[] = [];
   if (clinSnvShown) {
-    const bins = new Map<number, ClinvarVariant[]>();
-    for (const v of clinSnvView.list) { const x = refX((v.start + v.end) / 2); if (x < X0 || x > X1) continue; const k = Math.round((x - X0) / 3); bins.set(k, [...(bins.get(k) ?? []), v]); }
-    for (const [k, vs] of bins) clinSnvBins.push({ x: X0 + k * 3, vs, code: vs.some(v => v.code === 'PG') ? 'PG' : 'LP' });
+    const bins = new Map<string, ClinvarVariant[]>();
+    for (const v of clinSnvView.list) {
+      const x = refX((v.start + v.end) / 2); if (x < X0 || x > X1) continue;
+      const side = v.effect === 'lof' || v.effect === 'missense' ? v.effect : 'mid', k = `${side}:${Math.round((x - X0) / 3)}`;
+      bins.set(k, [...(bins.get(k) ?? []), v]);
+    }
+    for (const [k, vs] of bins) { const [side, i] = k.split(':'); clinSnvBins.push({ x: X0 + Number(i) * 3, vs, code: vs.some(v => v.code === 'PG') ? 'PG' : 'LP', side: side as 'lof' | 'missense' | 'mid' }); }
     clinSnvBins.sort((p, q) => (p.code === q.code ? 0 : p.code === 'LP' ? -1 : 1));
   }
   const yClinSnv = clinSnvShown ? y : -1; if (clinSnvShown) y += keep('clinsnv', CLIN_SNV_H) + 6;
@@ -1094,7 +1102,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           onClick={e => { e.stopPropagation(); setClinSvAll(v => { store.set('sashimi.svClinvarSvAll', !v); return !v; }); }}>
           {clinSvAll ? `▾ summary` : `▸ all SVs (${clinSvInView.length})`}<title>{clinSvAll ? 'Sum the SVs up: how many cover each point (losses above, gains below), the ones matching the event as bars' : 'Every ClinVar SV in view, one bar each'}</title></text>}
         {yClinSv >= 0 && <text x={14} y={yClinSv + 8} fontWeight={600} fill={C.text}>ClinVar SV<title>ClinVar variants of 50 bp or more classified pathogenic or likely pathogenic (UCSC track clinvarCnv)</title></text>}
-        {yClinSnv >= 0 && <text x={14} y={yClinSnv + 12} fontWeight={600} fill={C.text}>ClinVar SNV<title>ClinVar variants under 50 bp (SNVs, short indels) classified pathogenic or likely pathogenic (UCSC track clinvarMain)</title></text>}
+        {yClinSnv >= 0 && <g fontSize={9} pointerEvents="none">
+          <text x={14} y={yClinSnv + 8} fill={CLIN_EFFECT_COLOR.lof}>▲ LoF</text>
+          <text x={14} y={yClinSnv + CLIN_SNV_H - 2} fill={CLIN_EFFECT_COLOR.missense}>● missense</text></g>}
+        {yClinSnv >= 0 && <text x={14} y={yClinSnv + CLIN_SNV_H / 2 + 4} fontWeight={600} fill={C.text}>ClinVar SNV<title>ClinVar variants under 50 bp (SNVs, short indels) classified pathogenic or likely pathogenic (UCSC track clinvarMain)</title></text>}
         {yAchro >= 0 && <text x={14} y={yAchro + 10} fontWeight={600} fill={C.text}>AChro-Puce<title>{`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}`}</title></text>}
         {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
         {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
@@ -1187,19 +1198,29 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           );
         })}
         {yClinSv >= 0 && !clinSvItems.length && !clinAgg && <text x={X0 + 6} y={yClinSv + 8} fontSize={9.5} fill={C.faint}>{span > CLIN_SV_MAX_SPAN ? `zoom in below ${kb(CLIN_SV_MAX_SPAN)} to see the ClinVar SVs` : clinSvView.loading ? 'loading ClinVar…' : clinSvView.error ? `ClinVar unavailable: ${clinSvView.error}` : 'no pathogenic or likely pathogenic ClinVar SV here'}</text>}
-        {/* ClinVar SNVs: lollipops */}
-        {yClinSnv >= 0 && clinSnvBins.map(({ x, vs, code }) => {
-          const key = `cvs:${vs[0].id}:${vs[0].start}`, col = CLIN_SIGN_COLOR[code], base = yClinSnv + CLIN_SNV_H - 2;
+        {/* ClinVar SNVs, mirrored: ▲ loss of function above the line, ● missense below, ◆ in frame and other on it */}
+        {yClinSnv >= 0 && <line x1={X0} x2={X1} y1={yClinSnv + CLIN_SNV_H / 2} y2={yClinSnv + CLIN_SNV_H / 2} stroke={C.line} strokeWidth={1} />}
+        {yClinSnv >= 0 && clinSnvBins.map(({ x, vs, code, side }) => {
+          const key = `cvs:${side}:${vs[0].id}:${vs[0].start}`, mid = yClinSnv + CLIN_SNV_H / 2;
+          const eff = side === 'mid' ? (vs.some(v => v.effect === 'inframe') ? 'inframe' : 'other') : side, col = CLIN_EFFECT_COLOR[eff];
+          const filled = code === 'PG', fill = filled ? col : '#ffffff', sw = filled ? 0.9 : 1.4, stroke = filled ? '#ffffff' : col;
+          // a stem a little longer for a mark gathering several variants (at most the lane's half)
+          const stem = Math.min(CLIN_SNV_H / 2 - 6, 13 + 2.4 * Math.log2(vs.length));
+          const r = (vs.length > 1 ? 4.1 : 3.5) + (filled ? 0.3 : 0);
+          const head = side === 'lof'
+            ? <path d={`M${x},${mid - stem - r * 1.25}L${x + r * 1.15},${mid - stem + r * 0.75}L${x - r * 1.15},${mid - stem + r * 0.75}Z`} fill={fill} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />
+            : side === 'missense'
+              ? <circle cx={x} cy={mid + stem} r={r} fill={fill} stroke={stroke} strokeWidth={sw} />
+              : <path d={`M${x},${mid - r}L${x + r},${mid}L${x},${mid + r}L${x - r},${mid}Z`} fill={fill} stroke={stroke} strokeWidth={sw} />;
           return (
             <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key, undefined, vs)} onMouseMove={hoverOn(key, undefined, vs)} onMouseLeave={hoverOff} onClick={pinOn(key, undefined, vs)}>
-              <rect x={x - 2.5} y={yClinSnv} width={5} height={CLIN_SNV_H} fill="transparent" />
-              <line x1={x} x2={x} y1={base} y2={yClinSnv + 7} stroke={col} strokeWidth={1} />
-              <circle cx={x} cy={yClinSnv + 5} r={vs.length > 1 ? 3.6 : 2.8} fill={col} stroke="#fff" strokeWidth={0.8} />
+              <rect x={x - 3} y={side === 'lof' ? yClinSnv : side === 'missense' ? mid : mid - 5} width={6} height={side === 'mid' ? 10 : CLIN_SNV_H / 2} fill="transparent" />
+              {side !== 'mid' && <line x1={x} x2={x} y1={mid} y2={side === 'lof' ? mid - stem : mid + stem} stroke={col} strokeOpacity={0.55} strokeWidth={1.1} />}
+              {head}
             </g>
           );
         })}
-        {yClinSnv >= 0 && <line x1={X0} x2={X1} y1={yClinSnv + CLIN_SNV_H - 1.5} y2={yClinSnv + CLIN_SNV_H - 1.5} stroke={C.line} strokeWidth={1} />}
-        {yClinSnv >= 0 && !clinSnvBins.length && <text x={X0 + 6} y={yClinSnv + 12} fontSize={9.5} fill={C.faint}>{span > CLIN_SNV_MAX_SPAN ? `zoom in below ${kb(CLIN_SNV_MAX_SPAN)} to see the ClinVar SNVs` : clinSnvView.loading ? 'loading ClinVar…' : clinSnvView.error ? `ClinVar unavailable: ${clinSnvView.error}` : 'no pathogenic or likely pathogenic ClinVar SNV here'}</text>}
+        {yClinSnv >= 0 && !clinSnvBins.length && <text x={X0 + 6} y={yClinSnv + CLIN_SNV_H / 2 - 4} fontSize={9.5} fill={C.faint}>{span > CLIN_SNV_MAX_SPAN ? `zoom in below ${kb(CLIN_SNV_MAX_SPAN)} to see the ClinVar SNVs` : clinSnvView.loading ? 'loading ClinVar…' : clinSnvView.error ? `ClinVar unavailable: ${clinSnvView.error}` : 'no pathogenic or likely pathogenic ClinVar SNV here'}</text>}
         {/* AChro-Puce recurrent CNVs */}
         {yAchro >= 0 && achroItems.map(({ p, lane, a, b, text }) => {
           // two bars, each its own target: the deletion (red) above, the duplication (blue) below, its class after it
@@ -1542,7 +1563,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {(showClinSv || showClinSnv) && loaders.getClinvar && <span className="inline-flex items-center gap-1">ClinVar (pathogenic / likely pathogenic):
           {showClinSv && !clinSvAll && <> SVs summed up: how many cover each point, <span style={{ color: CLIN_KIND_COLOR.loss }}>losses</span> above the line, <span style={{ color: CLIN_KIND_COLOR.gain }}>gains</span> below, <span style={{ color: CLIN_KIND_COLOR.inv }}>inversions and complex</span> on it{rec ? ', the ones matching a loss or gain of the event as outlined bars under it' : ''} (“▸ all SVs” lists them);</>}
           {showClinSv && clinSvAll && <><span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.loss }} /> loss <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.gain }} /> gain <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.inv }} /> inversion, complex (pale: likely pathogenic){rec ? '; outlined when it matches a loss or gain of the event' : ''};</>}
-          {showClinSnv && <> SNV <span style={{ color: CLIN_SIGN_COLOR.PG }}>●</span> pathogenic <span style={{ color: CLIN_SIGN_COLOR.LP }}>●</span> likely pathogenic</>}</span>}
+          {showClinSnv && <> SNV: <span style={{ color: CLIN_EFFECT_COLOR.lof }}>▲ loss of function</span> above the line (nonsense, frameshift, canonical splice site, start lost), <span style={{ color: CLIN_EFFECT_COLOR.missense }}>● missense</span> below, <span style={{ color: CLIN_EFFECT_COLOR.inframe }}>◆ in frame</span> and <span style={{ color: CLIN_EFFECT_COLOR.other }}>other</span> on it; filled pathogenic, hollow likely pathogenic</>}</span>}
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)}</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
@@ -1643,6 +1664,7 @@ function ClinvarCard({ vs, at, chrom, cnv, pinned, place, onClose, onZoom, cardR
         return (
           <div key={`${v.id}:${v.start}`} className="mt-1.5 pt-1 border-t border-white/10 first:border-0 first:pt-0">
             <div><span className="px-1 rounded text-[10px] font-bold" style={{ background: v.code === 'PG' ? '#b91c1c' : '#f97316' }}>{v.code === 'PG' ? 'P' : 'LP'}</span> <b>{v.sign}</b>
+              {!big && <span className="ml-1 px-1 rounded text-[10px] font-semibold" style={{ background: CLIN_EFFECT_COLOR[v.effect], color: '#fff' }} title={v.conseq || 'no consequence given'}>{CLIN_EFFECT_WORD[v.effect]}{v.conseq && CLIN_EFFECT_WORD[v.effect] !== v.conseq ? ` · ${v.conseq}` : ''}</span>}
               <span className="text-slate-300"> · {v.type || CLIN_KIND_WORD[v.kind]}{big ? ` · ${kb(v.end - v.start)}` : ''}</span>
               <span className="text-amber-300" title={v.review}> {'★'.repeat(Math.min(4, v.stars))}{'☆'.repeat(Math.max(0, 4 - Math.min(4, v.stars)))}</span></div>
             {v.genes.length > 0 && <div className="text-slate-300">gene{v.genes.length > 1 ? 's' : ''}: <i>{v.genes.slice(0, 8).join(', ')}{v.genes.length > 8 ? ` +${v.genes.length - 8}` : ''}</i></div>}
