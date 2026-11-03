@@ -6,8 +6,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { SUGGEST_MIN, looksLikeGene, suggestGenes, type GeneSuggestion } from '../../standalone/geneSuggest';
 
-export function GeneSuggest({ value, onChange, local = [], className, placeholder, title, ariaLabel, width = 340 }: {
-  value: string; onChange: (v: string) => void; local?: string[]; className?: string; placeholder?: string; title?: string; ariaLabel?: string;
+export function GeneSuggest({ value, onChange, local = [], className, placeholder, title, ariaLabel, width = 340, autoFocus }: {
+  value: string; onChange: (v: string) => void; local?: string[]; className?: string; placeholder?: string; title?: string; ariaLabel?: string; autoFocus?: boolean;
   /** width of the list, px */
   width?: number;
 }) {
@@ -41,7 +41,7 @@ export function GeneSuggest({ value, onChange, local = [], className, placeholde
 
   return (
     <span className="relative flex-1 min-w-0 flex">
-      <input ref={inputRef} value={value} placeholder={placeholder} title={title} aria-label={ariaLabel} className={className}
+      <input ref={inputRef} value={value} placeholder={placeholder} title={title} aria-label={ariaLabel} className={className} autoFocus={autoFocus}
         role="combobox" aria-expanded={shown} aria-autocomplete="list" autoComplete="off" spellCheck={false}
         onChange={e => { picked.current = null; onChange(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}

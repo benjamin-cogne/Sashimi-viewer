@@ -30,7 +30,8 @@ export function svLoadersFor(build: GenomeBuild): Omit<SvGeneLoaders, 'fallback'
     getPopulationSvs: async (c, a, b) => (await getDgvGold(build, c, a, b)).map(parseDgvItem).filter((v): v is PopulationSv => !!v),
     liftOver: (from, to, chrom, start, end) => mapAssembly(from, to, chrom, start, end),
     locateGene: async symbol => {
-      const t = await getTranscript(build, symbol);
+      // as the Sashimi viewer's search: a symbol, or an Ensembl gene id
+      const t = await getTranscript(build, symbol, /^ENSG\d+/i.test(symbol) ? symbol.replace(/\.\d+$/, '') : undefined);
       // 1-based inclusive → 0-based half-open
       return { chrom: t.chrom.startsWith('chr') ? t.chrom : `chr${t.chrom}`, start: t.start - 1, end: t.end, name: t.gene_name };
     },

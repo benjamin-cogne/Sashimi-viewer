@@ -13,6 +13,8 @@ import { parseLocus } from './geometry';
 import { buildOfNc } from './knownVariants';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
+import { GeneSuggest } from './GeneSuggest';
+import { rememberGene } from '../../standalone/geneSuggest';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -21,6 +23,7 @@ const EXAMPLES = [
   { label: 'inverted insertion', text: 'NC_000020.11:g.10807815_10807816ins10489766_10783340inv' },
   { label: 'ISCN sequence form', text: 'chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_cen_qter' },
   { label: 'coordinates', text: 'chr20:10,300,000-11,000,000' },
+  { label: 'a chromosome', text: 'chr20' },
   { label: 'a gene', text: 'JAG1' },
 ];
 const KEY = 'sashimi.svBrowserText', BUILD_KEY = 'sashimi.svBuild';
@@ -67,14 +70,24 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         goRegion(loc.chrom, single ? loc.start - 1 - AROUND_POS : loc.start - 1, single ? loc.start + AROUND_POS : loc.end, b);
         save(KEY, t); return;
       }
-      // a gene symbol
+      // a whole chromosome: chr3, 3, X, chrM / MT
+      const chr = raw.match(/^(?:chr)?(\d{1,2}|X|Y|M|MT)$/i);
+      if (chr) {
+        const name = `chr${chr[1].toUpperCase() === 'MT' ? 'M' : chr[1].toUpperCase()}`;
+        const len = chromLength(b, name);
+        if (!len) throw new Error(`Unknown chromosome ${name} on ${b}.`);
+        goRegion(name, 0, len, b);
+        save(KEY, t); return;
+      }
+      // a gene symbol or an Ensembl gene id (looked up as in the Sashimi viewer's search)
       if (/^[A-Za-z][A-Za-z0-9-]{0,19}(\.\d+)?$/.test(raw) && !/^NC_/i.test(raw) && !/:/.test(raw)) {
         if (!loaders.locateGene) throw new Error('Gene names need the UCSC API, not available here: type coordinates.');
         setBusy(true);
         const g = await loaders.locateGene(raw).finally(() => setBusy(false));
         const pad = Math.max(5000, (g.end - g.start) * 0.4);
         goRegion(g.chrom, g.start - pad, g.end + pad, b);
-        setNote(`${g.name}: ${g.chrom}:${(g.start + 1).toLocaleString('en-US')}-${g.end.toLocaleString('en-US')} (${b})`);
+        setNote(`${g.name}${g.name.toUpperCase() !== raw.toUpperCase() ? ` (${raw})` : ''}: ${g.chrom}:${(g.start + 1).toLocaleString('en-US')}-${g.end.toLocaleString('en-US')} (${b})`);
+        rememberGene(g.name);
         save(KEY, t); return;
       }
       // an HGVS or ISCN description: an NC_ accession's version decides the build
@@ -126,16 +139,18 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                   </span>
                 : <span className="font-normal text-gray-500">· {build}</span>}
             </div>
-            <div className="text-xs text-gray-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb) or a gene name</div>
+            <div className="text-xs text-gray-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or a place to go to: coordinates (chr20:10.3-11 Mb), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
         </div>
         <div className="px-5 pb-3">
-          <div className="flex gap-2">
-            <input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void draw(); }} spellCheck={false} autoFocus
-              placeholder="NC_000020.11:g.[10489766_10783340del;10783341_10807815inv;10807816_10808805del]  ·  chr20:10,300,000-11,000,000  ·  JAG1"
-              className="flex-1 font-mono text-[12.5px] h-9 px-3 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-300" />
-            <button onClick={() => void draw()} disabled={busy} className="h-9 px-4 rounded-md bg-accent-600 text-white text-sm font-semibold hover:bg-accent-700 disabled:opacity-60">{busy ? '…' : 'Go'}</button>
-          </div>
+          <form className="flex gap-2" onSubmit={e => { e.preventDefault(); void draw(); }}>
+            {/* the Sashimi viewer's search box: gene names suggested from the third letter (HGNC, the recent genes first) */}
+            <GeneSuggest value={text} onChange={setText} width={420} autoFocus ariaLabel="Rearrangement, place or gene"
+              placeholder="NC_000020.11:g.[10489766_10783340del;10783341_10807815inv;10807816_10808805del]  ·  chr20:10,300,000-11,000,000  ·  chr20  ·  JAG1"
+              title={'A rearrangement (HGVS or ISCN sequence form), coordinates (chr20:10.3-11 Mb), a chromosome (chr3 or 3), or a gene symbol or ENSG id.\nGene names are suggested from the third letter (HGNC), with their previous symbols and aliases.'}
+              className="flex-1 min-w-0 font-mono text-[12.5px] h-9 px-3 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-accent-300" />
+            <button type="submit" disabled={busy} className="h-9 px-4 rounded-md bg-accent-600 text-white text-sm font-semibold hover:bg-accent-700 disabled:opacity-60">{busy ? '…' : 'Go'}</button>
+          </form>
           <div className="text-[11px] text-gray-500 mt-1">
             examples: {EXAMPLES.map((x, i) => <span key={x.label}>{i ? ' · ' : ''}<button className="text-accent-700 hover:underline" onClick={() => { setText(x.text); void draw(x.text); }}>{x.label}</button></span>)}
             {' '}· band-level ISCN has no positions and is not drawn; one chromosome at a time (no translocation yet)
