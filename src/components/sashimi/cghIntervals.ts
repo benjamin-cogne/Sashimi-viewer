@@ -42,6 +42,8 @@ export interface CghCnv {
   suppressed: boolean;
   /** the classification as given (the text before `;;`), and what followed it, kept for the export */
   classification: string; classRest: string;
+  /** the file's comment on the call (a Comment / Note column), else '' */
+  note: string;
   /** the file's line of this call (0-based), for the export */
   line: number;
 }
@@ -60,6 +62,8 @@ export interface CghFile {
   classCol: number | null;
   /** whether the file's classifications end with `;;` (written the same way back) */
   classSuffix: string;
+  /** the header line (interval table) and its Comment / Note column, if any (else one is added at the export) */
+  headerLine: number | null; commentCol: number | null;
   samples: CghSample[];
   warnings: string[];
 }
@@ -131,6 +135,7 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
     genes: col('genename', 'genenames', 'genes', 'gene'), size: col('sizekb', 'size'), type: col('type', 'aberrationtype'),
     probes: col('probes', 'probe', 'nprobes', 'numprobes', 'numberofprobes'), lr: col('meanlogratio', 'logratio', 'log2ratio'),
     iscn: col('iscn'), sup: col('suppress', 'suppressed'), cls: col('classification', 'class'),
+    note: col('comment', 'comments', 'note', 'notes', 'commentaire', 'commentaires'),
     sample: col('samplename', 'sample', 'recordname', 'arrayname'),
   };
   const warnings: string[] = [];
@@ -168,7 +173,7 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
       sizeKb: size ?? (end - start) / 1000, kind, typeText: typeText || (kind === 'loss' ? 'Deletion' : 'Gain'),
       probes: c.probes >= 0 ? num(f[c.probes]) : null, logRatio: lr, iscn, ...cn,
       suppressed: c.sup >= 0 && /^(true|yes|1)$/i.test((f[c.sup] ?? '').trim()),
-      ...splitClass(cell), line: i,
+      ...splitClass(cell), note: c.note >= 0 ? (f[c.note] ?? '').trim() : '', line: i,
     });
   }
   for (const s of samples.values()) {
@@ -177,7 +182,7 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
     if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
   }
   if (!samples.size) throw new Error(`${fileName}: no call could be read (an interval table needs Chromosome, Start, Stop and a Type, an ISCN or a log ratio).`);
-  return { id, name: fileName, format: 'interval', build: cghBuild(buildText), buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', samples: [...samples.values()], warnings };
+  return { id, name: fileName, format: 'interval', build: cghBuild(buildText), buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings };
 }
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
@@ -197,24 +202,36 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
     const cn = name.includes('(') ? iscnCopies(name) : bare ? { copies: +bare[1], copiesHi: bare[2] ? +bare[2] : null, amp: false } : { copies: null, copiesHi: null, amp: /\bamp/i.test(name) };
     const kind = kindOfText(`${name} ${f.slice(4).join(' ')}`) ?? (cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : null);
     if (!kind) { noType++; continue; }
-    s.cnvs.push({ id: `${id}:${i}`, sample: base, sampleKey: s.key, chrom, start: a + 1, end: b, cytoband: '', genes: [], sizeKb: (b - a) / 1000, kind, typeText: name || kind, probes: null, logRatio: null, iscn: null, ...cn, suppressed: false, classification: '', classRest: '', line: i });
+    s.cnvs.push({ id: `${id}:${i}`, sample: base, sampleKey: s.key, chrom, start: a + 1, end: b, cytoband: '', genes: [], sizeKb: (b - a) / 1000, kind, typeText: name || kind, probes: null, logRatio: null, iscn: null, ...cn, suppressed: false, classification: '', classRest: '', note: '', line: i });
   }
   if (noType) warnings.push(`${noType} interval${noType > 1 ? 's' : ''} without a type (the 4th column should say del / dup, loss / gain or x1 / x3), not read`);
   if (!s.cnvs.length) throw new Error(`${fileName}: neither an interval table (no Chromosome / Start / Stop header) nor a BED with typed intervals.`);
   warnings.unshift('BED: no probe count, the minimum number of probes does not apply');
-  return { id, name: fileName, format: 'bed', build: null, buildText: null, meta: [], lines, eol, classCol: null, classSuffix: '', samples: [s], warnings };
+  return { id, name: fileName, format: 'bed', build: null, buildText: null, meta: [], lines, eol, classCol: null, classSuffix: '', headerLine: null, commentCol: null, samples: [s], warnings };
 }
 
-/** The file written back, each call with the class given in the browser (the other lines as they were). */
-export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string): string {
+/**
+ * The file written back, each call with the class and the note given in the browser, the other lines as they were. An
+ * interval table gets its Classification column filled and a Comment column (added after the last one when it has none);
+ * a BED gets the class and the note as two last columns.
+ */
+export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note): string {
   const out = file.lines.slice();
+  const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const byLine = new Map(file.samples.flatMap(s => s.cnvs).map(c => [c.line, c]));
+  let noteCol = file.commentCol;
+  if (file.headerLine != null && noteCol == null) {
+    const h = out[file.headerLine].replace(/\t+$/, '').split('\t');
+    noteCol = h.length; h.push('Comment'); out[file.headerLine] = h.join('\t');
+  }
   for (const [i, cnv] of byLine) {
-    const cls = classOf(cnv).trim();
+    const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
     const cell = cls ? `${cls}${cnv.classRest || file.classSuffix}` : '';
-    const f = out[i].split('\t');
-    if (file.classCol != null) { while (f.length <= file.classCol) f.push(''); f[file.classCol] = cell; out[i] = f.join('\t'); }
-    else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}`;
+    if (file.classCol != null && noteCol != null) {
+      const f = out[i].split('\t');
+      while (f.length <= Math.max(file.classCol, noteCol)) f.push('');
+      f[file.classCol] = cell; f[noteCol] = note; out[i] = f.join('\t');
+    } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}`;
   }
   return out.join(file.eol);
 }
@@ -234,26 +251,33 @@ export const cnvSearchText = (cnv: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kin
 export const copyText = (c: CghCnv) => (c.copies != null ? `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}` : c.amp ? 'amp' : c.kind === 'loss' ? 'loss' : 'gain');
 
 // ---- classes ----
-/** The classes offered: the AChro-Puce classes (the French network's, 5 to 1 and PIEV), then the files' own words. */
-export const CGH_CLASSES: { value: string; color: string }[] = [
-  { value: 'Pathogenic (class 5)', color: '#b91c1c' },
-  { value: 'Likely pathogenic (class 4)', color: '#ea580c' },
-  { value: 'PIEV (susceptibility)', color: '#7c3aed' },
-  { value: 'Uncertain significance (class 3)', color: '#64748b' },
-  { value: 'Likely benign (class 2)', color: '#22a35a' },
-  { value: 'Benign (class 1)', color: '#15803d' },
+/** The classes, as the laboratory writes them (and as they are exported). */
+export const CGH_CLASSES: { value: string; color: string; hint?: string }[] = [
+  { value: 'Benign', color: '#15803d' },
+  { value: 'Likely benign', color: '#22a35a' },
+  { value: 'Uncertain significance', color: '#64748b' },
+  { value: 'Likely pathogenic', color: '#ea580c' },
+  { value: 'Pathogenic', color: '#b91c1c' },
+  { value: 'PIEV', color: '#7c3aed', hint: 'susceptibility: incomplete penetrance, variable expressivity' },
+  { value: 'Male Reference', color: '#0284c7', hint: 'a call of the male reference' },
+  { value: 'Female Reference', color: '#db2777', hint: 'a call of the female reference' },
+  { value: 'NS', color: '#94a3b8', hint: 'non significant: recurring technical artifact / atypical log ratio' },
 ];
-/** a class's colour: one of the offered classes, else read from its words (a file's own vocabulary, French or English) */
-export function classColor(v: string): string | null {
-  if (!v.trim()) return null;
-  const known = CGH_CLASSES.find(c => c.value === v);
-  if (known) return known.color;
+/** a class a file writes in other words (French or English, with or without its number), as one of the classes; null if none */
+export function toClass(v: string): string | null {
   const t = norm(v);
-  if (/probablementpathog|likelypathog|class4|classe4/.test(t)) return '#ea580c';
-  if (/pathog|class5|classe5/.test(t)) return '#b91c1c';
-  if (/piev|susceptib/.test(t)) return '#7c3aed';
-  if (/probablementbenin|likelybenign|class2|classe2/.test(t)) return '#22a35a';
-  if (/benin|benign|class1|classe1/.test(t)) return '#15803d';
-  if (/vsi|vus|incertain|uncertain|inconnu|class3|classe3/.test(t)) return '#64748b';
-  return '#94a3b8';
+  if (!t) return null;
+  const known = CGH_CLASSES.find(c => norm(c.value) === t);
+  if (known) return known.value;
+  if (/probablementpathog|likelypathog|classe?4/.test(t)) return 'Likely pathogenic';
+  if (/pathog|classe?5/.test(t)) return 'Pathogenic';
+  if (/probablementbenin|likelybenign|classe?2/.test(t)) return 'Likely benign';
+  if (/benin|benign|classe?1/.test(t)) return 'Benign';
+  if (/vsi|vus|incertain|uncertain|inconnu|classe?3/.test(t)) return 'Uncertain significance';
+  if (/piev|susceptib/.test(t)) return 'PIEV';
+  if (/temoinfeminin|referencefeminine?|femalereference|femalecontrol/.test(t)) return 'Female Reference';
+  if (/temoinmasculin|referencemasculine?|malereference|malecontrol/.test(t)) return 'Male Reference';
+  if (/^ns$|nonsignificati|nonsignificant|artefact|artifact/.test(t)) return 'NS';
+  return null;
 }
+export const classColor = (v: string): string | null => (v.trim() ? CGH_CLASSES.find(c => c.value === v)?.color ?? '#94a3b8' : null);

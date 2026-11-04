@@ -122,7 +122,9 @@ export function scoreCnv(i: ScoreInput): Score {
     const gs = i.genes.filter(v => r.gene!(v, i)).map(v => v.g.symbol);
     if (gs.length) reasons.push({ id: r.id, level: r.level, text: `${r.label}: ${gs.slice(0, 8).join(', ')}${gs.length > 8 ? ` +${gs.length - 8}` : ''}` });
   }
+  // a call meeting no HIGH or MODERATE rule is LOW, whatever it holds
+  if (!reasons.length) reasons.push({ id: i.kind === 'loss' ? 'L0' : 'G0', level: 'low', text: i.genes.length ? 'no HIGH or MODERATE rule met' : 'no protein-coding gene in the call' });
   // a low reason only says what is left: dropped when a higher one is there
-  const top = reasons.reduce<Level>((m, r) => (LEVEL_RANK[r.level] > LEVEL_RANK[m] ? r.level : m), 'none');
+  const top = reasons.reduce<Level>((m, r) => (LEVEL_RANK[r.level] > LEVEL_RANK[m] ? r.level : m), 'low');
   return { level: top, reasons: top === 'low' ? reasons : reasons.filter(r => r.level !== 'low') };
 }

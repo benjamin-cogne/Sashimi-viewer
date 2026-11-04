@@ -5,7 +5,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
-import { parseCghFile, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
+import { parseCghFile, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
 
@@ -42,6 +42,8 @@ export interface CghState {
   modes: Record<string, GeneModes | 'loading' | 'error'>;
   /** each patient's sex, by sample key (absent: not given) */
   sex: Record<string, CghSex>;
+  /** a note on each call, by call id (else the file's) */
+  notes: Record<string, string>;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -55,7 +57,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {}, sex: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {}, sex: {}, notes: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -136,6 +138,7 @@ export const cgh = {
   },
   setSample(key: string | null) { set({ sample: key }); },
   setClass(cnv: CghCnv, v: string) { set({ classes: { ...state.classes, [cnv.id]: v }, dirty: true }); },
+  setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, dirty: true }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
   /** a sample taken off the list (its file too when it was the file's only sample) */
@@ -147,8 +150,10 @@ export const cgh = {
   exported() { set({ dirty: false }); },
 };
 
-/** a call's class: the one given in the browser, else the file's */
-export const classOf = (s: CghState, c: CghCnv) => s.classes[c.id] ?? c.classification;
+/** a call's class: the one given in the browser, else the file's (in the laboratory's words when recognised) */
+export const classOf = (s: CghState, c: CghCnv) => s.classes[c.id] ?? toClass(c.classification) ?? c.classification;
+/** a call's note: the one written in the browser, else the file's */
+export const noteOf = (s: CghState, c: CghCnv) => s.notes[c.id] ?? c.note;
 
 /** whether a call is listed */
 export function passes(s: CghState, c: CghCnv): boolean {

@@ -255,7 +255,8 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
   Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more
   and / or more than 1 Mb;
   MODERATE for a TS score of 2, a breakpoint inside an HI 3 or green monoallelic gene, a PIEV region, or 35 to 49 genes;
-  LOW otherwise (an AChro-Puce region of class 3, 2 or 1 included). The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
+  LOW otherwise (an AChro-Puce region of class 3, 2 or 1 included). A call meeting no HIGH or MODERATE rule is LOW,
+  one without a protein-coding gene included. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
   is still being asked.
 
@@ -264,12 +265,17 @@ or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rul
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
 its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
-homozygous. Each row has its **classification** (the AChro-Puce classes 5 to 1 and PIEV, the words already used in the
-files such as *probablement pathogène* or *bénin*, or one typed with *Other*) and a link to the call's **CNV-Hub** page
+homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
+array ISCN on one line. Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
+significance, Likely pathogenic, Pathogenic, PIEV, Male Reference, Female Reference, NS (non significant: recurring
+technical artifact / atypical log ratio); a class already written in the file is read into that list when its words are
+recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin féminin*…). The **✎** of a row opens a
+**note** on the call. Each row also links to the call's **CNV-Hub** page
 (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
-carries the call's position and type). The classes are kept in the tab only: **Export classified table** writes each
-file of the tab back unchanged but for its Classification column (a BED gets a last column); closing the tab with
-classes not exported asks first.
+carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
+each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
+after the last column when the table has none; a BED gets both as two last columns); closing the tab with classes or
+notes not exported asks first.
 
 ## Reads, haplotypes and phasing
 

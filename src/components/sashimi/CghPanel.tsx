@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Icon, Stepper, Segmented, Pill } from './controls';
-import { cgh, useCgh, passes, classOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_RO } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type GeneView, type Level } from './cghScore';
@@ -16,7 +16,6 @@ import type { MoiClass } from '../../standalone/panelapp';
 const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : kb >= 1 ? `${kb.toFixed(kb >= 100 ? 0 : 1)} kb` : `${Math.round(kb * 1000)} bp`);
 const KIND = { loss: { color: '#dc2626', bg: '#fee2e2', word: 'del' }, gain: { color: '#2563eb', bg: '#dbeafe', word: 'dup' } } as const;
-const OTHER = '\u0000other';
 
 /** "＋ Add samples": the files picked (several at once), read in the page. */
 export function CghAddButton({ compact }: { compact?: boolean }) {
@@ -112,7 +111,8 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
  */
 export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv, f: CghFile) => void; dropping?: boolean; loadersFor?: (b: GenomeBuild) => Omit<SvGeneLoaders, 'fallback'> }) {
   const s = useCgh();
-  const [other, setOther] = useState<{ id: string; text: string } | null>(null);
+  /** a note opened from its row's ✎: its box takes the focus */
+  const [noteFocus, setNoteFocus] = useState<string | null>(null);
   // every analysed call of every patient: its genes (RefSeq, GRCh37), dosage, constraint, PanelApp, AChro-Puce
   useEffect(() => {
     if (!loadersFor) return;
@@ -131,12 +131,11 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const anySuppressed = all.some(({ c }) => c.suppressed);
   const f = s.filter;
   // the classes offered: the network's, then the words of the files and those typed here
-  const own = [...new Set([...s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.map(c => c.classification))), ...Object.values(s.classes)].map(v => v.trim()).filter(v => v && !CGH_CLASSES.some(c => c.value === v)))];
   const show = (i: number) => { const r = rows[i]; if (r) { cgh.setShown(r.c.id); onShow(r.c, r.f); } };
   const at = rows.findIndex(r => r.c.id === s.shown);
   const exportAll = () => {
     for (const fl of new Set(listed.map(e => e.f))) {
-      const text = exportCghFile(fl, c => classOf(s, c));
+      const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c));
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
       a.download = fl.saveAs;
@@ -149,18 +148,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const filesBuilds = [...new Set(listed.map(e => e.f.build ?? 'GRCh37'))];
   return (
     <div className={`mx-4 mt-3 bg-white border rounded-xl shadow-sm ${dropping ? 'border-accent-400 ring-2 ring-accent-100' : 'border-slate-200'}`} data-cgh-frame>
-      <div className="px-5 pt-3 pb-2 flex flex-wrap items-center gap-2">
-        <div className="text-base font-bold mr-1">Array-CGH</div>
-        <CghAddButton compact />
-        <span className="ml-auto flex items-center gap-2">
-          <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
-          <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${s.dirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
-            title={'Each file of the tab written back as it came, its Classification column filled with the classes given here (a BED gets them as a last column).\nThe classes are kept in this tab only: export them to keep them.'}>
-            <Icon name="download" size={13} />Export classified table{s.dirty ? ' •' : ''}</button>
-        </span>
-      </div>
       {/* one tab per patient, and all of them in one table */}
-      <div className="px-5 flex flex-wrap items-end gap-1 border-b border-slate-200" role="tablist" aria-label="Patients">
+      <div className="px-5 pt-2 flex flex-wrap items-end gap-1 border-b border-slate-200">
+        <div className="text-base font-bold mr-2 self-center">Array-CGH</div>
+        <div className="flex flex-wrap items-end gap-1" role="tablist" aria-label="Patients">
         {samples.length > 1 && <button role="tab" aria-selected={!s.sample} className={tab(!s.sample)} onClick={() => cgh.setSample(null)}
           title="Every patient in one table, the sample as a column">All patients <span className="text-slate-400 font-normal tabular-nums">{samples.reduce((n, e) => n + e.x.cnvs.filter(c => passes(s, c)).length, 0)}</span></button>}
         {samples.map(({ x, f: fl }) => {
@@ -168,9 +159,17 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
             <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
             <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
-              onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null) || confirm(`${x.name}: the classes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
+              onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null || s.notes[c.id] != null) || confirm(`${x.name}: the classes and notes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
           </span>;
         })}
+        </div>
+        <span className="ml-auto self-center flex items-center gap-2 py-1">
+          <CghAddButton compact />
+          <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
+          <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${s.dirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+            title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns).\nClasses and notes are kept in this tab only: export them to keep them.'}>
+            <Icon name="download" size={13} />Export classified table{s.dirty ? ' •' : ''}</button>
+        </span>
       </div>
       <div className="pt-2" />
       <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs">
@@ -195,77 +194,74 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       </div>
       {analysedAll > CGH_MAX_ANNOTATED && <div className="mx-5 mb-2 rounded-lg border border-red-300 bg-red-50 text-red-800 px-3 py-1.5 text-[11.5px]" role="alert">
         {analysedAll.toLocaleString('en-US')} calls analysed: only the first {CGH_MAX_ANNOTATED} are annotated. Raise the minimum number of probes and / or the minimum size.</div>}
-      <div className="mx-5 mb-2 border border-slate-200 rounded-lg overflow-auto max-h-[460px] outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
+      <div style={{ maxHeight: 'max(230px, 36vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className="w-full text-[11.5px] border-collapse">
           <thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left">
             <tr className="border-b border-slate-200">
-              {!s.sample && samples.length > 1 && <th className="px-2 py-1 font-medium">Sample</th>}
-              <th className="px-2 py-1 font-medium">Band</th><th className="px-2 py-1 font-medium">Position (GRCh37)</th>
-              <th className="px-2 py-1 font-medium text-right">Size</th><th className="px-2 py-1 font-medium">Type</th>
-              <th className="px-2 py-1 font-medium text-right" title="#Probes">Probes</th><th className="px-2 py-1 font-medium text-right" title="Mean log ratio">Log ratio</th>
-              <th className="px-2 py-1 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes</th>
-              <th className="px-2 py-1 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp</th>
-              <th className="px-2 py-1 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage</th>
-              <th className="px-2 py-1 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority</th>
-              <th className="px-2 py-1 font-medium">Classification</th><th className="px-2 py-1 font-medium">Links</th>
+              {!s.sample && samples.length > 1 && <th className="px-2 py-0.5 font-medium">Sample</th>}
+              <th className="px-2 py-0.5 font-medium">Band</th><th className="px-2 py-0.5 font-medium">Position (GRCh37)</th>
+              <th className="px-2 py-0.5 font-medium text-right">Size</th><th className="px-2 py-0.5 font-medium">Type</th>
+              <th className="px-2 py-0.5 font-medium text-right" title="#Probes">Probes</th><th className="px-2 py-0.5 font-medium text-right" title="Mean log ratio">Log ratio</th>
+              <th className="px-2 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes</th>
+              <th className="px-2 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp</th>
+              <th className="px-2 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage</th>
+              <th className="px-2 py-0.5 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority</th>
+              <th className="px-2 py-0.5 font-medium">Classification</th><th className="px-2 py-0.5 font-medium">Links</th>
             </tr>
           </thead>
           <tbody>
             {rows.map(({ c, f: fl }, i) => {
               const cls = classOf(s, c), col = classColor(cls), on = s.shown === c.id, k = KIND[c.kind];
+              const inList = CGH_CLASSES.some(o => o.value === cls), note = noteOf(s, c);
               const hub = cnvHubUrl(c, fl.build ?? 'GRCh37');
               const v = views.get(c.id)!;
               return [
                 <tr key={c.id} data-cgh-row onClick={() => show(i)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
-                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 shadow-[inset_3px_0_0_#0f766e]' : 'hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
-                  {!s.sample && samples.length > 1 && <td className="px-2 py-1 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
-                  <td className="px-2 py-1 font-semibold whitespace-nowrap">{c.chrom.replace(/^chr/, '')}{c.cytoband.replace(/\s+/g, '')}</td>
-                  <td className="px-2 py-1 font-mono text-[11px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
-                  <td className="px-2 py-1 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
-                  <td className="px-2 py-1 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
-                  <td className={`px-2 py-1 text-right tabular-nums ${c.probes == null ? 'text-slate-400' : ''}`}>{c.probes ?? '?'}</td>
-                  <td className="px-2 py-1 text-right tabular-nums text-slate-600">{c.logRatio == null ? '' : c.logRatio.toFixed(2)}</td>
+                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
+                  {!s.sample && samples.length > 1 && <td className="px-2 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
+                  <td className="px-2 py-0.5 font-semibold whitespace-nowrap">{c.chrom.replace(/^chr/, '')}{c.cytoband.replace(/\s+/g, '')}</td>
+                  <td className="px-2 py-0.5 font-mono text-[11px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
+                  <td className="px-2 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
+                  <td className="px-2 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
+                  <td className={`px-2 py-0.5 text-right tabular-nums ${c.probes == null ? 'text-slate-400' : ''}`}>{c.probes ?? '?'}</td>
+                  <td className="px-2 py-0.5 text-right tabular-nums text-slate-600">{c.logRatio == null ? '' : c.logRatio.toFixed(2)}</td>
                   <GenesCell c={c} v={v} />
                   <PanelCell v={v} />
                   <DosageCell c={c} v={v} />
-                  <td className="px-2 py-1 whitespace-nowrap"><PriorityBadge v={v} /></td>
-                  <td className="px-2 py-1" onClick={e => e.stopPropagation()}>
-                    {other?.id === c.id
-                      ? <form className="flex gap-1" onSubmit={e => { e.preventDefault(); cgh.setClass(c, other.text); setOther(null); }}>
-                          <input autoFocus value={other.text} onChange={e => setOther({ id: c.id, text: e.target.value })} onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setOther(null); } }} placeholder="the class, as your lab writes it"
-                            className="h-[22px] w-[170px] px-1.5 rounded border border-accent-300 text-[11px] outline-none" />
-                          <button className="px-1.5 rounded bg-accent-600 text-white text-[11px]">OK</button></form>
-                      : <select value={cls} aria-label={`Classification of ${c.chrom}:${c.start}-${c.end}`} style={{ borderLeftColor: col ?? '#d3dbe5' }}
-                          onChange={e => { if (e.target.value === OTHER) setOther({ id: c.id, text: cls }); else cgh.setClass(c, e.target.value); }}
-                          className={`h-[22px] max-w-[210px] pl-1.5 pr-1 rounded border border-slate-200 border-l-[4px] bg-white text-[11px] outline-none cursor-pointer ${cls ? 'font-medium text-slate-800' : 'text-slate-400'}`}>
-                          <option value="">— not classified</option>
-                          {CGH_CLASSES.map(o => <option key={o.value} value={o.value}>{o.value}</option>)}
-                          {own.length > 0 && <option disabled>── from the files / typed ──</option>}
-                          {own.map(v => <option key={v} value={v}>{v}</option>)}
-                          <option value={OTHER}>Other (type it)…</option>
-                        </select>}
+                  <td className="px-2 py-0.5 whitespace-nowrap"><PriorityBadge v={v} /></td>
+                  <td className="px-2 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                    <select value={inList ? cls : ''} aria-label={`Classification of ${c.chrom}:${c.start}-${c.end}`} style={{ borderLeftColor: inList ? col ?? '#d3dbe5' : '#d3dbe5' }}
+                      title={!inList && cls ? `The file says “${cls}”: kept in the export unless a class is chosen` : 'The class written in the export'}
+                      onChange={e => cgh.setClass(c, e.target.value)}
+                      className={`h-[20px] w-[150px] pl-1.5 pr-1 rounded border border-slate-200 border-l-[4px] bg-white text-[11px] outline-none cursor-pointer ${inList ? 'font-medium text-slate-800' : 'text-slate-400'}`}>
+                      <option value="">— not classified</option>
+                      {CGH_CLASSES.map(o => <option key={o.value} value={o.value}>{o.hint && o.value === 'NS' ? `NS (${o.hint})` : o.value}</option>)}
+                    </select>
+                    <button onClick={() => { setNoteFocus(c.id); if (!on) show(i); }} className={`ml-1 px-1 rounded ${note ? 'text-accent-700 bg-accent-50 font-bold' : 'text-slate-300 hover:text-slate-600'}`}
+                      title={note ? `Note: ${note}` : 'Add a note on this call (exported in the Comment column)'} aria-label="Note">✎</button>
                   </td>
-                  <td className="px-2 py-1 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                  <td className="px-2 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     {hub ? <a href={hub} target="_blank" rel="noopener noreferrer" className="text-accent-700 hover:underline font-medium" title={`CNV-Hub (cnvhub.net, Dijon University Hospital): this call's page, ${hub}. Opens in a new tab; the call's position and type are in the address.`}>CNV-Hub ↗</a>
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0"><CnvDetail c={c} v={v} /></td></tr>,
+                on && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
           </tbody>
         </table>
       </div>
-      <div className="px-5 pb-3 text-[10.5px] text-slate-500 leading-4">
+      {s.files.some(fl => fl.warnings.some(w => !/^BED: no probe/.test(w))) && <div className="px-5 text-[10.5px] text-amber-700">{s.files.flatMap(fl => fl.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</div>}
+      <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4">
+        <summary className="cursor-pointer text-accent-700 font-medium select-none">ⓘ How the calls are read, annotated, ranked and exported</summary>
         Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row: the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
-        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel).
-        <PriorityRules />
+        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked from {Math.round(DGV_RO * 100)} % reciprocal overlap (same type).
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
-        Positions and ISCN as in the file (hover a row for its ISCN). The classes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them.
-        {s.files.some(fl => fl.warnings.length) && <span className="text-amber-700"> {s.files.flatMap(fl => fl.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</span>}
-      </div>
+        Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column).
+        <PriorityRules />
+      </details>
     </div>
   );
 }
@@ -276,10 +272,10 @@ const waitingDot = (n: number) => (n ? <span className="text-slate-400" title={`
 type View = ReturnType<typeof viewOf>;
 
 function GenesCell({ c, v }: { c: CghCnv; v: View }) {
-  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-0.5 text-slate-400">…</td>;
   const gs = v.ann.genes, file = v.ann.source === 'file';
   return (
-    <td className="px-2 py-1 max-w-[230px] truncate" title={`${file ? `From the file (RefSeq not read): ${c.genes.join(', ')}` : `${gs.length} RefSeq gene${gs.length > 1 ? 's' : ''}: ${gs.map(g => `${g.symbol}${g.whole ? '' : ' (cut)'}`).join(', ')}`}`}>
+    <td className="px-2 py-0.5 max-w-[230px] truncate" title={`${file ? `From the file (RefSeq not read): ${c.genes.join(', ')}` : `${gs.length} RefSeq gene${gs.length > 1 ? 's' : ''}: ${gs.map(g => `${g.symbol}${g.whole ? '' : ' (cut)'}`).join(', ')}`}`}>
       {file && <span className="text-amber-700 font-semibold mr-1">file</span>}
       {gs.length ? <><span className="tabular-nums text-slate-500 mr-1">{gs.length}</span><i>{gs.slice(0, 4).map(g => g.symbol).join(', ')}</i>{gs.length > 4 ? <span className="text-slate-400"> +{gs.length - 4}</span> : null}</>
         : <span className="text-slate-400">{file ? '—' : 'no gene'}</span>}
@@ -290,12 +286,12 @@ function GenesCell({ c, v }: { c: CghCnv; v: View }) {
 const RATING = { 3: { word: 'green', color: '#16a34a' }, 2: { word: 'amber', color: '#d97706' }, 1: { word: 'red', color: '#dc2626' } } as const;
 const modesAt = (x: GeneView) => (x.pa!.best === 3 ? x.pa!.green : x.pa!.best === 2 ? x.pa!.amber : []).filter(m => m !== '?');
 function PanelCell({ v }: { v: View }) {
-  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-0.5 text-slate-400">…</td>;
   const by = (r: 1 | 2 | 3) => v.genes.filter(x => x.pa?.best === r);
   const green = by(3), amber = by(2), red = by(1);
   const title = ([3, 2, 1] as const).flatMap(r => by(r).map(x => `${RATING[r].word}: ${x.g.symbol}${modesAt(x).length ? ` (${modesAt(x).map(m => MOI[m].short).join(', ')})` : ''}${x.pa!.diseases.length ? ` · ${x.pa!.diseases.slice(0, 2).join('; ')}` : ''}`)).join('\n');
   return (
-    <td className="px-2 py-1 max-w-[260px]" title={title || undefined}>
+    <td className="px-2 py-0.5 max-w-[260px]" title={title || undefined}>
       <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
         {green.slice(0, 4).map(x => <span key={x.g.symbol} className="inline-flex items-center gap-0.5 whitespace-nowrap"><i>{x.g.symbol}</i>{modesAt(x).map(m => <MoiBadge key={m} m={m} />)}</span>)}
         {green.length > 4 && <span className="text-slate-400">+{green.length - 4}</span>}
@@ -308,12 +304,12 @@ function PanelCell({ v }: { v: View }) {
   );
 }
 function DosageCell({ c, v }: { c: CghCnv; v: View }) {
-  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-0.5 text-slate-400">…</td>;
   const key = c.kind === 'loss' ? 'hi' : 'ts', word = c.kind === 'loss' ? 'HI' : 'TS';
   const scored = v.genes.filter(x => x[key] === 3 || x[key] === 2).sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0));
   const low = v.genes.filter(x => x.loeuf != null).sort((a, b) => a.loeuf! - b.loeuf!)[0];
   return (
-    <td className="px-2 py-1 whitespace-nowrap">
+    <td className="px-2 py-0.5 whitespace-nowrap">
       {scored.slice(0, 2).map(x => <span key={x.g.symbol} className="mr-1.5 font-semibold" style={{ color: x[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`ClinGen ${c.kind === 'loss' ? 'haploinsufficiency' : 'triplosensitivity'} score ${x[key]} (${x[key] === 3 ? 'sufficient' : 'some'} evidence)`}>{word}{x[key]} <i className="font-normal">{x.g.symbol}</i></span>)}
       {scored.length > 2 && <span className="text-slate-400 mr-1.5">+{scored.length - 2}</span>}
       {low && <span className="text-slate-600" title={`Lowest gnomAD LOEUF of the call (${low.version ?? ''}): ${low.g.symbol} ${low.loeuf!.toFixed(2)}${low.pli != null ? `, pLI ${low.pli.toFixed(2)}` : ''}`}>LOEUF {low.loeuf!.toFixed(2)} <i>{low.g.symbol}</i></span>}
@@ -329,16 +325,21 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v }: { c: CghCnv; v: View }) {
+function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
-  if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]">Reading the genes of the call…</div>;
+  const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
+    ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
+    onKeyDown={e => e.stopPropagation()} aria-label="Note on this call"
+    className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
+  if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}Reading the genes of the call…</div>;
   const key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position
   const genes = v.genes.slice().sort((a, b) => (b.pa?.best ?? 0) - (a.pa?.best ?? 0) || (b[key] ?? 0) % 10 - (a[key] ?? 0) % 10 || a.g.start - b.g.start);
   const shownGenes = allGenes ? genes : genes.slice(0, 30);
   const dot = (l: Level) => <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ background: LEVEL_STYLE[l].color }} />;
   return (
-    <div className="px-4 py-2 bg-slate-50 border-t border-b border-accent-200 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
+    <div className="px-4 py-2 bg-slate-50 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
+      {noteBox}
       <div className="flex flex-wrap gap-x-6 gap-y-1">
         <div className="min-w-[320px] flex-1">
           <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>
@@ -385,12 +386,12 @@ function CnvDetail({ c, v }: { c: CghCnv; v: View }) {
 function PriorityRules() {
   return (
     <details className="mt-1">
-      <summary className="cursor-pointer text-accent-700 font-medium">The priority's rules (a proposal: HIGH, MODERATE, LOW, none)</summary>
+      <summary className="cursor-pointer text-accent-700 font-medium">The priority's rules (HIGH, MODERATE, LOW)</summary>
       <div className="grid grid-cols-[1fr_1fr] gap-4 mt-1">
         {(['loss', 'gain'] as const).map(k => <div key={k}>
           <div className="font-semibold text-slate-700">{k === 'loss' ? 'Losses' : 'Gains'}</div>
           {SCORE_RULES.filter(r => r.kind === k).map(r => <div key={r.id}><span className="font-bold" style={{ color: LEVEL_STYLE[r.level].color }}>{LEVEL_STYLE[r.level].label}</span> <span className="text-slate-400">{r.id}</span> {r.label}</div>)}
-          <div><span className="font-bold" style={{ color: LEVEL_STYLE.none.color }}>none</span>: no protein-coding gene in the call</div>
+          <div><span className="font-bold" style={{ color: LEVEL_STYLE.low.color }}>LOW</span> anything else, a call without a protein-coding gene included</div>
         </div>)}
       </div>
       <div className="mt-1">A call takes the highest level among the rules it meets. Evidence weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet Med 2020;22:245-57: sections 2 and 3); a dashed badge with ? is incomplete (a source did not answer, PanelApp still asked).</div>
