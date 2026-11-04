@@ -190,6 +190,13 @@ const store = {
   get<T>(k: string): T | null { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : null; } catch { return null; } },
   set(k: string, v: unknown) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage full or blocked */ } },
 };
+/**
+ * The SV browser's display settings: remembered while it is open (each search draws the view anew), back to their
+ * defaults each time it opens. The gene panel (PanelApp or a file) is kept across openings.
+ */
+const SV_SETTING_KEYS = ['sashimi.svColorBy', 'sashimi.svNear', 'sashimi.svDgv', 'sashimi.svAchro', 'sashimi.svClinvarSv', 'sashimi.svClinvarSnv',
+  'sashimi.svClinvarSvMode', 'sashimi.svClinvarSnvMode', 'sashimi.svGeneFilter', 'sashimi.svDomains'];
+export function resetSvBrowserSettings(): void { for (const k of SV_SETTING_KEYS) store.set(k, null); }
 const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, name: p.name, version: p.version, genes: new Map(p.genes.map(g => [g.symbol.toUpperCase(), g])) });
 
 // ======================== Drawing helpers ========================

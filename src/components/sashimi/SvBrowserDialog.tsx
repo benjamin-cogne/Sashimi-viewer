@@ -5,7 +5,7 @@
  * picks its build by itself.
  */
 import { useEffect, useMemo, useState } from 'react';
-import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
+import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
@@ -64,7 +64,9 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   /** a search to run at once (a link: #sv=…), in its build when it gives one */
   initial?: { text: string; build?: GenomeBuild };
 }) {
-  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? (initial?.build ?? ((load(BUILD_KEY) as GenomeBuild) || 'GRCh38')) : (sessionBuild as GenomeBuild)));
+  // each opening starts from the default settings (the gene panel aside), before the view below reads them
+  useState(() => { resetSvBrowserSettings(); save(BUILD_KEY, ''); return 0; });
+  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? (initial?.build ?? 'GRCh38') : (sessionBuild as GenomeBuild)));
   const loaders = useMemo(() => (loadersFor ? loadersFor(build) : sessionLoaders), [build, loadersFor, sessionLoaders]);
   const [text, setText] = useState(() => initial?.text ?? load(KEY));
   /** the interval asked for, highlighted in the view (coordinates typed) */
@@ -98,7 +100,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
       const accBuild = acc ? buildOfNc(acc) : null;
       if (accBuild && accBuild !== b) {
         if (!loadersFor) throw new Error(`${acc} is a ${accBuild} accession; this session reads ${b}.`);
-        b = accBuild; setBuild(b); save(BUILD_KEY, b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
+        b = accBuild; setBuild(b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
       }
       const showVariant = (v: SmallVariant, typed: string, hgvsg: string | null, spdi: string | null, vcf: string | null = null, source: string | null = null) => {
         const len = chromLength(b, v.chrom);
@@ -169,7 +171,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   };
   const switchBuild = (b: GenomeBuild) => {
     if (b === build) return;
-    setBuild(b); save(BUILD_KEY, b); setShown(null); setFocus(null);
+    setBuild(b); setShown(null); setFocus(null);
     if (text.trim()) void draw(text, b);
   };
 
