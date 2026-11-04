@@ -1366,10 +1366,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             const vs = clinSvInView.filter(v => v.start <= pos + tol && v.end >= pos - tol).sort((p, q) => (p.end - p.start) - (q.end - q.start));
             return { key: `cvagg:${Math.round((x - X0) / 4)}`, vs, pos: Math.round(pos) };
           };
-          const onMove = (e: React.MouseEvent) => { const r = at(e); if (!r.vs.length) { hoverOff(); return; } if (tip?.gene !== r.key) setTip({ ...boxPos(e), gene: r.key, clin: r.vs, clinAt: r.pos }); else placeTip(boxPos(e).x, boxPos(e).y); lastTipPos.current = boxPos(e); };
+          // ClinVar cards open on a click only (no card following the pointer over these tracks)
           const onClick = (e: React.MouseEvent) => { e.stopPropagation(); if (suppressClick.current) return; const r = at(e); if (!r.vs.length) return; setPinned(cur => (cur?.gene === r.key ? null : { ...boxPos(e), gene: r.key, clin: r.vs, clinAt: r.pos })); };
           return (
-            <g style={{ cursor: 'pointer' }} onMouseMove={onMove} onMouseLeave={hoverOff} onClick={onClick}>
+            <g style={{ cursor: 'pointer' }} onClick={onClick}>
               <rect x={X0} y={yClinSv} width={PW} height={CLIN_AGG_H} fill="transparent" />
               <path d={path(clinAgg.loss, 1)} fill={CLIN_KIND_COLOR.loss} fillOpacity={0.55} />
               <path d={path(clinAgg.gain, -1)} fill={CLIN_KIND_COLOR.gain} fillOpacity={0.55} />
@@ -1383,7 +1383,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const yy = yClinBars + lane * CLIN_SV_LANE_H, col = CLIN_KIND_COLOR[v.kind] ?? CLIN_KIND_COLOR.other, key = `cv:${v.id}:${v.start}`;
           const same = clinMatch(v);
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key, undefined, [v])} onMouseMove={hoverOn(key, undefined, [v])} onMouseLeave={hoverOff} onClick={pinOn(key, undefined, [v])}>
+            <g key={key} style={{ cursor: 'pointer' }} onClick={pinOn(key, undefined, [v])}>
               <rect x={a} y={yy} width={b - a} height={CLIN_SV_LANE_H - 1} fill="transparent" />
               <rect x={a} y={yy + 1} width={Math.max(1.5, b - a)} height={6} rx={1} fill={col} fillOpacity={v.code === 'PG' ? 0.9 : 0.4} stroke={same ? '#111827' : 'none'} strokeWidth={0.8} />
             </g>
@@ -1397,9 +1397,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const range: [number, number] = [Math.floor(vp.s + (b.x - X0) * bppRef.current), Math.ceil(vp.s + (b.x + CLIN_SNV_BIN - X0) * bppRef.current)];
           const vs = [...b.vs].sort((p, q) => ['lof', 'missense', 'inframe', 'other'].indexOf(p.effect) - ['lof', 'missense', 'inframe', 'other'].indexOf(q.effect) || (p.code === q.code ? 0 : p.code === 'PG' ? -1 : 1));
           const key = `cvsum:${b.k}`;
-          const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== key) setTip({ ...pt, gene: key, clin: vs, clinRange: range }); else placeTip(pt.x, pt.y); };
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={show} onMouseMove={show} onMouseLeave={hoverOff}
+            <g key={key} style={{ cursor: 'pointer' }}
               onClick={e => { e.stopPropagation(); if (suppressClick.current) return; const pt = boxPos(e); setPinned(cur => (cur?.gene === key ? null : { ...pt, gene: key, clin: vs, clinRange: range })); }}>
               <rect x={b.x} y={yClinSnv} width={CLIN_SNV_BIN} height={snvH} fill="transparent" />
               {b.lofP > 0 && <rect x={b.x} y={mid - b.lofP * k} width={w} height={b.lofP * k} fill={CLIN_EFFECT_COLOR.lof} />}
@@ -1427,7 +1426,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
               ? <path d={`M${x},${mid + stem + r * 1.25}L${x + r * 1.15},${mid + stem - r * 0.75}L${x - r * 1.15},${mid + stem - r * 0.75}Z`} fill={fill} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />
               : <path d={`M${x},${mid - r}L${x + r},${mid}L${x},${mid + r}L${x - r},${mid}Z`} fill={fill} stroke={stroke} strokeWidth={sw} />;
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key, undefined, vs)} onMouseMove={hoverOn(key, undefined, vs)} onMouseLeave={hoverOff} onClick={pinOn(key, undefined, vs)}>
+            <g key={key} style={{ cursor: 'pointer' }} onClick={pinOn(key, undefined, vs)}>
               <rect x={x - 3} y={up ? yClinSnv : side === 'missense' ? mid : mid - 5} width={6} height={side === 'mid' ? 10 : snvH / 2} fill="transparent" />
               {side !== 'mid' && <line x1={x} x2={x} y1={mid} y2={up ? mid - stem : mid + stem} stroke={col} strokeOpacity={0.55} strokeWidth={1.1} />}
               {head}
@@ -1440,7 +1439,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const order = (v: ClinvarVariant) => (v.effect === 'lof' ? (isEsc(v) ? 1 : 0) : v.effect === 'missense' ? 2 : 3) * 2 + (v.code === 'PG' ? 0 : 1);
           const vs = [...gp.vs].sort((a, b) => order(a) - order(b));
           const info = { names, tx, s: gp.s, e: gp.e };
-          const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== key) setTip({ ...pt, gene: key, clin: vs, clinGenes: info }); else placeTip(pt.x, pt.y); };
           const rN = snvR(gp.nmd), rE = snvR(gp.esc), both = gp.nmd > 0 && gp.esc > 0;
           const cxN = both ? gp.x - rN - 1 : gp.x, cxE = both ? gp.x + rE + 1 : gp.x;
           const t = snvTri(gp.mis), th = t * 1.3, triFs = gp.mis > 99 ? 7.5 : 9;
@@ -1448,7 +1446,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const gx0 = Math.max(X0, refX(gp.s)), gx1 = Math.min(X1, refX(gp.e));
           const lw = Math.max(gp.w * 2, 10);
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={show} onMouseMove={show} onMouseLeave={hoverOff}
+            <g key={key} style={{ cursor: 'pointer' }}
               onClick={e => { e.stopPropagation(); if (suppressClick.current) return; const pt = boxPos(e); setPinned(cur => (cur?.gene === key ? null : { ...pt, gene: key, clin: vs, clinGenes: info })); }}>
               {/* the gene's stretch on the line */}
               {gx1 > gx0 && <rect x={gx0} y={midY - 1.5} width={Math.max(gx1 - gx0, 1)} height={3} rx={1.5} fill={C.faint} fillOpacity={0.35} />}
