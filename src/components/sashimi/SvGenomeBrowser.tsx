@@ -68,7 +68,8 @@ const CLIN_LOF_ESC = '#ea580c';
 /** the ClinVar SNV track summed per gene: its height, and the glyphs' sizes (radius / half-width by count) */
 const CLIN_SNV_GENE_H = 70;
 const snvR = (n: number) => Math.min(13, 6.6 + 1.5 * Math.sqrt(n));
-const snvTri = (n: number) => Math.min(13, 7.2 + 1.4 * Math.sqrt(n));
+/** the missense ▼: half-width by count, flat enough (height 1.3 × half-width) for its number to sit in its wide part */
+const snvTri = (n: number) => Math.min(15, 10 + 1.3 * Math.sqrt(n));
 const CLIN_EFFECT_WORD = { lof: 'loss of function', missense: 'missense', inframe: 'in frame', other: 'other' } as const;
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
@@ -1397,7 +1398,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== key) setTip({ ...pt, gene: key, clin: vs, clinGenes: info }); else placeTip(pt.x, pt.y); };
           const rN = snvR(gp.nmd), rE = snvR(gp.esc), both = gp.nmd > 0 && gp.esc > 0;
           const cxN = both ? gp.x - rN - 1 : gp.x, cxE = both ? gp.x + rE + 1 : gp.x;
-          const t = snvTri(gp.mis), th = t * 1.55;
+          const t = snvTri(gp.mis), th = t * 1.3, triFs = gp.mis > 99 ? 7.5 : 9;
           const num = (n: number, x: number, yy: number, big: number) => <text x={x} y={yy} fontSize={n > 99 ? 7.5 : big > 9 ? 9.5 : 8.5} fontWeight={700} textAnchor="middle" fill="#fff" pointerEvents="none">{n}</text>;
           const gx0 = Math.max(X0, refX(gp.s)), gx1 = Math.min(X1, refX(gp.e));
           const lw = Math.max(gp.w * 2, 10);
@@ -1409,7 +1410,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
               <rect x={gp.x - lw / 2} y={yClinSnv} width={lw} height={snvH} fill="transparent" />
               {gp.nmd > 0 && <><circle cx={cxN} cy={midY - 4 - rN} r={rN} fill={CLIN_EFFECT_COLOR.lof} stroke="#fff" strokeWidth={1} />{num(gp.nmd, cxN, midY - 4 - rN + 3.3, rN)}</>}
               {gp.esc > 0 && <><circle cx={cxE} cy={midY - 4 - rE} r={rE} fill={CLIN_LOF_ESC} stroke="#fff" strokeWidth={1} />{num(gp.esc, cxE, midY - 4 - rE + 3.3, rE)}</>}
-              {gp.mis > 0 && <><path d={`M${gp.x - t},${midY + 4}L${gp.x + t},${midY + 4}L${gp.x},${midY + 4 + th}Z`} fill={CLIN_EFFECT_COLOR.missense} stroke="#fff" strokeWidth={1} strokeLinejoin="round" />{num(gp.mis, gp.x, midY + 4 + th * 0.42, t)}</>}
+              {gp.mis > 0 && <><path d={`M${gp.x - t},${midY + 4}L${gp.x + t},${midY + 4}L${gp.x},${midY + 4 + th}Z`} fill={CLIN_EFFECT_COLOR.missense} stroke="#fff" strokeWidth={1} strokeLinejoin="round" /><text x={gp.x} y={midY + 4 + 1.5 + triFs * 0.74} fontSize={triFs} fontWeight={700} textAnchor="middle" fill="#fff" stroke={CLIN_EFFECT_COLOR.missense} strokeWidth={2} paintOrder="stroke" pointerEvents="none">{gp.mis}</text></>}
               {!gp.nmd && !gp.esc && !gp.mis && <path d={`M${gp.x},${midY - 3.5}L${gp.x + 3.5},${midY}L${gp.x},${midY + 3.5}L${gp.x - 3.5},${midY}Z`} fill={CLIN_EFFECT_COLOR.inframe} />}
               {gp.genes.length > 1 && <text x={gp.x + gp.w - 1} y={midY + 3} fontSize={8} textAnchor="end" fill={C.faint} pointerEvents="none">{`×${gp.genes.length}`}</text>}
             </g>
