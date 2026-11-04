@@ -37,6 +37,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const bands = useCytobands(drawn?.cnv.chrom ?? 'chr1', loaders?.getCytobands);
   // the calls this page lists are in the store: a call drawn from a sample taken off stays until another is clicked
   const c = drawn?.cnv;
+  // a male's chrX and chrY: one copy, the call on it (no other homologue)
+  const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!over) setOver(true); }}
@@ -66,13 +68,13 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
                 <div className="text-sm font-bold">{c.sample} · {c.chrom.replace(/^chr/, '')}{c.cytoband.replace(/\s+/g, '')} {c.kind === 'loss' ? 'loss' : 'gain'} {copyText(c)}</div>
                 <div className="text-[11px] text-slate-600 mt-0.5">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} ({drawn.build}) · {c.probes ?? '?'} probes{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.iscn ? <> · <span className="font-mono">{c.iscn}</span></> : null}</div>
                 <div className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-1">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
-                <div className="text-[10.5px] text-slate-500 mt-0.5">{c.copies === 0 ? 'Drawn as homozygous (x0: both copies lost)' : 'Drawn as heterozygous'}, 2 copies on the flanks{c.kind === 'gain' ? '; the extra copy drawn in tandem (its place is not known from the array)' : ''}.</div>
+                <div className="text-[10.5px] text-slate-500 mt-0.5">{one ? `Drawn with one copy (${c.chrom} of a male)` : c.copies === 0 ? 'Drawn as homozygous (x0: both copies lost), 2 copies on the flanks' : 'Drawn as heterozygous, 2 copies on the flanks'}{c.kind === 'gain' ? '; the extra copy drawn in tandem (its place is not known from the array)' : ''}.</div>
               </div>
               <SvNomenclatureBox rec={rec} build={drawn.build} bands={bands} />
             </div>
             <div className="[&>div:first-child]:mt-2">
-              <SvGenomeBrowser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={2}
-                zygosity={c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} />
+              <SvGenomeBrowser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
+                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} />
             </div>
           </div>
         )}

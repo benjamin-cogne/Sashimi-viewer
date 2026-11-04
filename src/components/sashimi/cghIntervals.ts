@@ -12,10 +12,15 @@
 import type { GenomeBuild } from '../../standalone/ensembl';
 
 export type CghKind = 'loss' | 'gain';
+export type CghSex = 'male' | 'female';
+/** a sex as a header line may write it (Gender / Sex: Male, F, Femme…) */
+export const sexOf = (v: string | null | undefined): CghSex | null => (!v ? null : /^\s*(m|male|homme|masculin)\b/i.test(v) ? 'male' : /^\s*(f|female|femme|f[ée]minin)\b/i.test(v) ? 'female' : null);
 export interface CghCnv {
   /** unique within the tab: file, row */
   id: string;
   sample: string;
+  /** the sample's key (its file and name) */
+  sampleKey: string;
   /** chr1…chr22, chrX, chrY */
   chrom: string;
   /** 1-based inclusive, as in the file's ISCN */
@@ -40,7 +45,9 @@ export interface CghCnv {
   /** the file's line of this call (0-based), for the export */
   line: number;
 }
-export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[] }
+export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[];
+  /** the sex a header line gives (Gender, Sex), else null */
+  sex: CghSex | null }
 export interface CghFile {
   /** the file's name (for a file of a zip: zip › path inside), and the name its export is saved under */
   id: string; name: string; saveAs: string; format: 'interval' | 'bed';
@@ -152,10 +159,10 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
     if (cell.trim()) { if (cell.includes(';;')) suffixYes++; else suffixNo++; }
     const name = (c.sample >= 0 && f[c.sample]?.trim()) || record || base;
     let s = samples.get(name);
-    if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [] }; samples.set(name, s); }
+    if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex: sexOf(metaOf(/^(gender|sex|sexe)$/i)) }; samples.set(name, s); }
     const size = c.size >= 0 ? num(f[c.size]) : null;
     s.cnvs.push({
-      id: `${id}:${i}`, sample: name, chrom, start, end,
+      id: `${id}:${i}`, sample: name, sampleKey: s.key, chrom, start, end,
       cytoband: c.band >= 0 ? (f[c.band] ?? '').trim() : '',
       genes: c.genes >= 0 ? (f[c.genes] ?? '').split(/[,;]/).map(g => g.trim()).filter(Boolean) : [],
       sizeKb: size ?? (end - start) / 1000, kind, typeText: typeText || (kind === 'loss' ? 'Deletion' : 'Gain'),
@@ -175,7 +182,7 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
 function parseBed(lines: string[], id: string, fileName: string, base: string, eol: string): Omit<CghFile, 'saveAs'> {
-  const s: CghSample = { key: `${id}:${base}`, name: base, fileId: id, declaredCalls: null, cnvs: [] };
+  const s: CghSample = { key: `${id}:${base}`, name: base, fileId: id, declaredCalls: null, cnvs: [], sex: null };
   const warnings: string[] = [];
   let noType = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -190,7 +197,7 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
     const cn = name.includes('(') ? iscnCopies(name) : bare ? { copies: +bare[1], copiesHi: bare[2] ? +bare[2] : null, amp: false } : { copies: null, copiesHi: null, amp: /\bamp/i.test(name) };
     const kind = kindOfText(`${name} ${f.slice(4).join(' ')}`) ?? (cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : null);
     if (!kind) { noType++; continue; }
-    s.cnvs.push({ id: `${id}:${i}`, sample: base, chrom, start: a + 1, end: b, cytoband: '', genes: [], sizeKb: (b - a) / 1000, kind, typeText: name || kind, probes: null, logRatio: null, iscn: null, ...cn, suppressed: false, classification: '', classRest: '', line: i });
+    s.cnvs.push({ id: `${id}:${i}`, sample: base, sampleKey: s.key, chrom, start: a + 1, end: b, cytoband: '', genes: [], sizeKb: (b - a) / 1000, kind, typeText: name || kind, probes: null, logRatio: null, iscn: null, ...cn, suppressed: false, classification: '', classRest: '', line: i });
   }
   if (noType) warnings.push(`${noType} interval${noType > 1 ? 's' : ''} without a type (the 4th column should say del / dup, loss / gain or x1 / x3), not read`);
   if (!s.cnvs.length) throw new Error(`${fileName}: neither an interval table (no Chromosome / Start / Stop header) nor a BED with typed intervals.`);

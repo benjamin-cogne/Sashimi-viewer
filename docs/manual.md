@@ -221,7 +221,9 @@ Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Cl
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
 one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
 already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
-**minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED keeps all its calls).
+**minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED keeps all its calls), and
+each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
+marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
 Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
@@ -238,9 +240,10 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
   HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode, both copies
-  (x0) of a green biallelic gene, an AChro-Puce recurrent deletion of class 5 or 4, or 35 protein-coding genes or more;
-  MODERATE for an HI score of 2, a LoF-intolerant gene (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9), one copy
-  of a green biallelic gene (look for a second variant), a green X-linked recessive gene, a green gene without a mode
+  (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
+  deletion of class 5 or 4, or 35 protein-coding genes or more; MODERATE for an HI score of 2, a LoF-intolerant gene
+  (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9; losses only), one copy of a green biallelic gene (look for a
+  second variant), one copy of a green X-linked recessive gene in a female or when the sex is not given, a green gene without a mode
   or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost, genes cut without an exon,
   or an AChro-Puce region of class 3, 2 or 1 (said, never lowering a higher level).
   Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more;

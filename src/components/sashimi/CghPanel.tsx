@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, CGH_MIN_PROBES_DEFAULT, type CghState } from './cghStore';
-import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile } from './cghIntervals';
+import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, PANEL_SOURCE, PANELAPP_MAX_GENES } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type GeneView, type Level } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
@@ -36,13 +36,23 @@ export function CghProbeDialog() {
   const s = useCgh();
   return s.pending ? <ProbeQuestion p={s.pending} init={s.filter.minProbes} /> : null;
 }
+/** the patient's sex: changes the priority of X-linked recessive genes and the copies drawn for chrX / chrY */
+export const SEX_MARK: Record<CghSex, string> = { male: '♂', female: '♀' };
+function SexSelect({ value, onChange, title }: { value: CghSex | null; onChange: (v: CghSex | null) => void; title?: string }) {
+  return <select value={value ?? ''} onChange={e => onChange((e.target.value || null) as CghSex | null)} aria-label="Sex of the patient"
+    title={title ?? "The patient's sex: a male's chrX loss is hemizygous (a green X-linked recessive gene is then HIGH), and his chrX / chrY are drawn with one copy"}
+    className={`h-[24px] px-1 rounded border border-slate-200 bg-white text-[11.5px] outline-none cursor-pointer ${value ? 'text-slate-800 font-medium' : 'text-slate-400'}`}>
+    <option value="">sex not given</option><option value="male">♂ male</option><option value="female">♀ female</option>
+  </select>;
+}
 function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init: number }) {
   const [n, setN] = useState<number>(init);
+  const [sexes, setSexes] = useState<Record<string, CghSex | null>>(() => Object.fromEntries(p.files.flatMap(f => f.samples.map(x => [x.key, x.sex]))));
   const samples = p.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const noCount = p.files.some(f => f.format === 'bed' || f.warnings.some(w => /no #Probes/.test(w)));
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
-      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length) cgh.accept(n); }}>
+      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && (e.target as HTMLElement).tagName !== 'SELECT') cgh.accept(n, sexes); }}>
       <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16">
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
@@ -55,12 +65,13 @@ function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init:
             {n !== CGH_MIN_PROBES_DEFAULT && <button className="text-accent-700 hover:underline" onClick={() => setN(CGH_MIN_PROBES_DEFAULT)}>back to {CGH_MIN_PROBES_DEFAULT}</button>}
           </div>}
           {samples.length > 0 && <table className="w-full text-[11.5px]">
-            <thead><tr className="text-left text-slate-500 border-b border-slate-200"><th className="py-1 font-medium">Sample</th><th className="font-medium">File</th><th className="font-medium">Build</th><th className="font-medium text-right">Calls</th><th className="font-medium text-right">Analysed</th></tr></thead>
+            <thead><tr className="text-left text-slate-500 border-b border-slate-200"><th className="py-1 font-medium">Sample</th><th className="font-medium">File</th><th className="font-medium">Build</th><th className="font-medium">Sex</th><th className="font-medium text-right">Calls</th><th className="font-medium text-right">Analysed</th></tr></thead>
             <tbody>{samples.map(({ x, f }) => {
               const kept = x.cnvs.filter(c => c.probes == null || c.probes >= n).length;
               return <tr key={x.key} className="border-b border-slate-100">
                 <td className="py-1 font-semibold">{x.name}</td><td className="text-slate-500 truncate max-w-[150px]" title={f.name}>{f.name}</td>
                 <td className={f.build ? '' : 'text-amber-700'} title={f.buildText ? `the file says Genome ${f.buildText}` : 'the file states no build: read as GRCh37'}>{f.build ?? 'GRCh37 ?'}</td>
+                <td><SexSelect value={sexes[x.key] ?? null} onChange={v => setSexes(m => ({ ...m, [x.key]: v }))} title={x.sex ? `the file says ${x.sex}` : undefined} /></td>
                 <td className="text-right tabular-nums">{x.cnvs.length}</td><td className="text-right tabular-nums font-semibold">{kept}</td>
               </tr>;
             })}</tbody>
@@ -72,7 +83,7 @@ function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init:
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
           <button onClick={() => cgh.cancel()} className="h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50">Cancel</button>
-          {samples.length > 0 && <button autoFocus onClick={() => cgh.accept(n)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
+          {samples.length > 0 && <button autoFocus onClick={() => cgh.accept(n, sexes)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
         </div>
       </div>
     </div>
@@ -139,7 +150,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         {samples.map(({ x, f: fl }) => {
           const n = x.cnvs.filter(c => passes(s, c)).length, on = s.sample === x.key || samples.length === 1;
           return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
-            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
+            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
             <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
               onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null) || confirm(`${x.name}: the classes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
           </span>;
@@ -147,6 +158,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       </div>
       <div className="pt-2" />
       <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs">
+        {listed.length === 1 && <SexSelect value={s.sex[listed[0].x.key] ?? null} onChange={v => cgh.setSex(listed[0].x.key, v)} />}
         <Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" />
         <Segmented size="sm" label="Type" title="Losses, gains or both" value={f.kind} onChange={v => cgh.setFilter({ kind: v })}
           options={[{ value: 'all', label: 'all', hint: 'Losses and gains' }, { value: 'loss', label: 'losses', hint: 'Deletions only' }, { value: 'gain', label: 'gains', hint: 'Gains and amplifications only' }]} />
@@ -189,7 +201,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
               return [
                 <tr key={c.id} data-cgh-row onClick={() => show(i)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 shadow-[inset_3px_0_0_#0f766e]' : 'hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
-                  {!s.sample && samples.length > 1 && <td className="px-2 py-1 text-slate-600 whitespace-nowrap">{c.sample}</td>}
+                  {!s.sample && samples.length > 1 && <td className="px-2 py-1 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
                   <td className="px-2 py-1 font-semibold whitespace-nowrap">{c.chrom.replace(/^chr/, '')}{c.cytoband.replace(/\s+/g, '')}</td>
                   <td className="px-2 py-1 font-mono text-[11px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-2 py-1 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>

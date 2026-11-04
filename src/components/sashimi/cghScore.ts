@@ -15,6 +15,7 @@
  */
 import type { MoiClass } from '../../standalone/panelapp';
 import type { AchroClass } from './achropuce';
+import type { CghSex } from './cghIntervals';
 
 export type Level = 'high' | 'moderate' | 'low' | 'none';
 export const LEVEL_RANK: Record<Level, number> = { high: 3, moderate: 2, low: 1, none: 0 };
@@ -40,6 +41,8 @@ export interface GeneView {
 export interface AchroHit { id: string; name: string; type: 'del' | 'dup'; cls: AchroClass[]; how: string }
 export interface ScoreInput {
   kind: 'loss' | 'gain'; copies: number | null; chrom: string;
+  /** the patient's sex, null when not given */
+  sex: CghSex | null;
   genes: GeneView[];
   /** whether the genes are RefSeq's (counted) or only the file's names (not counted) */
   refseq: boolean;
@@ -69,12 +72,13 @@ export const SCORE_RULES: Rule[] = [
   { id: 'L1', level: 'high', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 3 (sufficient evidence)', gene: v => v.g.exons && v.hi === 3 },
   { id: 'L2', level: 'high', kind: 'loss', label: 'exons of a PanelApp green gene with a monoallelic mode (AD, AD/AR, X-linked dominant)', gene: v => v.g.exons && any(v.pa?.green, MONO) },
   { id: 'L3', level: 'high', kind: 'loss', label: 'both copies lost (x0) of exons of a PanelApp green gene with a biallelic mode (AR)', gene: (v, i) => i.copies === 0 && v.g.exons && any(v.pa?.green, BI) },
+  { id: 'L3X', level: 'high', kind: 'loss', label: 'exons of a PanelApp green X-linked recessive gene lost in a male (hemizygous), or both copies lost (x0)', gene: (v, i) => i.chrom === 'chrX' && (i.sex === 'male' || i.copies === 0) && v.g.exons && any(v.pa?.green, ['XLR']) },
   { id: 'L4', level: 'high', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 5 or 4', call: i => hits(i, 'del', ['5', '4']) },
   { id: 'L5', level: 'high', kind: 'loss', label: '35 protein-coding genes or more (ACMG/ClinGen section 3C: 0.90 point)', call: i => (i.refseq && i.genes.length >= 35 ? `${i.genes.length} protein-coding genes` : null) },
   { id: 'L6', level: 'moderate', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 2 (some evidence)', gene: v => v.g.exons && v.hi === 2 },
   { id: 'L7', level: 'moderate', kind: 'loss', label: 'exons of a LoF-intolerant gene (gnomAD LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9)', gene: v => v.g.exons && intolerant(v) },
   { id: 'L8', level: 'moderate', kind: 'loss', label: 'one copy of a PanelApp green gene with a biallelic mode (AR) lost: look for a variant on the other copy', gene: (v, i) => i.copies !== 0 && v.g.exons && any(v.pa?.green, BI) && !any(v.pa?.green, MONO) },
-  { id: 'L9', level: 'moderate', kind: 'loss', label: 'a PanelApp green X-linked recessive gene (hemizygous in a male)', gene: (v, i) => i.chrom === 'chrX' && v.g.exons && any(v.pa?.green, ['XLR']) },
+  { id: 'L9', level: 'moderate', kind: 'loss', label: 'one copy of a PanelApp green X-linked recessive gene lost in a female (carrier), or the sex not given', gene: (v, i) => i.chrom === 'chrX' && i.sex !== 'male' && i.copies !== 0 && v.g.exons && any(v.pa?.green, ['XLR']) },
   { id: 'L10', level: 'moderate', kind: 'loss', label: 'a PanelApp green gene whose mode is not given, or an amber gene with a monoallelic mode', gene: v => v.g.exons && (any(v.pa?.green, ['?']) || any(v.pa?.amber, MONO)) },
   { id: 'L11', level: 'moderate', kind: 'loss', label: 'an AChro-Puce recurrent deletion classed PIEV (susceptibility)', call: i => hits(i, 'del', ['PIEV']) },
   { id: 'L12', level: 'moderate', kind: 'loss', label: '25 to 34 protein-coding genes (section 3B: 0.45 point)', call: i => (i.refseq && i.genes.length >= 25 && i.genes.length < 35 ? `${i.genes.length} protein-coding genes` : null) },

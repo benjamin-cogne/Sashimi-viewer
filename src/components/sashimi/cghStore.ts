@@ -5,7 +5,7 @@
  */
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
-import { parseCghFile, type CghFile, type CghCnv } from './cghIntervals';
+import { parseCghFile, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
 
@@ -40,6 +40,8 @@ export interface CghState {
   /** what each call holds (genes, dosage, constraint, AChro-Puce), by call id; PanelApp's entries by gene */
   ann: Record<string, CnvAnn>;
   modes: Record<string, GeneModes | 'loading' | 'error'>;
+  /** each patient's sex, by sample key (absent: not given) */
+  sex: Record<string, CghSex>;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -49,7 +51,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {}, sex: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -112,12 +114,15 @@ export const cgh = {
     set({ pending: { files, errors, notes } });
   },
   /** the files accepted with this minimum: listed, the first new sample shown */
-  accept(minProbes: number) {
+  /** the files accepted with this minimum and the sexes chosen (by sample key; the file's own when not chosen) */
+  accept(minProbes: number, sexes: Record<string, CghSex | null> = {}) {
     const p = state.pending; if (!p) return;
+    const sex = { ...state.sex };
+    for (const x of p.files.flatMap(f => f.samples)) { const v = x.key in sexes ? sexes[x.key] : x.sex; if (v) sex[x.key] = v; else delete sex[x.key]; }
     const filter = { ...state.filter, minProbes };
     try { localStorage.setItem(FILTER_KEY, JSON.stringify({ ...filter, query: '' })); } catch { /* storage blocked */ }
     const files = [...state.files, ...p.files];
-    set({ files, pending: null, filter, sample: p.files[0]?.samples[0]?.key ?? state.sample });
+    set({ files, pending: null, filter, sex, sample: p.files[0]?.samples[0]?.key ?? state.sample });
   },
   cancel() { set({ pending: null }); },
   setFilter(patch: Partial<CghFilter>) {
@@ -128,6 +133,7 @@ export const cgh = {
   setSample(key: string | null) { set({ sample: key }); },
   setClass(cnv: CghCnv, v: string) { set({ classes: { ...state.classes, [cnv.id]: v }, dirty: true }); },
   setShown(id: string | null) { set({ shown: id }); },
+  setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
   /** a sample taken off the list (its file too when it was the file's only sample) */
   remove(sampleKey: string) {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);
