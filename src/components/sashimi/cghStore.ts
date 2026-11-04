@@ -30,6 +30,8 @@ export interface CghState {
   pending: { files: CghFile[]; errors: string[] } | null;
   /** classes changed since the last export */
   dirty: boolean;
+  /** the array-CGH page is open (over the SV browser) */
+  open: boolean;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -39,7 +41,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -57,6 +59,7 @@ async function readText(f: File): Promise<string> {
 
 export const cgh = {
   get: () => state,
+  setOpen(open: boolean) { set({ open }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [];

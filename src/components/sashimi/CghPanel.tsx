@@ -18,9 +18,9 @@ export function CghAddButton({ compact }: { compact?: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   return (
     <label className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium cursor-pointer whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50 ${compact ? 'h-[26px] px-2 text-xs rounded-lg' : ''}`}
-      title={'Array-CGH calls of one or more patients: the interval table of each sample exported by CytoGenomics (.txt: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), or a BED (chrom, start, end, a name saying del / dup or x1 / x3).\nRead in this page, never sent anywhere.'}>
+      title={'Array-CGH calls of one or more patients: the interval table of each sample exported by CytoGenomics (.txt: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), a BED (chrom, start, end, a name saying del / dup or x1 / x3), or zip files holding them (one patient per zip).\nRead in this page, never sent anywhere. Files can also be dropped on the page.'}>
       <Icon name="upload" size={compact ? 13 : 15} />{compact ? 'Add samples' : 'Add array-CGH samples'}
-      <input ref={input} data-cgh-input type="file" multiple accept=".txt,.tsv,.bed,.xls,text/plain" className="hidden"
+      <input ref={input} data-cgh-input type="file" multiple accept=".txt,.tsv,.bed,.xls,.zip,text/plain,application/zip" className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>
   );
@@ -78,7 +78,7 @@ function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init:
  * band), each call a row: clicked, it is drawn in the browser below; its class is chosen in the row; its CNV-Hub page
  * opens from it. ↑ ↓ go from one call to the next.
  */
-export function CghFrame({ onShow }: { onShow: (c: CghCnv, f: CghFile) => void }) {
+export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile) => void; dropping?: boolean }) {
   const s = useCgh();
   const [other, setOther] = useState<{ id: string; text: string } | null>(null);
   if (!s.files.length) return null;
@@ -107,7 +107,7 @@ export function CghFrame({ onShow }: { onShow: (c: CghCnv, f: CghFile) => void }
   const chip = (on: boolean) => `inline-flex items-center gap-1.5 h-[26px] pl-2 pr-1.5 rounded-lg border text-xs font-medium whitespace-nowrap ${on ? 'bg-accent-50 border-accent-200 text-accent-700' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`;
   const filesBuilds = [...new Set(listed.map(e => e.f.build ?? 'GRCh37'))];
   return (
-    <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm" data-cgh-frame>
+    <div className={`mx-4 mt-3 bg-white border rounded-xl shadow-sm ${dropping ? 'border-accent-400 ring-2 ring-accent-100' : 'border-slate-200'}`} data-cgh-frame>
       <div className="px-5 pt-3 pb-2 flex flex-wrap items-center gap-2">
         <div className="text-base font-bold mr-1">Array-CGH</div>
         {samples.length > 1 && <button className={chip(!s.sample)} onClick={() => cgh.setSample(null)}>All samples <span className="text-slate-400 font-normal">{samples.length}</span></button>}

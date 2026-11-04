@@ -4,7 +4,7 @@
  * the same chromosome, else the reference alone). GRCh38 by default, GRCh37 on demand: an `NC_` accession's version
  * picks its build by itself.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
 import { parseSv, type ParsedSv } from './svNomenclature';
@@ -18,9 +18,8 @@ import { Segmented } from './controls';
 import { rememberGene } from '../../standalone/geneSuggest';
 import { svLinkHref } from '../../standalone/link';
 import { parseSmallGenomic, TRANSCRIPT_HGVS_RE, SMALL_KIND_WORD, SMALL_MAX, type SmallVariant } from './smallVariant';
-import { CghAddButton, CghProbeDialog, CghFrame } from './CghPanel';
-import { cgh } from './cghStore';
-import { cnvSearchText, copyText, type CghCnv, type CghFile } from './cghIntervals';
+import CghPage from './CghPage';
+import { cgh, useCgh } from './cghStore';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -81,9 +80,6 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  /** the array-CGH call drawn (a loss of both copies is drawn homozygous); any other search clears it */
-  const [cghCnv, setCghCnv] = useState<CghCnv | null>(null);
-  const fromCgh = useRef<CghCnv | null>(null);
 
   /** Go to a place: with the rearrangement when it is on that chromosome (the view flies there), else the reference alone. */
   const goRegion = (chrom: string, start: number, end: number, b: GenomeBuild, highlight?: { start: number; end: number }) => {
@@ -97,8 +93,6 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   };
   const draw = async (t = text, b: GenomeBuild = build) => {
     setError(null); setNote(null);
-    const cnv = fromCgh.current; fromCgh.current = null;
-    setCghCnv(cnv); if (!cnv) cgh.setShown(null);
     const raw = t.trim();
     try {
       // an NC_ accession's version decides the build (HGVS, ISCN, a small variant)
@@ -175,15 +169,6 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
       setShown({ kind: 'sv', parsed, text: t }); setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
     } catch (e) { setError((e as Error).message); setNote(n => (n?.endsWith('…') ? null : n)); }
   };
-  /** an array-CGH call clicked: DEL / DUP before its coordinates, on the file's build (GRCh37 when it states none) */
-  const showCnv = (c: CghCnv, f: CghFile) => {
-    const b: GenomeBuild = f.build ?? 'GRCh37';
-    if (b !== build && !loadersFor) { setError(`${f.name} is on ${b}; this session reads ${build}.`); return; }
-    if (b !== build) { setBuild(b); save(BUILD_KEY, b); }
-    const t = cnvSearchText(c);
-    setText(t); fromCgh.current = c;
-    void draw(t, b).then(() => setNote(`${c.sample} · ${c.chrom.replace(/^chr/, '')}${c.cytoband.replace(/\s+/g, '')} ${c.kind === 'loss' ? 'loss' : 'gain'} ${copyText(c)} · ${c.probes ?? '?'} probes${c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}${c.iscn ? ` · ${c.iscn}` : ''}`));
-  };
   const switchBuild = (b: GenomeBuild) => {
     if (b === build) return;
     setBuild(b); save(BUILD_KEY, b); setShown(null); setFocus(null);
@@ -192,8 +177,12 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Esc answers the array-CGH question first (it cancels it), then closes the page
-      if (e.key === 'Escape' && !cgh.get().pending) close();
+      // Esc goes up one level: the array-CGH question (it answers itself), the array-CGH page, then this page
+      if (e.key !== 'Escape') return;
+      const g = cgh.get();
+      if (g.pending) return;
+      if (g.open) { cgh.setOpen(false); return; }
+      close();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -207,6 +196,10 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const colors = useMemo(() => (sv ? segmentColors(sv.rec) : new Map<number, string>()), [sv]);
   const full = useMemo<SvGeneLoaders>(() => ({ ...loaders, fallback: [] }), [loaders]);
   const rec = sv?.rec;
+  const cghState = useCgh();
+  const cghSamples = cghState.files.reduce((n, f) => n + f.samples.length, 0);
+  /** the array-CGH page reads GRCh37 (its files' build) whatever the SV browser shows */
+  const cghLoaders = useMemo(() => (loadersFor ?? ((b: GenomeBuild) => (b === sessionBuild ? sessionLoaders : {}))), [loadersFor, sessionBuild, sessionLoaders]);
   return (
     <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
       <div className="w-full min-h-full pb-4">
@@ -229,10 +222,12 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                 ? <Segmented size="sm" label="Genome build" title="The genome build of the positions" value={build} onChange={switchBuild}
                     options={[{ value: 'GRCh38', label: 'GRCh38', hint: 'GRCh38 / hg38 (default)' }, { value: 'GRCh37', label: 'GRCh37', hint: 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)' }]} />
                 : <span className="font-normal text-slate-500">· {build}</span>}
+              <button onClick={() => cgh.setOpen(true)} className="ml-auto inline-flex items-center gap-1.5 h-[28px] px-2.5 rounded-[6px] border text-[12px] font-medium bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50"
+                title="Array-CGH: the interval tables of your patients (CytoGenomics .txt, BED or zip), each call classified and drawn in this browser (GRCh37)">
+                Array-CGH{cghSamples ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{cghSamples}</span> : null} ▸</button>
             </div>
             <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); a small variant (under {SMALL_MAX} bp: chr2:g.60461323del, or on a transcript: NM_022893.4:c.1592del, placed by VariantValidator, else Ensembl), marked on the reference; or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
-          <div className="shrink-0 ml-4"><CghAddButton /></div>
         </div>
         <div className="px-5 pb-3">
           <form className="flex gap-2" onSubmit={e => { e.preventDefault(); void draw(); }}>
@@ -256,20 +251,18 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                 <div className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-0.5">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
                 {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(s => s.letter).join(', ')}.</div>}
                 {sv.notes.map((n, i) => <div key={i} className="text-[10.5px] text-slate-500">{n}</div>)}
-                <div className="text-[10.5px] text-slate-500 mt-0.5">{cghCnv?.copies === 0 ? 'Drawn as homozygous (array-CGH x0: both copies lost)' : 'Drawn as heterozygous'}, 2 copies on the flanks; {cghCnv ? `array-CGH call of ${cghCnv.sample}${cghCnv.kind === 'gain' ? ', the extra copy drawn in tandem (its place is not known from the array)' : ''}` : 'no read depth (open the cartoon on a sample for that)'}.</div>
+                <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as heterozygous, 2 copies on the flanks; no read depth (open the cartoon on a sample for that).</div>
               </div>
               <SvNomenclatureBox rec={rec} build={build} bands={bands} />
             </div>
           )}
         </div>
         </div>
-        {/* the array-CGH calls, once samples are added: between the search and the browser */}
-        <CghFrame onShow={showCnv} />
         {shown && (
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : shown.kind === 'variant' ? `variant:${shown.text}` : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
-            segColors={colors} flankCopies={2} zygosity={cghCnv?.copies === 0 && sv ? 'hom' : 'het'} build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark}
+            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark}
             variant={variant ? {
               start: variant.v.start, end: variant.v.end, key: variant.text,
               label: variant.hgvsg ? variant.typed.replace(/\(([^)]*)\)/, '') : variant.v.hgvs,
@@ -282,7 +275,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           </div>
         )}
       </div>
-      <CghProbeDialog />
+      {cghState.open && <CghPage loadersFor={cghLoaders} onBack={() => cgh.setOpen(false)} />}
     </div>
   );
 }
