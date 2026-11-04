@@ -18,6 +18,8 @@ import { Segmented } from './controls';
 import { rememberGene } from '../../standalone/geneSuggest';
 import { svLinkHref } from '../../standalone/link';
 import { parseSmallGenomic, TRANSCRIPT_HGVS_RE, SMALL_KIND_WORD, SMALL_MAX, type SmallVariant } from './smallVariant';
+import { CghAddButton, CghProbeDialog } from './CghPanel';
+import { cgh } from './cghStore';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -175,7 +177,8 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
+      // Esc answers the array-CGH question first (it cancels it), then closes the page
+      if (e.key === 'Escape' && !cgh.get().pending) close();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -214,6 +217,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
             </div>
             <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); a small variant (under {SMALL_MAX} bp: chr2:g.60461323del, or on a transcript: NM_022893.4:c.1592del, placed by VariantValidator, else Ensembl), marked on the reference; or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
+          <div className="shrink-0 ml-4"><CghAddButton /></div>
         </div>
         <div className="px-5 pb-3">
           <form className="flex gap-2" onSubmit={e => { e.preventDefault(); void draw(); }}>
@@ -261,6 +265,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           </div>
         )}
       </div>
+      <CghProbeDialog />
     </div>
   );
 }
