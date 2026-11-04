@@ -10,7 +10,7 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 import type { SvGeneLoaders } from './SvGenomeBrowser';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import { ACHRO_REGIONS, type AchroClass } from './achropuce';
-import { RO_MATCH, matchesOf } from './svPopulation';
+import { RO_MATCH, type PopulationSv } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
 import { scoreCnv, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
@@ -25,13 +25,32 @@ export interface CnvAnn {
   achro: AchroHit[];
   /** the sources that did not answer */
   missing: string[];
-  /** the DGV Gold CNVs of the same type with DGV_RO reciprocal overlap or more (as the SV browser measures it); not in the priority */
+  /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more; not in the priority */
   dgv: DgvHit[];
   dgvError?: string;
 }
-export interface DgvHit { id: string; type: string; ro: number; freq: string | null; samples: number | null; studies: number | null }
-/** the reciprocal overlap from which a call is marked as a DGV Gold CNV */
-export const DGV_RO = 0.8;
+/** how a DGV Gold CNV lies against the call: the call inside it, the call holding it, or the two overlapping on one side */
+export type DgvRelation = 'within' | 'contains' | 'overlaps';
+export interface DgvHit { id: string; type: string; rel: DgvRelation; cover: number; freq: string | null; samples: number | null; studies: number | null }
+/** the share of the call a DGV Gold CNV must share with it (a call wholly inside one: 100 %) */
+export const DGV_COVER = 0.8;
+/**
+ * The DGV Gold CNVs of the call's type (loss, gain, or both) sharing DGV_COVER of the call or more: the common stretch over
+ * the call's length, with the record's inner or outer extent, the one sharing more; and how they lie against each other.
+ */
+export function dgvHits(kind: 'loss' | 'gain', s0: number, e0: number, svs: PopulationSv[]): DgvHit[] {
+  const len = Math.max(1, e0 - s0);
+  const out: DgvHit[] = [];
+  for (const v of svs) {
+    if (!(v.type === kind || v.type === 'both')) continue;
+    const best = [v.inner, v.outer].map(([a, b]) => ({ a, b, cover: Math.max(0, Math.min(e0, b) - Math.max(s0, a)) / len }))
+      .sort((x, y) => y.cover - x.cover || (x.b - x.a) - (y.b - y.a))[0];
+    if (best.cover < DGV_COVER) continue;
+    const rel: DgvRelation = best.a <= s0 && best.b >= e0 ? 'within' : s0 <= best.a && e0 >= best.b ? 'contains' : 'overlaps';
+    out.push({ id: v.id, type: v.type, rel, cover: best.cover, freq: v.freqText, samples: v.samples, studies: v.studies });
+  }
+  return out.sort((a, b) => b.cover - a.cover);
+}
 /** every gene of a call is asked of PanelApp (one request per gene, cached); a bound against a whole-arm call only */
 export const PANELAPP_MAX_GENES = 1000;
 export const PANEL_SOURCE = PANEL_SOURCES[0];
@@ -117,14 +136,10 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
       missing.push(...a.notes.filter(n => /unavailable/i.test(n)));
     } catch (e) { missing.push(`ClinGen dosage and gnomAD constraint (${msg(e)})`); }
   }
-  // DGV Gold: the same overlap as the SV browser's (reciprocal, with the inner or outer extent, the better), same type
+  // DGV Gold: the records sharing 80 % of the call or more, the call inside one counting 100 %
   let dgv: DgvHit[] = [], dgvError: string | undefined;
   if (ld.getPopulationSvs) {
-    try {
-      dgv = matchesOf({ kind: c.kind, start: s0, end: e0, letters: '', copies: 0 }, await ld.getPopulationSvs(c.chrom, s0, e0))
-        .filter(m => m.sameType && m.sv.type !== 'unknown' && m.ro >= DGV_RO)
-        .map(m => ({ id: m.sv.id, type: m.sv.type, ro: m.ro, freq: m.sv.freqText, samples: m.sv.samples, studies: m.sv.studies }));
-    } catch (e) { dgvError = msg(e); }
+    try { dgv = dgvHits(c.kind, s0, e0, await ld.getPopulationSvs(c.chrom, s0, e0)); } catch (e) { dgvError = msg(e); }
   }
   cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing, dgv, dgvError });
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));

@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
-import { annotate, viewOf, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_RO } from './cghAnnotate';
+import { annotate, viewOf, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type GeneView, type Level } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
@@ -257,7 +257,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4">
         <summary className="cursor-pointer text-accent-700 font-medium select-none">ⓘ How the calls are read, annotated, ranked and exported</summary>
         Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row: the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
-        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked from {Math.round(DGV_RO * 100)} % reciprocal overlap (same type).
+        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), one icon per way they lie: <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column).
         <PriorityRules />
@@ -348,8 +348,8 @@ function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: Vie
           {v.missing.map(m => <div key={m} className="text-amber-700">Not available: {m}</div>)}
         </div>
         {(v.ann.dgv.length > 0 || v.ann.dgvError) && <div className="min-w-[240px]">
-          <div className="font-semibold text-slate-900">DGV Gold (≥ {Math.round(DGV_RO * 100)} % reciprocal overlap, same type)</div>
-          {v.ann.dgv.map(x => <div key={x.id}>{x.id} <span className="text-slate-500">({x.type})</span>: <b>{Math.round(x.ro * 100)} %</b>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
+          <div className="font-semibold text-slate-900">DGV Gold (same type, ≥ {Math.round(DGV_COVER * 100)} % of the call shared)</div>
+          {v.ann.dgv.map(x => <div key={x.id} className="flex items-center gap-1"><DgvIcon rel={x.rel} />{x.id} <span className="text-slate-500">({x.type})</span>: <b>{Math.round(x.cover * 100)} %</b> <span className="text-slate-500">· {DGV_REL[x.rel].word}</span>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
           {v.ann.dgvError && <div className="text-amber-700">not available ({v.ann.dgvError})</div>}
         </div>}
         {v.ann.achro.length > 0 && <div className="min-w-[240px]">
@@ -399,11 +399,27 @@ function PriorityRules() {
   );
 }
 
-/** a call matching a DGV Gold CNV of the same type (≥ 80 % reciprocal overlap): a population CNV, a clue to benignity */
+/** how a DGV Gold CNV lies against the call, drawn: the call (dark) and the DGV CNV (violet) */
+export const DGV_REL: Record<DgvRelation, { word: string; call: [number, number]; dgv: [number, number] }> = {
+  within: { word: 'the call lies inside a DGV Gold CNV', call: [7, 15], dgv: [1, 21] },
+  contains: { word: 'the call holds a DGV Gold CNV', call: [1, 21], dgv: [6, 16] },
+  overlaps: { word: 'the call and a DGV Gold CNV overlap on one side', call: [1, 14], dgv: [8, 21] },
+};
+const DgvIcon = ({ rel }: { rel: DgvRelation }) => (
+  <svg width="22" height="11" viewBox="0 0 22 11" aria-hidden="true" className="shrink-0">
+    <rect x={DGV_REL[rel].dgv[0]} y="1" width={DGV_REL[rel].dgv[1] - DGV_REL[rel].dgv[0]} height="3.5" rx="1" fill="#7c3aed" />
+    <rect x={DGV_REL[rel].call[0]} y="6.5" width={DGV_REL[rel].call[1] - DGV_REL[rel].call[0]} height="3.5" rx="1" fill="#1f2937" />
+  </svg>
+);
+/** the DGV Gold CNVs sharing 80 % of the call or more: one medallion per way they lie against it, with the best share */
 function DgvMedal({ v }: { v: View }) {
   const d = v.ann?.dgv;
   if (!d?.length) return null;
-  const best = d.reduce((a, b) => (b.ro > a.ro ? b : a));
-  return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-violet-300 bg-violet-50 text-violet-700 leading-[15px]"
-    title={`DGV Gold: ${d.length} population CNV${d.length > 1 ? 's' : ''} of the same type with ≥ ${Math.round(DGV_RO * 100)} % reciprocal overlap\n${d.map(x => `${x.id} (${x.type}): ${Math.round(x.ro * 100)} %${x.freq ? `, frequency ${x.freq}` : ''}${x.samples != null ? `, ${x.samples} samples` : ''}${x.studies != null ? `, ${x.studies} studies` : ''}`).join('\n')}`}>DGV {Math.round(best.ro * 100)}%</span>;
+  return <>{(['within', 'contains', 'overlaps'] as DgvRelation[]).map(rel => {
+    const hs = d.filter(x => x.rel === rel);
+    if (!hs.length) return null;
+    return <span key={rel} className="ml-1 inline-flex items-center gap-0.5 rounded-full pl-1 pr-1.5 text-[9.5px] font-bold border border-violet-300 bg-violet-50 text-violet-700 leading-[15px] align-middle"
+      title={`DGV Gold: ${DGV_REL[rel].word} (same type, ≥ ${Math.round(DGV_COVER * 100)} % of the call shared)\n${hs.map(x => `${x.id} (${x.type}): ${Math.round(x.cover * 100)} % of the call${x.freq ? `, frequency ${x.freq}` : ''}${x.samples != null ? `, ${x.samples} samples` : ''}${x.studies != null ? `, ${x.studies} studies` : ''}`).join('\n')}`}>
+      <DgvIcon rel={rel} />{Math.round(Math.max(...hs.map(x => x.cover)) * 100)}%</span>;
+  })}</>;
 }
