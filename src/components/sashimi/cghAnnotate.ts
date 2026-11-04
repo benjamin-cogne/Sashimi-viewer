@@ -10,7 +10,7 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 import type { SvGeneLoaders } from './SvGenomeBrowser';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import { ACHRO_REGIONS, type AchroClass } from './achropuce';
-import { RO_MATCH } from './svPopulation';
+import { RO_MATCH, matchesOf } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
 import { scoreCnv, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
@@ -25,7 +25,13 @@ export interface CnvAnn {
   achro: AchroHit[];
   /** the sources that did not answer */
   missing: string[];
+  /** the DGV Gold CNVs of the same type with DGV_RO reciprocal overlap or more (as the SV browser measures it); not in the priority */
+  dgv: DgvHit[];
+  dgvError?: string;
 }
+export interface DgvHit { id: string; type: string; ro: number; freq: string | null; samples: number | null; studies: number | null }
+/** the reciprocal overlap from which a call is marked as a DGV Gold CNV */
+export const DGV_RO = 0.8;
 /** every gene of a call is asked of PanelApp (one request per gene, cached); a bound against a whole-arm call only */
 export const PANELAPP_MAX_GENES = 1000;
 export const PANEL_SOURCE = PANEL_SOURCES[0];
@@ -92,7 +98,7 @@ function pump() {
 }
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
 async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
-  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], missing: [] });
+  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], missing: [], dgv: [] });
   const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing: string[] = [];
   let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
   try {
@@ -111,7 +117,16 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
       missing.push(...a.notes.filter(n => /unavailable/i.test(n)));
     } catch (e) { missing.push(`ClinGen dosage and gnomAD constraint (${msg(e)})`); }
   }
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing });
+  // DGV Gold: the same overlap as the SV browser's (reciprocal, with the inner or outer extent, the better), same type
+  let dgv: DgvHit[] = [], dgvError: string | undefined;
+  if (ld.getPopulationSvs) {
+    try {
+      dgv = matchesOf({ kind: c.kind, start: s0, end: e0, letters: '', copies: 0 }, await ld.getPopulationSvs(c.chrom, s0, e0))
+        .filter(m => m.sameType && m.sv.type !== 'unknown' && m.ro >= DGV_RO)
+        .map(m => ({ id: m.sv.id, type: m.sv.type, ro: m.ro, freq: m.sv.freqText, samples: m.sv.samples, studies: m.sv.studies }));
+    } catch (e) { dgvError = msg(e); }
+  }
+  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing, dgv, dgvError });
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 

@@ -46,6 +46,10 @@ export interface CghState {
 
 const FILTER_KEY = 'sashimi.cghFilter';
 export const CGH_MIN_PROBES_DEFAULT = 3;
+/** at most this many calls are annotated (genes, PanelApp, ClinGen, gnomAD, DGV): more, and a minimum must be raised */
+export const CGH_MAX_ANNOTATED = 200;
+/** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
+export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
 const loadFilter = (): CghFilter => {
   const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position' };
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
@@ -115,11 +119,11 @@ export const cgh = {
   },
   /** the files accepted with this minimum: listed, the first new sample shown */
   /** the files accepted with this minimum and the sexes chosen (by sample key; the file's own when not chosen) */
-  accept(minProbes: number, sexes: Record<string, CghSex | null> = {}) {
+  accept(minProbes: number, sexes: Record<string, CghSex | null> = {}, minKb = state.filter.minKb) {
     const p = state.pending; if (!p) return;
     const sex = { ...state.sex };
     for (const x of p.files.flatMap(f => f.samples)) { const v = x.key in sexes ? sexes[x.key] : x.sex; if (v) sex[x.key] = v; else delete sex[x.key]; }
-    const filter = { ...state.filter, minProbes };
+    const filter = { ...state.filter, minProbes, minKb };
     try { localStorage.setItem(FILTER_KEY, JSON.stringify({ ...filter, query: '' })); } catch { /* storage blocked */ }
     const files = [...state.files, ...p.files];
     set({ files, pending: null, filter, sex, sample: p.files[0]?.samples[0]?.key ?? state.sample });
@@ -149,9 +153,8 @@ export const classOf = (s: CghState, c: CghCnv) => s.classes[c.id] ?? c.classifi
 /** whether a call is listed */
 export function passes(s: CghState, c: CghCnv): boolean {
   const f = s.filter;
-  if (c.probes != null && c.probes < f.minProbes) return false;
+  if (!isAnalysed(c, f.minProbes, f.minKb)) return false;
   if (f.kind !== 'all' && c.kind !== f.kind) return false;
-  if (c.sizeKb < f.minKb) return false;
   if (f.hideSuppressed && c.suppressed) return false;
   const cls = classOf(s, c).trim();
   if (f.classed === 'unclassified' && cls) return false;

@@ -53,7 +53,7 @@ export interface ScoreInput {
 export interface Reason { id: string; level: Level; text: string }
 export interface Score { level: Level; reasons: Reason[] }
 
-/** a call larger than this (kb) is high priority whatever its genes (the laboratory's rule) */
+/** a call larger than this (kb) is high priority whatever its genes (the AChro-Puce network's rule) */
 export const BIG_KB = 1000;
 const MONO: MoiClass[] = ['AD', 'AD+AR', 'XLD'];
 const BI: MoiClass[] = ['AR', 'AD+AR'];
@@ -78,7 +78,7 @@ export const SCORE_RULES: Rule[] = [
   { id: 'L3', level: 'high', kind: 'loss', label: 'both copies lost (x0) of exons of a PanelApp green gene with a biallelic mode (AR)', gene: (v, i) => i.copies === 0 && v.g.exons && any(v.pa?.green, BI) },
   { id: 'L3X', level: 'high', kind: 'loss', label: 'exons of a PanelApp green X-linked recessive gene lost in a male (hemizygous), or both copies lost (x0)', gene: (v, i) => i.chrom === 'chrX' && (i.sex === 'male' || i.copies === 0) && v.g.exons && any(v.pa?.green, ['XLR']) },
   { id: 'L4', level: 'high', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 5 or 4', call: i => hits(i, 'del', ['5', '4']) },
-  { id: 'L5', level: 'high', kind: 'loss', label: `35 protein-coding genes or more (ACMG/ClinGen section 3C: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (the laboratory's rule)`, call: i => big(i, 35) },
+  { id: 'L5', level: 'high', kind: 'loss', label: `35 protein-coding genes or more (ACMG/ClinGen section 3C: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (AChro-Puce)`, call: i => big(i, 35) },
   { id: 'L6', level: 'moderate', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 2 (some evidence)', gene: v => v.g.exons && v.hi === 2 },
   { id: 'L7', level: 'moderate', kind: 'loss', label: 'exons of a LoF-intolerant gene (gnomAD LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9)', gene: v => v.g.exons && intolerant(v) },
   { id: 'L8', level: 'moderate', kind: 'loss', label: 'one copy of a PanelApp green gene with a biallelic mode (AR) lost: look for a variant on the other copy', gene: (v, i) => i.copies !== 0 && v.g.exons && any(v.pa?.green, BI) && !any(v.pa?.green, MONO) },
@@ -93,7 +93,7 @@ export const SCORE_RULES: Rule[] = [
   // ---- gains ----
   { id: 'G1', level: 'high', kind: 'gain', label: 'a whole gene with a ClinGen triplosensitivity score of 3 (sufficient evidence)', gene: v => v.g.whole && v.ts === 3 },
   { id: 'G2', level: 'high', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 5 or 4', call: i => hits(i, 'dup', ['5', '4']) },
-  { id: 'G3', level: 'high', kind: 'gain', label: `50 protein-coding genes or more (section 3C for gains: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (the laboratory's rule)`, call: i => big(i, 50) },
+  { id: 'G3', level: 'high', kind: 'gain', label: `50 protein-coding genes or more (section 3C for gains: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (AChro-Puce)`, call: i => big(i, 50) },
   { id: 'G4', level: 'moderate', kind: 'gain', label: 'a whole gene with a ClinGen triplosensitivity score of 2 (some evidence)', gene: v => v.g.whole && v.ts === 2 },
   { id: 'G5', level: 'moderate', kind: 'gain', label: 'a breakpoint inside a gene with a haploinsufficiency score of 3 or a PanelApp green monoallelic gene: a partial duplication may disrupt it (2I-2L)', gene: v => !v.g.whole && v.g.exons && (v.hi === 3 || any(v.pa?.green, MONO)) },
   { id: 'G6', level: 'moderate', kind: 'gain', label: 'an AChro-Puce recurrent duplication classed PIEV (susceptibility)', call: i => hits(i, 'dup', ['PIEV']) },

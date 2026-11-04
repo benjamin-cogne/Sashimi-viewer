@@ -221,7 +221,10 @@ Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Cl
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
 one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
 already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
-**minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED keeps all its calls), and
+**minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
+analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). At most 200 calls
+are annotated: when the tab holds more calls than that, the question says so, and when more would pass the minimums,
+*Analyse* stays off until the number of probes and / or the size is raised. And
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
@@ -230,6 +233,9 @@ Filters: probes, losses / gains, size, classified or not, suppressed calls, a ge
 order by position or by priority. Each row: band, position, size, copy number from the ISCN (x0, x1, x3, amp), probes,
 mean log ratio, then what the call holds, read on the file's build (GRCh37) by the SV browser's own routes:
 
+- **DGV Gold**: a medallion after the type (*DGV 98%*) when a population CNV of DGV Gold of the same type overlaps the
+  call by 80 % or more, reciprocally (with its inner or outer extent, the better, as the SV browser measures it); its
+  frequency, samples and studies in its tooltip and under the row. It does not change the priority.
 - **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
   they cannot be read, and the cell then says *file*.
 - **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes), then
