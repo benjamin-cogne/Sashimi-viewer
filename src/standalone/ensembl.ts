@@ -288,3 +288,29 @@ export function mapAssembly(from: GenomeBuild, to: GenomeBuild, chrom: string, s
   }
   return mapCache.get(key)!;
 }
+
+/**
+ * A transcript HGVS (`NM_022893.4:c.1592del`, `ENST…:c.…`) moved to the genome by Ensembl's Variant Recoder (RefSeq and
+ * Ensembl transcripts: the endpoint runs on the merged set). The response is one object per input, keyed by allele, each
+ * with `hgvsg` (on the `NC_` accession) and `spdi` lists, and a `warnings` list when the input raised any (a reference
+ * base that does not match, for one).
+ */
+export async function recodeHgvs(build: GenomeBuild, hgvs: string): Promise<{ hgvsg: string; spdi: string | null; warnings: string[] }> {
+  const url = `${HOSTS[build]}/variant_recoder/human/${encodeURIComponent(hgvs)}?fields=hgvsg,spdi&content-type=application/json`;
+  let resp: Response;
+  try { resp = await fetch(url, { headers: { Accept: 'application/json' } }); }
+  catch { throw new Error(`Ensembl (${HOSTS[build].replace('https://', '')}) unreachable: type the variant on the genome (chr2:g.…)`); }
+  const body: any = await resp.json().catch(() => null);
+  if (!resp.ok) throw new Error(`Ensembl could not read ${hgvs}${body?.error ? `: ${String(body.error).split('\n')[0].slice(0, 300)}` : ` (${resp.status})`}`);
+  const rec = Array.isArray(body) ? body[0] : null;
+  if (!rec || typeof rec !== 'object') throw new Error(`Ensembl returned nothing for ${hgvs}`);
+  const warnings: string[] = Array.isArray(rec.warnings) ? rec.warnings.map(String) : [];
+  const alleles = Object.entries(rec).filter(([k, v]) => k !== 'warnings' && v && typeof v === 'object') as [string, any][];
+  for (const [, a] of alleles) {
+    const gs: string[] = (Array.isArray(a.hgvsg) ? a.hgvsg : []).map(String);
+    // the primary assembly's chromosome first (an NC_0000xx accession), not a patch or a haplotype
+    const g = gs.find(x => /^NC_0000\d\d\./.test(x)) ?? gs.find(x => /^NC_012920/.test(x));
+    if (g) return { hgvsg: g, spdi: Array.isArray(a.spdi) ? String(a.spdi[0] ?? '') || null : null, warnings };
+  }
+  throw new Error(`Ensembl gave no genomic position for ${hgvs}${warnings.length ? `: ${warnings[0]}` : ''}`);
+}

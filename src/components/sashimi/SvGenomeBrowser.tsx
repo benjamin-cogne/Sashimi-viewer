@@ -105,6 +105,8 @@ export interface SvGeneLoaders {
   locateGene?: (symbol: string) => Promise<{ chrom: string; start: number; end: number; name: string }>;
   /** a stretch moved between builds (1-based inclusive), for coordinates published in the other build */
   liftOver?: (from: GenomeBuild, to: GenomeBuild, chrom: string, start: number, end: number) => Promise<{ chrom: string; start: number; end: number } | null>;
+  /** a transcript HGVS (NM_…:c.…) on the genome: its genomic HGVS on the NC_ accession, its SPDI, Ensembl's warnings */
+  recodeHgvs?: (hgvs: string) => Promise<{ hgvsg: string; spdi: string | null; warnings: string[] }>;
   /** ClinVar variants classified pathogenic / likely pathogenic over a 0-based half-open window: SVs (≥ 50 bp) or SNVs and short indels */
   getClinvar?: (which: 'sv' | 'snv', chrom: string, start: number, end: number) => Promise<ClinvarVariant[]>;
   /** the models the viewer already has (the gene in view): used when the source cannot list a window's transcripts */
@@ -124,6 +126,26 @@ interface Props {
   focus?: { start: number; end: number; key: number } | null;
   /** an interval to highlight (as a Ctrl / ⌘ + drag would): each new `key` sets it */
   highlight?: { start: number; end: number; key: number } | null;
+  /** a small variant marked on the reference (no rebuilt chromosome): its stretch (0-based half-open), a label, its card's lines */
+  variant?: { start: number; end: number; key: string; label: string; lines: string[] };
+}
+
+/** the small variant's mark */
+const VARIANT_COLOR = '#0f172a';
+/** Where a position lies in a transcript: exon n of N (UTR or coding), intron n, upstream or downstream. */
+function whereInTx(tx: SvTranscript, pos: number): string {
+  const ex = [...tx.exons].sort((a, b) => a.rank - b.rank), n = ex.length;
+  const e = ex.find(x => pos >= x.start && pos < x.end);
+  if (e) {
+    const utr = tx.cdsStart == null || tx.cdsEnd == null ? 'non-coding' : pos < tx.cdsStart ? (tx.strand > 0 ? '5′ UTR' : '3′ UTR') : pos >= tx.cdsEnd ? (tx.strand > 0 ? '3′ UTR' : '5′ UTR') : '';
+    return `exon ${e.rank} of ${n}${utr ? ` (${utr})` : ''}`;
+  }
+  for (let i = 0; i + 1 < n; i++) {
+    const lo = Math.min(ex[i].end, ex[i + 1].end), hi = Math.max(ex[i].start, ex[i + 1].start);
+    if (pos >= lo && pos < hi) return `intron ${ex[i].rank} of ${n - 1}`;
+  }
+  const before = tx.strand > 0 ? pos < tx.start : pos >= tx.end;
+  return before ? 'upstream' : 'downstream';
 }
 
 // ======================== Genes of the window ========================
@@ -282,7 +304,9 @@ type TipAt = { x: number; y: number; gene: string; dgv?: PopulationSv; achro?: A
   /** the ClinVar SNVs of one bar of the summary: its stretch (0-based half-open) */
   clinRange?: [number, number];
   /** the ClinVar SNVs of one gene (or of neighbouring genes merged): their names, the transcripts NMD is predicted on, their span */
-  clinGenes?: { names: string[]; tx: string[]; s: number; e: number } };
+  clinGenes?: { names: string[]; tx: string[]; s: number; e: number };
+  /** the small variant searched */
+  variant?: boolean };
 /** AChro-Puce bars: deletions red, duplications blue */
 const ACHRO_TYPE_COLOR = { del: '#dc2626', dup: '#2563eb' } as const;
 /** an AChro-Puce region placed on the chromosome in view: 0-based half-open, and how it was placed */
@@ -294,7 +318,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -684,6 +708,24 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [Math.floor(snvExt[0] / snvTs), Math.floor(snvExt[1] / snvTs), snvTs, clinSnvMode, showClinSnv, clinSnvTiles, span > CLIN_SNV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const clinSnvView = useMemo(() => clinView(clinSnvTiles, showClinSnv, CLIN_SNV_MAX_SPAN, snvTs, snvExt[0], snvExt[1]), [tilesVersion, snvTs, Math.floor(vp.s / snvTs), Math.floor(ve / snvTs), Math.floor(snvExt[0] / snvTs), Math.floor(snvExt[1] / snvTs), clinSnvTiles, showClinSnv, span > CLIN_SNV_MAX_SPAN]); // eslint-disable-line react-hooks/exhaustive-deps
   const geneBySym = useMemo(() => new Map(view.genes.map(g => [g.symbol, g])), [view.genes]);
+  // a small variant searched: the ClinVar variants around it each at its place (not counted per gene), and the view on
+  // its gene once the gene models are in (unless the view was moved meanwhile, or the gene is very long)
+  useEffect(() => { if (variant) setClinSnvMode('each'); }, [variant?.key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const variantFit = useRef<{ key: string; s: number; done: boolean } | null>(null);
+  useEffect(() => {
+    if (!variant) return;
+    if (variantFit.current?.key !== variant.key) variantFit.current = { key: variant.key, s: vpRef.current.s, done: false };
+    const f = variantFit.current;
+    if (f.done) return;
+    if (Math.abs(vpRef.current.s - f.s) > 1) { f.done = true; return; }
+    const at = (variant.start + variant.end) / 2, hits = view.genes.filter(g => g.start <= at && g.end >= at);
+    if (!hits.length) { if (!view.loading) f.done = true; return; }
+    f.done = true;
+    const g = hits.find(x => x.principal.status === 'mane') ?? hits[0];
+    if (g.end - g.start > 2.5e6) return;
+    const pad = Math.max(2000, (g.end - g.start) * 0.08);
+    flyTo(Math.min(g.start, variant.start) - pad, Math.max(g.end, variant.end) + pad, 600);
+  }, [view.genes, view.loading, variant?.key]); // eslint-disable-line react-hooks/exhaustive-deps
   // the ClinVar SNVs' genes need their exons at any zoom (the zoomed-out gene tiles keep only each gene's span): tiles of
   // at most CLIN_SNV_TILE_MAX over the SNVs' stretch, the view's own genes when its tiles are that size already
   const snvGenesOwn = tileSize > snvTs && showClinSnv && !!loaders.getClinvar && span <= CLIN_SNV_MAX_SPAN;
@@ -1621,6 +1663,25 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           {refX(sel.e) <= X1 && <line x1={b} x2={b} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
         </g>;
       })()}
+      {/* the small variant searched: a line (a band when wider) through every track, its name on the ruler */}
+      {variant && (() => {
+        const a = refX(variant.start), b = refX(variant.end), mid = (a + b) / 2;
+        if (b < X0 - 2 || a > X1 + 2) return null;
+        const lw = Math.min(260, textWidth(variant.label) * 0.98 + 26), lx = Math.max(X0, Math.min(X1 - lw, mid - lw / 2)), py = yRuler + RULER_H / 2 - 8;
+        const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== 'variant:') setTip({ ...pt, gene: 'variant:', variant: true }); else placeTip(pt.x, pt.y); };
+        return <g>
+          <g pointerEvents="none">
+            {b - a > 2 && <rect x={Math.max(a, X0)} y={yRuler + RULER_H} width={Math.min(b, X1) - Math.max(a, X0)} height={H - yRuler - RULER_H - 6} fill={VARIANT_COLOR} fillOpacity={0.07} />}
+            <line x1={mid} x2={mid} y1={py + 16} y2={H - 6} stroke={VARIANT_COLOR} strokeWidth={1.1} strokeDasharray="5 3" opacity={0.75} />
+          </g>
+          <g style={{ cursor: 'pointer' }} onMouseEnter={show} onMouseMove={show} onMouseLeave={hoverOff}
+            onClick={e => { e.stopPropagation(); if (suppressClick.current) return; const pt = boxPos(e); setPinned(cur => (cur?.gene === 'variant:' ? null : { ...pt, gene: 'variant:', variant: true })); }}>
+            <rect x={lx} y={py} width={lw} height={16} rx={8} fill={VARIANT_COLOR} />
+            <path d={`M${Math.max(lx + 6, Math.min(lx + lw - 6, mid)) - 4},${py + 16}L${Math.max(lx + 6, Math.min(lx + lw - 6, mid)) + 4},${py + 16}L${Math.max(lx + 6, Math.min(lx + lw - 6, mid))},${py + 21}Z`} fill={VARIANT_COLOR} />
+            <text x={lx + lw / 2} y={py + 11.5} fontSize={10} fontWeight={700} textAnchor="middle" fill="#fff" fontFamily={MONO}>{variant.label.length > 40 ? `${variant.label.slice(0, 39)}…` : variant.label}</text>
+          </g>
+        </g>;
+      })()}
       {band && <g pointerEvents="none">
         <rect x={Math.min(band.a, band.b)} y={yRuler} width={Math.abs(band.b - band.a)} height={H - yRuler - 6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeDasharray="4 3" />
         <text x={(band.a + band.b) / 2} y={yRuler - 4} fontSize={10} fontWeight={700} textAnchor="middle" fill={C.accent}>{kb(Math.abs(band.b - band.a) / ppb)}{dragRef.current?.kind === 'select' ? ' · release to highlight' : ''}</text>
@@ -1629,13 +1690,37 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   );
 
   // ---- the card of the gene or population CNV under the pointer, or kept open ----
-  useEffect(() => { const isGene = (t: TipAt | null) => !!t && !t.dgv && !t.achro && !t.clin; const sym = (isGene(pinned) ? pinned!.gene : null) ?? (isGene(tip) ? tip!.gene : null); if (sym) wantModes([sym]); }, [pinned?.gene, tip?.gene]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const isGene = (t: TipAt | null) => !!t && !t.dgv && !t.achro && !t.clin && !t.variant; const sym = (isGene(pinned) ? pinned!.gene : null) ?? (isGene(tip) ? tip!.gene : null); if (sym) wantModes([sym]); }, [pinned?.gene, tip?.gene]); // eslint-disable-line react-hooks/exhaustive-deps
   const card = (at: TipAt, isPin: boolean) => {
     const place: React.CSSProperties = { left: Math.max(0, Math.min(at.x + 14, (boxRef.current?.clientWidth ?? 900) - 400)), ...(at.y > (boxRef.current?.clientHeight ?? 400) - 160 ? { bottom: (boxRef.current?.clientHeight ?? 400) - at.y + 14 } : { top: at.y + 14 }) };
     const ref = isPin ? (el: HTMLDivElement | null) => { if (el && boxRef.current) fitY(el, at.y, boxRef.current.clientHeight); } : (el: HTMLDivElement | null) => { tipEl.current = el; };
     if (at.achro) return <AchroCard key={isPin ? 'pin' : 'tip'} cardRef={ref} p={at.achro} type={at.achroType} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.achro!.start, at.achro!.end)} />;
     if (at.clin) return <ClinvarCard key={isPin ? 'pin' : 'tip'} cardRef={ref} vs={at.clin} at={at.clinAt} range={at.clinRange} genes={at.clinGenes} nmdOf={nmdOf} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)}
       onZoom={() => { if (at.clinGenes) { zoomTo(at.clinGenes.s, at.clinGenes.e); return; } const a = Math.min(...at.clin!.map(v => v.start)), b = Math.max(...at.clin!.map(v => v.end)); zoomTo(a, Math.max(b, a + 50)); }} />;
+    if (at.variant && variant) {
+      const pos = Math.floor((variant.start + variant.end) / 2);
+      const inGenes = view.genes.filter(g => g.start <= pos && g.end > pos);
+      const clin = clinSnvView.list.filter(v => v.start < variant.end && v.end > variant.start);
+      return (
+        <div key={isPin ? 'pin' : 'tip'} ref={ref} className={`absolute z-20 rounded-lg bg-slate-900 text-white text-[11px] px-3 py-2 shadow-xl w-max max-w-[460px] ${isPin ? 'ring-1 ring-white/30' : 'pointer-events-none opacity-95'}`} style={isPin ? place : {}}
+          onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+          <div className="font-semibold flex items-start gap-2"><span className="flex-1 font-mono">{variant.label}</span>
+            {isPin && <button onClick={() => setPinned(null)} className="-mr-1 -mt-0.5 px-1 text-slate-400 hover:text-white text-sm leading-none" title="Close">×</button>}</div>
+          {variant.lines.map((l, i) => <div key={i} className={i ? 'text-slate-400' : 'text-slate-200'}>{l}</div>)}
+          {inGenes.length > 0
+            ? inGenes.map(g => <div key={g.symbol} className="text-slate-200"><i>{g.symbol}</i>: {whereInTx(g.principal, pos)} <span className="text-slate-400">({g.principal.id}{g.principal.status === 'mane' ? ', MANE Select' : ''})</span></div>)
+            : <div className="text-slate-400">{view.loading ? 'gene models loading…' : 'in no RefSeq gene'}</div>}
+          <div className="mt-1 pt-1 border-t border-white/10">{clin.length
+            ? <>ClinVar (pathogenic / likely pathogenic) here: {clin.slice(0, 4).map(v => <div key={`${v.id}:${v.start}`} className="text-slate-300">
+                <span className="px-1 rounded text-[10px] font-bold text-white" style={{ background: v.code === 'PG' ? '#b91c1c' : '#f97316' }}>{v.code === 'PG' ? 'P' : 'LP'}</span> {v.start === variant.start && v.end === variant.end ? <b>same position</b> : 'overlapping'} · {v.conseq || v.type} <span className="font-mono text-[10px]">{v.protein ?? v.hgvs ?? ''}</span>
+                {isPin && <> · <a href={clinvarUrl(v)} target="_blank" rel="noreferrer" className="text-accent-300 hover:underline">{v.id} ↗</a></>}</div>)}{clin.length > 4 ? <div className="text-slate-400">+{clin.length - 4} more</div> : null}</>
+            : <span className="text-slate-400">{clinSnvView.loading ? 'ClinVar loading…' : 'no pathogenic or likely pathogenic ClinVar variant at this place'}</span>}</div>
+          {isPin
+            ? <div className="mt-1.5 pt-1.5 border-t border-white/15"><button onClick={() => zoomTo(variant.start, variant.end)} className="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-white">🔍 zoom on it</button></div>
+            : <div className="mt-0.5 text-slate-400">click to keep this card open</div>}
+        </div>
+      );
+    }
     if (at.dgv) return <DgvCard key={isPin ? 'pin' : 'tip'} cardRef={ref} v={at.dgv} chrom={chrom} cnv={cnv} pinned={isPin} place={isPin ? place : {}} onClose={() => setPinned(null)} onZoom={() => zoomTo(at.dgv!.outer[0], at.dgv!.outer[1])} />;
     const gi = impactOf.get(at.gene), g = gi?.gene ?? geneBySym.get(at.gene);
     if (!g) return null;
