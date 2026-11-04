@@ -25,7 +25,7 @@ export interface CnvAnn {
   achro: AchroHit[];
   /** the sources that did not answer */
   missing: string[];
-  /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more; not in the priority */
+  /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more, and those lying inside it whatever their share; not in the priority */
   dgv: DgvHit[];
   dgvError?: string;
 }
@@ -37,15 +37,21 @@ export const DGV_COVER = 0.8;
 /**
  * The DGV Gold CNVs of the call's type (loss, gain, or both) sharing DGV_COVER of the call or more: the common stretch over
  * the call's length, with the record's inner or outer extent, the one sharing more; and how they lie against each other.
+ * A record lying inside the call (one of its extents) is kept whatever its share, as 'contains'.
  */
 export function dgvHits(kind: 'loss' | 'gain', s0: number, e0: number, svs: PopulationSv[]): DgvHit[] {
   const len = Math.max(1, e0 - s0);
   const out: DgvHit[] = [];
   for (const v of svs) {
     if (!(v.type === kind || v.type === 'both')) continue;
-    const best = [v.inner, v.outer].map(([a, b]) => ({ a, b, cover: Math.max(0, Math.min(e0, b) - Math.max(s0, a)) / len }))
-      .sort((x, y) => y.cover - x.cover || (x.b - x.a) - (y.b - y.a))[0];
-    if (best.cover < DGV_COVER) continue;
+    const ext = [v.inner, v.outer].map(([a, b]) => ({ a, b, cover: Math.max(0, Math.min(e0, b) - Math.max(s0, a)) / len }));
+    let best = ext.slice().sort((x, y) => y.cover - x.cover || (x.b - x.a) - (y.b - y.a))[0];
+    if (best.cover < DGV_COVER) {
+      // under the share: kept only when it lies inside the call (its larger extent that does)
+      const inside = ext.filter(x => x.a >= s0 && x.b <= e0 && x.b > x.a).sort((x, y) => y.cover - x.cover)[0];
+      if (!inside) continue;
+      best = inside;
+    }
     const rel: DgvRelation = best.a <= s0 && best.b >= e0 ? 'within' : s0 <= best.a && e0 >= best.b ? 'contains' : 'overlaps';
     out.push({ id: v.id, type: v.type, rel, cover: best.cover, freq: v.freqText, samples: v.samples, studies: v.studies });
   }

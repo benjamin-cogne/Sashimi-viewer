@@ -257,7 +257,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4">
         <summary className="cursor-pointer text-accent-700 font-medium select-none">ⓘ How the calls are read, annotated, ranked and exported</summary>
         Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row: the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
-        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), one icon per way they lie: <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
+        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column).
         <PriorityRules />
@@ -348,8 +348,9 @@ function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: Vie
           {v.missing.map(m => <div key={m} className="text-amber-700">Not available: {m}</div>)}
         </div>
         {(v.ann.dgv.length > 0 || v.ann.dgvError) && <div className="min-w-[240px]">
-          <div className="font-semibold text-slate-900">DGV Gold (same type, ≥ {Math.round(DGV_COVER * 100)} % of the call shared)</div>
-          {v.ann.dgv.map(x => <div key={x.id} className="flex items-center gap-1"><DgvIcon rel={x.rel} />{x.id} <span className="text-slate-500">({x.type})</span>: <b>{Math.round(x.cover * 100)} %</b> <span className="text-slate-500">· {DGV_REL[x.rel].word}</span>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
+          <div className="font-semibold text-slate-900">DGV Gold (same type: ≥ {Math.round(DGV_COVER * 100)} % of the call shared, or inside the call whatever its share)</div>
+          {v.ann.dgv.slice(0, 15).map(x => <div key={x.id} className="flex items-center gap-1"><DgvIcon rel={x.rel} />{x.id} <span className="text-slate-500">({x.type})</span>: <b>{Math.round(x.cover * 100)} %</b> <span className="text-slate-500">· {DGV_REL[x.rel].word}</span>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
+          {v.ann.dgv.length > 15 && <div className="text-slate-500">+{v.ann.dgv.length - 15} more (in the medallions' tooltips)</div>}
           {v.ann.dgvError && <div className="text-amber-700">not available ({v.ann.dgvError})</div>}
         </div>}
         {v.ann.achro.length > 0 && <div className="min-w-[240px]">
@@ -419,7 +420,7 @@ function DgvMedal({ v }: { v: View }) {
     const hs = d.filter(x => x.rel === rel);
     if (!hs.length) return null;
     return <span key={rel} className="ml-1 inline-flex items-center gap-0.5 rounded-full pl-1 pr-1.5 text-[9.5px] font-bold border border-violet-300 bg-violet-50 text-violet-700 leading-[15px] align-middle"
-      title={`DGV Gold: ${DGV_REL[rel].word} (same type, ≥ ${Math.round(DGV_COVER * 100)} % of the call shared)\n${hs.map(x => `${x.id} (${x.type}): ${Math.round(x.cover * 100)} % of the call${x.freq ? `, frequency ${x.freq}` : ''}${x.samples != null ? `, ${x.samples} samples` : ''}${x.studies != null ? `, ${x.studies} studies` : ''}`).join('\n')}`}>
-      <DgvIcon rel={rel} />{Math.round(Math.max(...hs.map(x => x.cover)) * 100)}%</span>;
+      title={`DGV Gold: ${DGV_REL[rel].word} (same type, ${rel === 'contains' ? 'whatever its share of the call' : `≥ ${Math.round(DGV_COVER * 100)} % of the call shared`})\n${hs.map(x => `${x.id} (${x.type}): ${Math.round(x.cover * 100)} % of the call${x.freq ? `, frequency ${x.freq}` : ''}${x.samples != null ? `, ${x.samples} samples` : ''}${x.studies != null ? `, ${x.studies} studies` : ''}`).join('\n')}`}>
+      <DgvIcon rel={rel} />{Math.round(Math.max(...hs.map(x => x.cover)) * 100)}%{hs.length > 1 ? <span className="font-normal"> ×{hs.length}</span> : null}</span>;
   })}</>;
 }

@@ -235,8 +235,9 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
 
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
-  the one sharing more; a call wholly inside a DGV CNV shares 100 %). One medallion per way they lie, with the best
-  share: the call inside a DGV CNV, the call holding one, or the two overlapping on one side; each record's frequency,
+  the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One
+  medallion per way they lie, with the best share and how many: the call inside a DGV CNV, the call holding one (at any
+  share), or the two overlapping on one side; each record's frequency,
   samples and studies in its tooltip and under the row. It does not change the priority.
 - **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
   they cannot be read, and the cell then says *file*.
