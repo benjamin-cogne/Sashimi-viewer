@@ -230,8 +230,9 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
 
 - **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
   they cannot be read, and the cell then says *file*.
-- **PanelApp green**: the genes rated green in a panel of PanelApp (Genomics England, every panel) with their mode of
-  inheritance (AD, AR, AD/AR, XLR, XLD), the amber ones counted; up to 150 genes per call are asked.
+- **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes), then
+  listed by its best rating, green first (with their modes of inheritance: AD, AR, AD/AR, XLR, XLD), then amber, then
+  red (counted).
 - **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
@@ -240,15 +241,16 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
   (x0) of a green biallelic gene, an AChro-Puce recurrent deletion of class 5 or 4, or 35 protein-coding genes or more;
   MODERATE for an HI score of 2, a LoF-intolerant gene (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9), one copy
   of a green biallelic gene (look for a second variant), a green X-linked recessive gene, a green gene without a mode
-  or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost or genes cut without an exon.
+  or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost, genes cut without an exon,
+  or an AChro-Puce region of class 3, 2 or 1 (said, never lowering a higher level).
   Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more;
   MODERATE for a TS score of 2, a breakpoint inside an HI 3 or green monoallelic gene, a PIEV region, or 35 to 49 genes;
-  LOW otherwise. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
+  LOW otherwise (an AChro-Puce region of class 3, 2 or 1 included). The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
   is still being asked.
 
-Click a row (↑ ↓ for the next one): its genes are listed under it (whole or cut, HI, TS, LOEUF and pLI, PanelApp
-rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
+Click a row (↑ ↓ for the next one): its genes are listed under it, PanelApp green first, then amber, then red (whole
+or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
 its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as

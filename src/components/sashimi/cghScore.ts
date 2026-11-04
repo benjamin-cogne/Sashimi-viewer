@@ -80,6 +80,8 @@ export const SCORE_RULES: Rule[] = [
   { id: 'L12', level: 'moderate', kind: 'loss', label: '25 to 34 protein-coding genes (section 3B: 0.45 point)', call: i => (i.refseq && i.genes.length >= 25 && i.genes.length < 35 ? `${i.genes.length} protein-coding genes` : null) },
   { id: 'L13', level: 'low', kind: 'loss', label: 'exons of protein-coding genes lost, none of the above', gene: v => v.g.exons },
   { id: 'L14', level: 'low', kind: 'loss', label: 'genes cut without an exon lost (introns, ends of genes)', gene: v => !v.g.exons },
+  { id: 'L15', level: 'low', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 3 (uncertain significance)', call: i => hits(i, 'del', ['3']) },
+  { id: 'L16', level: 'low', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 2 or 1 (likely benign, benign)', call: i => hits(i, 'del', ['2', '1']) },
   // ---- gains ----
   { id: 'G1', level: 'high', kind: 'gain', label: 'a whole gene with a ClinGen triplosensitivity score of 3 (sufficient evidence)', gene: v => v.g.whole && v.ts === 3 },
   { id: 'G2', level: 'high', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 5 or 4', call: i => hits(i, 'dup', ['5', '4']) },
@@ -89,6 +91,8 @@ export const SCORE_RULES: Rule[] = [
   { id: 'G6', level: 'moderate', kind: 'gain', label: 'an AChro-Puce recurrent duplication classed PIEV (susceptibility)', call: i => hits(i, 'dup', ['PIEV']) },
   { id: 'G7', level: 'moderate', kind: 'gain', label: '35 to 49 protein-coding genes (section 3B for gains: 0.45 point)', call: i => (i.refseq && i.genes.length >= 35 && i.genes.length < 50 ? `${i.genes.length} protein-coding genes` : null) },
   { id: 'G8', level: 'low', kind: 'gain', label: 'protein-coding genes gained, none of the above', gene: () => true },
+  { id: 'G9', level: 'low', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 3 (uncertain significance)', call: i => hits(i, 'dup', ['3']) },
+  { id: 'G10', level: 'low', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 2 or 1 (likely benign, benign)', call: i => hits(i, 'dup', ['2', '1']) },
 ];
 
 function hits(i: ScoreInput, type: 'del' | 'dup', cls: AchroClass[]): string | null {

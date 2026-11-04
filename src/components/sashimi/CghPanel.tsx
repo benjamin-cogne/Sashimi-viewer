@@ -256,16 +256,22 @@ function GenesCell({ c, v }: { c: CghCnv; v: View }) {
     </td>
   );
 }
+/** PanelApp's genes of the call, green first, then amber, then red (each with the modes of its best-rated entries) */
+const RATING = { 3: { word: 'green', color: '#16a34a' }, 2: { word: 'amber', color: '#d97706' }, 1: { word: 'red', color: '#dc2626' } } as const;
+const modesAt = (x: GeneView) => (x.pa!.best === 3 ? x.pa!.green : x.pa!.best === 2 ? x.pa!.amber : []).filter(m => m !== '?');
 function PanelCell({ v }: { v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
-  const green = v.genes.filter(x => x.pa?.best === 3), amber = v.genes.filter(x => x.pa?.best === 2).length;
+  const by = (r: 1 | 2 | 3) => v.genes.filter(x => x.pa?.best === r);
+  const green = by(3), amber = by(2), red = by(1);
+  const title = ([3, 2, 1] as const).flatMap(r => by(r).map(x => `${RATING[r].word}: ${x.g.symbol}${modesAt(x).length ? ` (${modesAt(x).map(m => MOI[m].short).join(', ')})` : ''}${x.pa!.diseases.length ? ` · ${x.pa!.diseases.slice(0, 2).join('; ')}` : ''}`)).join('\n');
   return (
-    <td className="px-2 py-1 max-w-[230px]" title={green.map(x => `${x.g.symbol}: ${x.pa!.green.map(m => MOI[m].label).join(', ')}${x.pa!.diseases.length ? ` · ${x.pa!.diseases.slice(0, 3).join('; ')}` : ''}`).join('\n') || undefined}>
+    <td className="px-2 py-1 max-w-[260px]" title={title || undefined}>
       <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        {green.slice(0, 4).map(x => <span key={x.g.symbol} className="inline-flex items-center gap-0.5 whitespace-nowrap"><i>{x.g.symbol}</i>{x.pa!.green.filter(m => m !== '?').map(m => <MoiBadge key={m} m={m} />)}</span>)}
+        {green.slice(0, 4).map(x => <span key={x.g.symbol} className="inline-flex items-center gap-0.5 whitespace-nowrap"><i>{x.g.symbol}</i>{modesAt(x).map(m => <MoiBadge key={m} m={m} />)}</span>)}
         {green.length > 4 && <span className="text-slate-400">+{green.length - 4}</span>}
-        {!green.length && !v.waiting && <span className="text-slate-300">—</span>}
-        {amber > 0 && <span className="text-amber-700 text-[10.5px]" title="Genes rated amber in a panel at best">{amber} amber</span>}
+        {amber.length > 0 && <span className="whitespace-nowrap" style={{ color: RATING[2].color }}><span className="text-[10px] font-semibold">amber </span><i>{amber.slice(0, 2).map(x => x.g.symbol).join(', ')}</i>{amber.length > 2 ? ` +${amber.length - 2}` : ''}</span>}
+        {red.length > 0 && <span className="text-[10px] font-semibold" style={{ color: RATING[1].color }}>red {red.length}</span>}
+        {!green.length && !amber.length && !red.length && !v.waiting && <span className="text-slate-300">—</span>}
         {waitingDot(v.waiting)}
       </span>
     </td>
@@ -297,8 +303,8 @@ function CnvDetail({ c, v }: { c: CghCnv; v: View }) {
   const [allGenes, setAllGenes] = useState(false);
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]">Reading the genes of the call…</div>;
   const key = c.kind === 'loss' ? 'hi' : 'ts';
-  const order = (x: GeneView) => (x[key] === 3 ? 0 : x.pa?.best === 3 ? 1 : x[key] === 2 ? 2 : (x.loeuf ?? 9) < 0.35 ? 3 : x.pa?.best === 2 ? 4 : 5);
-  const genes = v.genes.slice().sort((a, b) => order(a) - order(b) || a.g.start - b.g.start);
+  // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position
+  const genes = v.genes.slice().sort((a, b) => (b.pa?.best ?? 0) - (a.pa?.best ?? 0) || (b[key] ?? 0) % 10 - (a[key] ?? 0) % 10 || a.g.start - b.g.start);
   const shownGenes = allGenes ? genes : genes.slice(0, 30);
   const dot = (l: Level) => <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ background: LEVEL_STYLE[l].color }} />;
   return (
@@ -330,8 +336,8 @@ function CnvDetail({ c, v }: { c: CghCnv; v: View }) {
             <td className="px-2 py-0.5 tabular-nums">{x.loeuf != null ? x.loeuf.toFixed(2) : ''}{x.pli != null ? <span className="text-slate-400"> ({x.pli.toFixed(2)})</span> : null}</td>
             <td className="px-2 py-0.5 whitespace-nowrap">{!x.pa ? <span className={x.paState === 'failed' ? 'text-amber-700' : 'text-slate-400'}>{x.paState === 'failed' ? 'not answered' : x.paState === 'not asked' ? `not asked (over ${PANELAPP_MAX_GENES} genes)` : '…'}</span>
               : x.pa.best === 0 ? <span className="text-slate-400">in no panel</span>
-              : <span className="inline-flex items-center gap-1"><span className="font-semibold" style={{ color: x.pa.best === 3 ? '#16a34a' : x.pa.best === 2 ? '#d97706' : '#dc2626' }}>{x.pa.best === 3 ? 'green' : x.pa.best === 2 ? 'amber' : 'red'}</span>
-                {(x.pa.best === 3 ? x.pa.green : x.pa.amber).filter(m => m !== '?').map(m => <MoiBadge key={m} m={m} />)}</span>}</td>
+              : <span className="inline-flex items-center gap-1"><span className="font-semibold" style={{ color: RATING[x.pa.best].color }}>{RATING[x.pa.best].word}</span>
+                {modesAt(x).map(m => <MoiBadge key={m} m={m} />)}</span>}</td>
             <td className="px-2 py-0.5 text-slate-600 max-w-[380px] truncate" title={x.pa?.diseases.join('\n')}>{x.pa?.diseases.slice(0, 2).join(' · ')}</td>
           </tr>))}</tbody>
       </table>}

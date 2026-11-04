@@ -26,8 +26,8 @@ export interface CnvAnn {
   /** the sources that did not answer */
   missing: string[];
 }
-/** the genes PanelApp is asked for, at most, per call (the largest calls are high priority by their gene count anyway) */
-export const PANELAPP_MAX_GENES = 150;
+/** every gene of a call is asked of PanelApp (one request per gene, cached); a bound against a whole-arm call only */
+export const PANELAPP_MAX_GENES = 1000;
 export const PANEL_SOURCE = PANEL_SOURCES[0];
 
 /** the genes of a window from its RefSeq models: each gene's principal model (MANE / RefSeq Select, else the longest) */
@@ -163,7 +163,7 @@ export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes
   const asked = ann.genes.slice(0, PANELAPP_MAX_GENES).map(g => s.modes[g.symbol]);
   const waiting = asked.filter(m => m === 'loading' || m === undefined).length;
   const failed = asked.filter(m => m === 'error').length;
-  const missing = [...ann.missing, ...(failed ? [`PanelApp (${failed} gene${failed > 1 ? 's' : ''} not answered)`] : []), ...(ann.genes.length > PANELAPP_MAX_GENES ? [`PanelApp asked for the first ${PANELAPP_MAX_GENES} genes only`] : [])];
+  const missing = [...ann.missing, ...(failed ? [`PanelApp (${failed} gene${failed > 1 ? 's' : ''} not answered)`] : []), ...(ann.genes.length > PANELAPP_MAX_GENES ? [`PanelApp asked for ${PANELAPP_MAX_GENES} of the ${ann.genes.length} genes`] : [])];
   const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, genes, refseq: ann.source === 'refseq', achro: ann.achro });
   return { ann, genes, score, waiting, missing };
 }
