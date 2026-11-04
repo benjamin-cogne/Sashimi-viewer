@@ -307,8 +307,17 @@ https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464
 Template: `href="…/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100"`. A GRCh37
 laboratory sends the hg19 accession or `build=GRCh37`; deep-intronic variants need a larger `pad` or a `locus`.
 
+**Nomenclature of a rebuilt rearrangement.** The box under a rebuilt SV gives drafts to check before any report:
+HGVS (allele form on the `NC_` accession), and ISCN 2024 for sequencing in its two formats (§4.7): the karyotype
+format (bands, short system for one deletion, duplication or inversion, `t(A;B)(…;…)` for a balanced reciprocal
+translocation, else the detailed system with `→`, derivatives named after the chromosome giving the centromere,
+then the HGVS description) and the microarray format (each stretch gained or lost with its copy number, `×1`, `×3`;
+heterozygous unless the cartoon says homozygous). The junction line is the viewer's own and is left out of the copy.
+
 **Links to the SV browser.** `#sv=` opens the page on the SV browser with what its box takes, no alignment needed:
-a rearrangement (HGVS, ISCN sequence form, or `DEL` / `DUP` / `INV` before coordinates), a small variant (under 50 bp,
+a rearrangement (HGVS; ISCN 2024 with positions, `seq[GRCh38] del(20)(p12.2p12.2) NC_000020.11:g.10489766_10783340del`
+or `seq[GRCh38] 20p12.2(10,489,766_10,783,340)×1`; the viewer's junction line; or `DEL` / `DUP` / `INV` before
+coordinates), a small variant (under 50 bp,
 genomic `chr2:g.60461323del` or on a transcript `NM_022893.4:c.1592del`, moved to the genome by VariantValidator,
 or by Ensembl's Variant Recoder when VariantValidator fails or gives no answer in 10 s: marked on the reference, no rebuilt chromosome, the view on its gene, ClinVar variants each at its place),
 coordinates (opened with

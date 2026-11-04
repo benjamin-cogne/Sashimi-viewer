@@ -8,10 +8,18 @@
  * chromosome end replaced by another chromosome a `delins[NC_…:g.…_qter]`. Positions are the best ones the reads give,
  * not shifted by the 3′ rule: their uncertainty goes along as "±N bp", outside the description.
  *
- * ISCN (the resulting chromosome): the bands of the breakpoints, `seq[GRCh38] del(20)(p12.2p12.2)` for a single
- * deletion, duplication or inversion, otherwise the detailed form of the derivative from pter to qter
- * (`der(20)(pter->p12.2::p12.2->p12.2::p12.2->qter)`), and its sequence form with the positions
- * (`chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_cen_qter`).
+ * ISCN 2024 (McGowan-Jordan, Hastings & Moore eds., Karger 2024), sequencing (`seq`), in its two formats (§4.7):
+ * - karyotype format: the bands, then the HGVS description on the NC_ accession after a space (§4.7 i–ii), e.g.
+ *   `seq[GRCh38] del(12)(q22q22) NC_000012.12:g.93201112_95156540del`. The short system for a single deletion,
+ *   duplication or inversion (both breakpoints given, even within one band, §4.4.4d; the one nearer pter first,
+ *   §5.5.10a); otherwise the detailed system, the derivative from pter to qter with → between bands, :: at each
+ *   break and reunion, the chromosome number before the bands when several chromosomes take part (§5.4.2.2);
+ *   several abnormalities separated by commas.
+ * - microarray format: the copy number of each stretch gained or lost, e.g. `seq[GRCh38] 12q22(93,201,112_95,156,540)×1`:
+ *   the band once when both ends lie in it (§4.4.4d), positions with commas (§4.4.5d), no pter / qter (§4.7.2a),
+ *   sex chromosomes first, then autosomes in order (§4.4.5f), abnormalities separated by commas.
+ * The junction line (`chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_qter`) is the
+ * viewer's own: the derivative's stretches from pter to qter, which the SV browser reads back. It is not an ISCN form.
  *
  * Every description is a draft: the viewer says so next to it.
  */
@@ -22,12 +30,18 @@ export interface Cytoband { start: number; end: number; name: string; stain: str
 export interface SvNomenclature {
   /** one HGVS description per rearranged chromosome */
   hgvs: string[];
-  /** ISCN with bands (when the cytobands are known), and the sequence form */
-  iscn: string | null; iscnSeq: string[];
+  /** ISCN 2024 karyotype format (bands, then the HGVS description when one chromosome is rearranged); null without bands */
+  iscn: string | null;
+  /** ISCN 2024 microarray format: the stretches gained or lost and their copy number; null when none or without bands */
+  iscnArr: string | null;
+  /** the viewer's junction line per derivative (not an ISCN form; the SV browser reads it back) */
+  iscnSeq: string[];
   /** "±5–45 bp" over the breakpoints described */
   uncertainty: string;
 }
 export const NOMENCLATURE_WARNING = 'Automated draft: check before any clinical report.';
+/** the versions followed, to state in a report (ISCN 2024 §4.2a) */
+export const NOMENCLATURE_VERSIONS = 'HGVS nomenclature (varnomen.hgvs.org) · ISCN 2024';
 
 const num = (c: string) => c.replace(/^chr/i, '');
 const comma = (n: number) => n.toLocaleString('en-US');
@@ -124,6 +138,7 @@ function iscnOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | 
   const many = chroms.length > 1;
   const seq: string[] = [];
   const bandForms: string[] = [];
+  const derSpans: { name: string; spans: Span[] }[] = [];
   let allBands = true;
   for (const d of ders) {
     const spans = d.pieces.map(spanOf);
@@ -141,6 +156,13 @@ function iscnOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | 
       const mid = cen != null && cen > (s.pter ? 0 : s.start) && (s.qter || cen < s.end) ? '_cen' : '';
       return `chr${num(s.chrom)}:g.${a}${mid}_${b}${s.reversed ? 'inv' : ''}`;
     }).join('::'));
+    // the derivative is named after the chromosome giving its centromere and read from the end replacing the short arm
+    // (ISCN 2024 §5.4.2.2d–e): the piece holding a centromere goes forward
+    const hasCen = (s: Span) => { const c = centromere(bandsOf(s.chrom)); return c != null && (s.pter ? 0 : s.start) < c && (s.qter ? Infinity : s.end) > c; };
+    const cenPiece = merged.find(hasCen);
+    const oriented = cenPiece?.reversed ? [...merged].reverse().map(s => ({ ...s, reversed: !s.reversed })) : merged;
+    const name = cenPiece ? cenPiece.chrom : d.chrom;
+    derSpans.push({ name, spans: oriented });
     const bandName = (s: Span, which: 'from' | 'to'): string => {
       const atStart = (which === 'from') !== s.reversed;
       if (atStart && s.pter) return `${many ? num(s.chrom) : ''}pter`;
@@ -149,31 +171,90 @@ function iscnOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | 
       if (!b) allBands = false;
       return `${many ? num(s.chrom) : ''}${b ?? '?'}`;
     };
-    bandForms.push(`der(${num(d.chrom)})(${merged.map(s => `${bandName(s, 'from')}->${bandName(s, 'to')}`).join('::')})`);
+    bandForms.push(`der(${num(name)})(${oriented.map(s => `${bandName(s, 'from')}→${bandName(s, 'to')}`).join('::')})`);
   }
-  // a single deletion, duplication or inversion in one chromosome: the short form
+  // a balanced reciprocal translocation (two derivatives, each its own chromosome's centric piece and the other's end):
+  // the short system t(A;B)(bA;bB), the sex chromosome or the lowest number first (§5.5.18.1)
+  if (derSpans.length === 2 && chroms.length === 2 && !arrOf(rec, bandsOf, build, 'het')) {
+    const brk: Record<string, string | null> = {};
+    const ok = derSpans.every(({ name, spans }) => {
+      if (spans.length !== 2 || spans[0].chrom === spans[1].chrom || !spans.some(x => x.chrom === name)) return false;
+      if (!spans.every(x => x.pter || x.qter)) return false;
+      const own = spans.find(x => x.chrom === name)!;
+      brk[name] = bandAt(bandsOf(name), own.pter ? own.end - 1 : own.start);
+      return true;
+    }) && new Set(derSpans.map(x => x.name)).size === 2 && Object.values(brk).every(Boolean);
+    if (ok) {
+      const order = (c: string) => { const n = num(c).toUpperCase(); return n === 'X' ? -2 : n === 'Y' ? -1 : Number(n) || 99; };
+      const cs = derSpans.map(x => x.name).sort((a, b) => order(a) - order(b));
+      return { band: `seq[${build}] t(${cs.map(num).join(';')})(${cs.map(c => brk[c]).join(';')})`, seq };
+    }
+  }
+  // one rearranged chromosome: its HGVS description follows the bands (karyotype format, §4.7)
   const hg = rec.ders.filter(d => d.rearranged);
-  if (hg.length === 1 && !many) {
-    const h = hgvsOf(hg[0], rec.segs, build);
-    const m = h?.match(/:g\.(\d+|pter)_(\d+|qter)(del|dup|inv)$/);
+  const h = hg.length === 1 && !many ? hgvsOf(hg[0], rec.segs, build) : null;
+  const withHgvs = (band: string) => `seq[${build}] ${band}${h ? ` ${h}` : ''}`;
+  // a single deletion, duplication or inversion in one chromosome: the short system
+  if (h) {
+    const m = h.match(/:g\.(\d+|pter)_(\d+|qter)(del|dup|inv)$/);
     const bands = bandsOf(hg[0].chrom);
     if (m && bands) {
       const a = m[1] === 'pter' ? null : bandAt(bands, +m[1] - 1), b = m[2] === 'qter' ? null : bandAt(bands, +m[2] - 1);
       if ((a || m[1] === 'pter') && (b || m[2] === 'qter')) {
         const terminal = m[1] === 'pter' || m[2] === 'qter';
-        return { band: `seq[${build}] ${m[3]}(${num(hg[0].chrom)})(${terminal ? (a ?? b) : `${a}${b}`})`, seq };
+        return { band: withHgvs(`${m[3]}(${num(hg[0].chrom)})(${terminal ? (a ?? b) : `${a}${b}`})`), seq };
       }
     }
   }
-  return { band: allBands && bandForms.length ? `seq[${build}] ${bandForms.join(';')}` : null, seq };
+  return { band: allBands && bandForms.length ? withHgvs(bandForms.join(',')) : null, seq };
 }
 
-export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (chrom: string) => Cytoband[] | undefined = () => undefined): SvNomenclature {
+/**
+ * ISCN 2024 microarray format of the copy-number changes: each segment's copies, from the homologues left intact and
+ * the copies of it the rearranged chromosomes carry (heterozygous: one homologue per rearranged chromosome replaced;
+ * homozygous: both); runs of contiguous segments with the same copy number other than 2 are listed.
+ */
+function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | undefined, build: string, zygosity: 'het' | 'hom'): string | null {
+  const ders = rec.ders.filter(d => d.rearranged);
+  if (!ders.length) return null;
+  const count = new Map<number, number>();
+  for (const d of ders) for (const p of d.pieces) count.set(p.seg.id, (count.get(p.seg.id) ?? 0) + 1);
+  const derOn = (c: string) => ders.filter(d => d.chrom === c).length;
+  const k = zygosity === 'hom' ? 2 : 1;
+  const items: { chrom: string; start: number; end: number; cn: number; pter: boolean; qter: boolean }[] = [];
+  for (const c of rec.chrs) {
+    const kept = Math.max(0, 2 - k * derOn(c));
+    for (const sg of rec.byChr[c] ?? []) {
+      const cn = kept + k * (count.get(sg.id) ?? 0);
+      const last = items[items.length - 1];
+      const pter = sg.first && sg.i === 0, qter = sg.last;
+      if (last && last.chrom === c && last.cn === cn && last.end === sg.start) { last.end = sg.end; last.qter = qter; }
+      else items.push({ chrom: c, start: sg.start, end: sg.end, cn, pter, qter });
+    }
+  }
+  const changed = items.filter(x => x.cn !== 2);
+  if (!changed.length) return null;
+  const order = (c: string) => { const n = num(c).toUpperCase(); return n === 'X' ? -2 : n === 'Y' ? -1 : Number(n) || 99; };
+  const parts: string[] = [];
+  for (const x of [...changed].sort((a, b) => order(a.chrom) - order(b.chrom) || a.start - b.start)) {
+    const bands = bandsOf(x.chrom);
+    if (!bands) return null;
+    // no pter / qter in this format (§4.7.2a): the chromosome's first and last bases
+    const len = Math.max(...bands.map(b => b.end));
+    const a = x.pter ? 0 : x.start, b = x.qter ? len : x.end;
+    const b1 = bandAt(bands, a), b2 = bandAt(bands, b - 1);
+    if (!b1 || !b2) return null;
+    parts.push(`${num(x.chrom)}${b1}${b2 !== b1 ? b2 : ''}(${comma(a + 1)}_${comma(b)})×${x.cn}`);
+  }
+  return `seq[${build}] ${parts.join(',')}`;
+}
+
+export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (chrom: string) => Cytoband[] | undefined = () => undefined, zygosity: 'het' | 'hom' = 'het'): SvNomenclature {
   const hgvs = rec.ders.filter(d => d.rearranged).map(d => hgvsOf(d, rec.segs, build)).filter((x): x is string => !!x);
   const { band, seq } = iscnOf(rec, bandsOf, build);
   const errs = Object.values(rec.bpError ?? {});
   const lo = errs.length ? Math.min(...errs) : 0, hi = errs.length ? Math.max(...errs) : 0;
-  return { hgvs, iscn: band, iscnSeq: seq, uncertainty: !errs.length ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
+  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity), iscnSeq: seq, uncertainty: !errs.length ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
 }
 
 // ======================== Reading a description ========================
@@ -201,7 +282,19 @@ function chromOf(ref: string): string | null {
  */
 export function parseSv(text: string, build: string, chromLen: (chrom: string) => number | null): ParsedSv {
   const notes: string[] = [];
-  const raw = text.trim().replace(/^seq\[[^\]]*\]\s*/i, '').replace(/\s+/g, '').replace(/,/g, '');
+  let typed = text.trim().replace(/^seq\[[^\]]*\]\s*/i, '');
+  // ISCN 2024 karyotype format: the bands, then the HGVS description after a space: the HGVS description is read
+  const kar = typed.match(/^(?:del|dup|inv|ins|der|t)\([^)]*\)\([^)]*\)\s+(\S+:g\..+)$/i);
+  if (kar) typed = kar[1];
+  // ISCN 2024 microarray format, one stretch: 20p12.2(10,489,766_10,783,340)×1 → a deletion (×0, ×1) or a duplication (×3…)
+  const arr = typed.replace(/\s+/g, '').match(/^(\d{1,2}|X|Y)[pq][\d.]+(?:[pq][\d.]+)?\(([\d,]+)_([\d,]+)\)[×x](\d+)$/i);
+  if (arr) {
+    const cn = +arr[4];
+    if (cn === 2) throw new Error('Two copies: no change to draw.');
+    typed = `chr${arr[1].toUpperCase()}:g.${arr[2].replace(/,/g, '')}_${arr[3].replace(/,/g, '')}${cn < 2 ? 'del' : 'dup'}`;
+    if (cn > 3) notes.push(`×${cn}: drawn as one extra copy in tandem`);
+  }
+  const raw = typed.replace(/\s+/g, '').replace(/,/g, '');
   if (!raw) throw new Error('Type an HGVS or ISCN description.');
   if (/^[a-z]+\(\w+(;\w+)?\)\(/i.test(raw) || /->|→/.test(raw)) throw new Error('Band-level ISCN gives no positions: type the HGVS description, or the ISCN sequence form (chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::…).');
   const lenOf = (c: string) => { const l = chromLen(c); if (!l) throw new Error(`Unknown chromosome ${c} on ${build}.`); return l; };

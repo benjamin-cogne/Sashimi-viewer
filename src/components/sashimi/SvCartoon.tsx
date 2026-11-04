@@ -250,7 +250,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
               {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-slate-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-slate-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
               <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
             </div>
-            <SvNomenclatureBox rec={rec} build={build} bands={bands} />
+            <SvNomenclatureBox rec={rec} build={build} bands={bands} zygosity={zygosity} />
           </div>
         </div>
         <div ref={reconRef} className="scroll-mt-12 border-t border-slate-200 pt-3">
