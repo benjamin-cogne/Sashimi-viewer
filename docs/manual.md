@@ -309,8 +309,8 @@ laboratory sends the hg19 accession or `build=GRCh37`; deep-intronic variants ne
 
 **Links to the SV browser.** `#sv=` opens the page on the SV browser with what its box takes, no alignment needed:
 a rearrangement (HGVS, ISCN sequence form, or `DEL` / `DUP` / `INV` before coordinates), a small variant (under 50 bp,
-genomic `chr2:g.60461323del` or on a transcript `NM_022893.4:c.1592del`, moved to the genome by Ensembl's Variant
-Recoder: marked on the reference, no rebuilt chromosome, the view on its gene, ClinVar variants each at its place),
+genomic `chr2:g.60461323del` or on a transcript `NM_022893.4:c.1592del`, moved to the genome by VariantValidator,
+or by Ensembl's Variant Recoder when VariantValidator fails or gives no answer in 10 s: marked on the reference, no rebuilt chromosome, the view on its gene, ClinVar variants each at its place),
 coordinates (opened with
 a quarter of the interval on each side, the interval highlighted), a chromosome or a gene. `build=GRCh37` for hg19
 positions. The SV browser keeps the address bar on its last search, and **🔗 copy link** copies it.

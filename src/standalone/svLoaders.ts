@@ -8,6 +8,7 @@ import { chromLength } from './assembly';
 import { getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getTranscript, getClinvar } from './ucsc';
 import { getConstraint } from './gnomad';
 import { mapAssembly, recodeHgvs } from './ensembl';
+import { vvRecode } from './variantValidator';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
 import type { SvGeneLoaders } from '../components/sashimi/SvGenomeBrowser';
 import type { Constraint, DosageScore } from '../components/sashimi/svGenes';
@@ -29,7 +30,20 @@ export function svLoadersFor(build: GenomeBuild): Omit<SvGeneLoaders, 'fallback'
     getCytobands: c => getCytobands(build, c, chromLength(build, c) ?? 300_000_000),
     getPopulationSvs: async (c, a, b) => (await getDgvGold(build, c, a, b)).map(parseDgvItem).filter((v): v is PopulationSv => !!v),
     liftOver: (from, to, chrom, start, end) => mapAssembly(from, to, chrom, start, end),
-    recodeHgvs: hgvs => recodeHgvs(build, hgvs),
+    // VariantValidator first (RefSeq-native, usually faster), Ensembl's Variant Recoder when it fails or is slow
+    recodeHgvs: async (hgvs, onStep) => {
+      let vvFailed: string;
+      try {
+        onStep?.('VariantValidator');
+        const r = await vvRecode(build, hgvs);
+        return { hgvsg: r.hgvsg, spdi: null, vcf: r.vcf, warnings: r.warnings, source: 'VariantValidator' };
+      } catch (e) { vvFailed = (e as Error).message; }
+      onStep?.('Ensembl');
+      try {
+        const r = await recodeHgvs(build, hgvs);
+        return { ...r, vcf: null, warnings: [...r.warnings, `asked after ${vvFailed}`], source: 'Ensembl Variant Recoder' };
+      } catch (e) { throw new Error(`${vvFailed}; ${(e as Error).message}`); }
+    },
     getClinvar: (which, c, a, b) => getClinvar(build, which, c, a, b),
     locateGene: async symbol => {
       // as the Sashimi viewer's search: a symbol, or an Ensembl gene id

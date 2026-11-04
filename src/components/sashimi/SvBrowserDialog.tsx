@@ -52,7 +52,7 @@ function typedSv(raw: string): string | null {
 }
 
 /** a small variant marked on the reference: as typed, and on the genome when typed on a transcript */
-type ShownVariant = { kind: 'variant'; chrom: string; start: number; end: number; v: SmallVariant; typed: string; hgvsg: string | null; spdi: string | null; text: string };
+type ShownVariant = { kind: 'variant'; chrom: string; start: number; end: number; v: SmallVariant; typed: string; hgvsg: string | null; spdi: string | null; vcf: string | null; source: string | null; text: string };
 type Shown = { kind: 'sv'; parsed: ParsedSv; text: string } | { kind: 'region'; chrom: string; start: number; end: number } | ShownVariant;
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 
@@ -100,25 +100,26 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
         if (!loadersFor) throw new Error(`${acc} is a ${accBuild} accession; this session reads ${b}.`);
         b = accBuild; setBuild(b); save(BUILD_KEY, b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
       }
-      const showVariant = (v: SmallVariant, typed: string, hgvsg: string | null, spdi: string | null) => {
+      const showVariant = (v: SmallVariant, typed: string, hgvsg: string | null, spdi: string | null, vcf: string | null = null, source: string | null = null) => {
         const len = chromLength(b, v.chrom);
         if (!len) throw new Error(`Unknown chromosome ${v.chrom} on ${b}.`);
         if (v.end > len) throw new Error(`${v.chrom} ends at ${len.toLocaleString('en-US')} on ${b}.`);
-        setShown({ kind: 'variant', chrom: v.chrom, start: Math.max(0, v.start - AROUND_VAR), end: Math.min(len, v.end + AROUND_VAR), v, typed, hgvsg, spdi, text: raw });
+        setShown({ kind: 'variant', chrom: v.chrom, start: Math.max(0, v.start - AROUND_VAR), end: Math.min(len, v.end + AROUND_VAR), v, typed, hgvsg, spdi, vcf, source, text: raw });
         setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
       };
-      // a transcript description (NM_022893.4:c.1592del): moved to the genome by Ensembl, then marked (or rebuilt when large)
+      // a transcript description (NM_022893.4:c.1592del): moved to the genome (VariantValidator, else Ensembl), then
+      // marked (or rebuilt when large)
       if (TRANSCRIPT_HGVS_RE.test(raw.replace(/\s+/g, ''))) {
         const ld = loadersFor ? loadersFor(b) : loaders;
-        if (!ld.recodeHgvs) throw new Error('Transcript descriptions need Ensembl, not available here: type the variant on the genome (chr2:g.…).');
+        if (!ld.recodeHgvs) throw new Error('Transcript descriptions need VariantValidator or Ensembl, not available here: type the variant on the genome (chr2:g.…).');
         setBusy(true);
-        const r = await ld.recodeHgvs(raw.replace(/\s+/g, '')).finally(() => setBusy(false));
+        const r = await ld.recodeHgvs(raw.replace(/\s+/g, ''), service => setNote(`${raw}: asking ${service}…`)).finally(() => setBusy(false));
         const small = parseSmallGenomic(r.hgvsg);
-        const warn = r.warnings.length ? ` · Ensembl: ${r.warnings.join('; ')}` : '';
-        if (small) { showVariant(small, raw, r.hgvsg, r.spdi); setNote(`${raw} = ${r.hgvsg} (${b}, Ensembl Variant Recoder)${warn}`); return; }
+        const warn = r.warnings.length ? ` · ${r.warnings.join('; ')}` : '';
+        if (small) { showVariant(small, raw, r.hgvsg, r.spdi, r.vcf, r.source); setNote(`${raw} = ${r.hgvsg} (${b}, ${r.source})${warn}`); return; }
         const parsed = parseSv(r.hgvsg, b, c => chromLength(b, c));
         setShown({ kind: 'sv', parsed, text: r.hgvsg }); setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
-        setNote(`${raw} = ${r.hgvsg} (${b}, Ensembl Variant Recoder): ${SMALL_MAX} bp or more, drawn as a rearrangement${warn}`);
+        setNote(`${raw} = ${r.hgvsg} (${b}, ${r.source}): ${SMALL_MAX} bp or more, drawn as a rearrangement${warn}`);
         return;
       }
       // a small genomic variant (under SMALL_MAX bp): marked on the reference, no rebuilt chromosome
@@ -164,7 +165,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
       // an HGVS or ISCN description (its NC_ accession's build already picked above)
       const parsed = parseSv(t, b, c => chromLength(b, c));
       setShown({ kind: 'sv', parsed, text: t }); setFocus(null); setMark(null); save(KEY, t); setLink(raw, b);
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) { setError((e as Error).message); setNote(n => (n?.endsWith('…') ? null : n)); }
   };
   const switchBuild = (b: GenomeBuild) => {
     if (b === build) return;
@@ -211,7 +212,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                     options={[{ value: 'GRCh38', label: 'GRCh38', hint: 'GRCh38 / hg38 (default)' }, { value: 'GRCh37', label: 'GRCh37', hint: 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)' }]} />
                 : <span className="font-normal text-slate-500">· {build}</span>}
             </div>
-            <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); a small variant (under {SMALL_MAX} bp: chr2:g.60461323del, or on a transcript: NM_022893.4:c.1592del, placed by Ensembl), marked on the reference; or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
+            <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); a small variant (under {SMALL_MAX} bp: chr2:g.60461323del, or on a transcript: NM_022893.4:c.1592del, placed by VariantValidator, else Ensembl), marked on the reference; or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
         </div>
         <div className="px-5 pb-3">
@@ -253,7 +254,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
               label: variant.hgvsg ? variant.typed.replace(/\(([^)]*)\)/, '') : variant.v.hgvs,
               lines: [
                 `${SMALL_KIND_WORD[variant.v.kind]}${variant.v.kind === 'snv' ? '' : ` of ${variant.v.size} bp`}`,
-                ...(variant.hgvsg ? [`on the genome: ${variant.hgvsg} (${build}, Ensembl Variant Recoder)`, ...(variant.spdi ? [`SPDI: ${variant.spdi}`] : [])] : []),
+                ...(variant.hgvsg ? [`on the genome: ${variant.hgvsg} (${build}, ${variant.source ?? 'mapped'})`, ...(variant.spdi ? [`SPDI: ${variant.spdi}`] : []), ...(variant.vcf ? [`VCF: ${variant.vcf}`] : [])] : []),
                 `${variant.v.chrom}:${(variant.v.start + 1).toLocaleString('en-US')}${variant.v.end - variant.v.start > 1 ? `-${variant.v.end.toLocaleString('en-US')}` : ''} (${build})`,
               ],
             } : undefined} />

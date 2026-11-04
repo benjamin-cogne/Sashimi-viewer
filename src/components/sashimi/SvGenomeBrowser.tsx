@@ -105,8 +105,11 @@ export interface SvGeneLoaders {
   locateGene?: (symbol: string) => Promise<{ chrom: string; start: number; end: number; name: string }>;
   /** a stretch moved between builds (1-based inclusive), for coordinates published in the other build */
   liftOver?: (from: GenomeBuild, to: GenomeBuild, chrom: string, start: number, end: number) => Promise<{ chrom: string; start: number; end: number } | null>;
-  /** a transcript HGVS (NM_…:c.…) on the genome: its genomic HGVS on the NC_ accession, its SPDI, Ensembl's warnings */
-  recodeHgvs?: (hgvs: string) => Promise<{ hgvsg: string; spdi: string | null; warnings: string[] }>;
+  /**
+   * a transcript HGVS (NM_…:c.…) on the genome: its genomic HGVS on the NC_ accession, its SPDI or VCF form when given,
+   * the service's warnings and the service that answered; `onStep` names each service as it is asked
+   */
+  recodeHgvs?: (hgvs: string, onStep?: (service: string) => void) => Promise<{ hgvsg: string; spdi: string | null; vcf: string | null; warnings: string[]; source: string }>;
   /** ClinVar variants classified pathogenic / likely pathogenic over a 0-based half-open window: SVs (≥ 50 bp) or SNVs and short indels */
   getClinvar?: (which: 'sv' | 'snv', chrom: string, start: number, end: number) => Promise<ClinvarVariant[]>;
   /** the models the viewer already has (the gene in view): used when the source cannot list a window's transcripts */
