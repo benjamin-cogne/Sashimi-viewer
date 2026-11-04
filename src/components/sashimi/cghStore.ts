@@ -4,6 +4,7 @@
  * browser's storage: only the settings (the minimum number of probes, the filter) are remembered.
  */
 import { useSyncExternalStore } from 'react';
+import { unzipSync } from 'fflate';
 import { parseCghFile, type CghFile, type CghCnv } from './cghIntervals';
 
 export interface CghFilter {
@@ -27,7 +28,7 @@ export interface CghState {
   /** the call drawn in the browser */
   shown: string | null;
   /** files read, waiting for the minimum number of probes; the files that could not be read */
-  pending: { files: CghFile[]; errors: string[] } | null;
+  pending: { files: CghFile[]; errors: string[]; notes: string[] } | null;
   /** classes changed since the last export */
   dirty: boolean;
   /** the array-CGH page is open (over the SV browser) */
@@ -52,9 +53,23 @@ const onUnload = (e: BeforeUnloadEvent) => { if (state.dirty) { e.preventDefault
 if (typeof window !== 'undefined') window.addEventListener('beforeunload', onUnload);
 
 /** a file's text: UTF-8, else Windows-1252 (an export from a Windows PC) */
-async function readText(f: File): Promise<string> {
-  const buf = await f.arrayBuffer();
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); }
+const decode = (buf: Uint8Array | ArrayBuffer): string => { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); } };
+const TABLE = /\.(txt|tsv|xls|bed)$/i;
+/** the tables of a zip, and of the zips inside it (one level): macOS's resource files left out, the other files counted */
+function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; bytes: Uint8Array }[]; skipped: number } {
+  let skipped = 0;
+  const files = unzipSync(data, { filter: f => {
+    if (f.name.endsWith('/') || /(^|\/)__MACOSX\/|(^|\/)\._/.test(f.name)) return false;
+    const keep = (TABLE.test(f.name) || (depth === 0 && /\.zip$/i.test(f.name))) && f.originalSize < 200e6;
+    if (!keep) skipped++;
+    return keep;
+  } });
+  const entries: { path: string; bytes: Uint8Array }[] = [];
+  for (const [path, bytes] of Object.entries(files)) {
+    if (/\.zip$/i.test(path)) { const inner = zipEntries(bytes, depth + 1); skipped += inner.skipped; entries.push(...inner.entries.map(e => ({ path: `${path} › ${e.path}`, bytes: e.bytes }))); }
+    else entries.push({ path, bytes });
+  }
+  return { entries, skipped };
 }
 
 export const cgh = {
@@ -62,11 +77,30 @@ export const cgh = {
   setOpen(open: boolean) { set({ open }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
-    const files: CghFile[] = [], errors: string[] = [];
+    const files: CghFile[] = [], errors: string[] = [], notes: string[] = [];
+    const seen = new Set([...state.files].map(f => f.lines.join('\n')));
+    const take = (f: CghFile) => { const k = f.lines.join('\n'); if (seen.has(k)) { notes.push(`${f.name}: already added`); return; } seen.add(k); files.push(f); };
     for (const f of Array.from(list)) {
-      try { files.push(parseCghFile(await readText(f), f.name)); } catch (e) { errors.push((e as Error).message); }
+      try {
+        const buf = new Uint8Array(await f.arrayBuffer());
+        if (/\.zip$/i.test(f.name)) {
+          // one patient per zip: its interval tables (a .txt must be one: other text files are skipped), its BED files
+          const { entries, skipped } = zipEntries(buf);
+          const patient = f.name.replace(/\.zip$/i, '');
+          let n = 0, other = skipped;
+          for (const e of entries) {
+            try {
+              const t = parseCghFile(decode(e.bytes), `${f.name} › ${e.path}`, patient);
+              if (t.format === 'bed' && !/\.bed$/i.test(e.path)) { other++; continue; }
+              take(t); n++;
+            } catch { other++; }
+          }
+          if (!n) errors.push(`${f.name}: no interval table or BED inside (${entries.length + skipped} file${entries.length + skipped > 1 ? 's' : ''})`);
+          else if (other) notes.push(`${f.name}: ${n} table${n > 1 ? 's' : ''} read, ${other} other file${other > 1 ? 's' : ''} skipped`);
+        } else take(parseCghFile(decode(buf), f.name));
+      } catch (e) { errors.push(`${f.name}: ${(e as Error).message.replace(`${f.name}: `, '')}`); }
     }
-    set({ pending: { files, errors } });
+    set({ pending: { files, errors, notes } });
   },
   /** the files accepted with this minimum: listed, the first new sample shown */
   accept(minProbes: number) {

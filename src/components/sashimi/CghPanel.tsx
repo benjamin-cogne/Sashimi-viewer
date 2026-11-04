@@ -62,6 +62,7 @@ function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init:
           </table>}
           {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
+          {p.notes.map(e => <div key={e} className="text-[11px] text-slate-500">{e}</div>)}
           {p.errors.map(e => <div key={e} className="text-[11px] text-red-700">{e}</div>)}
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
@@ -98,35 +99,40 @@ export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile)
       const text = exportCghFile(fl, c => classOf(s, c));
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-      a.download = fl.name.replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`);
+      a.download = fl.saveAs;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     }
     cgh.exported();
   };
-  const chip = (on: boolean) => `inline-flex items-center gap-1.5 h-[26px] pl-2 pr-1.5 rounded-lg border text-xs font-medium whitespace-nowrap ${on ? 'bg-accent-50 border-accent-200 text-accent-700' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`;
+  const tab = (on: boolean) => `inline-flex items-center gap-1.5 h-8 pl-3 pr-2 -mb-px rounded-t-lg border text-xs whitespace-nowrap ${on ? 'bg-white border-slate-200 border-b-white text-slate-900 font-semibold shadow-[inset_0_2px_0_#0f766e]' : 'bg-slate-50 border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`;
   const filesBuilds = [...new Set(listed.map(e => e.f.build ?? 'GRCh37'))];
   return (
     <div className={`mx-4 mt-3 bg-white border rounded-xl shadow-sm ${dropping ? 'border-accent-400 ring-2 ring-accent-100' : 'border-slate-200'}`} data-cgh-frame>
       <div className="px-5 pt-3 pb-2 flex flex-wrap items-center gap-2">
         <div className="text-base font-bold mr-1">Array-CGH</div>
-        {samples.length > 1 && <button className={chip(!s.sample)} onClick={() => cgh.setSample(null)}>All samples <span className="text-slate-400 font-normal">{samples.length}</span></button>}
-        {samples.map(({ x, f: fl }) => {
-          const n = x.cnvs.filter(c => passes(s, c)).length;
-          return <span key={x.key} className={chip(s.sample === x.key || samples.length === 1)}>
-            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
-            <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this sample off the list"
-              onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null) || confirm(`${x.name}: the classes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
-          </span>;
-        })}
         <CghAddButton compact />
         <span className="ml-auto flex items-center gap-2">
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
           <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${s.dirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
-            title={'Each file written back as it came, its Classification column filled with the classes given here (a BED gets them as a last column).\nThe classes are kept in this tab only: export them to keep them.'}>
+            title={'Each file of the tab written back as it came, its Classification column filled with the classes given here (a BED gets them as a last column).\nThe classes are kept in this tab only: export them to keep them.'}>
             <Icon name="download" size={13} />Export classified table{s.dirty ? ' •' : ''}</button>
         </span>
       </div>
+      {/* one tab per patient, and all of them in one table */}
+      <div className="px-5 flex flex-wrap items-end gap-1 border-b border-slate-200" role="tablist" aria-label="Patients">
+        {samples.length > 1 && <button role="tab" aria-selected={!s.sample} className={tab(!s.sample)} onClick={() => cgh.setSample(null)}
+          title="Every patient in one table, the sample as a column">All patients <span className="text-slate-400 font-normal tabular-nums">{samples.reduce((n, e) => n + e.x.cnvs.filter(c => passes(s, c)).length, 0)}</span></button>}
+        {samples.map(({ x, f: fl }) => {
+          const n = x.cnvs.filter(c => passes(s, c)).length, on = s.sample === x.key || samples.length === 1;
+          return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
+            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
+            <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
+              onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null) || confirm(`${x.name}: the classes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
+          </span>;
+        })}
+      </div>
+      <div className="pt-2" />
       <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs">
         <Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" />
         <Segmented size="sm" label="Type" title="Losses, gains or both" value={f.kind} onChange={v => cgh.setFilter({ kind: v })}

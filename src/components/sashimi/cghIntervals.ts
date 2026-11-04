@@ -42,7 +42,8 @@ export interface CghCnv {
 }
 export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[] }
 export interface CghFile {
-  id: string; name: string; format: 'interval' | 'bed';
+  /** the file's name (for a file of a zip: zip › path inside), and the name its export is saved under */
+  id: string; name: string; saveAs: string; format: 'interval' | 'bed';
   /** the build the file states (Genome hg19 → GRCh37), null when it states none */
   build: GenomeBuild | null; buildText: string | null;
   /** the header lines as key / value (Array Design Info, Creation Date…) */
@@ -91,18 +92,23 @@ function splitClass(cell: string): { classification: string; classRest: string }
 }
 
 let fileSeq = 0;
-/** One file: an interval table (CytoGenomics) or a BED. Throws when no call can be read from it. */
-export function parseCghFile(text: string, fileName: string): CghFile {
+/**
+ * One file: an interval table (CytoGenomics) or a BED. Throws when no call can be read from it. The sample is the
+ * table's Record Name, else `fallbackSample` (a zip's name: one patient per zip), else the file's name.
+ */
+export function parseCghFile(text: string, fileName: string, fallbackSample?: string): CghFile {
   // the commoner line ending (a file may mix them), written back the same
   const crlf = (text.match(/\r\n/g) ?? []).length, eol = crlf * 2 > (text.match(/\n/g) ?? []).length ? '\r\n' : '\n';
   const lines = text.replace(/^﻿/, '').split(/\r?\n/);
   const id = `cgh${++fileSeq}`;
-  const base = fileName.replace(/\.(txt|tsv|bed|xls)$/i, '');
+  const leaf = fileName.split(/[›/\\]/).pop()!.trim();
+  const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|bed|xls)$/i, '');
   const hi = lines.findIndex(l => { const c = l.split('\t').map(norm); return c.includes('chromosome') && c.includes('start') && (c.includes('stop') || c.includes('end')); });
-  return hi >= 0 ? parseInterval(lines, hi, id, fileName, base, eol) : parseBed(lines, id, fileName, base, eol);
+  const f = hi >= 0 ? parseInterval(lines, hi, id, fileName, base, eol) : parseBed(lines, id, fileName, base, eol);
+  return { ...f, saveAs: leaf.replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
 }
 
-function parseInterval(lines: string[], hi: number, id: string, fileName: string, base: string, eol: string): CghFile {
+function parseInterval(lines: string[], hi: number, id: string, fileName: string, base: string, eol: string): Omit<CghFile, 'saveAs'> {
   const meta: [string, string][] = [];
   for (const l of lines.slice(0, hi)) {
     const [k, ...v] = l.split('\t');
@@ -168,7 +174,7 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
 }
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
-function parseBed(lines: string[], id: string, fileName: string, base: string, eol: string): CghFile {
+function parseBed(lines: string[], id: string, fileName: string, base: string, eol: string): Omit<CghFile, 'saveAs'> {
   const s: CghSample = { key: `${id}:${base}`, name: base, fileId: id, declaredCalls: null, cnvs: [] };
   const warnings: string[] = [];
   let noType = 0;
