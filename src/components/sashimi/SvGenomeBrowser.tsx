@@ -276,7 +276,7 @@ const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first 
 
 
 /** Modes of inheritance (PanelApp), as colours and words. */
-const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
+export const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
   AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
   'AD+AR': { color: '#7c3aed', short: 'AD/AR', label: 'mono- or biallelic' },
   AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },

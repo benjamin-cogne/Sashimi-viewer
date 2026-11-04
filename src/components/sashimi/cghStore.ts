@@ -6,6 +6,8 @@
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
 import { parseCghFile, type CghFile, type CghCnv } from './cghIntervals';
+import type { CnvAnn } from './cghAnnotate';
+import type { GeneModes } from '../../standalone/panelapp';
 
 export interface CghFilter {
   /** calls with fewer probes are not analysed (a BED's calls, without a count, are kept) */
@@ -17,6 +19,8 @@ export interface CghFilter {
   hideSuppressed: boolean;
   /** a gene, a band or a chromosome typed */
   query: string;
+  /** the calls in genomic order, or the highest priority first */
+  sort: 'position' | 'priority';
 }
 export interface CghState {
   files: CghFile[];
@@ -33,16 +37,19 @@ export interface CghState {
   dirty: boolean;
   /** the array-CGH page is open (over the SV browser) */
   open: boolean;
+  /** what each call holds (genes, dosage, constraint, AChro-Puce), by call id; PanelApp's entries by gene */
+  ann: Record<string, CnvAnn>;
+  modes: Record<string, GeneModes | 'loading' | 'error'>;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
 export const CGH_MIN_PROBES_DEFAULT = 3;
 const loadFilter = (): CghFilter => {
-  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '' };
+  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position' };
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -75,6 +82,8 @@ function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; byt
 export const cgh = {
   get: () => state,
   setOpen(open: boolean) { set({ open }); },
+  setAnn(id: string, a: CnvAnn) { set({ ann: { ...state.ann, [id]: a } }); },
+  setModes(m: Record<string, GeneModes | 'loading' | 'error'>) { set({ modes: { ...state.modes, ...m } }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [], notes: string[] = [];

@@ -57,7 +57,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
             <div className="mt-4 flex justify-center"><AddInline /></div>
           </div>
         )}
-        <CghFrame onShow={show} dropping={over} />
+        <CghFrame onShow={show} dropping={over} loadersFor={loadersFor} />
         {error && <div className="mx-4 mt-2 text-[12px] text-red-700">{error}</div>}
         {drawn && rec && full && c && (
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden">

@@ -3,10 +3,15 @@
  * question of the minimum number of probes, and the frame listing each sample's calls between the search and the
  * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
  */
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, CGH_MIN_PROBES_DEFAULT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile } from './cghIntervals';
+import { annotate, viewOf, PANEL_SOURCE, PANELAPP_MAX_GENES } from './cghAnnotate';
+import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type GeneView, type Level } from './cghScore';
+import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
+import type { GenomeBuild } from '../../standalone/ensembl';
+import type { MoiClass } from '../../standalone/panelapp';
 
 const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : kb >= 1 ? `${kb.toFixed(kb >= 100 ? 0 : 1)} kb` : `${Math.round(kb * 1000)} bp`);
@@ -79,14 +84,22 @@ function ProbeQuestion({ p, init }: { p: NonNullable<CghState['pending']>; init:
  * band), each call a row: clicked, it is drawn in the browser below; its class is chosen in the row; its CNV-Hub page
  * opens from it. ↑ ↓ go from one call to the next.
  */
-export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile) => void; dropping?: boolean }) {
+export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv, f: CghFile) => void; dropping?: boolean; loadersFor?: (b: GenomeBuild) => Omit<SvGeneLoaders, 'fallback'> }) {
   const s = useCgh();
   const [other, setOther] = useState<{ id: string; text: string } | null>(null);
+  // every analysed call of every patient: its genes (RefSeq, GRCh37), dosage, constraint, PanelApp, AChro-Puce
+  useEffect(() => {
+    if (!loadersFor) return;
+    annotate(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.filter(c => c.probes == null || c.probes >= s.filter.minProbes).map(c => ({ c, build: fl.build ?? 'GRCh37' })))), loadersFor);
+  }, [s.files, s.filter.minProbes, loadersFor]);
   if (!s.files.length) return null;
   const samples = s.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const listed = s.sample ? samples.filter(e => e.x.key === s.sample) : samples;
   const all = listed.flatMap(({ x, f }) => x.cnvs.map(c => ({ c, f })));
+  const views = new Map(all.map(({ c }) => [c.id, viewOf(s, c)]));
+  const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const rows = all.filter(({ c }) => passes(s, c));
+  if (s.filter.sort === 'priority') rows.sort((a, b) => rank(b.c.id) - rank(a.c.id));
   const fewProbes = all.filter(({ c }) => c.probes != null && c.probes < s.filter.minProbes).length;
   const anySuppressed = all.some(({ c }) => c.suppressed);
   const f = s.filter;
@@ -148,9 +161,11 @@ export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile)
         {anySuppressed && <Pill size="sm" label="hide suppressed" on={f.hideSuppressed} onChange={v => cgh.setFilter({ hideSuppressed: v })} title="Calls marked Suppress = true in CytoGenomics" />}
         <input value={f.query} onChange={e => cgh.setFilter({ query: e.target.value })} placeholder="gene, band (16p11), chromosome" aria-label="Filter the calls by gene, band or chromosome"
           className="h-[26px] w-[210px] px-2 rounded-lg border border-slate-200 text-xs placeholder:text-slate-400 focus:outline-none focus:border-accent-300" />
+        <Segmented size="sm" label="Order" title="The calls in genomic order, or the highest priority first" value={f.sort} onChange={v => cgh.setFilter({ sort: v })}
+          options={[{ value: 'position', label: 'position', hint: 'Genomic order, as in the file' }, { value: 'priority', label: 'priority', hint: 'HIGH first, then MODERATE, LOW, none' }]} />
         <span className="text-slate-500 ml-1">{rows.length} of {all.length} call{all.length > 1 ? 's' : ''} listed{fewProbes ? ` · ${fewProbes} under ${f.minProbes} probe${f.minProbes > 1 ? 's' : ''} not analysed` : ''}</span>
       </div>
-      <div className="mx-5 mb-2 border border-slate-200 rounded-lg overflow-auto max-h-[320px] outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
+      <div className="mx-5 mb-2 border border-slate-200 rounded-lg overflow-auto max-h-[460px] outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className="w-full text-[11.5px] border-collapse">
           <thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left">
@@ -159,14 +174,19 @@ export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile)
               <th className="px-2 py-1 font-medium">Band</th><th className="px-2 py-1 font-medium">Position (GRCh37)</th>
               <th className="px-2 py-1 font-medium text-right">Size</th><th className="px-2 py-1 font-medium">Type</th>
               <th className="px-2 py-1 font-medium text-right" title="#Probes">Probes</th><th className="px-2 py-1 font-medium text-right" title="Mean log ratio">Log ratio</th>
-              <th className="px-2 py-1 font-medium">Genes</th><th className="px-2 py-1 font-medium">Classification</th><th className="px-2 py-1 font-medium">Links</th>
+              <th className="px-2 py-1 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes</th>
+              <th className="px-2 py-1 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes rated green (diagnostic grade) with their mode of inheritance; amber genes counted`}>PanelApp green</th>
+              <th className="px-2 py-1 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage</th>
+              <th className="px-2 py-1 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority</th>
+              <th className="px-2 py-1 font-medium">Classification</th><th className="px-2 py-1 font-medium">Links</th>
             </tr>
           </thead>
           <tbody>
             {rows.map(({ c, f: fl }, i) => {
               const cls = classOf(s, c), col = classColor(cls), on = s.shown === c.id, k = KIND[c.kind];
               const hub = cnvHubUrl(c, fl.build ?? 'GRCh37');
-              return (
+              const v = views.get(c.id)!;
+              return [
                 <tr key={c.id} data-cgh-row onClick={() => show(i)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 shadow-[inset_3px_0_0_#0f766e]' : 'hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
                   {!s.sample && samples.length > 1 && <td className="px-2 py-1 text-slate-600 whitespace-nowrap">{c.sample}</td>}
@@ -176,7 +196,10 @@ export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile)
                   <td className="px-2 py-1 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span></td>
                   <td className={`px-2 py-1 text-right tabular-nums ${c.probes == null ? 'text-slate-400' : ''}`}>{c.probes ?? '?'}</td>
                   <td className="px-2 py-1 text-right tabular-nums text-slate-600">{c.logRatio == null ? '' : c.logRatio.toFixed(2)}</td>
-                  <td className="px-2 py-1 max-w-[260px] truncate" title={c.genes.join(', ')}>{c.genes.length ? <><i>{c.genes.slice(0, 4).join(', ')}</i>{c.genes.length > 4 ? <span className="text-slate-400"> +{c.genes.length - 4}</span> : null}</> : <span className="text-slate-300">—</span>}</td>
+                  <GenesCell c={c} v={v} />
+                  <PanelCell v={v} />
+                  <DosageCell c={c} v={v} />
+                  <td className="px-2 py-1 whitespace-nowrap"><PriorityBadge v={v} /></td>
                   <td className="px-2 py-1" onClick={e => e.stopPropagation()}>
                     {other?.id === c.id
                       ? <form className="flex gap-1" onSubmit={e => { e.preventDefault(); cgh.setClass(c, other.text); setOther(null); }}>
@@ -197,19 +220,139 @@ export function CghFrame({ onShow, dropping }: { onShow: (c: CghCnv, f: CghFile)
                     {hub ? <a href={hub} target="_blank" rel="noopener noreferrer" className="text-accent-700 hover:underline font-medium" title={`CNV-Hub (cnvhub.net, Dijon University Hospital): this call's page, ${hub}. Opens in a new tab; the call's position and type are in the address.`}>CNV-Hub ↗</a>
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
-                </tr>
-              );
+                </tr>,
+                on && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0"><CnvDetail c={c} v={v} /></td></tr>,
+              ];
             })}
-            {!rows.length && <tr><td colSpan={11} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
+            {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
           </tbody>
         </table>
       </div>
       <div className="px-5 pb-3 text-[10.5px] text-slate-500 leading-4">
-        Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one): the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
+        Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row: the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
+        Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel).
+        <PriorityRules />
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file (hover a row for its ISCN). The classes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them.
         {s.files.some(fl => fl.warnings.length) && <span className="text-amber-700"> {s.files.flatMap(fl => fl.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</span>}
       </div>
     </div>
+  );
+}
+
+// ---- the columns of the genes' evidence ----
+const MoiBadge = ({ m }: { m: MoiClass }) => <span className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border leading-[13px]" style={{ color: MOI[m].color, borderColor: `${MOI[m].color}88`, background: `${MOI[m].color}1a` }} title={MOI[m].label}>{MOI[m].short}</span>;
+const waitingDot = (n: number) => (n ? <span className="text-slate-400" title={`PanelApp: ${n} gene${n > 1 ? 's' : ''} still asked`}> …</span> : null);
+type View = ReturnType<typeof viewOf>;
+
+function GenesCell({ c, v }: { c: CghCnv; v: View }) {
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  const gs = v.ann.genes, file = v.ann.source === 'file';
+  return (
+    <td className="px-2 py-1 max-w-[230px] truncate" title={`${file ? `From the file (RefSeq not read): ${c.genes.join(', ')}` : `${gs.length} RefSeq gene${gs.length > 1 ? 's' : ''}: ${gs.map(g => `${g.symbol}${g.whole ? '' : ' (cut)'}`).join(', ')}`}`}>
+      {file && <span className="text-amber-700 font-semibold mr-1">file</span>}
+      {gs.length ? <><span className="tabular-nums text-slate-500 mr-1">{gs.length}</span><i>{gs.slice(0, 4).map(g => g.symbol).join(', ')}</i>{gs.length > 4 ? <span className="text-slate-400"> +{gs.length - 4}</span> : null}</>
+        : <span className="text-slate-400">{file ? '—' : 'no gene'}</span>}
+    </td>
+  );
+}
+function PanelCell({ v }: { v: View }) {
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  const green = v.genes.filter(x => x.pa?.best === 3), amber = v.genes.filter(x => x.pa?.best === 2).length;
+  return (
+    <td className="px-2 py-1 max-w-[230px]" title={green.map(x => `${x.g.symbol}: ${x.pa!.green.map(m => MOI[m].label).join(', ')}${x.pa!.diseases.length ? ` · ${x.pa!.diseases.slice(0, 3).join('; ')}` : ''}`).join('\n') || undefined}>
+      <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        {green.slice(0, 4).map(x => <span key={x.g.symbol} className="inline-flex items-center gap-0.5 whitespace-nowrap"><i>{x.g.symbol}</i>{x.pa!.green.filter(m => m !== '?').map(m => <MoiBadge key={m} m={m} />)}</span>)}
+        {green.length > 4 && <span className="text-slate-400">+{green.length - 4}</span>}
+        {!green.length && !v.waiting && <span className="text-slate-300">—</span>}
+        {amber > 0 && <span className="text-amber-700 text-[10.5px]" title="Genes rated amber in a panel at best">{amber} amber</span>}
+        {waitingDot(v.waiting)}
+      </span>
+    </td>
+  );
+}
+function DosageCell({ c, v }: { c: CghCnv; v: View }) {
+  if (!v.ann || v.ann.state === 'loading') return <td className="px-2 py-1 text-slate-400">…</td>;
+  const key = c.kind === 'loss' ? 'hi' : 'ts', word = c.kind === 'loss' ? 'HI' : 'TS';
+  const scored = v.genes.filter(x => x[key] === 3 || x[key] === 2).sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0));
+  const low = v.genes.filter(x => x.loeuf != null).sort((a, b) => a.loeuf! - b.loeuf!)[0];
+  return (
+    <td className="px-2 py-1 whitespace-nowrap">
+      {scored.slice(0, 2).map(x => <span key={x.g.symbol} className="mr-1.5 font-semibold" style={{ color: x[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`ClinGen ${c.kind === 'loss' ? 'haploinsufficiency' : 'triplosensitivity'} score ${x[key]} (${x[key] === 3 ? 'sufficient' : 'some'} evidence)`}>{word}{x[key]} <i className="font-normal">{x.g.symbol}</i></span>)}
+      {scored.length > 2 && <span className="text-slate-400 mr-1.5">+{scored.length - 2}</span>}
+      {low && <span className="text-slate-600" title={`Lowest gnomAD LOEUF of the call (${low.version ?? ''}): ${low.g.symbol} ${low.loeuf!.toFixed(2)}${low.pli != null ? `, pLI ${low.pli.toFixed(2)}` : ''}`}>LOEUF {low.loeuf!.toFixed(2)} <i>{low.g.symbol}</i></span>}
+      {!scored.length && !low && <span className="text-slate-300">—</span>}
+    </td>
+  );
+}
+function PriorityBadge({ v }: { v: View }) {
+  if (!v.score) return <span className="text-slate-400">…</span>;
+  const st = LEVEL_STYLE[v.score.level], incomplete = v.missing.length > 0 || v.waiting > 0;
+  const title = [...v.score.reasons.map(r => `${LEVEL_STYLE[r.level].label}: ${r.text}`), ...(v.waiting ? [`PanelApp still asked for ${v.waiting} gene${v.waiting > 1 ? 's' : ''}`] : []), ...v.missing.map(m => `Not available: ${m}`)].join('\n') || 'No protein-coding gene in the call';
+  return <span className={`inline-flex items-center rounded px-1.5 text-[10.5px] font-bold ${incomplete && v.score.level !== 'high' ? 'border border-dashed' : ''}`} style={{ color: st.color, background: st.bg, borderColor: st.color }} title={title}>{st.label}{incomplete && v.score.level !== 'high' ? ' ?' : ''}</span>;
+}
+
+/** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
+function CnvDetail({ c, v }: { c: CghCnv; v: View }) {
+  const [allGenes, setAllGenes] = useState(false);
+  if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]">Reading the genes of the call…</div>;
+  const key = c.kind === 'loss' ? 'hi' : 'ts';
+  const order = (x: GeneView) => (x[key] === 3 ? 0 : x.pa?.best === 3 ? 1 : x[key] === 2 ? 2 : (x.loeuf ?? 9) < 0.35 ? 3 : x.pa?.best === 2 ? 4 : 5);
+  const genes = v.genes.slice().sort((a, b) => order(a) - order(b) || a.g.start - b.g.start);
+  const shownGenes = allGenes ? genes : genes.slice(0, 30);
+  const dot = (l: Level) => <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ background: LEVEL_STYLE[l].color }} />;
+  return (
+    <div className="px-4 py-2 bg-slate-50 border-t border-b border-accent-200 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
+      <div className="flex flex-wrap gap-x-6 gap-y-1">
+        <div className="min-w-[320px] flex-1">
+          <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>
+          {v.score.reasons.length ? v.score.reasons.map(r => <div key={r.id}>{dot(r.level)}{r.text}</div>) : <div className="text-slate-500">No protein-coding gene in the call.</div>}
+          {v.waiting > 0 && <div className="text-slate-500">PanelApp: {v.waiting} gene{v.waiting > 1 ? 's' : ''} still asked…</div>}
+          {v.missing.map(m => <div key={m} className="text-amber-700">Not available: {m}</div>)}
+        </div>
+        {v.ann.achro.length > 0 && <div className="min-w-[240px]">
+          <div className="font-semibold text-slate-900">AChro-Puce</div>
+          {v.ann.achro.map(a => <div key={a.id}>{a.name}: <b>{a.cls.join(' / ')}</b> <span className="text-slate-500">({a.how})</span></div>)}
+        </div>}
+      </div>
+      {genes.length > 0 && <table className="mt-1.5 w-full border-collapse bg-white border border-slate-200 rounded">
+        <thead className="text-slate-500 text-left"><tr className="border-b border-slate-200">
+          <th className="px-2 py-0.5 font-medium">Gene</th><th className="px-2 py-0.5 font-medium">In the call</th>
+          <th className="px-2 py-0.5 font-medium" title="ClinGen haploinsufficiency score">HI</th><th className="px-2 py-0.5 font-medium" title="ClinGen triplosensitivity score">TS</th>
+          <th className="px-2 py-0.5 font-medium">LOEUF (pLI)</th><th className="px-2 py-0.5 font-medium">PanelApp</th><th className="px-2 py-0.5 font-medium">Diseases (PanelApp)</th>
+        </tr></thead>
+        <tbody>{shownGenes.map(x => (
+          <tr key={x.g.symbol} className="border-b border-slate-100">
+            <td className="px-2 py-0.5"><i className="font-semibold">{x.g.symbol}</i> <span className="text-slate-400">{x.g.tx}</span></td>
+            <td className="px-2 py-0.5">{x.g.whole ? 'whole' : x.g.exons ? 'cut (exons in)' : 'cut (no exon)'}</td>
+            <td className="px-2 py-0.5 font-semibold" style={{ color: x.hi === 3 ? '#b91c1c' : x.hi === 2 ? '#c2410c' : undefined }}>{x.hi ?? ''}</td>
+            <td className="px-2 py-0.5 font-semibold" style={{ color: x.ts === 3 ? '#b91c1c' : x.ts === 2 ? '#c2410c' : undefined }}>{x.ts ?? ''}</td>
+            <td className="px-2 py-0.5 tabular-nums">{x.loeuf != null ? x.loeuf.toFixed(2) : ''}{x.pli != null ? <span className="text-slate-400"> ({x.pli.toFixed(2)})</span> : null}</td>
+            <td className="px-2 py-0.5 whitespace-nowrap">{!x.pa ? <span className="text-slate-400">{v.ann!.genes.indexOf(x.g) < PANELAPP_MAX_GENES ? '…' : 'not asked'}</span>
+              : x.pa.best === 0 ? <span className="text-slate-400">in no panel</span>
+              : <span className="inline-flex items-center gap-1"><span className="font-semibold" style={{ color: x.pa.best === 3 ? '#16a34a' : x.pa.best === 2 ? '#d97706' : '#dc2626' }}>{x.pa.best === 3 ? 'green' : x.pa.best === 2 ? 'amber' : 'red'}</span>
+                {(x.pa.best === 3 ? x.pa.green : x.pa.amber).filter(m => m !== '?').map(m => <MoiBadge key={m} m={m} />)}</span>}</td>
+            <td className="px-2 py-0.5 text-slate-600 max-w-[380px] truncate" title={x.pa?.diseases.join('\n')}>{x.pa?.diseases.slice(0, 2).join(' · ')}</td>
+          </tr>))}</tbody>
+      </table>}
+      {genes.length > 30 && <button className="mt-1 text-accent-700 hover:underline" onClick={() => setAllGenes(!allGenes)}>{allGenes ? 'fewer genes' : `all ${genes.length} genes`}</button>}
+    </div>
+  );
+}
+
+/** the rules of the priority, as the score applies them (cghScore.ts) */
+function PriorityRules() {
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-accent-700 font-medium">The priority's rules (a proposal: HIGH, MODERATE, LOW, none)</summary>
+      <div className="grid grid-cols-[1fr_1fr] gap-4 mt-1">
+        {(['loss', 'gain'] as const).map(k => <div key={k}>
+          <div className="font-semibold text-slate-700">{k === 'loss' ? 'Losses' : 'Gains'}</div>
+          {SCORE_RULES.filter(r => r.kind === k).map(r => <div key={r.id}><span className="font-bold" style={{ color: LEVEL_STYLE[r.level].color }}>{LEVEL_STYLE[r.level].label}</span> <span className="text-slate-400">{r.id}</span> {r.label}</div>)}
+          <div><span className="font-bold" style={{ color: LEVEL_STYLE.none.color }}>none</span>: no protein-coding gene in the call</div>
+        </div>)}
+      </div>
+      <div className="mt-1">A call takes the highest level among the rules it meets. Evidence weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet Med 2020;22:245-57: sections 2 and 3); a dashed badge with ? is incomplete (a source did not answer, PanelApp still asked).</div>
+    </details>
   );
 }
