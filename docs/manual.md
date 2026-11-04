@@ -241,12 +241,13 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
   HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode, both copies
   (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
-  deletion of class 5 or 4, or 35 protein-coding genes or more; MODERATE for an HI score of 2, a LoF-intolerant gene
+  deletion of class 5 or 4, or 35 protein-coding genes or more and / or more than 1 Mb; MODERATE for an HI score of 2, a LoF-intolerant gene
   (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9; losses only), one copy of a green biallelic gene (look for a
   second variant), one copy of a green X-linked recessive gene in a female or when the sex is not given, a green gene without a mode
   or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost, genes cut without an exon,
   or an AChro-Puce region of class 3, 2 or 1 (said, never lowering a higher level).
-  Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more;
+  Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more
+  and / or more than 1 Mb;
   MODERATE for a TS score of 2, a breakpoint inside an HI 3 or green monoallelic gene, a PIEV region, or 35 to 49 genes;
   LOW otherwise (an AChro-Puce region of class 3, 2 or 1 included). The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp

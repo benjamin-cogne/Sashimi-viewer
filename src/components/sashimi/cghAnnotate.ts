@@ -164,6 +164,6 @@ export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes
   const waiting = asked.filter(m => m === 'loading' || m === undefined).length;
   const failed = asked.filter(m => m === 'error').length;
   const missing = [...ann.missing, ...(failed ? [`PanelApp (${failed} gene${failed > 1 ? 's' : ''} not answered)`] : []), ...(ann.genes.length > PANELAPP_MAX_GENES ? [`PanelApp asked for ${PANELAPP_MAX_GENES} of the ${ann.genes.length} genes`] : [])];
-  const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, sex: s.sex[c.sampleKey] ?? null, genes, refseq: ann.source === 'refseq', achro: ann.achro });
+  const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, sex: s.sex[c.sampleKey] ?? null, sizeKb: c.sizeKb, genes, refseq: ann.source === 'refseq', achro: ann.achro });
   return { ann, genes, score, waiting, missing };
 }
