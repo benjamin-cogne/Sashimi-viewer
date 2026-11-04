@@ -460,6 +460,11 @@ function medianTargetDepth(runs: CoverageRun[], tx: TxModel | null, from: number
 
 // Reads track (IGV-like alignment view)
 const READS_MAX_ROWS = 120;
+/**
+ * Rows of the reads track with only the supporting reads of an arc: the reads unspliced through an intron boundary all
+ * overlap it and take a row each, so the usual 120 rows hid most of a well-covered retention; thinner rows past 300.
+ */
+const READS_SUPPORT_MAX_ROWS = 1000;
 /** Widest view whose variants are scanned (every DNA track, while Variants is on): a whole gene such as DMD (2.2 Mb) fits. */
 const VARIANTS_MAX_VIEW_BP = 3_000_000;
 /** the annotation panels under the ruler, in their default order: gene model, sequence, known variants, SNPs, all transcripts */
@@ -474,8 +479,8 @@ const GTEX_ALT_EXON_MAX_BP = 3000;
 /** the Layers control: one colour per layer, filled when on (coverage blue, variants amber, methylation red, reads slate) */
 const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
-/** Supporting reads of an arc kept at most (every k-th past it), their mates added. */
-const READS_SUPPORT_MAX = 300;
+/** Supporting reads of an arc kept at most (every k-th past it), their mates added: about as many reads as a window holds (READS_MAX). */
+const READS_SUPPORT_MAX = 2000;
 /** Reads placed with a mapping quality under this are drawn hollow, as IGV draws its MAPQ 0 reads (STAR: 3 for 2 loci, 1 for 3–4, 0 for more; 255 unique). */
 const LOW_MAPQ = 10;
 /** spliced reads of a gene's own introns needed before they are handed to the host as evidence of the library orientation */
@@ -3549,6 +3554,8 @@ export default function SashimiViewer({
       }
     });
     /** drawn extent of each visible read: soft clips always (when shown), hard clips only next to another part of the read */
+    // with only an arc's supporting reads, every one of them gets a row (up to READS_SUPPORT_MAX_ROWS)
+    const rowCap = current.supporting ? READS_SUPPORT_MAX_ROWS : READS_MAX_ROWS;
     const extOf = visible.map((r, i) => showClipped
       ? { s: r.s - r.c[0] - (partsOf[i].length ? r.h?.[0] ?? 0 : 0), e: r.e + r.c[1] + (partsOf[i].length ? r.h?.[1] ?? 0 : 0) }
       : { s: r.s, e: r.e });
@@ -3599,11 +3606,11 @@ export default function SashimiViewer({
         const keyOf = (u: number) => antiU[u] * 1e6 + (hpOf[u] || 999999);
         const keys = [...new Set(units.map((_, u) => keyOf(u)))].sort((a, b) => a - b);
         rows = new Int32Array(visible.length).fill(-1); hidden = 0;
-        // the rows are shared out when the groups need more than READS_MAX_ROWS together: each in proportion to what it
+        // the rows are shared out when the groups need more than rowCap together: each in proportion to what it
         // needs, with a few at least, so that a small group last (the opposite strand, untagged reads) still shows
-        const want = keys.map(k => (grouped || k >= 1e6 ? 1 : 0) + packReads(units.filter((_, u) => keyOf(u) === k), READS_MAX_ROWS).nRows);
+        const want = keys.map(k => (grouped || k >= 1e6 ? 1 : 0) + packReads(units.filter((_, u) => keyOf(u) === k), rowCap).nRows);
         const sum = want.reduce((x, y) => x + y, 0);
-        const budget = sum <= READS_MAX_ROWS ? want : want.map(w => Math.max(Math.min(w, 8), Math.floor((READS_MAX_ROWS * w) / sum)));
+        const budget = sum <= rowCap ? want : want.map(w => Math.max(Math.min(w, 8), Math.floor((rowCap * w) / sum)));
         let next = 0;
         keys.forEach((k, ki) => {
           const anti = k >= 1e6, hp = k % 1e6 === 999999 ? 0 : k % 1e6;
@@ -3611,7 +3618,7 @@ export default function SashimiViewer({
           const header = grouped || anti, head = header ? 1 : 0;
           const members = units.map((_, u) => u).filter(u => keyOf(u) === k);
           const inGroup = visible.map((_, i) => i).filter(i => keyOf(unitOf[i]) === k);
-          const cap = Math.min(budget[ki], READS_MAX_ROWS - next);
+          const cap = Math.min(budget[ki], rowCap - next);
           if (cap <= head) { hidden += inGroup.length; return; }
           const packed = packReads(members.map(u => units[u]), cap - head);
           const rowOfUnit = new Map(members.map((u, j) => [u, packed.rows[j] < 0 ? -1 : next + head + packed.rows[j]]));
@@ -3621,13 +3628,13 @@ export default function SashimiViewer({
         });
         nRows = next;
       } else {
-        const packed = packReads(units, READS_MAX_ROWS);
+        const packed = packReads(units, rowCap);
         rows = new Int32Array(visible.length); hidden = 0;
         visible.forEach((_, i) => { rows[i] = packed.rows[unitOf[i]]; if (rows[i] < 0) hidden++; });
         nRows = packed.nRows;
       }
     } else {
-      ({ rows, nRows, hidden } = packReads(extOf, READS_MAX_ROWS));
+      ({ rows, nRows, hidden } = packReads(extOf, rowCap));
     }
     // discordance: mate elsewhere, not flagged as a proper pair, or (genomic DNA) an insert far above the median
     // the median insert of the proper pairs shown (the discordant ones would raise it: with only the supporting reads of an
@@ -3674,7 +3681,7 @@ export default function SashimiViewer({
       if (!(r.f & 2)) return { text: 'not a proper pair', cls: 'other' };
       return null;
     };
-    const rowH = nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode
+    const rowH = nRows > 300 ? 2 : nRows > 60 ? 5 : 9; // squished rows beyond 60, like IGV's squished mode; dense beyond 300
     const bodyHeight = Math.max(1, nRows) * (rowH + 1) + 6;
     const height = READS_HEADER_H + sitesRowH + aaRowH + revRowH + seqRowH + bodyHeight + 4;
     const showLetters = rowH >= 9;
@@ -3904,12 +3911,12 @@ export default function SashimiViewer({
       );
     });
     const info = (current.supporting && readsSupport
-      ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (every ${Math.round(current.total / Math.max(1, current.shown))}th kept, ${READS_SUPPORT_MAX} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
+      ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (spread evenly over all of them, ${READS_SUPPORT_MAX.toLocaleString('en-US')} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
       : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
       (grouped && !strandSplit ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
       (strandSplit ? (() => { const a = groupRows.filter(g => g.anti).reduce((n, g) => n + g.reads, 0); return ` · ${a.toLocaleString('en-US')} on the opposite strand (violet, packed last${grouped ? `, grouped by ${byPhase ? 'read-based phasing' : 'haplotag'} within each strand` : ''})`; })() : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
-      (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${READS_MAX_ROWS} rows max)` : '') +
+      (hidden ? ` · ${hidden.toLocaleString('en-US')} more not drawn (${rowCap} rows max)` : '') +
       (consensus ? " · mismatches and indels at called sites only (Consensus)" : longReads ? " · long reads: every mismatch and indel" : "") +
       (showClipped ? (() => { const c = visible.filter(r => r.c[0] || r.c[1] || r.h).length, sp = visible.filter(r => r.sa).length; return c || sp ? ` · ${c.toLocaleString('en-US')} clipped read${c === 1 ? '' : 's'}${sp ? `, ${sp.toLocaleString('en-US')} split` : ''}` : ''; })() : '') +
       (pairMode ? (() => {

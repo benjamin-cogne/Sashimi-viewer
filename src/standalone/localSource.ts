@@ -1221,7 +1221,10 @@ export class LocalDataSource implements SashimiDataSource {
     const support = !collapsed ? opts?.support : undefined;
     // reads phased in reads mode: more of them read for the phasing, `maxReads` of them returned (answerReads)
     const phased = !collapsed && !support && !!opts?.phase;
-    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
+    // the supporting reads are read with room to spare (only they are kept), then every k-th past the cap below: the
+    // scan's own thinning halves what it holds each time it overflows, which left between half the cap and the cap; it
+    // now only bounds the memory past 32 times the cap
+    const cap = collapsed ? Math.max(40000, maxReads) : support ? 32 * Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
     // filtered and sampled before sequences and qualities are decoded: only the reads shown pay for them; the pair
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
@@ -1231,6 +1234,10 @@ export class LocalDataSource implements SashimiDataSource {
       { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
+    if (support && raw.length > Math.max(1, maxReads)) {
+      const want = Math.max(1, maxReads), step = raw.length / want;
+      raw = Array.from({ length: want }, (_, i) => raw[Math.floor(i * step)]);
+    }
     if (support) {
       // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
