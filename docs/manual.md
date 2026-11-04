@@ -214,6 +214,25 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
+**Array-CGH calls in the SV browser.** **Add array-CGH samples** (top right of the SV browser) reads one or more
+interval tables exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome,
+Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns
+found by their header), or BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`).
+The page then asks the **minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED,
+without probe counts, keeps all its calls). An **Array-CGH** frame appears between the search and the browser: one
+chip per sample, filters (probes, losses / gains, size, classified or not, suppressed calls, a gene, a band such as
+`16p11` or a chromosome), and one row per call with its band, position, size, copy number from the ISCN (x0, x1, x3,
+amp), probes, mean log ratio and genes. Click a row (↑ ↓ for the next one) to draw the call in the browser as
+`DEL` / `DUP` on the file's build (GRCh37; a file stating no build is read as GRCh37): the genes on the rebuilt
+chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp and the ClinGen and gnomAD scores are those of the
+browser, compared with the call. A gain is drawn as a tandem duplication (the array gives the copy number, not where
+the extra copy lies), a loss of both copies (x0) as homozygous. Each row has its **classification**: the AChro-Puce
+classes (5 to 1 and PIEV), the words already used in the files (*probablement pathogène*, *bénin*…) or one typed with
+*Other*, and a link to the call's **CNV-Hub** page (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon
+University Hospital's platform; hg19 only, and the address carries the call's position and type). The classes are kept
+in the tab only: **Export classified table** writes each file back unchanged but for its Classification column (a BED
+gets a last column); closing the tab with classes not exported asks first.
+
 ## Reads, haplotypes and phasing
 
 **Reads track**: mismatches, indels and splice gaps, IGV-style, up to the *window ≤* width; up to 2,500 reads per
@@ -360,7 +379,9 @@ BAM/CRAM/FASTA files are read with the browser's File API and decoded on the mac
 annotation hosts listed below and carry a gene name, a genomic interval or the letters typed in a search box, never
 reads, sample names or file names. The browser keeps the last genes opened, the folded bar, favourite GTEx tissues
 and, in Chrome and Edge, a bookmark (a permission, not a copy) of the folders and files added. **Session files and
-exported pages are patient data**: a session names files and samples, an exported page holds reads and coverage.
+exported pages are patient data**: a session names files and samples, an exported page holds reads and coverage. Array-CGH
+interval tables are read in the page as well; their calls and classes stay in the tab (never in the browser's storage),
+and only a click on *CNV-Hub ↗* sends a call's position and type, to cnvhub.net.
 
 ## Deploying in a clinical laboratory
 

@@ -85,6 +85,9 @@ a bookmark to the run folder.
   with its genes; a small variant (under 50 bp, `chr2:g.60461323del`, or on a transcript, `NM_022893.4:c.1592del`,
   placed on the genome by VariantValidator, else Ensembl's Variant Recoder) is marked on the reference with each ClinVar variant around it, (LOEUF, ClinGen dosage, PanelApp mode of inheritance and diseases) over DGV Gold population CNVs,
   AChro-Puce recurrent CNVs and ClinVar pathogenic / likely pathogenic SVs and SNVs.
+- **Array-CGH** in the SV browser: the interval tables of CytoGenomics (or BED files), one per patient, filtered on a
+  minimum number of probes (3 by default), each call classified in the list, linked to its CNV-Hub page and drawn in
+  the browser with the tracks above when clicked (GRCh37); the table is exported back with its Classification column.
 - **CpG methylation** of long reads (ONT, PacBio; MM / ML tags) in a panel under the coverage. A 5mC ribbon splits
   into HP1 / HP2 where both haplotagged copies are read (≥ 3 calls per CpG each, the minor ≥ 25 %, within one phase
   set) and joins elsewhere. The panel also shows the haplotypes' difference, the allele-specific stretches and the CpG
