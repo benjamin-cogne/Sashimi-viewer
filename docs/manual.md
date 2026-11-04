@@ -214,24 +214,50 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
-**Array-CGH calls in the SV browser.** **Add array-CGH samples** (top right of the SV browser) reads one or more
-interval tables exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome,
-Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns
-found by their header), or BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`).
-The page then asks the **minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED,
-without probe counts, keeps all its calls). An **Array-CGH** frame appears between the search and the browser: one
-chip per sample, filters (probes, losses / gains, size, classified or not, suppressed calls, a gene, a band such as
-`16p11` or a chromosome), and one row per call with its band, position, size, copy number from the ISCN (x0, x1, x3,
-amp), probes, mean log ratio and genes. Click a row (↑ ↓ for the next one) to draw the call in the browser as
-`DEL` / `DUP` on the file's build (GRCh37; a file stating no build is read as GRCh37): the genes on the rebuilt
-chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp and the ClinGen and gnomAD scores are those of the
-browser, compared with the call. A gain is drawn as a tandem duplication (the array gives the copy number, not where
-the extra copy lies), a loss of both copies (x0) as homozygous. Each row has its **classification**: the AChro-Puce
-classes (5 to 1 and PIEV), the words already used in the files (*probablement pathogène*, *bénin*…) or one typed with
-*Other*, and a link to the call's **CNV-Hub** page (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon
-University Hospital's platform; hg19 only, and the address carries the call's position and type). The classes are kept
-in the tab only: **Export classified table** writes each file back unchanged but for its Classification column (a BED
-gets a last column); closing the tab with classes not exported asks first.
+**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
+Esc to go back; the samples stay while the tab is open). **Add samples**, or drop files on the page: interval tables
+exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
+Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
+header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
+one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
+already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
+**minimum number of probes** (3 by default): calls with fewer probes are not analysed (a BED keeps all its calls).
+
+The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
+Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
+order by position or by priority. Each row: band, position, size, copy number from the ISCN (x0, x1, x3, amp), probes,
+mean log ratio, then what the call holds, read on the file's build (GRCh37) by the SV browser's own routes:
+
+- **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
+  they cannot be read, and the cell then says *file*.
+- **PanelApp green**: the genes rated green in a panel of PanelApp (Genomics England, every panel) with their mode of
+  inheritance (AD, AR, AD/AR, XLR, XLD), the amber ones counted; up to 150 genes per call are asked.
+- **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
+  gnomAD LOEUF (v2.1.1 on GRCh37).
+- **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
+  level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
+  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode, both copies
+  (x0) of a green biallelic gene, an AChro-Puce recurrent deletion of class 5 or 4, or 35 protein-coding genes or more;
+  MODERATE for an HI score of 2, a LoF-intolerant gene (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9), one copy
+  of a green biallelic gene (look for a second variant), a green X-linked recessive gene, a green gene without a mode
+  or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost or genes cut without an exon.
+  Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more;
+  MODERATE for a TS score of 2, a breakpoint inside an HI 3 or green monoallelic gene, a PIEV region, or 35 to 49 genes;
+  LOW otherwise. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
+  Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
+  is still being asked.
+
+Click a row (↑ ↓ for the next one): its genes are listed under it (whole or cut, HI, TS, LOEUF and pLI, PanelApp
+rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
+as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
+its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
+tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
+homozygous. Each row has its **classification** (the AChro-Puce classes 5 to 1 and PIEV, the words already used in the
+files such as *probablement pathogène* or *bénin*, or one typed with *Other*) and a link to the call's **CNV-Hub** page
+(`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
+carries the call's position and type). The classes are kept in the tab only: **Export classified table** writes each
+file of the tab back unchanged but for its Classification column (a BED gets a last column); closing the tab with
+classes not exported asks first.
 
 ## Reads, haplotypes and phasing
 
@@ -380,8 +406,9 @@ annotation hosts listed below and carry a gene name, a genomic interval or the l
 reads, sample names or file names. The browser keeps the last genes opened, the folded bar, favourite GTEx tissues
 and, in Chrome and Edge, a bookmark (a permission, not a copy) of the folders and files added. **Session files and
 exported pages are patient data**: a session names files and samples, an exported page holds reads and coverage. Array-CGH
-interval tables are read in the page as well; their calls and classes stay in the tab (never in the browser's storage),
-and only a click on *CNV-Hub ↗* sends a call's position and type, to cnvhub.net.
+interval tables and zips are read in the page as well; their calls and classes stay in the tab (never in the browser's
+storage). The genes, scores and PanelApp entries of a call are asked with its interval and gene names only, as the SV
+browser asks them, and only a click on *CNV-Hub ↗* sends a call's position and type, to cnvhub.net.
 
 ## Deploying in a clinical laboratory
 

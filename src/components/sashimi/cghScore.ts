@@ -33,8 +33,9 @@ export interface GeneView {
   g: CnvGene;
   hi: number | null; ts: number | null;
   loeuf: number | null; pli: number | null; version: string | null;
-  /** null while PanelApp is asked, or when it failed */
+  /** null while PanelApp is asked, or when it failed (`paState` says which) */
   pa: PanelView | null;
+  paState?: 'asked' | 'failed' | 'not asked' | 'done';
 }
 export interface AchroHit { id: string; name: string; type: 'del' | 'dup'; cls: AchroClass[]; how: string }
 export interface ScoreInput {

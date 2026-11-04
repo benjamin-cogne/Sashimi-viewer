@@ -157,7 +157,8 @@ export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes
   const genes: GeneView[] = ann.genes.map((g, i) => {
     const d = ann.dosage.get(g.symbol), k = ann.constraint.get(g.symbol);
     return { g, hi: d?.hi ?? null, ts: d?.ts ?? null, loeuf: k?.loeuf ?? null, pli: k?.pli ?? null, version: k?.version ?? null,
-      pa: i < PANELAPP_MAX_GENES ? panelView(s.modes[g.symbol]) : null };
+      pa: i < PANELAPP_MAX_GENES ? panelView(s.modes[g.symbol]) : null,
+      paState: i >= PANELAPP_MAX_GENES ? 'not asked' : s.modes[g.symbol] === 'error' ? 'failed' : !s.modes[g.symbol] || s.modes[g.symbol] === 'loading' ? 'asked' : 'done' };
   });
   const asked = ann.genes.slice(0, PANELAPP_MAX_GENES).map(g => s.modes[g.symbol]);
   const waiting = asked.filter(m => m === 'loading' || m === undefined).length;
