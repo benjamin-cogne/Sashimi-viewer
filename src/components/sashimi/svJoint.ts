@@ -61,6 +61,8 @@ export function jointReads(reads: AlignedRead[], chrom: string, ref: { start: nu
   const out: JointRead[] = [];
   for (const r of reads) {
     if (!r.sa || r.f & 0x900 || (r.c[0] + r.c[1] > 0 && !r.cs) || r.h?.[0] || r.h?.[1]) continue;
+    // clipped bases cut short (a container or page keeps at most so many per side): the read's coordinates would slip
+    if (r.cs && (r.cs[0].length !== r.c[0] || r.cs[1].length !== r.c[1])) continue;
     const mism = new Map(r.m.map(([p, b]) => [p, b]));
     const ins = new Map(r.i.map(([p], k) => [p, r.is?.[k] ?? null]));
     if ([...ins.values()].some(v => v == null)) continue;
