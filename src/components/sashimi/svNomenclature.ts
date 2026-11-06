@@ -25,6 +25,7 @@
  */
 import type { SvJunction, SvReconstruction, SvSegment, SvPiece } from './svModel';
 import { ncAccession, chromOfAccession } from './knownVariants';
+import { revComp } from './svJoint';
 
 export interface Cytoband { start: number; end: number; name: string; stain: string }
 export interface SvNomenclature {
@@ -60,6 +61,27 @@ const range = (s: { start: number; end: number; pter?: boolean; qter?: boolean }
  * nothing there → del; the same segments, some reversed in place → del / inv; a forward repeat of what precedes →
  * dup; anything else → ins (between two backbone pieces) or delins (replacing reference segments).
  */
+/**
+ * The bases a junction's joint inserts between two pieces of a derivative, as HGVS writes inserted content: the bases
+ * along the derivative, or the stretch they copy (`43249001_43249028`, `inv` when copied from the other strand); null
+ * when the joint inserts none or was not rebuilt. The joint was read from its breakend A to B: a derivative that
+ * crosses the junction the other way takes it reverse-complemented.
+ */
+function jointIns(prev: SvPiece, p: SvPiece, own: string, build: string): string | null {
+  const j = p.via && p.via !== 'ref' ? p.via : null;
+  const jt = j?.joint;
+  if (!j || !jt?.inserted) return null;
+  const exitPos = prev.reversed ? prev.seg.start : prev.seg.end, exitSide = prev.reversed ? 'head' : 'tail';
+  const forward = j.a.side === exitSide && Math.abs(j.a.pos - exitPos) <= 50 && num(j.a.chrom) === num(prev.seg.chrom);
+  const t = jt.templated;
+  if (t) {
+    const strand = forward ? t.strand : t.strand === '+' ? '-' : '+';
+    const acc = num(t.chrom) === num(own) ? '' : `${ncAccession(build, t.chrom) ?? t.chrom}:g.`;
+    return `${acc}${t.start + 1}_${t.end}${strand === '-' ? 'inv' : ''}`;
+  }
+  return forward ? jt.inserted : revComp(jt.inserted);
+}
+
 function hgvsOf(der: SvReconstruction['ders'][number], segs: SvSegment[], build: string): string | null {
   const own = der.chrom;
   const acc = ncAccession(build, own) ?? own;
@@ -74,14 +96,28 @@ function hgvsOf(der: SvReconstruction['ders'][number], segs: SvSegment[], build:
   while (end >= 0) { bb.unshift(cand[end]); end = prev[end]; }
   if (!bb.length || bb[0].p.seg.i !== 0) return null;
   const ops: string[] = [];
-  const content = (run: SvPiece[]): string => {
-    const items = run.map(spanOf).map(s => `${s.chrom === own ? '' : `${ncAccession(build, s.chrom) ?? s.chrom}:g.`}${range(s)}${s.reversed ? 'inv' : ''}`);
+  // inserted content, with the bases the joints insert before, between and after its pieces
+  const content = (run: SvPiece[], left: SvPiece, right: SvPiece | null): string => {
+    const items: string[] = [];
+    run.forEach((p, k) => {
+      const before = jointIns(k ? run[k - 1] : left, p, own, build);
+      if (before) items.push(before);
+      const s = spanOf(p);
+      items.push(`${s.chrom === own ? '' : `${ncAccession(build, s.chrom) ?? s.chrom}:g.`}${range(s)}${s.reversed ? 'inv' : ''}`);
+    });
+    const after = right ? jointIns(run[run.length - 1], right, own, build) : null;
+    if (after) items.push(after);
     return items.length === 1 && run[0].seg.chrom === own ? items[0] : `[${items.join(';')}]`;
   };
+  /** an insertion of a joint's bases at a boundary of the reference (0-based: between bases `at` and `at + 1`, 1-based) */
+  const insAt = (at: number, what: string) => `${at}_${at + 1}ins${what}`;
   const gapOps = (left: SvPiece, right: SvPiece | null, run: SvPiece[]) => {
     const gap = chromSegs.filter(s => s.i > left.seg.i && (right ? s.i < right.seg.i : true));
     if (!run.length) {
-      if (gap.length) ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}del`);
+      // a deletion; with bases inserted at its joint, a deletion-insertion
+      const ins = right ? jointIns(left, right, own, build) : null;
+      if (gap.length) ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}${ins ? `delins${ins}` : 'del'}`);
+      else if (ins) ops.push(insAt(left.seg.end, ins));
       return;
     }
     const inGap = new Set(gap.map(s => s.id));
@@ -96,25 +132,40 @@ function hgvsOf(der: SvReconstruction['ders'][number], segs: SvSegment[], build:
       if (blocks.every((b, k) => !k || lo(b) > hi(blocks[k - 1]))) {
         const kept = new Map<number, 'inv' | 'keep'>();
         for (const b of blocks) for (const p of b) kept.set(p.seg.id, p.reversed && b.length >= 1 ? 'inv' : 'keep');
+        // the bases inserted at the joints of the run, at the reference boundary each joint sits on: after a piece kept
+        // forward, its end; else before the next piece kept forward, its start
+        const joints: { at: number; what: string }[] = [];
+        const seq = [left, ...run, right];
+        for (let q = 1; q < seq.length; q++) {
+          const what = jointIns(seq[q - 1], seq[q], own, build);
+          if (!what) continue;
+          const prev = seq[q - 1], next = seq[q];
+          joints.push({ at: !prev.reversed ? prev.seg.end : !next.reversed ? next.seg.start : prev.seg.start, what });
+        }
+        const out: { at: number; op: string }[] = joints.map(x => ({ at: x.at, op: insAt(x.at, x.what) }));
         let k = 0;
         while (k < gap.length) {
           const what = kept.get(gap[k].id) ?? 'del';
           let e = k;
           if (what === 'inv') { const b = blocks.find(bl => bl.some(p => p.seg.id === gap[k].id))!; e = k + b.length - 1; }
           else while (e + 1 < gap.length && (kept.get(gap[e + 1].id) ?? 'del') === what) e++;
-          if (what !== 'keep') ops.push(`${range({ start: gap[k].start, end: gap[e].end })}${what}`);
+          if (what !== 'keep') out.push({ at: gap[k].start + 0.5, op: `${range({ start: gap[k].start, end: gap[e].end })}${what}` });
           k = e + 1;
         }
+        ops.push(...out.sort((x, y) => x.at - y.at).map(x => x.op));
         return;
       }
     }
     // a forward repeat of the segments just before: tandem duplication
     if (!gap.length && run.every(p => p.seg.chrom === own && !p.reversed) && run.every((p, k) => !k || p.seg.i === run[k - 1].seg.i + 1) && run[run.length - 1].seg.i === left.seg.i) {
-      ops.push(`${range({ start: run[0].seg.start, end: run[run.length - 1].seg.end })}dup`);
+      const copy = range({ start: run[0].seg.start, end: run[run.length - 1].seg.end });
+      // bases inserted between the two copies: a dup cannot carry them, the second copy is written as inserted
+      const between = jointIns(left, run[0], own, build);
+      ops.push(between ? insAt(left.seg.end, `[${between};${copy}]`) : `${copy}dup`);
       return;
     }
-    if (!gap.length) { ops.push(`${left.seg.end}_${left.seg.end + 1}ins${content(run)}`); return; }
-    ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}delins${content(run)}`);
+    if (!gap.length) { ops.push(insAt(left.seg.end, content(run, left, right))); return; }
+    ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}delins${content(run, left, right)}`);
   };
   for (let k = 0; k < bb.length; k++) {
     const left = bb[k].p, right = bb[k + 1]?.p ?? null;
@@ -254,7 +305,7 @@ export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (c
   const { band, seq } = iscnOf(rec, bandsOf, build);
   const errs = Object.values(rec.bpError ?? {});
   const lo = errs.length ? Math.min(...errs) : 0, hi = errs.length ? Math.max(...errs) : 0;
-  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity), iscnSeq: seq, uncertainty: !errs.length ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
+  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity), iscnSeq: seq, uncertainty: !errs.length || hi === 0 ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
 }
 
 // ======================== Reading a description ========================

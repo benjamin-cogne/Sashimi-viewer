@@ -14,6 +14,7 @@ import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathTex
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import { refineJunction, jointHint, jointSummary, TEMPLATE_MIN, TEMPLATE_SPAN, type SvJoint } from './svJoint';
 
 // ======================== Timeline ========================
 
@@ -89,10 +90,12 @@ export interface SvCartoonProps {
   build: string;
   /** the genes of the window and their annotations (the data source's), for the rearranged genome browser */
   geneLoaders: Omit<SvGeneLoaders, 'fallback'>;
+  /** the joint of a junction rebuilt base by base from its split reads (svJoint.ts); absent when the source cannot read them */
+  loadJoint?: (j: SvJunction) => Promise<SvJoint | null>;
   onClose: () => void;
 }
 
-export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, geneLoaders, onClose }: SvCartoonProps) {
+export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, geneLoaders, loadJoint, onClose }: SvCartoonProps) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelected));
   const [zygosity, setZygosity] = useState<'het' | 'hom'>('het');
   const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
@@ -119,7 +122,27 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const tRef = useRef(0);
   tRef.current = t;
 
-  const chosen = useMemo(() => candidates.filter(j => selected.has(j.id)), [candidates, selected]);
+  // the joints of the split-read junctions, rebuilt once the cartoon opens (one after the other: a few hundred reads each)
+  const [joints, setJoints] = useState<Map<string, SvJoint | null | 'loading'>>(new Map());
+  const [openJoints, setOpenJoints] = useState<Set<string>>(new Set());
+  const candKey = candidates.map(j => `${j.id}:${j.a.chrom}:${j.a.pos}${j.a.side}-${j.b.chrom}:${j.b.pos}${j.b.side}:${j.evidence}`).join('|');
+  useEffect(() => {
+    if (!loadJoint) return;
+    let alive = true;
+    (async () => {
+      for (const j of candidates) {
+        if (!/\bsplit\b/.test(j.evidence)) continue;
+        setJoints(m => new Map(m).set(j.id, 'loading'));
+        const r = await loadJoint(j).catch(() => null);
+        if (!alive) return;
+        setJoints(m => new Map(m).set(j.id, r));
+      }
+    })();
+    return () => { alive = false; };
+  }, [candKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const jointOfId = (id: string) => { const v = joints.get(id); return v && v !== 'loading' ? v : undefined; };
+  // the junctions of the event, their breakends where the split reads put them and their joint carried along
+  const chosen = useMemo(() => candidates.filter(j => selected.has(j.id)).map(j => refineJunction(j, jointOfId(j.id))), [candidates, selected, joints]); // eslint-disable-line react-hooks/exhaustive-deps
   // several junctions leaving one breakend give several paths: ranked by the depth, the best shown unless one is picked
   const [pathKey, setPathKey] = useState<string | null>(null);
   useEffect(() => setPathKey(null), [chosen]);
@@ -321,7 +344,8 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
             </div>
 
           </div>
-          <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} chrom={chrom} />
+          <Details rec={rec} depth={depth} ranked={ranked} onPath={setPathKey} candidates={candidates} selected={selected} onToggle={toggleJunction} models={models} chrom={chrom}
+            joints={joints} openJoints={openJoints} onOpenJoint={id => setOpenJoints(o => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; })} />
         </div>
         <div ref={genesRef} className="scroll-mt-12" />
         {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
@@ -481,13 +505,15 @@ function Caption({ t, scene, rec, depth, chosen, zygosity }: { t: number; scene:
 
 // ======================== Details ========================
 
-function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, chrom }: {
+function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, models, chrom, joints, openJoints, onOpenJoint }: {
   rec: ReturnType<typeof reconstruct>; depth: ReturnType<typeof checkDepth>; ranked: RankedPath[]; onPath: (key: string) => void; candidates: SvJunction[]; selected: Set<string>; onToggle: (id: string) => void; models: TxModel[];
   chrom: string;
+  joints: Map<string, SvJoint | null | 'loading'>; openJoints: Set<string>; onOpenJoint: (id: string) => void;
 }) {
   const side = (e: SvJunction['a']) => (e.side === 'tail' ? '▸' : '◂');
   const breakpoints = [...new Set(rec.junctions.flatMap(j => [j.a.pos, j.b.pos]))].sort((a, b) => a - b);
   return (
+    <>
     <div className="px-5 pb-4 grid grid-cols-[320px_1fr_1fr] gap-4 text-xs">
       <div>
         <div className="text-[10.5px] font-semibold text-slate-700 mb-1">Junctions in the window ({candidates.length}) · tick the ones of one event</div>
@@ -500,6 +526,7 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
                 <span className="inline-block text-[9px] font-bold tracking-wide uppercase px-1 rounded text-white mr-1" style={{ background: KIND_COLOR[j.kind] }}>{j.kind}</span>
                 <span className="font-mono text-[11px] text-slate-700">{fmt(j.a.pos)} {side(j.a)}—{side(j.b)} {fmt(j.b.pos)}</span>
                 <div className="text-[11px] text-slate-500">{fmt(j.reads)} reads · {j.evidence} · ±{j.precision} bp{j.assumed ? ` · ${j.assumed}` : ''}</div>
+                <JointLine jt={joints.get(j.id)} split={/\bsplit\b/.test(j.evidence)} open={openJoints.has(j.id)} onOpen={() => onOpenJoint(j.id)} />
               </span>
             </label>
           ))}
@@ -572,8 +599,67 @@ function Details({ rec, depth, ranked, onPath, candidates, selected, onToggle, m
         )}
         {rec.merged.length > 0 && <div className="text-[10.5px] text-slate-600 mt-1">Breakends within {SV_BREAKEND_CLUSTER_BP} bp taken as one breakpoint: {rec.merged.join('; ')}.</div>}
         {rec.warnings.map((w, i) => <div key={i} className="text-[11px] text-amber-800 mt-1">⚠ {w}</div>)}
-        <div className="text-[10.5px] text-slate-500 mt-1.5">Breakpoints come from the reads, rounded to 5 bp (pairs alone: within an insert size); check them in the alignments before anything goes into a report. The scene draws segment widths on a log scale.</div>
+        <div className="text-[10.5px] text-slate-500 mt-1.5">Breakpoints come from the reads, rounded to 5 bp (pairs alone: within an insert size), to the base where a joint was rebuilt from split reads (joint: in the list); check them in the alignments before anything goes into a report. The scene draws segment widths on a log scale.</div>
       </div>
+    </div>
+    {(() => {
+      const open = candidates.filter(j => openJoints.has(j.id)).map(j => ({ j, jt: joints.get(j.id) })).filter((x): x is { j: SvJunction; jt: SvJoint } => !!x.jt && x.jt !== 'loading');
+      return open.map(({ j, jt }, k) => <JointPanel key={j.id} j={j} jt={jt} method={k === open.length - 1} />);
+    })()}
+    </>
+  );
+}
+
+const JOINT_COLOR = { inserted: '#c2410c', templated: '#b45309', shared: '#6d28d9', blunt: '#334155' };
+const jointColor = (jt: SvJoint) => (jt.templated ? JOINT_COLOR.templated : jt.inserted ? JOINT_COLOR.inserted : jt.homology ? JOINT_COLOR.shared : JOINT_COLOR.blunt);
+
+/** The joint of a junction in the list: inserted, templated or shared bases, the split reads agreeing, and the bases panel. */
+function JointLine({ jt, split, open, onOpen }: { jt: SvJoint | null | 'loading' | undefined; split: boolean; open: boolean; onOpen: () => void }) {
+  if (!split) return null;
+  if (jt === 'loading') return <div className="text-[10.5px] text-slate-400">joint: reading the split reads…</div>;
+  if (!jt) return <div className="text-[10.5px] text-slate-400" title="No split read carrying its bases meets both breakends (hard-clipped parts, reads outside the reads window, or no sequence in the file).">joint: not rebuilt</div>;
+  const bases = jt.templated ? '' : jt.inserted ? (jt.inserted.length <= 12 ? jt.inserted : '') : jt.homology.length <= 12 ? jt.homology : '';
+  return (
+    <div className="text-[11px]" title={jointHint(jt)}>
+      joint: <b style={{ color: jointColor(jt) }}>{jointSummary(jt)}</b>{bases && <span className="font-mono"> {bases}</span>}
+      {jt.templated && <> from {fmt(jt.templated.start + 1)}–{fmt(jt.templated.end)} ({jt.templated.strand})</>}
+      {jt.homology && <> · breakpoint ±{jt.homology.length}</>}
+      <span className="text-slate-500"> · {jt.agree}/{jt.reads} split read{jt.reads === 1 ? '' : 's'}</span>
+      <button type="button" onClick={e => { e.preventDefault(); e.stopPropagation(); onOpen(); }} className="ml-1 text-accent-700 hover:underline">{open ? '▾' : '▸'} bases</button>
+    </div>
+  );
+}
+
+/** The joint base by base: the derivative as the reads read it, with the reference at either side under it. */
+function JointPanel({ j, jt, method }: { j: SvJunction; jt: SvJoint; /** the method note, under the last panel */ method: boolean }) {
+  const cell = (s: string, cls: string, key: string) => s.split('').map((ch, i) => <span key={`${key}${i}`} className={`inline-block w-[1.05ch] text-center ${cls}`}>{ch}</span>);
+  const blank = (n: number, key: string) => Array.from({ length: n }, (_, i) => <span key={`${key}${i}`} className="inline-block w-[1.05ch]">{'\u00a0'}</span>);
+  const midCls = jt.templated ? 'bg-amber-200 text-amber-900 font-bold' : jt.inserted ? 'bg-orange-200 text-orange-900 font-bold' : 'bg-violet-200 text-violet-900 font-bold';
+  const aCls = 'bg-slate-200', bCls = 'bg-teal-100', dim = 'text-slate-300';
+  const m = jt.mid.length, F = jt.left.length;
+  const strandA = j.a.side === 'tail' ? '+' : '−', strandB = j.b.side === 'head' ? '+' : '−';
+  // the base of A next to the joint and the base of B next to it, 1-based (before any slide along shared bases)
+  const aPos = j.a.side === 'tail' ? jt.posA : jt.posA + 1, bPos = j.b.side === 'head' ? jt.posB + 1 : jt.posB;
+  const dist = jt.templated ? Math.min(...[j.a, j.b].filter(e => e.chrom === jt.templated!.chrom).map(e => Math.min(Math.abs(e.pos - jt.templated!.end), Math.abs(jt.templated!.start - e.pos)))) : 0;
+  return (
+    <div className="mx-5 mb-3 rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-xs">
+      <div className="font-semibold text-slate-800 mb-1">{j.id} · {j.kind} · the joint from {jt.reads} split read{jt.reads === 1 ? '' : 's'} <span className="font-normal text-slate-500">({jt.votes.map(v => `${v.key} ×${v.n}`).join(', ')})</span></div>
+      <div className="overflow-x-auto">
+        <table className="border-collapse"><tbody className="font-mono text-[11px] leading-[16px] whitespace-nowrap">
+          <tr><td className="pr-3 font-sans text-[10.5px] text-slate-600">derivative (reads)</td><td>{cell(jt.left, aCls, 'l')}{cell(jt.mid, midCls, 'm')}{cell(jt.right, bCls, 'r')}</td></tr>
+          <tr><td className="pr-3 font-sans text-[10.5px] text-slate-600">reference at A <span className="text-slate-400">{j.a.chrom}:{fmt(aPos)} ({strandA})</span></td><td>{cell(jt.left, aCls, 'l')}{jt.homology ? cell(jt.homology, midCls, 'h') : blank(m, 'h')}{cell('········', dim, 'd')}</td></tr>
+          <tr><td className="pr-3 font-sans text-[10.5px] text-slate-600">reference at B <span className="text-slate-400">{j.b.chrom}:{fmt(bPos)} ({strandB})</span></td><td>{cell('········', dim, 'd')}{blank(Math.max(0, F - 8), 'b')}{jt.homology ? cell(jt.homology, midCls, 'h') : blank(m, 'h')}{cell(jt.right, bCls, 'r')}</td></tr>
+        </tbody></table>
+      </div>
+      <div className="mt-1 text-slate-700 leading-snug">
+        {jt.templated
+          ? <><b style={{ color: JOINT_COLOR.templated }}>{jt.inserted.length} inserted bases</b>, a copy of {jt.templated.chrom}:{fmt(jt.templated.start + 1)}–{fmt(jt.templated.end)} ({jt.templated.strand} strand{jt.templated.mismatches ? `, ${jt.templated.mismatches} mismatch${jt.templated.mismatches > 1 ? 'es' : ''}` : ''}){dist ? `, ${fmt(dist)} bp from the breakpoint` : ''}.</>
+          : jt.inserted ? <><b style={{ color: JOINT_COLOR.inserted }}>{jt.inserted.length} inserted base{jt.inserted.length > 1 ? 's' : ''}</b>{jt.inserted.length > 12 ? <> (<span className="font-mono break-all">{jt.inserted}</span>)</> : ''}, found nowhere within {fmt(TEMPLATE_SPAN)} bp of either breakpoint{jt.inserted.length < 10 ? ' (shorter than 10 bases: not looked up)' : ''}. The shortest description: a base next to them that matches the reference is counted as the reference's.</>
+          : jt.homology ? <><b style={{ color: JOINT_COLOR.shared }}>{jt.homology.length} base{jt.homology.length > 1 ? 's' : ''} shared</b> by the two sides: the breakpoint can sit anywhere along them, the reads cannot tell.{j.a.side === 'tail' && j.b.side === 'head' ? ' The HGVS places it as far 3′ as they allow.' : ''}</>
+          : <><b>Blunt joint</b>: no base inserted or shared.</>}
+        {' '}<span className="text-slate-500">Hint: {jointHint(jt)}.</span>
+      </div>
+      {method && <div className="text-[10.5px] text-slate-500 mt-1 pt-1 border-t border-slate-200">How: from each split read's primary alignment and its SA part, the bases between the two parts are inserted and the bases both aligned are shared; the reads vote, and the majority joint is checked on the reference (the shared bases: how far the joint slides). An insertion of {TEMPLATE_MIN} bases or more is looked up within {fmt(TEMPLATE_SPAN)} bp of either breakpoint, both strands, one mismatch per 10 bases. A rebuilt junction's breakends sit where the reads put them (a deletion or a tandem duplication as far 3′ as shared bases allow), and its inserted bases enter the HGVS. The hint is the usual reading of breakpoint junctions, not a call.</div>}
     </div>
   );
 }

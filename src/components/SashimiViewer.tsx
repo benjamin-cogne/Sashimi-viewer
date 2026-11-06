@@ -20,7 +20,8 @@ import type { ExonPhase } from './sashimi/geometry';
 import { fusionFrame, fusionHgvs, fusionPeptide, type FusionEnd, type FusionPeptide } from './sashimi/fusionFrame';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import SvCartoon from './sashimi/SvCartoon';
-import { junctionsOfEvidence } from './sashimi/svModel';
+import { jointOf, jointReads, TEMPLATE_SPAN, type SvJoint } from './sashimi/svJoint';
+import { junctionsOfEvidence, type SvJunction } from './sashimi/svModel';
 import { fusionStory, fusionStoryPossible, fusionWindows, spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
 import { SNP_MAX_WINDOW, snpSourceLabel } from '../standalone/snps';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR, SV_MIN_CLIP, SV_MIN_DELETION, breakpointsOf, clipConsensus, parseSa, hardClippedBases } from '../standalone/alignments';
@@ -481,6 +482,8 @@ const LAYER_COLORS = { C: '#2563eb', V: '#d97706', M: '#b2182b', R: '#475569' };
 const READS_HEADER_H = 22;
 /** Supporting reads of an arc kept at most (every k-th past it), their mates added: about as many reads as a window holds (READS_MAX). */
 const READS_SUPPORT_MAX = 2000;
+/** The joint of a split-read junction: the reads this far around each breakend, at most this many (svJoint.ts). */
+const JOINT_READS_BP = 250, JOINT_READS_MAX = 3000;
 /** Reads placed with a mapping quality under this are drawn hollow, as IGV draws its MAPQ 0 reads (STAR: 3 for 2 loci, 1 for 3–4, 0 for more; 255 unique). */
 const LOW_MAPQ = 10;
 /** spliced reads of a gene's own introns needed before they are handed to the host as evidence of the library orientation */
@@ -7439,7 +7442,25 @@ export default function SashimiViewer({
           const models: TxModel[] = [...(tx ? [tx] : []), ...(altModels ?? []).filter(m => !tx || m.name !== tx.transcriptId).map(m => ({
             geneName: currentGeneName, transcriptId: m.name, isMane: m.is_mane, modelKind: 'chosen' as const, chrom: currentChrom, strand: (m.strand < 0 ? -1 : 1) as 1 | -1, start: m.start, end: m.end,
             exons: m.exons.map((e, i) => ({ start: e.start, end: e.end, rank: m.strand < 0 ? m.exons.length - i : i + 1 })), cdsStart: m.cdsStart, cdsEnd: m.cdsEnd }))];
-          return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build} geneLoaders={svGeneLoaders}
+          // the joint of a junction from its split reads: the reads around both breakends, with the reference to rebuild
+          // their bases and, around each breakend, the stretch a templated insertion is looked for in (svJoint.ts)
+          const sid = track.sampleId;
+          const loadJoint = async (j: SvJunction): Promise<SvJoint | null> => {
+            if (!/\bsplit\b/.test(j.evidence)) return null;
+            const ends = [j.a, j.b];
+            const [wins, refs] = await Promise.all([
+              Promise.all(ends.map(e => ds.getReads(sid, e.chrom, Math.max(0, e.pos - JOINT_READS_BP), e.pos + JOINT_READS_BP, minMapq, JOINT_READS_MAX, 'reads', 1, 1))),
+              Promise.all(ends.map(e => ds.getReference(e.chrom, Math.max(0, e.pos - TEMPLATE_SPAN - 50), e.pos + TEMPLATE_SPAN + 50).then(seq => ({ chrom: e.chrom, start: Math.max(0, e.pos - TEMPLATE_SPAN - 50), seq })).catch(() => null))),
+            ]);
+            const stretches = [...refs.filter((r): r is { chrom: string; start: number; seq: string } => !!r?.seq), ...wins.flatMap((w, k) => (w.reference ? [{ chrom: ends[k].chrom, ...w.reference }] : []))];
+            const refAt = (c: string, a: number, b: number) => {
+              const st = stretches.find(x => x.chrom === c && x.start <= a && x.start + x.seq.length >= b);
+              return st ? st.seq.slice(a - st.start, b - st.start).toUpperCase() : null;
+            };
+            const reads = wins.flatMap((w, k) => jointReads(w.reads, ends[k].chrom, w.reference ? { start: w.reference.start, seq: w.reference.seq.toUpperCase() } : null));
+            return jointOf(j.a, j.b, reads, refAt);
+          };
+          return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build} geneLoaders={svGeneLoaders} loadJoint={loadJoint}
             sample={{ name: track.sampleName, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], coverage: track.coverage, sampled: !!track.sampled }} controls={controls}
             onClose={() => setSvCartoon(null)} />;
         })()}

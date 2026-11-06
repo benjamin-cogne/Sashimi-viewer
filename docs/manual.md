@@ -206,6 +206,15 @@ insert size of the arc's ends); soft-clip clusters (≥ 3 reads clipped ≥ 20 b
 its count in every DNA sample and a g. notation; a duplication's tooltip says whether its whole exons keep the frame.
 Hover a track's *DNA* tag to see why an arc is missing.
 
+**Joints from split reads.** In the SV cartoon (*🎬 rebuild the SV*), each junction seen in split reads gets a *joint*
+line once the cartoon opens: the bases **inserted** between the two sides (orange; *templated* when they copy a stretch
+within 5 kb of a breakpoint, either strand, at most one mismatch per 10 bases), or the bases **shared** by the two
+sides (violet, microhomology: the breakpoint can sit anywhere along them), or *blunt*, with the split reads agreeing.
+*▸ bases* shows the joint base by base under the reference at either side, with a hint at the repair (end joining,
+microhomology-mediated, replication-based) that is not a call. A rebuilt junction's breakends sit where the reads put
+them, a deletion or tandem duplication as far 3′ as the shared bases allow, and its inserted bases enter the draft HGVS
+(`delinsTA`, `ins43249001_43249028`).
+
 **Repeat inspector.** The 77 pathogenic repeat loci of STRchive get an orange ruler pill (*FMR1 CGG repeat ·
 inspect ▸*); any other repeat opens with Shift+drag, then *⟲ Inspect repeat*. Long reads are sized between two
 locus-specific anchors, drawn as a size **histogram** and a **waterfall** of units (pathogenic motif blue, benign

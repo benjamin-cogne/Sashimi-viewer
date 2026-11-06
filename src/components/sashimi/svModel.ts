@@ -22,6 +22,8 @@ export type BreakendSide = 'tail' | 'head';
 export interface Breakend { chrom: string; pos: number; side: BreakendSide }
 export type SvJunctionKind = 'deletion' | 'duplication' | 'inversion' | 'translocation';
 
+import type { SvJoint } from './svJoint';
+
 export interface SvJunction {
   /** short label (J1, J2…) */
   id: string;
@@ -36,6 +38,8 @@ export interface SvJunction {
   assumed?: string;
   /** the viewer's arc key it came from */
   key?: string;
+  /** the joint rebuilt base by base from its split reads (svJoint.ts), when it was: its breakends then sit where the reads put them */
+  joint?: SvJoint;
 }
 
 // ======================== Thresholds ========================
