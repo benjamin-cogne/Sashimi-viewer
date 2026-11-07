@@ -54,7 +54,7 @@ export function stackSvgs(plots: { title: string; svg: string }[], gap = 28, tit
   const parts: string[] = [];
   items.forEach((it, i) => {
     const clipId = `page-clip-v${i + 1}`;
-    parts.push(`<text x="8" y="${y + 15}" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#111827">${escapeXml(it.title)}</text>`);
+    parts.push(`<text x="8" y="${y + 15}" font-family="'Inter Viewer', Inter, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="13" font-weight="700" fill="#111827">${escapeXml(it.title)}</text>`);
     parts.push(`<defs><clipPath id="${clipId}"><rect x="0" y="0" width="${it.w}" height="${it.h}"/></clipPath></defs>`);
     parts.push(`<g transform="translate(0, ${y + titleH})" clip-path="url(#${clipId})"${it.font ? ` font-family="${it.font}"` : ''}>${it.inner}</g>`);
     y += titleH + it.h + gap;
