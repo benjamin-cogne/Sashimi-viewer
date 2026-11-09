@@ -19,7 +19,10 @@ export interface RemoteSource {
   readonly url: string;
   /** the file name, from the URL's path */
   readonly name: string;
-  /** bytes, from the server's Content-Range */
+  /**
+   * bytes, from the server's Content-Range, else the Content-Length of a HEAD; Infinity when the server tells neither
+   * to this page (reads then stop at the end of the file by themselves: a short or empty answer)
+   */
   readonly size: number;
 }
 
@@ -153,10 +156,15 @@ export function forgetRemote(f: SampleFile | null | undefined) {
 // ---------------- Opening ----------------
 
 /**
- * Checks that a URL can be read by ranges and returns it as a RemoteSource. One request for its first byte: a 206
- * with a Content-Range gives the size. Everything else is turned into the reason a person can act on. A server that
- * ignores Range answers 200 with the whole file: the request is cancelled as soon as the headers arrive, so a 30 GB BAM
- * is not downloaded by a probe.
+ * Checks that a URL can be read by ranges and returns it as a RemoteSource. One request for its first byte must come
+ * back as 206 Partial Content; everything else is turned into the reason a person can act on. A server that ignores
+ * Range answers 200 with the whole file: the request is cancelled as soon as the headers arrive, so a 30 GB BAM is not
+ * downloaded by a probe.
+ *
+ * The size comes from the 206's Content-Range. Across origins the page may read that header only when the server lists
+ * it in Access-Control-Expose-Headers, which many servers configured for CORS do not; the size is then taken from the
+ * Content-Length of a HEAD request (a header every page may read), and when even that is missing it is left unknown:
+ * BAM and CRAM reads go by the index and do not need it.
  */
 export async function probeUrl(url: string, signal?: AbortSignal): Promise<RemoteSource> {
   let abs: string;
@@ -179,14 +187,31 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
   if (res.status === 401 || res.status === 403) { ctl.abort(); throw new Error(`${name}: access denied (HTTP ${res.status})`); }
   if (res.status === 404) { ctl.abort(); throw new Error(`${name}: not found (HTTP 404)`); }
   if (res.status !== 206) { ctl.abort(); throw new Error(`${name}: HTTP ${res.status}`); }
+  const enc = res.headers.get('content-encoding');
+  if (enc && enc !== 'identity') { ctl.abort(); throw new Error(`${name}: the server compresses the file on the fly (Content-Encoding: ${enc}), which breaks reading it in parts: serve .bam/.bai/.cram/.crai as application/octet-stream without gzip`); }
   const cr = res.headers.get('content-range');
   await res.arrayBuffer().catch(() => {});
-  const size = cr ? Number(/\/(\d+)\s*$/.exec(cr)?.[1]) : NaN;
-  if (!Number.isFinite(size) || size <= 0) throw new Error(`${name}: the server does not tell the file size to this page (expose Content-Range with Access-Control-Expose-Headers)`);
-  const enc = res.headers.get('content-encoding');
-  if (enc && enc !== 'identity') throw new Error(`${name}: the server compresses the file on the fly (Content-Encoding: ${enc}), which breaks reading it in parts: serve .bam/.bai/.cram/.crai as application/octet-stream without gzip`);
-  return { kind: 'url', url: abs, name, size };
+  let size = cr ? Number(/\/(\d+)\s*$/.exec(cr)?.[1]) : NaN;
+  if (!(size > 0)) size = await headLength(abs, signal);
+  return { kind: 'url', url: abs, name, size: size > 0 ? size : Infinity };
 }
+
+/** Content-Length of a HEAD request (readable across origins without being exposed), or NaN. */
+async function headLength(url: string, signal?: AbortSignal): Promise<number> {
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal, cache: 'no-store' });
+    if (!res.ok) return NaN;
+    const enc = res.headers.get('content-encoding');
+    if (enc && enc !== 'identity') return NaN;   // the length of a compressed body, not of the file
+    return Number(res.headers.get('content-length'));
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw e;
+    return NaN;
+  }
+}
+
+/** A file size for a person: "1.18 GB", or "size not told by the server" for a URL whose size is unknown. */
+export const sizeLabel = (bytes: number): string => (Number.isFinite(bytes) ? `${(bytes / 1e9).toFixed(2)} GB` : 'size not told by the server');
 
 /** A probe that answers null instead of failing (index candidates). */
 const tryProbe = (url: string, signal?: AbortSignal) => probeUrl(url, signal).catch(e => { if (e?.name === 'AbortError') throw e; return null; });

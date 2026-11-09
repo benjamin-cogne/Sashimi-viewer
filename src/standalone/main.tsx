@@ -20,7 +20,7 @@ import type { GenomeBuild } from './ensembl';
 import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { attachVariantWorker } from './variantClient';
-import { findIndexUrl, isRemote, probeUrl, sameSource, type SampleFile } from './remote';
+import { findIndexUrl, isRemote, probeUrl, sameSource, sizeLabel, type SampleFile } from './remote';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
@@ -1112,7 +1112,7 @@ function App() {
             <div className="flex flex-wrap items-center gap-1.5 min-w-0" aria-label="Samples">
               {samples.map((s, i) => (
                 <span key={s.id} className={`group inline-flex items-center gap-1.5 h-7 pl-2 pr-1.5 rounded-full text-[12.5px] border whitespace-nowrap ${i === 0 ? 'bg-accent-50 border-accent-200 text-slate-900' : 'bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300 cursor-pointer'}`}
-                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${(s.file.size / 1e9).toFixed(2)} GB${isRemote(s.file) ? ` at ${s.file.url.replace(/[?#].*$/, '')}` : ''}`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
+                  title={`${s.file.name} · ${s.embedded ? 'data embedded in this exported page' : `${sizeLabel(s.file.size)}${isRemote(s.file) ? ` at ${s.file.url.replace(/[?#].*$/, '')}` : ''}`} · ${kindLabel(s.kind)}${s.asm ? ` · ${s.asm.note}` : ''}${i === 0 ? ' · primary sample' : ' · click to make it the primary sample'} · double-click to rename`}
                   onClick={() => { if (i !== 0 && renaming?.id !== s.id) makePrimary(s.id); }}
                   onDoubleClick={e => { e.stopPropagation(); setRenaming({ id: s.id, value: s.name }); }}>
                   {i === 0 && <span className="text-accent-600" title="primary sample"><Icon name="star" size={13} /></span>}

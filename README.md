@@ -32,8 +32,9 @@ Files on a web server can be opened without downloading them: **Add → From URL
 the file's, on the same line). Only the header, the index and the regions you look at are fetched, with HTTP Range
 requests, as igv.js does. The server has to answer Range requests (`206 Partial Content`; nginx, Apache, IIS and S3
 do for static files) without compressing the BAM on the fly. If the page is not served from the same server as the
-files, the server must also allow it by CORS: `Access-Control-Allow-Origin`, `Range` in
-`Access-Control-Allow-Headers`, `Content-Range` in `Access-Control-Expose-Headers`. Putting `sashimi-viewer.html` on
+files, the server must also allow it by CORS: `Access-Control-Allow-Origin` and `Range` in
+`Access-Control-Allow-Headers` (`Content-Range` in `Access-Control-Expose-Headers` is optional: without it the size
+comes from a `HEAD` request, or stays unknown, which BAM and CRAM do not need). Putting `sashimi-viewer.html` on
 that server, next to the data, needs no CORS at all, and the server's own login keeps working. Local files are added
 as before; sessions record URL samples by their URL and reopen them by themselves.
 
