@@ -21,6 +21,12 @@ const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
+type Drawn = { cnv: CghCnv; build: GenomeBuild; parsed: ParsedSv };
+/** a call as the SV browser reads it: DEL / DUP over its positions, on its file's build (GRCh37 when it states none) */
+function drawOf(c: CghCnv, f: CghFile): Drawn {
+  const b: GenomeBuild = f.build ?? 'GRCh37';
+  return { cnv: c, build: b, parsed: parseSv(`${c.chrom}:g.${c.start}_${c.end}${c.kind === 'loss' ? 'del' : 'dup'}`, b, ch => chromLength(b, ch)) };
+}
 /** the browser redrawn only when its own props change, not at each answer of the annotations */
 const Browser = memo(SvGenomeBrowser);
 
@@ -42,16 +48,17 @@ export function CghPageSlot({ loadersFor }: { loadersFor: (b: GenomeBuild) => Lo
 
 export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: GenomeBuild) => Loaders; onBack: () => void }) {
   const s = useCgh();
-  const [drawn, setDrawn] = useState<{ cnv: CghCnv; build: GenomeBuild; parsed: ParsedSv } | null>(null);
+  /** the call drawn: the one clicked, or, the page opened again, the one clicked before */
+  const [drawn, setDrawn] = useState<Drawn | null>(() => {
+    const id = cgh.get().shown, f = id ? s.files.find(fl => fl.samples.some(x => x.cnvs.some(c => c.id === id))) : undefined;
+    const c = f?.samples.flatMap(x => x.cnvs).find(x => x.id === id);
+    try { return c && f ? drawOf(c, f) : null; } catch { return null; }
+  });
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
-    const b: GenomeBuild = f.build ?? 'GRCh37';
-    try {
-      const parsed = parseSv(`${c.chrom}:g.${c.start}_${c.end}${c.kind === 'loss' ? 'del' : 'dup'}`, b, ch => chromLength(b, ch));
-      setDrawn({ cnv: c, build: b, parsed }); setError(null);
-    } catch (e) { setError(`${c.chrom}:${c.start}-${c.end}: ${(e as Error).message}`); }
+    try { setDrawn(drawOf(c, f)); setError(null); } catch (e) { setError(`${c.chrom}:${c.start}-${c.end}: ${(e as Error).message}`); }
   };
   const loaders = useMemo(() => (drawn ? loadersFor(drawn.build) : null), [drawn?.build, loadersFor]); // eslint-disable-line react-hooks/exhaustive-deps
   const full = useMemo<SvGeneLoaders | null>(() => (loaders ? { ...loaders, fallback: [] } : null), [loaders]);

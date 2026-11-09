@@ -35,6 +35,8 @@ export interface CghState {
   pending: { files: CghFile[]; errors: string[]; notes: string[] } | null;
   /** classes changed since the last export */
   dirty: boolean;
+  /** the patients (sample keys) with classes or notes not exported yet */
+  dirtyKeys: Record<string, true>;
   /** the array-CGH page is open (over the SV browser) */
   open: boolean;
   /** what each call holds (genes, dosage, constraint, AChro-Puce), by call id; PanelApp's entries by gene */
@@ -57,7 +59,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, open: false, ann: {}, modes: {}, sex: {}, notes: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -86,6 +88,10 @@ function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; byt
   }
   return { entries, skipped };
 }
+
+/** a patient's classes or notes changed / exported: the patients still to export, and whether any is */
+const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]: true as const }; return { dirtyKeys, dirty: true }; };
+const exportedOf = (keys: string[]) => { const dirtyKeys = { ...state.dirtyKeys }; for (const k of keys) delete dirtyKeys[k]; return { dirtyKeys, dirty: Object.keys(dirtyKeys).length > 0 }; };
 
 export const cgh = {
   get: () => state,
@@ -119,7 +125,6 @@ export const cgh = {
     }
     set({ pending: { files, errors, notes } });
   },
-  /** the files accepted with this minimum: listed, the first new sample shown */
   /** the files accepted with this minimum and the sexes chosen (by sample key; the file's own when not chosen) */
   accept(minProbes: number, sexes: Record<string, CghSex | null> = {}, minKb = state.filter.minKb) {
     const p = state.pending; if (!p) return;
@@ -137,17 +142,18 @@ export const cgh = {
     set({ filter });
   },
   setSample(key: string | null) { set({ sample: key }); },
-  setClass(cnv: CghCnv, v: string) { set({ classes: { ...state.classes, [cnv.id]: v }, dirty: true }); },
-  setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, dirty: true }); },
+  setClass(cnv: CghCnv, v: string) { set({ classes: { ...state.classes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
+  setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
   /** a sample taken off the list (its file too when it was the file's only sample) */
   remove(sampleKey: string) {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);
     const left = files.flatMap(f => f.samples);
-    set({ files, sample: state.sample === sampleKey ? left[0]?.key ?? null : state.sample, dirty: left.length ? state.dirty : false });
+    set({ files, sample: state.sample === sampleKey ? left[0]?.key ?? null : state.sample, ...exportedOf([sampleKey]) });
   },
-  exported() { set({ dirty: false }); },
+  /** these patients' classes and notes written to a file */
+  exported(keys: string[]) { set(exportedOf(keys)); },
 };
 
 /** a call's class: the one given in the browser, else the file's (in the laboratory's words when recognised) */

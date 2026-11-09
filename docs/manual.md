@@ -230,8 +230,10 @@ marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
 Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
-order by position or by priority. Each row: band, position, size, copy number from the ISCN (x0, x1, x3, amp), probes,
-mean log ratio, then what the call holds, read on the file's build (GRCh37) by the SV browser's own routes:
+order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
+copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
+build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
+links staying on the right.
 
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
@@ -241,9 +243,10 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
   samples and studies in its tooltip and under the row. It does not change the priority.
 - **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
   they cannot be read, and the cell then says *file*.
-- **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes), then
-  listed by its best rating, green first (with their modes of inheritance: AD, AR, AD/AR, XLR, XLD), then amber, then
-  red (counted).
+- **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes per call,
+  25 genes a request, one request at a time, as PanelApp refuses bursts; a batch not answered is asked again twice),
+  then listed by its best rating, green first (with their modes of inheritance:
+  AD, AR, AD/AR, XLR, XLD), then amber, then red (counted).
 - **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
@@ -263,13 +266,14 @@ mean log ratio, then what the call holds, read on the file's build (GRCh37) by t
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
   is still being asked.
 
-Click a row (↑ ↓ for the next one): its genes are listed under it, PanelApp green first, then amber, then red (whole
+Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
 or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
 its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
 homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
-array ISCN on one line. Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
+array ISCN on one line (the file's; written from the band and the copy number when the file gives both but no ISCN,
+else the positions alone: no copy number is assumed). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
 significance, Likely pathogenic, Pathogenic, PIEV, Male Reference, Female Reference, NS (non significant: recurring
 technical artifact / atypical log ratio); a class already written in the file is read into that list when its words are
 recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin féminin*…). The **✎** of a row opens a
@@ -277,8 +281,8 @@ recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin f�
 (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
 carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
 each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
-after the last column when the table has none; a BED gets both as two last columns); closing the tab with classes or
-notes not exported asks first.
+after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
+the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
 
 ## Reads, haplotypes and phasing
 

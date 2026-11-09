@@ -141,7 +141,6 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const analysedAll = s.files.reduce((k, fl) => k + fl.samples.reduce((m, x) => m + x.cnvs.filter(c => isAnalysed(c, s.filter.minProbes, s.filter.minKb)).length, 0), 0);
   const anySuppressed = all.some(({ c }) => c.suppressed);
   const f = s.filter;
-  // the classes offered: the network's, then the words of the files and those typed here
   /** a call clicked: drawn below with its detail under its row; clicked again, its detail folds or unfolds */
   const show = (i: number, click = false) => {
     const r = rows[i]; if (!r) return;
@@ -158,8 +157,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     }
-    cgh.exported();
+    cgh.exported(listed.map(e => e.x.key));
   };
+  /** classes or notes of the patients listed not exported yet */
+  const listedDirty = listed.some(e => s.dirtyKeys[e.x.key]);
   const tab = (on: boolean) => `inline-flex items-center gap-1.5 h-8 pl-3 pr-2 -mb-px rounded-t-lg border text-xs whitespace-nowrap ${on ? 'bg-white border-slate-200 border-b-white text-slate-900 font-semibold shadow-[inset_0_2px_0_#0f766e]' : 'bg-slate-50 border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`;
   const filesBuilds = [...new Set(listed.map(e => e.f.build ?? 'GRCh37'))];
   return (
@@ -175,16 +176,16 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
             <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
             <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
-              onClick={() => { if (!s.dirty || !x.cnvs.some(c => s.classes[c.id] != null || s.notes[c.id] != null) || confirm(`${x.name}: the classes and notes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
+              onClick={() => { if (!s.dirtyKeys[x.key] || confirm(`${x.name}: the classes and notes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
           </span>;
         })}
         </div>
         <span className="ml-auto self-center flex items-center gap-2 py-1">
           <CghAddButton compact />
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
-          <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${s.dirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+          <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
             title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns).\nClasses and notes are kept in this tab only: export them to keep them.'}>
-            <Icon name="download" size={13} />Export classified table{s.dirty ? ' •' : ''}</button>
+            <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>
         </span>
       </div>
       <div className="pt-2" />

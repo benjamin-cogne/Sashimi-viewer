@@ -2,10 +2,10 @@
  * What an array-CGH call holds, by the SV browser's own routes, on the file's build (GRCh37): the RefSeq NM_ genes of
  * its interval (UCSC ncbiRefSeqCurated; the file's Gene Name only when they cannot be read, and said so), their ClinGen
  * dosage scores and gnomAD constraint (UCSC, gnomAD), their PanelApp entries (Genomics England, every panel: rating and
- * mode of inheritance), and the AChro-Puce recurrent CNVs it matches. Calls are asked two at a time, PanelApp four genes
- * at a time; each answer is kept for the tab's life.
+ * mode of inheritance), and the AChro-Puce recurrent CNVs it matches. Calls are asked two at a time, PanelApp 25 genes
+ * a request, one request at a time (a batch not answered asked again twice); each answer is kept for the tab's life.
  */
-import { geneModes, PANEL_SOURCES, type GeneModes } from '../../standalone/panelapp';
+import { PANEL_SOURCES, classifyMoi, summarizeModes, type GeneModes, type GeneMode } from '../../standalone/panelapp';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { SvGeneLoaders } from './SvGenomeBrowser';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
@@ -164,7 +164,7 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 
-// ---- PanelApp, gene by gene ----
+// ---- PanelApp, by batches of genes ----
 const modeQueue: string[] = [];
 let modeRunning = 0;
 let pendingModes: Record<string, GeneModes | 'loading' | 'error'> = {};
@@ -179,12 +179,44 @@ function wantModes(symbols: string[]) {
   for (const s of symbols) if (!(s in known) && !(s in pendingModes) && !modeQueue.includes(s)) { modeQueue.push(s); putMode(s, 'loading'); }
   pumpModes();
 }
-function pumpModes() {
-  while (modeRunning < 4 && modeQueue.length) {
-    const s = modeQueue.shift()!;
-    modeRunning++;
-    geneModes(PANEL_SOURCE, s).then(m => putMode(s, m), () => putMode(s, 'error')).finally(() => { modeRunning--; pumpModes(); });
+/**
+ * PanelApp is asked for 25 genes in one request (`/genes/?entity_name=A,B,…`, every page), one request at a time with
+ * 300 ms between two: it refuses bursts (HTTP 429, which the browser sees as a network error). A batch not answered is
+ * asked again twice, after 5 s then 15 s, its genes then marked not answered. A gene in no panel has no entry.
+ */
+const MODE_BATCH = 25, MODE_GAP_MS = 300, MODE_RETRY_MS = [5000, 15000];
+let modeLast = 0, modeTimer: ReturnType<typeof setTimeout> | null = null;
+const conf = (v: unknown): 1 | 2 | 3 | null => { const n = Number(v); return n >= 3 ? 3 : n === 2 ? 2 : n === 1 ? 1 : null; };
+async function batchModes(symbols: string[]): Promise<Map<string, GeneModes>> {
+  const by = new Map<string, Map<string, GeneMode>>(symbols.map(x => [x.toUpperCase(), new Map()]));
+  let url: string | null = `${PANEL_SOURCE.base}/genes/?entity_name=${symbols.map(encodeURIComponent).join(',')}`;
+  for (let guard = 0; url && guard < 50; guard++) {
+    const r: Response = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`${PANEL_SOURCE.label}: HTTP ${r.status}`);
+    const j: any = await r.json();
+    for (const g of j?.results ?? []) {
+      const sym = String(g?.entity_name ?? '').toUpperCase(), c = conf(g?.confidence_level), pid = String(g?.panel?.id ?? '');
+      const m = by.get(sym);
+      if (!m || !c || !pid || m.has(pid) || (g?.entity_type && g.entity_type !== 'gene')) continue;
+      m.set(pid, { panel: String(g?.panel?.name ?? `panel ${pid}`), panelId: pid, confidence: c, moi: String(g?.mode_of_inheritance ?? ''), cls: classifyMoi(g?.mode_of_inheritance),
+        phenotypes: Array.isArray(g?.phenotypes) ? g.phenotypes.map(String) : [] });
+    }
+    // the next page, on the same (https) address
+    url = typeof j?.next === 'string' ? j.next.replace(/^http:\/\//, 'https://') : null;
   }
+  return new Map(symbols.map(x => [x, summarizeModes(x, PANEL_SOURCE.label, [...by.get(x.toUpperCase())!.values()])]));
+}
+function pumpModes() {
+  if (modeRunning || !modeQueue.length) return;
+  const wait = modeLast + MODE_GAP_MS - Date.now();
+  if (wait > 0) { if (!modeTimer) modeTimer = setTimeout(() => { modeTimer = null; pumpModes(); }, wait); return; }
+  const batch = modeQueue.splice(0, MODE_BATCH);
+  modeRunning = 1; modeLast = Date.now();
+  const ask = (n: number) => batchModes(batch).then(ms => { for (const [k, m] of ms) putMode(k, m); }, () => {
+    if (n >= MODE_RETRY_MS.length) { for (const k of batch) putMode(k, 'error'); return; }
+    return new Promise<void>(res => setTimeout(() => res(ask(n + 1)), MODE_RETRY_MS[n]));
+  });
+  void ask(0).finally(() => { modeRunning = 0; modeLast = Date.now(); pumpModes(); });
 }
 
 /** a gene's PanelApp entries as the score reads them; null while asked or when PanelApp failed */
