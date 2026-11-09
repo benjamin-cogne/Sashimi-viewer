@@ -3,7 +3,7 @@
  * tab per patient, and under them the SV browser's own browser drawing the call clicked (DEL / DUP on the file's build,
  * GRCh37), with its tracks. Back to the SV browser from the bar (or Esc).
  */
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
@@ -12,12 +12,33 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 import { CghFrame, CghProbeDialog } from './CghPanel';
 import { cgh, useCgh } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
+import { bandOfCall } from './cghAnnotate';
 
-/** the call's array ISCN: the file's, else built from its band, positions and copies */
-const iscnOf = (c: CghCnv, build: GenomeBuild) => c.iscn ?? `arr[${build}] ${c.chrom.replace(/^chr/, '')}${c.cytoband.replace(/\s+/g, '').replace(/-/, '')}(${c.start}_${c.end})${c.copies != null ? `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}` : c.amp ? 'amp' : c.kind === 'loss' ? 'x1' : 'x3'}`;
+/** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
+const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
+  ? `arr[${build}] ${c.chrom.replace(/^chr/, '')}${band.replace(/\s+/g, '').replace(/-/, '')}(${c.start}_${c.end})${c.copies != null ? `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}` : 'amp'}`
+  : null);
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
+/** the browser redrawn only when its own props change, not at each answer of the annotations */
+const Browser = memo(SvGenomeBrowser);
+
+/** The SV browser's way in: the button (with the number of samples) and the page over it. Each listens to the array-CGH
+ * state by itself, so that the SV browser is not redrawn when the calls are annotated. */
+export function CghOpenButton() {
+  const s = useCgh();
+  const n = s.files.reduce((k, f) => k + f.samples.length, 0);
+  return (
+    <button onClick={() => cgh.setOpen(true)} className="ml-auto inline-flex items-center gap-1.5 h-[28px] px-2.5 rounded-[6px] border text-[12px] font-medium bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50"
+      title="Array-CGH: the interval tables of your patients (CytoGenomics .txt, BED or zip), each call classified and drawn in this browser (GRCh37)">
+      Array-CGH{n ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{n}</span> : null} ▸</button>
+  );
+}
+export function CghPageSlot({ loadersFor }: { loadersFor: (b: GenomeBuild) => Loaders }) {
+  const open = useCgh().open;
+  return open ? <CghPage loadersFor={loadersFor} onBack={() => cgh.setOpen(false)} /> : null;
+}
 
 export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: GenomeBuild) => Loaders; onBack: () => void }) {
   const s = useCgh();
@@ -37,7 +58,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const rec = drawn?.parsed.rec;
   const colors = useMemo(() => (rec ? segmentColors(rec) : new Map<number, string>()), [rec]);
   // the calls this page lists are in the store: a call drawn from a sample taken off stays until another is clicked
-  const c = drawn?.cnv;
+  // the call drawn, while its patient is on the list
+  const c = drawn && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
   // a male's chrX and chrY: one copy, the call on it (no other homologue)
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
   return (
@@ -66,11 +88,14 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden">
             <div className="px-5 pt-2 flex flex-wrap items-baseline gap-x-2 text-xs">
               <span className="text-sm font-bold">{c.sample}</span>
-              <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN built from the file (none given)'}>{iscnOf(c, drawn.build)}</span>
-              <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes ?? '?'} probes{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
+              {!iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id])) && bandOfCall(c, s.ann[c.id]) && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{bandOfCall(c, s.ann[c.id]).replace(/\s+/g, '')}</span>}
+              {iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id]))
+                ? <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN written from the band (the file\'s, else the cytogenetic bands), the positions and the copies of the file (it gives no ISCN)'}>{iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id]))}</span>
+                : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">({c.kind}, no ISCN in the file)</span></span>}
+              <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes != null ? `${c.probes} probes` : 'probes not given'}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
             </div>
             <div className="[&>div:first-child]:mt-2">
-              <SvGenomeBrowser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
+              <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
                 zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent />
             </div>
           </div>

@@ -219,18 +219,21 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
   const out = file.lines.slice();
   const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const byLine = new Map(file.samples.flatMap(s => s.cnvs).map(c => [c.line, c]));
-  let noteCol = file.commentCol;
-  if (file.headerLine != null && noteCol == null) {
+  // an interval table: its Classification and Comment columns, added after the last one when missing
+  let classCol = file.classCol, noteCol = file.commentCol;
+  if (file.headerLine != null && (classCol == null || noteCol == null)) {
     const h = out[file.headerLine].replace(/\t+$/, '').split('\t');
-    noteCol = h.length; h.push('Comment'); out[file.headerLine] = h.join('\t');
+    if (classCol == null) { classCol = h.length; h.push('Classification'); }
+    if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
+    out[file.headerLine] = h.join('\t');
   }
   for (const [i, cnv] of byLine) {
     const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
     const cell = cls ? `${cls}${cnv.classRest || file.classSuffix}` : '';
-    if (file.classCol != null && noteCol != null) {
+    if (classCol != null && noteCol != null) {
       const f = out[i].split('\t');
-      while (f.length <= Math.max(file.classCol, noteCol)) f.push('');
-      f[file.classCol] = cell; f[noteCol] = note; out[i] = f.join('\t');
+      while (f.length <= Math.max(classCol, noteCol)) f.push('');
+      f[classCol] = cell; f[noteCol] = note; out[i] = f.join('\t');
     } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}`;
   }
   return out.join(file.eol);

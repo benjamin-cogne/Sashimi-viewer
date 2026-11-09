@@ -18,8 +18,8 @@ import { Segmented } from './controls';
 import { rememberGene } from '../../standalone/geneSuggest';
 import { svLinkHref } from '../../standalone/link';
 import { parseSmallGenomic, TRANSCRIPT_HGVS_RE, SMALL_KIND_WORD, SMALL_MAX, type SmallVariant } from './smallVariant';
-import CghPage from './CghPage';
-import { cgh, useCgh } from './cghStore';
+import { CghOpenButton, CghPageSlot } from './CghPage';
+import { cgh } from './cghStore';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -196,8 +196,6 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const colors = useMemo(() => (sv ? segmentColors(sv.rec) : new Map<number, string>()), [sv]);
   const full = useMemo<SvGeneLoaders>(() => ({ ...loaders, fallback: [] }), [loaders]);
   const rec = sv?.rec;
-  const cghState = useCgh();
-  const cghSamples = cghState.files.reduce((n, f) => n + f.samples.length, 0);
   /** the array-CGH page reads GRCh37 (its files' build) whatever the SV browser shows */
   const cghLoaders = useMemo(() => (loadersFor ?? ((b: GenomeBuild) => (b === sessionBuild ? sessionLoaders : {}))), [loadersFor, sessionBuild, sessionLoaders]);
   return (
@@ -222,9 +220,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                 ? <Segmented size="sm" label="Genome build" title="The genome build of the positions" value={build} onChange={switchBuild}
                     options={[{ value: 'GRCh38', label: 'GRCh38', hint: 'GRCh38 / hg38 (default)' }, { value: 'GRCh37', label: 'GRCh37', hint: 'GRCh37 / hg19: positions differ from GRCh38 (no liftover: type them in GRCh37)' }]} />
                 : <span className="font-normal text-slate-500">· {build}</span>}
-              <button onClick={() => cgh.setOpen(true)} className="ml-auto inline-flex items-center gap-1.5 h-[28px] px-2.5 rounded-[6px] border text-[12px] font-medium bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50"
-                title="Array-CGH: the interval tables of your patients (CytoGenomics .txt, BED or zip), each call classified and drawn in this browser (GRCh37)">
-                Array-CGH{cghSamples ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{cghSamples}</span> : null} ▸</button>
+              <CghOpenButton />
             </div>
             <div className="text-xs text-slate-500">a rearrangement typed as HGVS (NC_… or chrN:g., del, dup, inv, ins, delins, allele form […;…]) or as the ISCN sequence form (chrN:g.…::chrN:g.…); or DEL / DUP / INV before coordinates (DEL 20:399240-599326); a small variant (under {SMALL_MAX} bp: chr2:g.60461323del, or on a transcript: NM_022893.4:c.1592del, placed by VariantValidator, else Ensembl), marked on the reference; or a place to go to: coordinates (chr20:10.3-11 Mb, opened with some flank and highlighted), a whole chromosome (chr3 or 3) or a gene name (suggested as you type, as in the Sashimi viewer)</div>
           </div>
@@ -275,7 +271,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           </div>
         )}
       </div>
-      {cghState.open && <CghPage loadersFor={cghLoaders} onBack={() => cgh.setOpen(false)} />}
+      <CghPageSlot loadersFor={cghLoaders} />
     </div>
   );
 }

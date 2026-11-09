@@ -28,7 +28,17 @@ export interface CnvAnn {
   /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more, and those lying inside it whatever their share; not in the priority */
   dgv: DgvHit[];
   dgvError?: string;
+  /** the call's band from the cytogenetic bands (UCSC), when the file gives none (a BED) */
+  band?: string;
 }
+/** the band of a call, as an interval table writes it: p21.1, or p21.2 - p21.1 */
+export function bandOf(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
+  const at = (pos: number) => bands.find(b => b.start <= pos && pos < b.end)?.name;
+  const a = at(s0), z = at(Math.max(s0, e0 - 1));
+  return !a || !z ? undefined : a === z ? a : `${a} - ${z}`;
+}
+/** a call's band: the file's, else the one read from the bands */
+export const bandOfCall = (c: CghCnv, ann?: CnvAnn) => c.cytoband || ann?.band || '';
 /** how a DGV Gold CNV lies against the call: the call inside it, the call holding it, or the two overlapping on one side */
 export type DgvRelation = 'within' | 'contains' | 'overlaps';
 export interface DgvHit { id: string; type: string; rel: DgvRelation; cover: number; freq: string | null; samples: number | null; studies: number | null }
@@ -147,7 +157,10 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   if (ld.getPopulationSvs) {
     try { dgv = dgvHits(c.kind, s0, e0, await ld.getPopulationSvs(c.chrom, s0, e0)); } catch (e) { dgvError = msg(e); }
   }
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing, dgv, dgvError });
+  // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram)
+  let band: string | undefined;
+  if (!c.cytoband && ld.getCytobands) { try { band = bandOf(await ld.getCytobands(c.chrom), s0, e0); } catch { /* the band stays unknown */ } }
+  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing, dgv, dgvError, band });
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 
