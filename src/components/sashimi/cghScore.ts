@@ -74,11 +74,14 @@ interface Rule {
 export const SCORE_RULES: Rule[] = [
   // ---- losses ----
   { id: 'L1', level: 'high', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 3 (sufficient evidence)', gene: v => v.g.exons && v.hi === 3 },
-  { id: 'L2', level: 'high', kind: 'loss', label: 'exons of a PanelApp green gene with a monoallelic mode (AD, AD/AR, X-linked dominant)', gene: v => v.g.exons && any(v.pa?.green, MONO) },
+  // a monoallelic gene is HIGH when its loss is known to matter (ClinGen HI 2 or 3, or LoF-intolerant); else its disease may
+  // come from another mechanism (gain of function: NIPA1 in 15q11.2) and it is MODERATE
+  { id: 'L2', level: 'high', kind: 'loss', label: 'exons of a PanelApp green gene with a monoallelic mode (AD, AD/AR, X-linked dominant) and a haploinsufficiency score of 2 or 3, or LoF-intolerant', gene: v => v.g.exons && any(v.pa?.green, MONO) && (v.hi === 2 || v.hi === 3 || intolerant(v)) },
   { id: 'L3', level: 'high', kind: 'loss', label: 'both copies lost (x0) of exons of a PanelApp green gene with a biallelic mode (AR)', gene: (v, i) => i.copies === 0 && v.g.exons && any(v.pa?.green, BI) },
   { id: 'L3X', level: 'high', kind: 'loss', label: 'exons of a PanelApp green X-linked recessive gene lost in a male (hemizygous), or both copies lost (x0)', gene: (v, i) => i.chrom === 'chrX' && (i.sex === 'male' || i.copies === 0) && v.g.exons && any(v.pa?.green, ['XLR']) },
   { id: 'L4', level: 'high', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 5 or 4', call: i => hits(i, 'del', ['5', '4']) },
   { id: 'L5', level: 'high', kind: 'loss', label: `35 protein-coding genes or more (ACMG/ClinGen section 3C: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (AChro-Puce)`, call: i => big(i, 35) },
+  { id: 'L2b', level: 'moderate', kind: 'loss', label: 'exons of a PanelApp green gene with a monoallelic mode, neither haploinsufficient (ClinGen) nor LoF-intolerant: its disease may not come from a loss', gene: v => v.g.exons && any(v.pa?.green, MONO) && !(v.hi === 2 || v.hi === 3 || intolerant(v)) },
   { id: 'L6', level: 'moderate', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 2 (some evidence)', gene: v => v.g.exons && v.hi === 2 },
   { id: 'L7', level: 'moderate', kind: 'loss', label: 'exons of a LoF-intolerant gene (gnomAD LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9)', gene: v => v.g.exons && intolerant(v) },
   { id: 'L8', level: 'moderate', kind: 'loss', label: 'one copy of a PanelApp green gene with a biallelic mode (AR) lost: look for a variant on the other copy', gene: (v, i) => i.copies !== 0 && v.g.exons && any(v.pa?.green, BI) && !any(v.pa?.green, MONO) },

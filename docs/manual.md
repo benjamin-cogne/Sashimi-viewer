@@ -235,6 +235,9 @@ copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then wha
 build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
 links staying on the right.
 
+- **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
+  their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
+  of that gene.
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
   the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One
@@ -251,7 +254,8 @@ links staying on the right.
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
-  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode, both copies
+  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode that is
+  haploinsufficient (ClinGen HI 2 or 3) or LoF-intolerant (else MODERATE: its disease may not come from a loss), both copies
   (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
   deletion of class 5 or 4, or 35 protein-coding genes or more and / or more than 1 Mb; MODERATE for an HI score of 2, a LoF-intolerant gene
   (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9; losses only), one copy of a green biallelic gene (look for a

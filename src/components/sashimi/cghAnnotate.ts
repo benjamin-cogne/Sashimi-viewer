@@ -99,6 +99,10 @@ export function achroHits(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, g
       const inCall = rule.genes.filter(g => genes.some(x => x.symbol === g));
       if (rule.match === 'overlaps' && inCall.length) how = `takes ${inCall.join(', ')}`;
       if (rule.match === 'contains' && rule.genes.every(g => genes.some(x => x.symbol === g && x.whole))) how = `spans ${rule.genes.join(', ')}`;
+    } else if (!r.coords?.some(x => x.build === build)) {
+      // a region placed by its genes only (2p16.3, NRXN1): the call takes exons of one of them
+      const hit = r.genes.filter(g => genes.some(x => x.symbol === g && x.exons));
+      if (hit.length) how = `takes exons of ${hit.join(', ')}`;
     } else {
       const co = r.coords?.find(x => x.build === build && x.chrom === c.chrom);
       if (co) {
