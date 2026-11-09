@@ -310,7 +310,7 @@ function PanelCell({ v }: { v: View }) {
     <td className="px-1.5 py-0.5 max-w-[180px] overflow-hidden" title={title || undefined}>
       <span className="flex items-center gap-x-1.5 whitespace-nowrap">
         {green.slice(0, 2).map(x => <span key={x.g.symbol} className="inline-flex items-center gap-0.5"><i>{x.g.symbol}</i>{modesAt(x).map(m => <MoiBadge key={m} m={m} />)}</span>)}
-        {green.length > 2 && <span className="text-[10px] font-semibold" style={{ color: RATING[3].color }}>+{green.length - 2} green</span>}
+        {green.length > 2 && <span className="text-[10px] font-semibold" style={{ color: RATING[3].color }} title={`${green.length - 2} more green genes`}>+{green.length - 2}</span>}
         {amber.length > 0 && <span className="text-[10px] font-semibold" style={{ color: RATING[2].color }}>{green.length ? '' : <i className="font-normal">{amber[0].g.symbol} </i>}{amber.length} amber</span>}
         {red.length > 0 && <span className="text-[10px] font-semibold" style={{ color: RATING[1].color }}>{red.length} red</span>}
         {!green.length && !amber.length && !red.length && !v.waiting && <span className="text-slate-300">—</span>}
@@ -384,8 +384,8 @@ function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: Vie
           <tr key={x.g.symbol} className="border-b border-slate-100">
             <td className="px-1.5 py-0.5"><i className="font-semibold">{x.g.symbol}</i> <span className="text-slate-400">{x.g.tx}</span></td>
             <td className="px-1.5 py-0.5">{v.ann!.source === 'file' ? <span className="text-amber-700" title="RefSeq could not be read: the file names the gene, its extent is not known here">from the file</span> : x.g.whole ? 'whole' : x.g.exons ? 'cut (exons in)' : 'cut (no exon)'}</td>
-            <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.hi === 3 ? '#b91c1c' : x.hi === 2 ? '#c2410c' : undefined }}>{x.hi ?? ''}</td>
-            <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.ts === 3 ? '#b91c1c' : x.ts === 2 ? '#c2410c' : undefined }}>{x.ts ?? ''}</td>
+            <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.hi === 3 ? '#b91c1c' : x.hi === 2 ? '#c2410c' : undefined }}>{dosageText(x.hi)}</td>
+            <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.ts === 3 ? '#b91c1c' : x.ts === 2 ? '#c2410c' : undefined }}>{dosageText(x.ts)}</td>
             <td className="px-1.5 py-0.5 tabular-nums">{x.loeuf != null ? x.loeuf.toFixed(2) : ''}{x.pli != null ? <span className="text-slate-400"> ({x.pli.toFixed(2)})</span> : null}</td>
             <td className="px-1.5 py-0.5 whitespace-nowrap">{!x.pa ? <span className={x.paState === 'failed' ? 'text-amber-700' : 'text-slate-400'}>{x.paState === 'failed' ? 'not answered' : x.paState === 'not asked' ? `not asked (over ${PANELAPP_MAX_GENES} genes)` : '…'}</span>
               : x.pa.best === 0 ? <span className="text-slate-400">in no panel</span>
@@ -418,6 +418,8 @@ function PriorityRules() {
 
 /** the DGV CNVs listed under a call: those holding or crossing it, then the 8 sharing most of those inside it */
 const dgvShown = <T extends { rel: DgvRelation }>(d: T[]): T[] => [...d.filter(x => x.rel !== 'contains'), ...d.filter(x => x.rel === 'contains').slice(0, 4)];
+/** a ClinGen dosage score: 30 and 40 are not grades (30: autosomal recessive gene, 40: dosage sensitivity unlikely) */
+const dosageText = (v: number | null) => (v == null ? '' : v === 30 ? '30 (AR)' : v === 40 ? '40 (unlikely)' : String(v));
 /** a share: under 1 % said so rather than 0 % */
 const pctText = (f: number) => (f > 0 && f < 0.005 ? '<1%' : `${Math.round(f * 100)}%`);
 /** how a DGV Gold CNV lies against the call, drawn: the call (dark) and the DGV CNV (violet) */
