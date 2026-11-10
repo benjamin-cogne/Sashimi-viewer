@@ -236,8 +236,10 @@ export function aggregateJunctions(junctions: JunctionArc[], tx: TxModel | null,
     for (const a of lefts) {
       const kA = junctionKey(a);
       if (paired.has(kA)) continue;
+      // the partner with the most reads, the nearest among equals (as pseudoExonOf): a few long reads some bases off the
+      // real site must not take the place of the junction that makes the cryptic exon
       const candidates = rights.filter(b => !paired.has(junctionKey(b)) && b.start > a.end && b.start - a.end <= maxPseudoExon)
-        .sort((x, y) => (x.start - a.end) - (y.start - a.end));
+        .sort((x, y) => y.count - x.count || (x.start - a.end) - (y.start - a.end));
       if (!candidates.length) continue;
       const b = candidates[0];
       paired.add(kA); paired.add(junctionKey(b));

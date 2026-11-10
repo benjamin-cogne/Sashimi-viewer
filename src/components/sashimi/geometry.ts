@@ -953,7 +953,7 @@ export interface JunctionHgvs {
  * and cryptic exonic sites give r.X_Ydel; cryptic intronic sites give
  * r.X_YinsX+1_X+n; anything else is described as the join of its two c. positions.
  */
-export function junctionHgvs(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[] = []): JunctionHgvs {
+export function junctionHgvs(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number; count?: number }[] = []): JunctionHgvs {
   const plus = tx.strand > 0;
   const donorPos = plus ? j.start - 1 : j.end;       // last exonic base upstream of the intron
   const acceptorPos = plus ? j.end : j.start - 1;    // first exonic base downstream of the intron
@@ -1160,7 +1160,7 @@ export interface FrameInfo {
  * confined to the UTRs do not affect the frame; pseudo-exon flanks and novel joins
  * cannot be judged from one junction alone.
  */
-export function junctionFrame(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[] = []): FrameInfo {
+export function junctionFrame(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number; count?: number }[] = []): FrameInfo {
   const unknown: FrameInfo = { frame: 'unknown', delta: null, cdsBases: 0, text: 'frame cannot be judged from this junction alone' };
   if (tx.cdsStart == null || tx.cdsEnd == null) return { frame: 'unknown', delta: null, cdsBases: 0, text: 'non-coding transcript' };
   const L = txLayout(tx);
@@ -1223,8 +1223,12 @@ export function junctionFrame(j: { start: number; end: number }, tx: TxModel, ot
  * Given one of them, find the partner among `others` and return the pseudo-exon [start, end)
  * with its flanking annotated exons (genomic order, so strand-independent).
  */
-export function pseudoExonOf(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[]): { start: number; end: number; upExon: Exon0; downExon: Exon0 } | null {
+export function pseudoExonOf(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number; count?: number }[]): { start: number; end: number; upExon: Exon0; downExon: Exon0 } | null {
   if (!others.length) return null;
+  // the partner with the most reads, the nearest among equals: long reads put a few junctions some bases off the real
+  // site, and the first one found in the list made the cryptic exon's length (and its frame) change from sample to sample
+  const best = <T extends { count?: number }>(cands: T[], dist: (o: T) => number): T | undefined =>
+    cands.sort((x, y) => (y.count ?? 0) - (x.count ?? 0) || dist(x) - dist(y))[0];
   const ex = tx.exons;
   const endIdx = ex.findIndex(e => e.end === j.start), startIdx = ex.findIndex(e => e.start === j.end);
   if (endIdx >= 0 && startIdx >= 0) return null;                       // both ends annotated: not a pseudo-exon flank
@@ -1233,12 +1237,12 @@ export function pseudoExonOf(j: { start: number; end: number }, tx: TxModel, oth
     // j leaves annotated exon `endIdx` for a novel site at j.end: the partner starts after it and lands on the next exon
     const down = ex[endIdx + 1];
     if (!down || j.end >= down.start) return null;
-    const k = others.find(o => o.start > j.end && o.end === down.start && o.start < down.start);
+    const k = best(others.filter(o => o.start > j.end && o.end === down.start && o.start < down.start), o => o.start - j.end);
     return k ? { start: j.end, end: k.start, upExon: ex[endIdx], downExon: down } : null;
   }
   const up = ex[startIdx - 1];
   if (!up || j.start <= up.end) return null;
-  const k = others.find(o => o.end < j.start && o.start === up.end && o.end > up.end);
+  const k = best(others.filter(o => o.end < j.start && o.start === up.end && o.end > up.end), o => j.start - o.end);
   return k ? { start: k.end, end: j.start, upExon: up, downExon: ex[startIdx] } : null;
 }
 
