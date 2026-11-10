@@ -182,7 +182,7 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
   } catch (e: any) {
     signal?.removeEventListener('abort', onAbort);
     if (e?.name === 'AbortError') throw e;
-    throw new Error(`${name}: the server could not be reached, or it refused this page (no CORS header allowing it: Access-Control-Allow-Origin, with Range in Access-Control-Allow-Headers). Serving this page from the same server as the files avoids CORS altogether.`);
+    throw new Error(`${name}: ${unreachable(abs)}`);
   }
   signal?.removeEventListener('abort', onAbort);
   // a web page in place of the file: a server that falls back to its index page for any path it cannot serve (`vite
@@ -199,6 +199,22 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
   let size = cr ? Number(/\/(\d+)\s*$/.exec(cr)?.[1]) : NaN;
   if (!(size > 0)) size = await headLength(abs, signal);
   return { kind: 'url', url: abs, name, size: size > 0 ? size : Infinity };
+}
+
+/**
+ * Why a request got no answer the page may read. The browser does not say (a refused CORS request and a server that is
+ * down fail alike), but where the page and the file are tells which cause is possible, and so what to do.
+ */
+function unreachable(url: string): string {
+  const fileOrigin = new URL(url).origin;
+  const page = typeof location !== 'undefined' ? location : null;
+  if (!page || !/^https?:$/.test(page.protocol))
+    return `this page is opened from a file on this computer, so the browser lets it read ${fileOrigin} only if that server allows it (CORS: Access-Control-Allow-Origin, with Range in Access-Control-Allow-Headers). Simplest: open the viewer from that server (${fileOrigin}/) and give the file as a path, e.g. ${new URL(url).pathname}`;
+  if (page.protocol === 'https:' && url.startsWith('http:'))
+    return `this page is served over https and the file over http, which browsers block (mixed content): use an https URL, or open the viewer over http from the file's server`;
+  if (page.origin !== fileOrigin)
+    return `this page (${page.origin}) and the file (${fileOrigin}) are on different addresses, so the browser lets the page read the file only if that server allows it (CORS: Access-Control-Allow-Origin, with Range in Access-Control-Allow-Headers; \`vite preview\` allows only pages opened from localhost). Simplest: open the viewer from ${fileOrigin}/ and give the file as a path, e.g. ${new URL(url).pathname}`;
+  return `the server did not answer (same address as this page, so not a CORS matter): check that it is still running, and that it can read the file (a file it cannot read closes the connection)`;
 }
 
 /** Content-Length of a HEAD request (readable across origins without being exposed), or NaN. */
