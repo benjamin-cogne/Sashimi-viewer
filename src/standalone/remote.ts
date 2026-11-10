@@ -156,7 +156,7 @@ export function forgetRemote(f: SampleFile | null | undefined) {
 // ---------------- Opening ----------------
 
 /**
- * Checks that a URL can be read by ranges and returns it as a RemoteSource. One request for its first byte must come
+ * Checks that a URL can be read by ranges and returns it as a RemoteSource. One request for its first bytes must come
  * back as 206 Partial Content; everything else is turned into the reason a person can act on. A server that ignores
  * Range answers 200 with the whole file: the request is cancelled as soon as the headers arrive, so a 30 GB BAM is not
  * downloaded by a probe.
@@ -176,7 +176,9 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
   signal?.addEventListener('abort', onAbort, { once: true });
   let res: Response;
   try {
-    res = await fetch(abs, { headers: { range: 'bytes=0-0' }, signal: ctl.signal, cache: 'no-store' });
+    // two bytes, not one: the static server bundled with Vite (sirv, `vite preview`) reads the end of bytes=0-0 as
+    // missing and sends the whole file
+    res = await fetch(abs, { headers: { range: 'bytes=0-1' }, signal: ctl.signal, cache: 'no-store' });
   } catch (e: any) {
     signal?.removeEventListener('abort', onAbort);
     if (e?.name === 'AbortError') throw e;
@@ -190,7 +192,7 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
   const enc = res.headers.get('content-encoding');
   if (enc && enc !== 'identity') { ctl.abort(); throw new Error(`${name}: the server compresses the file on the fly (Content-Encoding: ${enc}), which breaks reading it in parts: serve .bam/.bai/.cram/.crai as application/octet-stream without gzip`); }
   const cr = res.headers.get('content-range');
-  await res.arrayBuffer().catch(() => {});
+  ctl.abort();   // only the headers are needed: a server that sends more than asked is not read to the end
   let size = cr ? Number(/\/(\d+)\s*$/.exec(cr)?.[1]) : NaN;
   if (!(size > 0)) size = await headLength(abs, signal);
   return { kind: 'url', url: abs, name, size: size > 0 ? size : Infinity };
