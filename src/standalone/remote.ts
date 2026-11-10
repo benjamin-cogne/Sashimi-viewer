@@ -185,6 +185,9 @@ export async function probeUrl(url: string, signal?: AbortSignal): Promise<Remot
     throw new Error(`${name}: the server could not be reached, or it refused this page (no CORS header allowing it: Access-Control-Allow-Origin, with Range in Access-Control-Allow-Headers). Serving this page from the same server as the files avoids CORS altogether.`);
   }
   signal?.removeEventListener('abort', onAbort);
+  // a web page in place of the file: a server that falls back to its index page for any path it cannot serve (`vite
+  // preview`, single-page apps) answers a missing or unreadable file this way, with 200 rather than 404
+  if (res.status === 200 && /text\/html/i.test(res.headers.get('content-type') ?? '')) { ctl.abort(); throw new Error(`${name}: not found on the server (it answered with a web page, not the file): check the path, and that the file and its folders are readable by the user running the server`); }
   if (res.status === 200) { ctl.abort(); throw new Error(`${name}: the server ignores Range requests (it answered with the whole file), so the file cannot be read in parts`); }
   if (res.status === 401 || res.status === 403) { ctl.abort(); throw new Error(`${name}: access denied (HTTP ${res.status})`); }
   if (res.status === 404) { ctl.abort(); throw new Error(`${name}: not found (HTTP 404)`); }
