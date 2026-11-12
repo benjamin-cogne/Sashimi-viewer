@@ -154,14 +154,16 @@ export function startRecording(root: Document = document): Recorder {
     if (ids) ids.push(id); else index.set(h, [id]);
     return id;
   };
-  const skipped = (el: Element) => el.tagName.toLowerCase() === 'title' || el.getAttribute('data-export') === 'skip';
+  // what a figure export leaves out (data-export="skip": the hover crosshair, a selection being dragged, the track
+  // buttons) is on the screen, so it is recorded; only the tooltips' text (<title>, never drawn) is not
+  const skipped = (el: Element) => el.tagName.toLowerCase() === 'title';
   /** The chunk of an element: the whole element when small, else its own tag around its children's chunks. */
   const chunkOf = (el: Element): number => {
     const hit = cache.get(el);
     if (hit != null) return hit;
     let id: number;
     const many = el.getElementsByTagName('*').length > LEAF_MAX_DESCENDANTS;
-    const hasSkip = !!el.querySelector('title, [data-export="skip"]');
+    const hasSkip = !!el.querySelector('title');
     if (!el.childElementCount || (!many && !hasSkip)) {
       const s = roundGeom(ser.serializeToString(el).replace(SVG_NS_ATTR, ''));
       id = intern(s, c => 'leaf' in c && c.leaf === s, () => ({ leaf: s }));
@@ -255,12 +257,60 @@ export function startRecording(root: Document = document): Recorder {
     return v;
   };
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'LINK', 'META']);
+  /**
+   * The positioned descendants of a block that show outside its box: a search box's suggestions, a menu, a popover, a
+   * badge hanging under a button. A block is copied at its own size and cut to it, so these become blocks of their own,
+   * at their own place and stacking order, and are left out of the block's copy. Outermost only (what they hold goes
+   * with them).
+   */
+  const popCache = new WeakMap<Element, HTMLElement[]>();
+  const popouts = (el: Element, r: DOMRect): HTMLElement[] => {
+    let v = popCache.get(el);
+    if (v) return v;
+    v = [];
+    for (const d of Array.from(el.querySelectorAll<HTMLElement>('.absolute, .fixed, [style*="position"], [role="listbox"], [role="menu"], [role="tooltip"], [role="dialog"]'))) {
+      if (!(d instanceof HTMLElement) || v.some(o => o.contains(d))) continue;
+      const cs = getComputedStyle(d);
+      if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+      if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) continue;
+      const b = d.getBoundingClientRect();
+      if (b.width < 1 || b.height < 1) continue;
+      if (b.left < r.left - 1 || b.top < r.top - 1 || b.right > r.right + 1 || b.bottom > r.bottom + 1) v.push(d);
+    }
+    popCache.set(el, v);
+    return v;
+  };
+  /** The path of child indexes from an element down to one of its descendants. */
+  const pathTo = (el: Element, d: Element): number[] => {
+    const path: number[] = [];
+    for (let n: Element = d; n !== el && n.parentElement; n = n.parentElement) path.unshift(Array.prototype.indexOf.call(n.parentElement.children, n));
+    return path;
+  };
   /** One block: the element as it shows now (form states written into it, drawings left to the SVG layer). */
-  const blockId = (el: HTMLElement, r: DOMRect): number => {
+  const blockId = (el: HTMLElement, r: DOMRect, out: HTMLElement[] = []): number => {
     const hit = htmlCache.get(el);
     // a block keeps its copy while it neither changes nor resizes (a layout shift around it)
     if (hit && hit.w === r1(r.width) && hit.h === r1(r.height)) return hit.id;
     const clone = el.cloneNode(true) as HTMLElement;
+    // the copy takes its parent's line height as pixels, where the page may pass on a factor (Tailwind's 1.5): text of
+    // another size would then get the parent's height and the copy grow past its box. Every element whose font size
+    // differs from its parent's keeps the line height it has on the page (the others get the same either way).
+    {
+      const liveAll = [el, ...Array.from(el.querySelectorAll('*'))], copyAll = [clone, ...Array.from(clone.querySelectorAll('*'))];
+      liveAll.forEach((n, i) => {
+        const c = copyAll[i];
+        if (!(n instanceof HTMLElement) || !(c instanceof HTMLElement) || !n.parentElement) return;
+        const cs = getComputedStyle(n);
+        if (cs.lineHeight === 'normal' || cs.fontSize === getComputedStyle(n.parentElement).fontSize) return;
+        c.style.lineHeight = cs.lineHeight;
+      });
+    }
+    // what shows outside it is a block of its own (popouts): taken out of the copy, the last first so the paths hold
+    for (const path of out.map(d => pathTo(el, d)).reverse()) {
+      let n: Element | undefined = clone;
+      for (const k of path) n = n?.children[k];
+      if (n && n !== clone) n.remove();
+    }
     const live = [el, ...Array.from(el.querySelectorAll('input, select, textarea'))], copy = [clone, ...Array.from(clone.querySelectorAll('input, select, textarea'))];
     live.forEach((n, i) => {
       const c = copy[i];
@@ -302,32 +352,39 @@ export function startRecording(root: Document = document): Recorder {
    */
   const zOf = (el: Element): { z?: string } => { const k = zKey(zChain(el)); return k ? { z: k } : {}; };
   const blocksOf = (el: Element, out: Layer, page = false, stuck = false) => {
-    for (const c of Array.from(el.children)) {
-      const small = c instanceof SVGSVGElement && !bigSvg(c);
-      if (!(c instanceof HTMLElement || small) || skipRoot(c) || SKIP_TAGS.has(c.tagName)) continue;
-      if (page && c.matches('.fixed.inset-0')) continue;
-      if (c instanceof SVGSVGElement && !small) continue;
-      const r = c.getBoundingClientRect();
-      if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
-      const cs = getComputedStyle(c);
-      if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) continue;
-      const clip = clipOf(c, r);
-      if (clip && clip[2] === 0) continue;
-      const pinned = stuck || (page && (cs.position === 'fixed' || cs.position === 'sticky'));
-      if (split(c)) {
-        const bw = parseFloat(cs.borderTopWidth) || 0;
-        if (cs.backgroundColor !== TRANSPARENT || (bw > 0 && cs.borderTopStyle !== 'none'))
-          out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip, ...zOf(c) });
-        blocksOf(c, out, page, pinned);
-      } else if (pinned) {
-        (out.fixed ??= []).push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip, ...zOf(c) });
-      } else {
-        const [ox, oy] = out.origin;
-        // inside the card: only the dialog's own scrolling boxes clip (the window is clipped once for the whole dialog)
-        const inner = innerClip(c, r);
-        out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]], ...zOf(c) });
-      }
+    for (const c of Array.from(el.children)) visit(c, out, page, stuck);
+  };
+  /** One element of the page or of a dialog: cut into its children, or a block (and the popouts it holds, each a block). */
+  const visit = (c: Element, out: Layer, page: boolean, stuck: boolean) => {
+    const small = c instanceof SVGSVGElement && !bigSvg(c);
+    if (!(c instanceof HTMLElement || small) || skipRoot(c) || SKIP_TAGS.has(c.tagName)) return;
+    if (page && c.matches('.fixed.inset-0')) return;
+    if (c instanceof SVGSVGElement && !small) return;
+    const r = c.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1 || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) return;
+    const cs = getComputedStyle(c);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || Number(cs.opacity) === 0) return;
+    const clip = clipOf(c, r);
+    if (clip && clip[2] === 0) return;
+    const pinned = stuck || (page && (cs.position === 'fixed' || cs.position === 'sticky'));
+    if (split(c)) {
+      const bw = parseFloat(cs.borderTopWidth) || 0;
+      if (cs.backgroundColor !== TRANSPARENT || (bw > 0 && cs.borderTopStyle !== 'none'))
+        out.panels.push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), fill: cs.backgroundColor === TRANSPARENT ? 'none' : cs.backgroundColor, radius: parseFloat(cs.borderTopLeftRadius) || 0, ...(bw > 0 ? { stroke: cs.borderTopColor, strokeWidth: bw } : {}), clip, ...zOf(c) });
+      blocksOf(c, out, page, pinned);
+      return;
     }
+    const pops = c instanceof HTMLElement ? popouts(c, r) : [];
+    if (pinned) {
+      (out.fixed ??= []).push({ x: r1(r.left), y: r1(r.top), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r, pops), clip, ...zOf(c) });
+    } else {
+      const [ox, oy] = out.origin;
+      // inside the card: only the dialog's own scrolling boxes clip (the window is clipped once for the whole dialog)
+      const inner = innerClip(c, r);
+      out.blocks.push({ x: r1(r.left - ox), y: r1(r.top - oy), w: r1(r.width), h: r1(r.height), id: blockId(c as HTMLElement, r, pops), clip: inner && [r1(inner[0] - ox), r1(inner[1] - oy), inner[2], inner[3]], ...zOf(c) });
+    }
+    // a fixed popout stays on the screen; an absolute one follows its block (and the page's scroll)
+    for (const d of pops) visit(d, out, page, pinned || (page && getComputedStyle(d).position === 'fixed'));
   };
 
   const capture = () => {
@@ -389,7 +446,7 @@ export function startRecording(root: Document = document): Recorder {
   };
   const dirty = (n: Node | null) => {
     for (let e: Element | null = n instanceof Element ? n : n?.parentElement ?? null; e; e = e.parentElement) {
-      cache.delete(e); htmlCache.delete(e); splitCache.delete(e);
+      cache.delete(e); htmlCache.delete(e); splitCache.delete(e); popCache.delete(e);
       if (e.tagName.toLowerCase() === 'svg' && bigSvg(e)) break;
     }
   };
