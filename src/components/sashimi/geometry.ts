@@ -394,11 +394,9 @@ export function maxDepthIn(runs: CoverageRun[], start: number, end: number): num
 }
 
 export interface CoveragePaths {
-  /** area under the highest depth of each pixel column: the light band above the mean shows how far its bases spread */
-  fill: string;
-  /** area under the mean depth of each pixel column */
+  /** area under the depth of each pixel column (its mean, or its highest: see CoverageStat) */
   mean: string;
-  /** outline of that mean: the coverage line */
+  /** outline of that area: the coverage line */
   stroke: string;
   /**
    * a tick from the mean down to the lowest depth, in the columns where a base falls below half the mean: a dropout
@@ -408,17 +406,28 @@ export interface CoveragePaths {
 }
 
 /**
- * Coverage paths at pixel resolution: for each pixel column, the exact lowest and highest depth of the
+ * What one pixel column of coverage shows once it holds several bases:
+ * - 'mean' (DNA): their mean depth, the copy number's measure; their highest is only the sampling's noise;
+ * - 'max' (RNA): their highest depth: zoomed out, a column mixes an exon's bases with the intron's (near 0), whose
+ *   mean says nothing, while the exon's depth is the column's highest; an exon stays a solid bar of its depth.
+ * At base resolution the three agree.
+ */
+export type CoverageStat = 'mean' | 'max';
+
+/**
+ * Coverage paths at pixel resolution: for each pixel column, the exact lowest, mean and highest depth of the
  * bases it covers (see depthRange), so the path length is bounded by the plot width whatever the data,
- * narrow high peaks are never lost, and neither are narrow dropouts — they show where `floor` falls away
- * from `fill`. Works on any axis (linear, equal introns, reversed): columns are mapped back to genomic
- * ranges through the scale. Positions between runs are depth 0.
+ * narrow high peaks are never lost (with 'max'), and neither are narrow dropouts (the dips, with `dips`).
+ * Works on any axis (linear, equal introns, reversed): columns are mapped back to genomic ranges through the
+ * scale. Positions between runs are depth 0.
  */
 export function buildCoveragePaths(
   runs: CoverageRun[], scale: Scale, viewStart: number, viewEnd: number,
   baseline: number, depthToY: (d: number) => number,
+  opts: { stat?: CoverageStat; dips?: boolean } = {},
 ): CoveragePaths {
-  const empty = { fill: '', mean: '', stroke: '', dips: '' };
+  const stat = opts.stat ?? 'mean', withDips = opts.dips ?? true;
+  const empty = { mean: '', stroke: '', dips: '' };
   if (runs.length === 0) return empty;
   const dataStart = Math.max(viewStart, runs[0].start), dataEnd = Math.min(viewEnd, runs[runs.length - 1].end);
   if (dataEnd <= dataStart) return empty;
@@ -439,7 +448,7 @@ export function buildCoveragePaths(
     const ga = Math.max(dataStart, Math.floor(g1 < g2 ? g1 : g2));
     const gb = Math.min(dataEnd, Math.max(ga + 1, Math.ceil(g1 < g2 ? g2 : g1)));
     if (depthRangeInto(runs, ga, gb, idx, m)) {
-      const hi = r1(depthToY(m.max)), me = r1(depthToY(m.mean)), lo = r1(depthToY(m.min)), d = m.min < m.mean / 2 ? 1 : 0;
+      const hi = r1(depthToY(m.max)), me = r1(depthToY(stat === 'max' ? m.max : m.mean)), lo = r1(depthToY(m.min)), d = withDips && m.min < m.mean / 2 ? 1 : 0;
       // neighbouring columns drawn alike make one step
       if (n && yHi[n - 1] === hi && yMean[n - 1] === me && yLo[n - 1] === lo && dip[n - 1] === d && cb[n - 1] === x) cb[n - 1] = nx;
       else { ca[n] = x; cb[n] = nx; yHi[n] = hi; yMean[n] = me; yLo[n] = lo; dip[n] = d; n++; }
@@ -462,10 +471,10 @@ export function buildCoveragePaths(
     d.push(`L${r1(lastB)},${B}Z`);
     return { d: d.join(''), line: line.join('') };
   };
-  const top = area(yHi, false), mid = area(yMean, true);
+  const mid = area(yMean, true);
   const ticks: string[] = [];
   for (let i = 0; i < n; i++) if (dip[i]) { const xm = r1((ca[i] + cb[i]) / 2); ticks.push(`M${xm},${yMean[i]}V${yLo[i]}`); }
-  return { fill: top.d, mean: mid.d, stroke: mid.line, dips: ticks.join('') };
+  return { mean: mid.d, stroke: mid.line, dips: ticks.join('') };
 }
 
 // ======================== Junctions ========================

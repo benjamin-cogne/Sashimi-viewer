@@ -518,7 +518,7 @@ const INK = {
   grid: '#e3e8ee', gridStrong: '#d1d5db', exon: '#1e2a3a', utr: '#94a3b8', intron: '#94a3b8',
   geneBand: 'rgba(15, 118, 110, 0.035)', select: '#14857a',
 };
-/** Opacity of a track's coverage fill (over the lighter shade of the column's highest depth). */
+/** Opacity of a track's coverage fill. */
 const COVERAGE_ALPHA = 0.37;
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 // Nucleotide colours follow the IGV convention (A green, C blue, G orange, T red)
@@ -4522,8 +4522,10 @@ export default function SashimiViewer({
         if (a.label) a.label.y += baseline;
         if (a.edge) a.edge.y += baseline;
       }
-      const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d));
-      const antiPaths = track.anti ? buildCoveragePaths(track.anti.coverage, scale, viewStart, viewEnd, baseline, d => baseline + antiDepth(d)) : null;
+      // DNA: a column's mean depth (copy number), dropouts as ticks; RNA: its highest (an exon's depth when zoomed out)
+      const covOpts = dnaTrack ? { stat: 'mean' as const, dips: true } : { stat: 'max' as const, dips: false };
+      const paths = buildCoveragePaths(track.coverage, scale, viewStart, viewEnd, baseline, d => baseline + depthToY(d), covOpts);
+      const antiPaths = track.anti ? buildCoveragePaths(track.anti.coverage, scale, viewStart, viewEnd, baseline, d => baseline + antiDepth(d), covOpts) : null;
       const mirror = track.anti ? Math.ceil(Math.max(MIRROR_MIN_H, bottom, antiDepth(maxDepthIn(track.anti.coverage, viewStart, viewEnd)))) + MIRROR_PAD : 0;
       // intron retention pills: on the baseline at the middle of the visible part of each intron, above the Min % threshold
       const retention: TrackLayout['retention'] = (dnaTrack ? [] : trackAgg?.retention ?? [])
@@ -5662,17 +5664,14 @@ export default function SashimiViewer({
               return <rect key={`gain${j.start}-${j.end}`} x={Math.min(x1, x2)} y={baseline - (COVERAGE_H - 12)} width={Math.abs(x2 - x1)} height={COVERAGE_H - 12} fill={PAIR_CLASS_LINE.duplication} opacity={0.07} pointerEvents="none" />;
             });
           })()}
-          {/* the highest depth of each pixel column lightly, the lowest on top of it: where they coincide the shade is the
-              usual one (0.09, then COVERAGE_ALPHA over it); a column holding a dropout keeps only the light shade above it */}
-          {covOn && paths.fill && <path d={paths.fill} fill={withAlpha(color, 0.09)} stroke="none" />}
+          {/* one solid area per column (DNA: its mean depth; RNA: its highest), a dropout inside a DNA column as a tick */}
           {covOn && paths.mean && <path d={paths.mean} fill={withAlpha(color, COVERAGE_ALPHA)} stroke="none" />}
           {covOn && paths.dips && <path d={paths.dips} fill="none" stroke={color} strokeWidth={1} strokeOpacity={0.75} />}
-          {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={1.3} strokeLinejoin="round" />}
+          {covOn && paths.stroke && <path d={paths.stroke} fill="none" stroke={color} strokeWidth={isDnaTrack(track) ? 1 : 1.3} strokeLinejoin="round" />}
           {/* the opposite strand, mirrored under the baseline */}
           {L.antiPaths && (
             <g data-antisense="">
               <rect x={PLOT_LEFT} y={baseline} width={plotWidth} height={L.mirror} fill={withAlpha(ANTI_COLOR, 0.035)} />
-              {L.antiPaths.fill && <path d={L.antiPaths.fill} fill={withAlpha(ANTI_COLOR, 0.09)} stroke="none" />}
               {L.antiPaths.mean && <path d={L.antiPaths.mean} fill={withAlpha(ANTI_COLOR, COVERAGE_ALPHA)} stroke="none" />}
               {L.antiPaths.stroke && <path d={L.antiPaths.stroke} fill="none" stroke={ANTI_COLOR} strokeWidth={1.1} strokeLinejoin="round" />}
               <text x={plotRight - 6} y={baseline + 10} textAnchor="end" fill={ANTI_COLOR} fontSize={9} fontWeight={600} opacity={0.85} pointerEvents="none">
