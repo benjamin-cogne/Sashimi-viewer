@@ -4,9 +4,10 @@
  * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
  */
 import { useEffect, useRef, useState } from 'react';
+import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { Icon, Stepper, Segmented, Pill } from './controls';
-import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type GeneView, type Level } from './cghScore';
@@ -134,6 +135,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const samples = s.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const listed = s.sample ? samples.filter(e => e.x.key === s.sample) : samples;
   const all = listed.flatMap(({ x, f }) => x.cnvs.map(c => ({ c, f })));
+  const series = seriesOf(s.files);
   const views = new Map(all.map(({ c }) => [c.id, viewOf(s, c)]));
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const rows = all.filter(({ c }) => passes(s, c));
@@ -206,6 +208,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <select value={f.classed} onChange={e => cgh.setFilter({ classed: e.target.value as typeof f.classed })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
             <option value="all">any</option><option value="unclassified">not classified</option><option value="classified">classified</option>
           </select></label>
+        {samples.length > 1 && <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title={`Recurrence in the loaded series: the call is found in other patients (same type, same chromosome, reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %)`}>series
+          <select value={f.series} onChange={e => cgh.setFilter({ series: e.target.value as typeof f.series })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
+            <option value="any">any</option><option value="unique">unique (in no other patient)</option><option value="recurrent">recurrent (≥ {SERIES_RECURRENT} others)</option>
+          </select></label>}
         {anySuppressed && <Pill size="sm" label="hide suppressed" on={f.hideSuppressed} onChange={v => cgh.setFilter({ hideSuppressed: v })} title="Calls marked Suppress = true in CytoGenomics" />}
         <input value={f.query} onChange={e => cgh.setFilter({ query: e.target.value })} placeholder="gene, band (16p11), chromosome" aria-label="Filter the calls by gene, band or chromosome"
           className="h-[26px] w-[210px] px-2 rounded-lg border border-slate-200 text-xs placeholder:text-slate-400 focus:outline-none focus:border-accent-300" />
@@ -224,6 +230,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
               <th className="px-1.5 py-0.5 font-medium">Band</th><th className="px-1.5 py-0.5 font-medium">Position (GRCh37)</th>
               <th className="px-1.5 py-0.5 font-medium text-right">Size</th><th className="px-1.5 py-0.5 font-medium">Type</th>
               <th className="px-1.5 py-0.5 font-medium text-right" title="#Probes · mean log ratio">Probes · LogR</th>
+              {samples.length > 1 && <th className="px-1.5 py-0.5 font-medium text-right" title={`Recurrence in the loaded series: other patients with a call of the same type on the same chromosome (reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %) / other patients loaded. Every call counts, those under the minimums too.`}>Series</th>}
               <th className="px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes</th>
               <th className="px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp</th>
               <th className="px-1.5 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage</th>
@@ -246,6 +253,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
+                  {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   <GenesCell c={c} v={v} />
                   <PanelCell v={v} />
                   <DosageCell c={c} v={v} />
@@ -266,10 +274,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={12} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
-            {!rows.length && <tr><td colSpan={12} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
+            {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -306,6 +314,12 @@ function MosaicLine({ c, sex, dlrs }: { c: CghCnv; sex: CghSex | undefined; dlrs
     {m.ok ? <>observed <b>{c.logRatio!.toFixed(2)}</b>, expected for a one-copy {c.kind}: <b>{Number.isFinite(m.expected) ? `${m.expected > 0 ? '+' : ''}${m.expected.toFixed(2)}` : 'not finite'}</b> · cells carrying it: <b>{pc(m.f)}</b>{m.lo != null && m.hi != null ? <> (DLRS {dlrs}: {pc(m.lo)} to {pc(m.hi)})</> : null}</>
       : <>observed <b>{c.logRatio!.toFixed(2)}</b> · fraction of cells: <span className="text-amber-700">sex needed (chrX / chrY outside the PARs)</span></>}
     <span className="text-slate-500"> · indicative (AChro-Puce calculator, July 2025): no biological variability</span></div>;
+}
+const seriesTip = (i: SeriesInfo) => i.hits.length ? i.hits.map(h => `${h.name}: ${Math.round(h.pct * 100)} % overlap`).join('\n') : 'No other patient has this call';
+/** other patients carrying the call / other patients loaded; empty when only one patient is loaded */
+function SeriesCell({ info }: { info: SeriesInfo | undefined }) {
+  if (!info || !info.others) return <td />;
+  return <td className={`px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap ${info.hits.length ? 'font-semibold text-slate-800' : 'text-slate-400'}`} title={seriesTip(info)}>{info.hits.length}/{info.others}</td>;
 }
 function GenesCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
@@ -363,13 +377,14 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, sex, dlrs, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; sex: CghSex | undefined; dlrs: number | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, sex, dlrs, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; sex: CghSex | undefined; dlrs: number | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
     onKeyDown={e => e.stopPropagation()} aria-label="Note on this call"
     className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
-  const mosaic = <MosaicLine c={c} sex={sex} dlrs={dlrs} />;
+  const seen = series && series.others > 0 ? <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Series</span> {series.hits.length ? <>found in {series.hits.length} of {series.others} other patient{series.others > 1 ? 's' : ''}: {series.hits.map(h => `${h.name} (${Math.round(h.pct * 100)} %)`).join(', ')}</> : <>in none of the {series.others} other patient{series.others > 1 ? 's' : ''}</>}<span className="text-slate-500"> · same type, reciprocal overlap ≥ {Math.round(SERIES_OVERLAP * 100)} %</span></div> : null;
+  const mosaic = <>{seen}<MosaicLine c={c} sex={sex} dlrs={dlrs} /></>;
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
   const key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position

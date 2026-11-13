@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
 import { parseCghFile, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
+import { seriesOf } from './cghSeries';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
 
@@ -21,7 +22,11 @@ export interface CghFilter {
   query: string;
   /** the calls in genomic order, or the highest priority first */
   sort: 'position' | 'priority';
+  /** recurrence in the series: any call, in no other patient, or in at least SERIES_RECURRENT others */
+  series: 'any' | 'unique' | 'recurrent';
 }
+/** "recurrent": the call is found in at least this many other patients */
+export const SERIES_RECURRENT = 2;
 export interface CghState {
   files: CghFile[];
   /** the class given in the browser, by call id (else the file's own) */
@@ -57,8 +62,8 @@ export const CGH_MAX_ANNOTATED = 200;
 /** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
 export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
 const loadFilter = (): CghFilter => {
-  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position' };
-  try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
+  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any' };
+  try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any' } : d; } catch { return d; }
 };
 
 let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {} };
@@ -173,6 +178,7 @@ export function passes(s: CghState, c: CghCnv): boolean {
   const cls = classOf(s, c).trim();
   if (f.classed === 'unclassified' && cls) return false;
   if (f.classed === 'classified' && !cls) return false;
+  if (f.series !== 'any') { const n = seriesOf(s.files).get(c.id)?.hits.length ?? 0; if (f.series === 'unique' ? n > 0 : n < SERIES_RECURRENT) return false; }
   const q = f.query.trim().toLowerCase();
   if (q) {
     // a chromosome (3, chrX) exactly; a band from its start (1p3, 16p11); a gene by part of its name

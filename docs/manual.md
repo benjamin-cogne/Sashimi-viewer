@@ -241,6 +241,11 @@ fraction of cells is estimated from the mean log ratio with the AChro-Puce calcu
 patient's **DLRS** is typed next to the sex, the interval at ± DLRS. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
 
+**Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
+chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
+patients; the tooltip and the call's detail name them with their overlap. The *series* filter keeps the calls found in no other patient (*unique*) or in at
+least 2 others (*recurrent*). Not written to the export.
+
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
   of that gene.
