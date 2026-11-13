@@ -10,7 +10,7 @@ import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
-import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type GeneView, type Level } from './cghScore';
+import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
@@ -353,11 +353,13 @@ function PanelCell({ v }: { v: View }) {
     </td>
   );
 }
+/** the regions whose score for the call's type (HI for a loss, TS for a gain) is a grade, 1-3: not 0, 30 (AR) or 40 (unlikely), which is noise here */
+const regionsScored = (c: CghCnv, regs: RegionHit[]) => regs.filter(r => { const x = c.kind === 'loss' ? r.hi : r.ts; return x === 1 || x === 2 || x === 3; });
 function DosageCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
   const key = c.kind === 'loss' ? 'hi' : 'ts', word = c.kind === 'loss' ? 'HI' : 'TS';
   const scored = v.genes.filter(x => x[key] === 3 || x[key] === 2).sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0));
-  const regs = v.ann.regions.filter(r => r[key] === 3 || r[key] === 2);
+  const regs = regionsScored(c, v.ann.regions);
   const low = v.genes.filter(x => x.loeuf != null).sort((a, b) => a.loeuf! - b.loeuf!)[0];
   return (
     <td className="px-1.5 py-0.5 whitespace-nowrap">
@@ -408,9 +410,9 @@ function CnvDetail({ c, v, sex, dlrs, series, note, focusNote, onNoteFocused }: 
           {v.ann.dgv.length > dgvShown(v.ann.dgv).length && <div className="text-slate-500">+{v.ann.dgv.length - dgvShown(v.ann.dgv).length} more DGV CNVs inside the call (in the medallion's tooltip)</div>}
           {v.ann.dgvError && <div className="text-amber-700">not available ({v.ann.dgvError})</div>}
         </div>}
-        {v.ann.regions.length > 0 && <div className="min-w-[240px]">
+        {regionsScored(c, v.ann.regions).length > 0 && <div className="min-w-[240px]">
           <div className="font-semibold text-slate-900">ClinGen dosage regions</div>
-          {v.ann.regions.map(r => <div key={r.id}>{r.label} <span className="text-slate-500">({r.id})</span>: HI <b>{r.hi ?? '–'}</b>, TS <b>{r.ts ?? '–'}</b> <span className="text-slate-500">({Math.round(r.covered * 100)} % of the region in the call)</span></div>)}
+          {regionsScored(c, v.ann.regions).map(r => <div key={r.id}>{r.label} <span className="text-slate-500">({r.id})</span>: HI <b>{r.hi ?? '–'}</b>, TS <b>{r.ts ?? '–'}</b> <span className="text-slate-500">({Math.round(r.covered * 100)} % of the region in the call)</span></div>)}
         </div>}
         {v.ann.achro.length > 0 && <div className="min-w-[240px]">
           <div className="font-semibold text-slate-900">AChro-Puce</div>
