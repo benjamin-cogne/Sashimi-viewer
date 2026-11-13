@@ -13,6 +13,7 @@
  *
  * The rules are the array below: change a level, a threshold or a test there.
  */
+import type { CnvExons } from './cghExons';
 import type { MoiClass } from '../../standalone/panelapp';
 import type { AchroClass } from './achropuce';
 import type { CghSex } from './cghIntervals';
@@ -27,7 +28,11 @@ export const LEVEL_STYLE: Record<Level, { label: string; color: string; bg: stri
 };
 
 /** a gene of the call: in it whole, or cut by a breakpoint; whether an exon of one of its models is in the call */
-export interface CnvGene { symbol: string; whole: boolean; exons: boolean; start: number; end: number; tx: string }
+export interface CnvGene {
+  symbol: string; whole: boolean; exons: boolean; start: number; end: number; tx: string;
+  /** a cut gene: the exons of its principal transcript in the call and the frame, read from the call's ends (RefSeq genes only) */
+  cut?: CnvExons | null;
+}
 /** PanelApp's entries of a gene: its best rating (0: in no panel), the modes of its green and amber entries */
 export interface PanelView { best: 0 | 1 | 2 | 3; green: MoiClass[]; amber: MoiClass[]; diseases: string[] }
 export interface GeneView {

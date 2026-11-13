@@ -12,6 +12,7 @@ import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import { ACHRO_REGIONS, type AchroClass } from './achropuce';
 import { RO_MATCH, type PopulationSv } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
+import { exonsInCall } from './cghExons';
 import { scoreCnv, type RegionHit, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
 import { topoOf, type CnvTopo } from './cghTopo';
@@ -77,7 +78,7 @@ export const PANELAPP_MAX_GENES = 1000;
 export const PANEL_SOURCE = PANEL_SOURCES[0];
 
 /** the genes of a window from its RefSeq models: each gene's principal model (MANE / RefSeq Select, else the longest) */
-export function genesOf(txs: SvTranscript[], s0: number, e0: number): CnvGene[] {
+export function genesOf(txs: SvTranscript[], s0: number, e0: number, kind?: 'loss' | 'gain'): CnvGene[] {
   const by = new Map<string, SvTranscript[]>();
   for (const t of txs) { if (t.end <= s0 || t.start >= e0) continue; const l = by.get(t.gene) ?? []; l.push(t); by.set(t.gene, l); }
   return [...by.entries()].map(([symbol, list]) => {
@@ -86,6 +87,7 @@ export function genesOf(txs: SvTranscript[], s0: number, e0: number): CnvGene[] 
       symbol, tx: p.id, start: Math.min(...list.map(t => t.start)), end: Math.max(...list.map(t => t.end)),
       whole: p.start >= s0 && p.end <= e0,
       exons: list.some(t => t.exons.some(x => x.end > s0 && x.start < e0)),
+      ...(kind ? { cut: exonsInCall(p, s0, e0, kind) } : {}),
     };
   }).sort((a, b) => a.start - b.start);
 }
@@ -147,7 +149,7 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
   try {
     if (!ld.getTranscripts) throw new Error('no gene source for this build');
-    genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0);
+    genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0, c.kind);
   } catch (e) {
     source = 'file';
     genes = c.genes.map(symbol => ({ symbol, tx: '', start: s0, end: e0, whole: false, exons: true }));

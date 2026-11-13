@@ -12,7 +12,7 @@ import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
-import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type GeneView, type Level, type RegionHit } from './cghScore';
+import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
@@ -478,7 +478,7 @@ function CnvDetail({ c, v, lab, hints, sex, dlrs, series, note, focusNote, onNot
         <tbody>{shownGenes.map(x => (
           <tr key={x.g.symbol} className="border-b border-slate-100">
             <td className="px-1.5 py-0.5"><i className="font-semibold">{x.g.symbol}</i> <span className="text-slate-400">{x.g.tx}</span></td>
-            <td className="px-1.5 py-0.5">{v.ann!.source === 'file' ? <span className="text-amber-700" title="RefSeq could not be read: the file names the gene, its extent is not known here">from the file</span> : x.g.whole ? 'whole' : x.g.exons ? 'cut (exons in)' : 'cut (no exon)'}</td>
+            <td className="px-1.5 py-0.5">{v.ann!.source === 'file' ? <span className="text-amber-700" title="RefSeq could not be read: the file names the gene, its extent is not known here">from the file</span> : <InCall g={x.g} />}</td>
             <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.hi === 3 ? '#b91c1c' : x.hi === 2 ? '#c2410c' : undefined }}>{dosageText(x.hi)}</td>
             <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.ts === 3 ? '#b91c1c' : x.ts === 2 ? '#c2410c' : undefined }}>{dosageText(x.ts)}</td>
             <td className="px-1.5 py-0.5 tabular-nums">{x.loeuf != null ? x.loeuf.toFixed(2) : ''}{x.pli != null ? <span className="text-slate-400"> ({x.pli.toFixed(2)})</span> : null}</td>
@@ -539,4 +539,17 @@ function DgvMedal({ v }: { v: View }) {
   return <span className="ml-1 whitespace-nowrap inline-flex items-center gap-1 rounded-full px-1.5 text-[9.5px] font-bold border border-violet-300 bg-violet-50 text-violet-700 leading-[15px] align-middle" title={`DGV Gold, same type:\n${title}`}>
     {rels.map(({ rel, hs }) => <span key={rel} className="inline-flex items-center gap-0.5"><DgvIcon rel={rel} />{pctText(Math.max(...hs.map(x => x.cover)))}</span>)}
   </span>;
+}
+
+const THEORETICAL = "theoretical: the call's first and last probes, the true breakpoints lie between probes";
+/** what the call holds of a gene: whole, or the exons of its principal transcript it cuts and the frame */
+function InCall({ g }: { g: CnvGene }) {
+  if (g.whole) return <>whole</>;
+  const c = g.cut;
+  if (c?.effect === 'intronic' && c.intron) return <span className="text-slate-500" title={`${c.tx}\n${THEORETICAL}`}>intronic (between exons {c.intron[0]} and {c.intron[1]})</span>;
+  if (!c || !c.text) return <>{g.exons ? 'cut (exons in)' : 'cut (no exon)'}</>;
+  const tip = [`${c.tx} (${c.strand > 0 ? '+' : '−'} strand, ${c.n} exons)`,
+    c.coding == null ? 'non-coding transcript' : `coding bases in the exons wholly inside: ${c.coding} (${c.coding % 3 === 0 ? 'a multiple of 3' : `${c.coding % 3} past a multiple of 3`})`,
+    THEORETICAL].join('\n');
+  return <span className={c.severe ? 'text-red-700' : 'text-slate-500'} title={tip}>{c.text}</span>;
 }
