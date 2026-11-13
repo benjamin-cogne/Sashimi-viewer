@@ -7,6 +7,7 @@ import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
 import { parseCghFile, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
 import { seriesOf } from './cghSeries';
+import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
 
@@ -24,6 +25,8 @@ export interface CghFilter {
   sort: 'position' | 'priority';
   /** recurrence in the series: any call, in no other patient, or in at least SERIES_RECURRENT others */
   series: 'any' | 'unique' | 'recurrent';
+  /** the laboratory's benign list: any call, those not in it, those in it */
+  lab: 'any' | 'not' | 'in';
 }
 /** "recurrent": the call is found in at least this many other patients */
 export const SERIES_RECURRENT = 2;
@@ -53,6 +56,8 @@ export interface CghState {
   dlrs: Record<string, number>;
   /** a note on each call, by call id (else the file's) */
   notes: Record<string, string>;
+  /** the laboratory's list of benign CNVs (a reference, kept in localStorage), and whether it could be stored */
+  lab: LabBenign | null; labStored: boolean;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -62,11 +67,11 @@ export const CGH_MAX_ANNOTATED = 200;
 /** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
 export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
 const loadFilter = (): CghFilter => {
-  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any' };
-  try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any' } : d; } catch { return d; }
+  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any', lab: 'any' };
+  try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {}, lab: loadStoredLab(), labStored: true };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -143,6 +148,7 @@ export const cgh = {
     set({ files, pending: null, filter, sex, sample: p.files[0]?.samples[0]?.key ?? state.sample });
   },
   cancel() { set({ pending: null }); },
+  setLab(lab: LabBenign | null) { set({ lab, labStored: storeLab(lab), filter: lab ? state.filter : { ...state.filter, lab: 'any' } }); },
   setFilter(patch: Partial<CghFilter>) {
     const filter = { ...state.filter, ...patch };
     try { localStorage.setItem(FILTER_KEY, JSON.stringify({ ...filter, query: '' })); } catch { /* storage blocked */ }
@@ -179,6 +185,7 @@ export function passes(s: CghState, c: CghCnv): boolean {
   if (f.classed === 'unclassified' && cls) return false;
   if (f.classed === 'classified' && !cls) return false;
   if (f.series !== 'any') { const n = seriesOf(s.files).get(c.id)?.hits.length ?? 0; if (f.series === 'unique' ? n > 0 : n < SERIES_RECURRENT) return false; }
+  if (f.lab !== 'any' && (labHits(s.files, s.lab).has(c.id) !== (f.lab === 'in'))) return false;
   const q = f.query.trim().toLowerCase();
   if (q) {
     // a chromosome (3, chrX) exactly; a band from its start (1p3, 16p11); a gene by part of its name

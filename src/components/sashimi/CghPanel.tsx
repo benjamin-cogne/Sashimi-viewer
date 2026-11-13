@@ -4,6 +4,7 @@
  * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
  */
 import { useEffect, useRef, useState } from 'react';
+import { labHits, parseLabBenign, LAB_COVER, type LabHit } from './cghLabBenign';
 import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
@@ -139,6 +140,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const series = seriesOf(s.files);
   const views = new Map(all.map(({ c }) => [c.id, viewOf(s, c)]));
   const hints = rearrangementHints(s);
+  const lab = labHits(s.files, s.lab);
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const rows = all.filter(({ c }) => passes(s, c));
   if (s.filter.sort === 'priority') rows.sort((a, b) => rank(b.c.id) - rank(a.c.id));
@@ -187,6 +189,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         </div>
         <span className="ml-auto self-center flex items-center gap-2 py-1">
           <CghAddButton compact />
+          <LabBenignButton />
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
           <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
             title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns).\nClasses and notes are kept in this tab only: export them to keep them.'}>
@@ -210,6 +213,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <select value={f.classed} onChange={e => cgh.setFilter({ classed: e.target.value as typeof f.classed })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
             <option value="all">any</option><option value="unclassified">not classified</option><option value="classified">classified</option>
           </select></label>
+        {s.lab && <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title={`The laboratory's benign list (${s.lab.fileName}): calls sharing ${Math.round(LAB_COVER * 100)} % of the call or more with an entry of the same type`}>lab list
+          <select value={f.lab} onChange={e => cgh.setFilter({ lab: e.target.value as typeof f.lab })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
+            <option value="any">any</option><option value="not">not in the list</option><option value="in">in the list</option>
+          </select></label>}
         {samples.length > 1 && <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title={`Recurrence in the loaded series: the call is found in other patients (same type, same chromosome, reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %)`}>series
           <select value={f.series} onChange={e => cgh.setFilter({ series: e.target.value as typeof f.series })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
             <option value="any">any</option><option value="unique">unique (in no other patient)</option><option value="recurrent">recurrent (≥ {SERIES_RECURRENT} others)</option>
@@ -253,7 +260,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   <GenesCell c={c} v={v} />
@@ -268,6 +275,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       <option value="">— not classified</option>
                       {CGH_CLASSES.map(o => <option key={o.value} value={o.value}>{o.hint && o.value === 'NS' ? `NS (${o.hint})` : o.value}</option>)}
                     </select>
+                    {!cls.trim() && lab.has(c.id) && <button onClick={() => cgh.setClass(c, 'Benign')} className="ml-1 px-1 rounded border border-violet-300 bg-violet-50 text-[10px] font-semibold text-violet-700 hover:bg-violet-100" title="Suggestion only, from the laboratory's benign list: sets the class Benign on this call. Nothing is classified by itself.">→ Benign?</button>}
                     <button onClick={() => { setNoteFocus(c.id); setFolded(false); if (!on) show(i); }} className={`ml-1 px-1 rounded ${note ? 'text-accent-700 bg-accent-50 font-bold' : 'text-slate-300 hover:text-slate-600'}`}
                       title={note ? `Note: ${note}` : 'Add a note on this call (exported in the Comment column)'} aria-label="Note">✎</button>
                   </td>
@@ -276,7 +284,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
@@ -357,6 +365,38 @@ function PanelCell({ v }: { v: View }) {
 }
 /** the regions whose score for the call's type (HI for a loss, TS for a gain) is a grade, 1-3: not 0, 30 (AR) or 40 (unlikely), which is noise here */
 const regionsScored = (c: CghCnv, regs: RegionHit[]) => regs.filter(r => { const x = c.kind === 'loss' ? r.hi : r.ts; return x === 1 || x === 2 || x === 3; });
+const labText = (h: LabHit) => `${h.entry.name || 'unnamed entry'} · ${h.entry.chrom}:${h.entry.start.toLocaleString('en-US')}-${h.entry.end.toLocaleString('en-US')} (${h.entry.type === 'both' ? 'both types' : h.entry.type}) · ${Math.round(h.pct * 100)} % of the call`;
+/** violet-grey tag: the call lies in the laboratory's benign list (distinct from DGV's violet pill) */
+function LabTag({ hit }: { hit: LabHit | undefined }) {
+  if (!hit) return null;
+  return <span className="ml-1 inline-flex items-center rounded px-1 text-[9.5px] font-semibold align-middle bg-slate-200 text-violet-900 border border-slate-400" title={`Laboratory's benign list: ${labText(hit)}`}>lab benign</span>;
+}
+/** "Lab benign CNVs (BED)…": loads the laboratory's list; kept in this browser (localStorage), × removes it */
+function LabBenignButton() {
+  const s = useCgh(), lab = s.lab;
+  const [msg, setMsg] = useState('');
+  const load = async (f: File) => {
+    try {
+      const r = parseLabBenign(new TextDecoder('utf-8').decode(await f.arrayBuffer()), f.name);
+      if (!r.entries.length) { setMsg(`${f.name}: no interval read (${r.skipped} line${r.skipped === 1 ? '' : 's'} skipped)`); return; }
+      setMsg(''); cgh.setLab(r);
+    } catch (e) { setMsg(`${f.name}: ${(e as Error).message}`); }
+  };
+  return (
+    <span className="inline-flex items-center gap-1">
+      <label className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 cursor-pointer whitespace-nowrap hover:border-violet-300 hover:bg-violet-50"
+        title={"The laboratory's list of benign CNVs: a BED (chrom, start 0-based, end, optional name that may say del / dup / loss / gain; without it the entry applies to both types). A call sharing " + Math.round(LAB_COVER * 100) + " % of itself with an entry of its type is marked and can be suggested as Benign.\nA laboratory reference, not patient data: kept in this browser for the next sessions."}>
+        <Icon name="upload" size={13} />Lab benign CNVs (BED)…
+        <input data-lab-input type="file" accept=".bed,.txt,.tsv,text/plain" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void load(f); e.target.value = ''; }} />
+      </label>
+      {lab && <span className="inline-flex items-center gap-1 h-[26px] px-2 rounded-lg bg-slate-100 border border-slate-300 text-[11px] text-violet-900" data-lab-chip
+        title={`${lab.fileName}: ${lab.read} interval${lab.read === 1 ? '' : 's'} read, ${lab.skipped} line${lab.skipped === 1 ? '' : 's'} skipped${s.labStored ? '. Kept in this browser.' : '. Too large to keep: it is lost when the page closes.'}`}>
+        {lab.fileName} · {lab.read} read{lab.skipped ? `, ${lab.skipped} skipped` : ''}{s.labStored ? '' : ' (not kept)'}
+        <button onClick={() => cgh.setLab(null)} className="text-slate-500 hover:text-red-600" aria-label="Remove the lab benign list" title="Remove the list (also from this browser)">×</button></span>}
+      {msg && <span className="text-[11px] text-amber-700">{msg}</span>}
+    </span>
+  );
+}
 /** a neutral tag in the Band cell: terminal, whole arm, whole chromosome; the rearrangement hints in its tooltip */
 function TopoTag({ c, v, hints }: { c: CghCnv; v: View; hints: string[] | undefined }) {
   const t = v.ann?.topo, w = topoLabel(t);
@@ -387,7 +427,7 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, hints, sex, dlrs, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; hints: string[]; sex: CghSex | undefined; dlrs: number | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, lab, hints, sex, dlrs, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; dlrs: number | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
@@ -405,6 +445,7 @@ function CnvDetail({ c, v, hints, sex, dlrs, series, note, focusNote, onNoteFocu
     <div className="px-4 py-2 bg-slate-50 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
       {noteBox}
       {mosaic}
+      {lab && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Lab benign list</span> <span className="text-violet-800">{labText(lab)}</span> <span className="text-slate-500">· a suggestion: the class is yours to give</span></div>}
       {(topoWords(v.ann.topo, c.chrom).length > 0 || hints.length > 0) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Position</span> {topoWords(v.ann.topo, c.chrom).join(' · ')}{hints.map(h => <div key={h} className="text-violet-800">{h}</div>)}</div>}
       <div className="flex flex-wrap gap-x-6 gap-y-1">
         <div className="min-w-[320px] flex-1">
