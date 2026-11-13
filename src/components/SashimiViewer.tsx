@@ -7470,8 +7470,12 @@ export default function SashimiViewer({
 
         {/* HTML tooltip (crisper text than SVG, never exported) */}
         {hoverInfo && !popover && (
-          <div className="pointer-events-none absolute z-20 min-w-[190px] rounded-md border border-gray-200 bg-white/95 px-2.5 py-1.5 text-xs shadow-lg"
-            style={{ left: Math.min(hover!.px + 14, svgWidth - 200), top: Math.max(RULER_H + 4, hover!.py - 10) }}>
+          <div className="absolute z-20 min-w-[190px] rounded-md border border-gray-200 bg-white/95 pl-2.5 pr-7 py-1.5 text-xs shadow-lg select-text"
+            style={{ left: Math.min(hover!.px + 14, svgWidth - 200), top: Math.max(RULER_H + 4, hover!.py - 10) }}
+            data-probe="">
+            {/* the panel takes clicks (its text can be selected and copied); × closes it, as Escape or a click on the same spot */}
+            <button type="button" onClick={() => setHover(null)} title="Close (Esc)" aria-label="Close the position panel"
+              className="absolute top-1 right-1 w-5 h-5 grid place-items-center rounded text-gray-400 hover:text-gray-800 hover:bg-gray-100 text-[14px] leading-none">×</button>
             <div className="font-mono text-[11px] text-gray-900 leading-5">
               {currentChrom}:{(hoverInfo.pos + 1).toLocaleString('en-US')}
               {liftover && <span className="ml-2" style={{ color: LIFT_COLOR }}>{liftover.to} {liftedText(hoverInfo.pos, true) ?? (liftHere ? 'no counterpart' : '…')}</span>}
