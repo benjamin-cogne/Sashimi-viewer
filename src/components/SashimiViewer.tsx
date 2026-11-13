@@ -1388,7 +1388,13 @@ export default function SashimiViewer({
   const [repeatSel, setRepeatSel] = useState<{ start: number; end: number; busy?: boolean; error?: string } | null>(null);
   /** the repeat inspector's locus, while it is open */
   const [inspect, setInspect] = useState<RepeatLocus | null>(null);
+  /**
+   * The position probed: the crosshair and the panel of coordinates and depths, at the point of the plot last clicked
+   * (a plain left click, not a drag); a click on the same spot or Escape closes it. Not on mere hover: the panel
+   * followed the pointer everywhere over the plot.
+   */
   const [hover, setHover] = useState<{ px: number; py: number } | null>(null);
+  const probeBefore = useRef<{ px: number; py: number } | null>(null);
   /** Detail popover opened by clicking a junction arc or an exon (HTML, never exported). */
   const [popover, setPopover] = useState<
     | { kind: 'junction'; key: string; j: JunctionArc; x: number; y: number }
@@ -2702,8 +2708,19 @@ export default function SashimiViewer({
       dragStart.current = { x: e.clientX, vStart: scale.vStart, vEnd: scale.vEnd };
       panMoved.current = false;
     }
-    setHover(null);
+    // the probe closes while the press lasts (a pan moves the view under it); the click puts it back or moves it
+    setHover(prev => { probeBefore.current = prev; return null; });
   }, [scale]);
+  /** a plain click on the plot (no drag, not on an arc, a pill or a mark: those stop the click) probes the position */
+  const handlePlotClick = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0 || panMoved.current || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const p = svgPoint(e);
+    if (p.x < PLOT_LEFT || p.x > PLOT_LEFT + plotWidth) return;
+    const was = probeBefore.current;
+    probeBefore.current = null;
+    if (was && Math.abs(was.px - p.x) < 4 && Math.abs(was.py - p.y) < 4) return;   // the same spot: closed
+    setHover({ px: p.x, py: p.y });
+  }, [plotWidth]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     latestMouse.current = { x: e.clientX, y: e.clientY };
@@ -2731,7 +2748,6 @@ export default function SashimiViewer({
         setViewFromV(dragStart.current.vStart + dv, dragStart.current.vEnd + dv);
         return;
       }
-      setHover(p.x >= PLOT_LEFT && p.x <= PLOT_LEFT + plotWidth ? { px: p.x, py: p.y } : null);
     });
   }, [dragging, regionSelect, reverse, plotWidth, setViewFromV]);
 
@@ -2756,7 +2772,7 @@ export default function SashimiViewer({
     dragStart.current = null;
   }, [regionSelect, scale, setViewFromV]);
 
-  const handleMouseLeave = useCallback(() => { handleMouseUp(); setHover(null); }, [handleMouseUp]);
+  const handleMouseLeave = useCallback(() => { handleMouseUp(); }, [handleMouseUp]);
 
   // Ctrl+wheel zoom around the cursor. Registered natively because React's wheel
   // listener is passive and cannot prevent the page from scrolling.
@@ -5228,7 +5244,7 @@ export default function SashimiViewer({
         {els}
         <g style={liftover.onRemove ? { cursor: 'pointer' } : undefined} onClick={liftover.onRemove ? e => { e.stopPropagation(); liftover.onRemove!(); } : undefined}
           onMouseDown={e => e.stopPropagation()}>
-          <title>{`${summary}\nThe same ticks in ${liftover.to}, lifted by Ensembl's assembly map; hover the plot for any position.${liftover.onRemove ? '\nClick to remove this line.' : ''}`}</title>
+          <title>{`${summary}\nThe same ticks in ${liftover.to}, lifted by Ensembl's assembly map; click the plot for any position.${liftover.onRemove ? '\nClick to remove this line.' : ''}`}</title>
           <text x={PLOT_LEFT - 6} y={textY} textAnchor="end" fill={LIFT_COLOR} fontSize={9} fontWeight={700}>{liftover.to.replace(/^GRCh/, 'GRCh ')}{liftover.onRemove ? ' ×' : ''}</text>
         </g>
       </g>
@@ -6755,6 +6771,13 @@ export default function SashimiViewer({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [popover]);
+  // Escape closes the probed position too
+  useEffect(() => {
+    if (!hover) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setHover(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [hover]);
 
   // ---- Picker samples: every sample loaded in the page, the ones shown as a track highlighted ----
   const filteredSamples = useMemo(() => {
@@ -7298,6 +7321,7 @@ export default function SashimiViewer({
             if (x >= Math.min(a, b) - 6 && x <= Math.max(a, b) + 6) { e.preventDefault(); setLocusMark(null); }
           }}
           onMouseMove={handleMouseMove}
+          onClick={handlePlotClick}
           onDoubleClick={resetZoom}
           xmlns="http://www.w3.org/2000/svg"
           fontFamily={FONT}
@@ -7895,7 +7919,7 @@ export default function SashimiViewer({
         </div>
       )}
       <div className={`px-5 pb-2 text-[10.5px] ${t.muted}`}>
-        Drag to pan · Ctrl+drag to zoom into a region · Shift+drag to inspect a repeat · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · hover for c. positions · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
+        Drag to pan · Ctrl+drag to zoom into a region · Shift+drag to inspect a repeat · Ctrl+scroll to zoom around the cursor · double-click to reset · right-click a searched locus to remove its highlight · drag an arc up or down to change its height (its ends stay put) · click for the position, c. position and depths (again or Esc to close) · click an arc (HGVS, frame, share vs canonical) or an exon (depth-based usage) for details
       </div>
     </div>
   );
