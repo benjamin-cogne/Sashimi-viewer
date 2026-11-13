@@ -386,8 +386,11 @@ const chromKeyOf = (c: string) => c.replace(/^chr/i, '').toUpperCase().replace(/
 const revCompSeq = (s: string) => s.split('').reverse().map(c => ({ A: 'T', C: 'G', G: 'C', T: 'A' } as Record<string, string>)[c] ?? 'N').join('');
 /** Height of a track's coverage area by default, px; the user changes it (Depth section, or by dragging a coverage's baseline) between COVERAGE_H_MIN and COVERAGE_H_MAX. */
 const COVERAGE_H_DEFAULT = 130, COVERAGE_H_MIN = 70, COVERAGE_H_MAX = 600;
-/** autoscale: the smallest coverage it sets (the depth axis keeps a few pixels), and the window's margin left free */
-const COVERAGE_AUTO_MIN = 20, COVERAGE_AUTO_MARGIN = 12;
+/**
+ * autoscale: the smallest coverage it sets (the depth axis keeps a few pixels; it never goes past the default height),
+ * and the share of the window left free (at least COVERAGE_AUTO_MARGIN px), so the tracks fit without exact scrolling
+ */
+const COVERAGE_AUTO_MIN = 20, COVERAGE_AUTO_MARGIN = 40, COVERAGE_AUTO_FREE = 0.1;
 const TRACK_LABEL_H = 20;   // band at the top of each track reserved for the sample label (arcs and coverage stay below it)
 const JUNC_LEVEL_STEP = 17; // extra apex height per arc nesting level
 const JUNC_MIN_H = 6;       // smallest junction area; it otherwise grows to what the arcs and pills really occupy
@@ -4616,7 +4619,7 @@ export default function SashimiViewer({
     if (!withCov.length) return;
     // a pause after the last change (a pan, a zoom, data coming in): the tracks do not breathe while the view moves
     const id = setTimeout(() => {
-      const n = withCov.length, avail = winH - COVERAGE_AUTO_MARGIN;
+      const n = withCov.length, avail = winH - Math.max(COVERAGE_AUTO_MARGIN, winH * COVERAGE_AUTO_FREE);
       const used = layouts.reduce((a, L) => a + L.height, 0) + SASHIMI_GAP * (layouts.length - 1);
       // what the tracks take besides their coverage: the arcs' band (it scales with arcK), the label bands, the rest (strips, gaps)
       const band = withCov.reduce((a, L) => a + Math.max(0, L.juncH - labelBandH - L.strip), 0);
@@ -4632,7 +4635,7 @@ export default function SashimiViewer({
           h = (avail - fixed - band1 * k) / n;
         }
       }
-      const nextH = Math.round(Math.min(COVERAGE_H_MAX, Math.max(COVERAGE_AUTO_MIN, h))), nextK = Math.round(k * 100) / 100;
+      const nextH = Math.round(Math.min(COVERAGE_H_DEFAULT, Math.max(COVERAGE_AUTO_MIN, h))), nextK = Math.round(k * 100) / 100;
       if (Math.abs(nextH - coverageH) < 2 && Math.abs(nextK - arcK) < 0.02 && compact === compactLabels) { fitTries.current = 0; return; }
       if (fitTries.current++ < 6) { setCoverageH(nextH); setArcK(nextK); setCompactLabels(compact); }
     }, 200);
@@ -7161,7 +7164,7 @@ export default function SashimiViewer({
               title={`Height of each track's coverage area (${COVERAGE_H_MIN}–${COVERAGE_H_MAX} px, ${COVERAGE_H_DEFAULT} by default): taller when the SV arcs take much of the track. Dragging a coverage's lower edge does the same.${coverageAuto ? ' Set by Autoscale now: a height set here turns it off.' : ''}`}
               after={!coverageAuto && coverageH !== COVERAGE_H_DEFAULT ? <button type="button" className="pr-1.5 text-[10.5px] text-accent-600 hover:underline" title={`Back to ${COVERAGE_H_DEFAULT} px`} onClick={() => setCoverageByHand(COVERAGE_H_DEFAULT)}>reset</button> : undefined} />
             <Pill on={coverageAuto} onChange={toggleCoverageAuto} label="Autoscale" size="sm"
-              title={`Autoscale: the coverage height follows the window, so that the sample tracks (arcs, coverage and their strips) fill its height; the gene model and the other annotations stay above them, the reads tracks below. It follows the window's size, the samples shown and the arcs in view, a moment after the view stops moving. When the tracks do not fit over ${COVERAGE_H_MIN} px, each sample's name goes inside its track (its reads and make-primary chips are then left out: untick Autoscale to get them back), then the arcs are lowered with the coverage. Changing the height by hand turns it off; unticking it brings back the height from before (${coverageAuto ? manualCoverageH.current : coverageH} px).`} />
+              title={`Autoscale: the coverage height follows the window, so that the sample tracks (arcs, coverage and their strips) fit in it with a margin (a tenth of the window), never taller than the default ${COVERAGE_H_DEFAULT} px; the gene model and the other annotations stay above them, the reads tracks below. It follows the window's size, the samples shown and the arcs in view, a moment after the view stops moving. When the tracks do not fit over ${COVERAGE_H_MIN} px, each sample's name goes inside its track (its reads and make-primary chips are then left out: untick Autoscale to get them back), then the arcs are lowered with the coverage. Changing the height by hand turns it off; unticking it brings back the height from before (${coverageAuto ? manualCoverageH.current : coverageH} px).`} />
           </Section>
           <Section><Popover width={340} title="Which alignments are counted, in coverage, arcs and the reads track"
             button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
