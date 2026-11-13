@@ -4,6 +4,7 @@
  * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
  */
 import { useEffect, useRef, useState } from 'react';
+import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
@@ -191,6 +192,9 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <div className="pt-2" />
       <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs">
         {listed.length === 1 && <SexSelect value={s.sex[listed[0].x.key] ?? null} onChange={v => cgh.setSex(listed[0].x.key, v)} />}
+        {listed.length === 1 && <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title="The patient's DLRS (derivative log ratio spread, from the QC of the array): gives the interval of the mosaic estimate (±DLRS on the log ratio). Optional, kept in this tab only.">DLRS
+          <input type="number" min={0} max={2} step={0.01} value={s.dlrs[listed[0].x.key] ?? ''} placeholder="–" aria-label="DLRS of the patient" onKeyDown={e => e.stopPropagation()}
+            onChange={e => cgh.setDlrs(listed[0].x.key, e.target.value === '' ? null : Number(e.target.value))} className="w-[52px] bg-transparent font-medium text-slate-800 outline-none tabular-nums" /></label>}
         <Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" />
         <Segmented size="sm" label="Type" title="Losses, gains or both" value={f.kind} onChange={v => cgh.setFilter({ kind: v })}
           options={[{ value: 'all', label: 'all', hint: 'Losses and gains' }, { value: 'loss', label: 'losses', hint: 'Deletions only' }, { value: 'gain', label: 'gains', hint: 'Gains and amplifications only' }]} />
@@ -241,7 +245,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}</td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
                   <GenesCell c={c} v={v} />
                   <PanelCell v={v} />
                   <DosageCell c={c} v={v} />
@@ -262,7 +266,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={12} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={12} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={12} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
@@ -287,6 +291,22 @@ const MoiBadge = ({ m }: { m: MoiClass }) => <span className="inline-flex items-
 const waitingDot = (n: number) => (n ? <span className="text-slate-400" title={`PanelApp: ${n} gene${n > 1 ? 's' : ''} still asked`}> …</span> : null);
 type View = ReturnType<typeof viewOf>;
 
+/** the small amber tag of a call whose log ratio says a share of the cells only carries it */
+function MosaicTag({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
+  const m = mosaicOf(c, sex);
+  if (!m?.ok || m.f >= MOSAIC_TAG_BELOW) return null;
+  return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-amber-300 bg-amber-50 text-amber-800 leading-[15px] align-middle" title="Fraction of cells estimated from the mean log ratio (AChro-Puce calculator, July 2025): indicative, see the call's detail">mosaic ~{Math.round(m.f * 100)}%</span>;
+}
+/** the call's detail line: expected and observed log ratio, and the fraction of cells it gives */
+function MosaicLine({ c, sex, dlrs }: { c: CghCnv; sex: CghSex | undefined; dlrs: number | undefined }) {
+  const m = mosaicOf(c, sex, dlrs);
+  if (!m) return null;
+  const pc = (x: number) => `${Math.round(x * 100)} %`;
+  return <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Log ratio</span>{' '}
+    {m.ok ? <>observed <b>{c.logRatio!.toFixed(2)}</b>, expected for a one-copy {c.kind}: <b>{Number.isFinite(m.expected) ? `${m.expected > 0 ? '+' : ''}${m.expected.toFixed(2)}` : 'not finite'}</b> · cells carrying it: <b>{pc(m.f)}</b>{m.lo != null && m.hi != null ? <> (DLRS {dlrs}: {pc(m.lo)} to {pc(m.hi)})</> : null}</>
+      : <>observed <b>{c.logRatio!.toFixed(2)}</b> · fraction of cells: <span className="text-amber-700">sex needed (chrX / chrY outside the PARs)</span></>}
+    <span className="text-slate-500"> · indicative (AChro-Puce calculator, July 2025): no biological variability</span></div>;
+}
 function GenesCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
   const gs = v.ann.genes, file = v.ann.source === 'file';
@@ -343,13 +363,14 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, sex, dlrs, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; sex: CghSex | undefined; dlrs: number | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
     onKeyDown={e => e.stopPropagation()} aria-label="Note on this call"
     className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
-  if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}Reading the genes of the call…</div>;
+  const mosaic = <MosaicLine c={c} sex={sex} dlrs={dlrs} />;
+  if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
   const key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position
   const genes = v.genes.slice().sort((a, b) => (b.pa?.best ?? 0) - (a.pa?.best ?? 0) || (b[key] ?? 0) % 10 - (a[key] ?? 0) % 10 || a.g.start - b.g.start);
@@ -358,6 +379,7 @@ function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: Vie
   return (
     <div className="px-4 py-2 bg-slate-50 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
       {noteBox}
+      {mosaic}
       <div className="flex flex-wrap gap-x-6 gap-y-1">
         <div className="min-w-[320px] flex-1">
           <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>

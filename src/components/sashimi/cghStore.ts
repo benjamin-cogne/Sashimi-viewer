@@ -44,6 +44,8 @@ export interface CghState {
   modes: Record<string, GeneModes | 'loading' | 'error'>;
   /** each patient's sex, by sample key (absent: not given) */
   sex: Record<string, CghSex>;
+  /** each patient's DLRS (derivative log ratio spread), by sample key, for the mosaic interval (absent: not given; not persisted) */
+  dlrs: Record<string, number>;
   /** a note on each call, by call id (else the file's) */
   notes: Record<string, string>;
 }
@@ -59,7 +61,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -146,6 +148,7 @@ export const cgh = {
   setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
+  setDlrs(key: string, v: number | null) { const dlrs = { ...state.dlrs }; if (v != null && v > 0) dlrs[key] = v; else delete dlrs[key]; set({ dlrs }); },
   /** a sample taken off the list (its file too when it was the file's only sample) */
   remove(sampleKey: string) {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);

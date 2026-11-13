@@ -235,6 +235,12 @@ copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then wha
 build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
 links staying on the right.
 
+**Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
+fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
+*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and, when the
+patient's **DLRS** is typed next to the sex, the interval at ± DLRS. Indicative only (no biological variability); chrX / chrY
+outside the PARs need the sex.
+
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
   of that gene.
