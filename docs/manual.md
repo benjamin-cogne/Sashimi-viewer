@@ -256,6 +256,7 @@ least 2 others (*recurrent*). Not written to the export.
   medallion per way they lie, with the best share and how many: the call inside a DGV CNV, the call holding one (at any
   share), or the two overlapping on one side; each record's frequency,
   samples and studies in its tooltip and under the row. It does not change the priority.
+- **Position tag** (Band cell): *ter* when the call starts or ends within 500 kb of a chromosome end (arrays have no probes in the telomeric repeats), *arm* when it covers 90 % of an arm or more, *chr* for 90 % of both arms (an acrocentric's q arm alone); the cytobands come over the network, nothing is shown before. A patient with a terminal loss and a terminal gain on different chromosome ends gets a **possible** derivative of an unbalanced translocation hint on both calls (same chromosome, opposite ends: possible recombinant of a pericentric inversion; a gain adjacent to a terminal loss: possible inverted duplication-deletion), to check by parental karyotype / FISH. It does not change the priority.
 - **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
   they cannot be read, and the cell then says *file*.
 - **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes per call,

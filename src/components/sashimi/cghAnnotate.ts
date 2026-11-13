@@ -14,6 +14,7 @@ import { RO_MATCH, type PopulationSv } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
 import { scoreCnv, type RegionHit, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
+import { topoOf, type CnvTopo } from './cghTopo';
 
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 export interface CnvAnn {
@@ -32,6 +33,8 @@ export interface CnvAnn {
   dgvError?: string;
   /** the call's band from the cytogenetic bands (UCSC), when the file gives none (a BED) */
   band?: string;
+  /** terminal / whole arm / whole chromosome, from the chromosome length and the cytobands */
+  topo?: CnvTopo;
 }
 /** the band of a call, as an interval table writes it: p21.1, or p21.2 - p21.1 */
 export function bandOf(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
@@ -175,8 +178,10 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   }
   // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram)
   let band: string | undefined;
-  if (!c.cytoband && ld.getCytobands) { try { band = bandOf(await ld.getCytobands(c.chrom), s0, e0); } catch { /* the band stays unknown */ } }
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), regions, missing, dgv, dgvError, band });
+  let bands: Awaited<ReturnType<NonNullable<Loaders['getCytobands']>>> | null = null;
+  if (ld.getCytobands) { try { bands = await ld.getCytobands(c.chrom); } catch { /* the band stays unknown */ } }
+  if (!c.cytoband && bands) band = bandOf(bands, s0, e0);
+  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), regions, missing, dgv, dgvError, band, topo: topoOf(c, build, bands) });
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 

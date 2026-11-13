@@ -4,6 +4,7 @@
  * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
  */
 import { useEffect, useRef, useState } from 'react';
+import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { Icon, Stepper, Segmented, Pill } from './controls';
@@ -137,6 +138,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const all = listed.flatMap(({ x, f }) => x.cnvs.map(c => ({ c, f })));
   const series = seriesOf(s.files);
   const views = new Map(all.map(({ c }) => [c.id, viewOf(s, c)]));
+  const hints = rearrangementHints(s);
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const rows = all.filter(({ c }) => passes(s, c));
   if (s.filter.sort === 'priority') rows.sort((a, b) => rank(b.c.id) - rank(a.c.id));
@@ -248,7 +250,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                 <tr key={c.id} data-cgh-row data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
-                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}</td>
+                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /></td>
@@ -274,7 +276,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} dlrs={s.dlrs[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
@@ -355,6 +357,12 @@ function PanelCell({ v }: { v: View }) {
 }
 /** the regions whose score for the call's type (HI for a loss, TS for a gain) is a grade, 1-3: not 0, 30 (AR) or 40 (unlikely), which is noise here */
 const regionsScored = (c: CghCnv, regs: RegionHit[]) => regs.filter(r => { const x = c.kind === 'loss' ? r.hi : r.ts; return x === 1 || x === 2 || x === 3; });
+/** a neutral tag in the Band cell: terminal, whole arm, whole chromosome; the rearrangement hints in its tooltip */
+function TopoTag({ c, v, hints }: { c: CghCnv; v: View; hints: string[] | undefined }) {
+  const t = v.ann?.topo, w = topoLabel(t);
+  if (!w) return null;
+  return <span className="ml-1 inline-flex items-center rounded border border-slate-300 px-1 text-[9.5px] font-medium text-slate-500" title={[...topoWords(t, c.chrom), ...(hints ?? [])].join('\n')}>{w}{hints?.length ? ' ⚠' : ''}</span>;
+}
 function DosageCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
   const key = c.kind === 'loss' ? 'hi' : 'ts', word = c.kind === 'loss' ? 'HI' : 'TS';
@@ -379,7 +387,7 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, sex, dlrs, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; sex: CghSex | undefined; dlrs: number | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, hints, sex, dlrs, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; hints: string[]; sex: CghSex | undefined; dlrs: number | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
@@ -397,6 +405,7 @@ function CnvDetail({ c, v, sex, dlrs, series, note, focusNote, onNoteFocused }: 
     <div className="px-4 py-2 bg-slate-50 text-[11px] text-slate-700 cursor-default" onClick={e => e.stopPropagation()}>
       {noteBox}
       {mosaic}
+      {(topoWords(v.ann.topo, c.chrom).length > 0 || hints.length > 0) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Position</span> {topoWords(v.ann.topo, c.chrom).join(' · ')}{hints.map(h => <div key={h} className="text-violet-800">{h}</div>)}</div>}
       <div className="flex flex-wrap gap-x-6 gap-y-1">
         <div className="min-w-[320px] flex-1">
           <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>
