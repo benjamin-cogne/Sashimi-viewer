@@ -55,12 +55,15 @@ export const HINT_TRANSLOCATION = 'terminal loss + terminal gain in this patient
 export const HINT_PERICENTRIC = 'terminal loss and terminal gain on opposite arms of the same chromosome: a recombinant of a pericentric inversion is possible (parental karyotype / FISH)';
 export const HINT_INVDUPDEL = 'terminal loss with an adjacent gain on the same end: an inverted duplication-deletion is possible (parental karyotype / FISH)';
 
+/** the smallest call (kb) a rearrangement hint is given for */
+export const HINT_MIN_KB = 500;
 /** per call id, the hints of its patient's terminal losses and gains (among the analysed calls the annotation has read) */
 export function rearrangementHints(s: CghState): Map<string, string[]> {
   const out = new Map<string, string[]>();
   const add = (c: CghCnv, h: string) => { const l = out.get(c.id) ?? []; if (!l.includes(h)) l.push(h); out.set(c.id, l); };
   for (const fl of s.files) for (const sm of fl.samples) {
-    const read = sm.cnvs.filter(c => s.ann[c.id]?.state === 'done');
+    // small subtelomeric calls are common polymorphisms: only calls of HINT_MIN_KB or more are paired
+    const read = sm.cnvs.filter(c => s.ann[c.id]?.state === 'done' && c.sizeKb >= HINT_MIN_KB);
     // a whole chromosome is an aneuploidy, not a terminal event
     const ter = (c: CghCnv) => { const t = s.ann[c.id]?.topo; return t && t.span !== 'chr' ? t.ends : []; };
     const losses = read.filter(c => c.kind === 'loss' && ter(c).length), gains = read.filter(c => c.kind === 'gain');
