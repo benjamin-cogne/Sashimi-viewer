@@ -97,6 +97,8 @@ const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t 
 export interface SvGeneLoaders {
   getTranscripts?: (chrom: string, start: number, end: number) => Promise<SvTranscript[]>;
   getAnnotations?: (chrom: string, start: number, end: number, symbols: string[]) => Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
+  /** ClinGen curated dosage regions (ISCA-…) overlapping a 0-based half-open window (used by the array-CGH page) */
+  getDosageRegions?: (chrom: string, start: number, end: number) => Promise<{ id: string; label: string; start: number; end: number; hi: number | null; ts: number | null }[]>;
   /** the cytogenetic bands of a chromosome (the ideogram, the ISCN of the event) */
   getCytobands?: (chrom: string) => Promise<Cytoband[]>;
   /** CNV regions of the general population (DGV Gold Standard) over a 0-based half-open window */

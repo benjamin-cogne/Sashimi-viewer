@@ -238,6 +238,7 @@ links staying on the right.
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
   of that gene.
+- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call covering 80 % of a region or more takes its HI score (loss) or TS score (gain) as for a gene (score 3 HIGH, 2 MODERATE), a smaller overlap is only listed as LOW. The SV browser is unchanged.
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
   the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One

@@ -8,7 +8,7 @@ import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
-import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type GeneView, type Level } from './cghScore';
+import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type GeneView, type Level } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
@@ -323,13 +323,15 @@ function DosageCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
   const key = c.kind === 'loss' ? 'hi' : 'ts', word = c.kind === 'loss' ? 'HI' : 'TS';
   const scored = v.genes.filter(x => x[key] === 3 || x[key] === 2).sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0));
+  const regs = v.ann.regions.filter(r => r[key] === 3 || r[key] === 2);
   const low = v.genes.filter(x => x.loeuf != null).sort((a, b) => a.loeuf! - b.loeuf!)[0];
   return (
     <td className="px-1.5 py-0.5 whitespace-nowrap">
       {scored.slice(0, 1).map(x => <span key={x.g.symbol} className="mr-1.5 font-semibold" style={{ color: x[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`ClinGen ${c.kind === 'loss' ? 'haploinsufficiency' : 'triplosensitivity'} score ${x[key]} (${x[key] === 3 ? 'sufficient' : 'some'} evidence)`}>{word}{x[key]} <i className="font-normal">{x.g.symbol}</i></span>)}
       {scored.length > 1 && <span className="text-slate-500 mr-1.5" title={scored.slice(1).map(x => `${word}${x[key]} ${x.g.symbol}`).join(', ')}>+{scored.length - 1}</span>}
+      {regs.map(r => <span key={r.id} className="mr-1.5 font-semibold" style={{ color: r[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`${r.label} (${r.id}): ClinGen region, ${word} ${r[key]}, ${Math.round(r.covered * 100)} % of it in the call`}>{word}{r[key]} region{r.covered < REGION_COVER ? ` ${Math.round(r.covered * 100)} %` : ''}</span>)}
       {low && <span className="text-slate-600" title={`Lowest gnomAD LOEUF of the call (${low.version ?? ''}): ${low.g.symbol} ${low.loeuf!.toFixed(2)}${low.pli != null ? `, pLI ${low.pli.toFixed(2)}` : ''}`}>LOEUF {low.loeuf!.toFixed(2)}</span>}
-      {!scored.length && !low && <span className="text-slate-300">—</span>}
+      {!scored.length && !regs.length && !low && <span className="text-slate-300">—</span>}
     </td>
   );
 }
@@ -368,6 +370,10 @@ function CnvDetail({ c, v, note, focusNote, onNoteFocused }: { c: CghCnv; v: Vie
           {dgvShown(v.ann.dgv).map(x => <div key={x.id} className="flex flex-wrap items-center gap-x-1"><DgvIcon rel={x.rel} />{x.id} <span className="text-slate-500">({x.type})</span>: <b>{pctText(x.cover)}</b> <span className="text-slate-500">· {DGV_REL[x.rel].word}</span>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
           {v.ann.dgv.length > dgvShown(v.ann.dgv).length && <div className="text-slate-500">+{v.ann.dgv.length - dgvShown(v.ann.dgv).length} more DGV CNVs inside the call (in the medallion's tooltip)</div>}
           {v.ann.dgvError && <div className="text-amber-700">not available ({v.ann.dgvError})</div>}
+        </div>}
+        {v.ann.regions.length > 0 && <div className="min-w-[240px]">
+          <div className="font-semibold text-slate-900">ClinGen dosage regions</div>
+          {v.ann.regions.map(r => <div key={r.id}>{r.label} <span className="text-slate-500">({r.id})</span>: HI <b>{r.hi ?? '–'}</b>, TS <b>{r.ts ?? '–'}</b> <span className="text-slate-500">({Math.round(r.covered * 100)} % of the region in the call)</span></div>)}
         </div>}
         {v.ann.achro.length > 0 && <div className="min-w-[240px]">
           <div className="font-semibold text-slate-900">AChro-Puce</div>

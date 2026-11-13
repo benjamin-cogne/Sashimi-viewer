@@ -39,6 +39,11 @@ export interface GeneView {
   paState?: 'asked' | 'failed' | 'not asked' | 'done';
 }
 export interface AchroHit { id: string; name: string; type: 'del' | 'dup'; cls: AchroClass[]; how: string }
+/** a ClinGen dosage region the call overlaps: `covered` is the share (0-1) of the REGION lying in the call */
+export interface RegionHit { id: string; label: string; hi: number | null; ts: number | null; covered: number }
+/** a call covering this share of a ClinGen dosage region (or more) counts as the region's gain / loss */
+export const REGION_COVER = 0.8;
+const pct = (x: number) => `${Math.round(x * 100)} %`;
 export interface ScoreInput {
   kind: 'loss' | 'gain'; copies: number | null; chrom: string;
   /** the patient's sex, null when not given */
@@ -49,6 +54,8 @@ export interface ScoreInput {
   /** whether the genes are RefSeq's (counted) or only the file's names (not counted) */
   refseq: boolean;
   achro: AchroHit[];
+  /** ClinGen dosage regions overlapped */
+  regions?: RegionHit[];
 }
 export interface Reason { id: string; level: Level; text: string }
 export interface Score { level: Level; reasons: Reason[] }
@@ -81,6 +88,8 @@ export const SCORE_RULES: Rule[] = [
   { id: 'L3X', level: 'high', kind: 'loss', label: 'exons of a PanelApp green X-linked recessive gene lost in a male (hemizygous), or both copies lost (x0)', gene: (v, i) => i.chrom === 'chrX' && (i.sex === 'male' || i.copies === 0) && v.g.exons && any(v.pa?.green, ['XLR']) },
   { id: 'L4', level: 'high', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 5 or 4', call: i => hits(i, 'del', ['5', '4']) },
   { id: 'L5', level: 'high', kind: 'loss', label: `35 protein-coding genes or more (ACMG/ClinGen section 3C: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (AChro-Puce)`, call: i => big(i, 35) },
+  { id: 'L1R', level: 'high', kind: 'loss', label: `a ClinGen dosage region with a haploinsufficiency score of 3, ${REGION_COVER * 100} % covered or more`, call: i => regionText(i, 'hi', 3, true) },
+  { id: 'L6R', level: 'moderate', kind: 'loss', label: `a ClinGen dosage region with a haploinsufficiency score of 2, ${REGION_COVER * 100} % covered or more`, call: i => regionText(i, 'hi', 2, true) },
   { id: 'L2b', level: 'moderate', kind: 'loss', label: 'exons of a PanelApp green gene with a monoallelic mode, neither haploinsufficient (ClinGen) nor LoF-intolerant: its disease may not come from a loss', gene: v => v.g.exons && any(v.pa?.green, MONO) && !(v.hi === 2 || v.hi === 3 || intolerant(v)) },
   { id: 'L6', level: 'moderate', kind: 'loss', label: 'exons of a gene with a ClinGen haploinsufficiency score of 2 (some evidence)', gene: v => v.g.exons && v.hi === 2 },
   { id: 'L7', level: 'moderate', kind: 'loss', label: 'exons of a LoF-intolerant gene (gnomAD LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9)', gene: v => v.g.exons && intolerant(v) },
@@ -90,6 +99,7 @@ export const SCORE_RULES: Rule[] = [
   { id: 'L11', level: 'moderate', kind: 'loss', label: 'an AChro-Puce recurrent deletion classed PIEV (susceptibility)', call: i => hits(i, 'del', ['PIEV']) },
   { id: 'L12', level: 'moderate', kind: 'loss', label: '25 to 34 protein-coding genes (section 3B: 0.45 point)', call: i => (i.refseq && i.genes.length >= 25 && i.genes.length < 35 ? `${i.genes.length} protein-coding genes` : null) },
   { id: 'L13', level: 'low', kind: 'loss', label: 'exons of protein-coding genes lost, none of the above', gene: v => v.g.exons },
+  { id: 'L17', level: 'low', kind: 'loss', label: `a ClinGen dosage region (haploinsufficiency score 2 or 3) only partly lost (under ${REGION_COVER * 100} %)`, call: i => regionText(i, 'hi', 0, false) },
   { id: 'L14', level: 'low', kind: 'loss', label: 'genes cut without an exon lost (introns, ends of genes)', gene: v => !v.g.exons },
   { id: 'L15', level: 'low', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 3 (uncertain significance)', call: i => hits(i, 'del', ['3']) },
   { id: 'L16', level: 'low', kind: 'loss', label: 'an AChro-Puce recurrent deletion of class 2 or 1 (likely benign, benign)', call: i => hits(i, 'del', ['2', '1']) },
@@ -97,11 +107,14 @@ export const SCORE_RULES: Rule[] = [
   { id: 'G1', level: 'high', kind: 'gain', label: 'a whole gene with a ClinGen triplosensitivity score of 3 (sufficient evidence)', gene: v => v.g.whole && v.ts === 3 },
   { id: 'G2', level: 'high', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 5 or 4', call: i => hits(i, 'dup', ['5', '4']) },
   { id: 'G3', level: 'high', kind: 'gain', label: `50 protein-coding genes or more (section 3C for gains: 0.90 point), and / or more than ${BIG_KB / 1000} Mb (AChro-Puce)`, call: i => big(i, 50) },
+  { id: 'G1R', level: 'high', kind: 'gain', label: `a ClinGen dosage region with a triplosensitivity score of 3, ${REGION_COVER * 100} % covered or more`, call: i => regionText(i, 'ts', 3, true) },
+  { id: 'G4R', level: 'moderate', kind: 'gain', label: `a ClinGen dosage region with a triplosensitivity score of 2, ${REGION_COVER * 100} % covered or more`, call: i => regionText(i, 'ts', 2, true) },
   { id: 'G4', level: 'moderate', kind: 'gain', label: 'a whole gene with a ClinGen triplosensitivity score of 2 (some evidence)', gene: v => v.g.whole && v.ts === 2 },
   { id: 'G5', level: 'moderate', kind: 'gain', label: 'a breakpoint inside a gene with a haploinsufficiency score of 3 or a PanelApp green monoallelic gene: a partial duplication may disrupt it (2I-2L)', gene: v => !v.g.whole && v.g.exons && (v.hi === 3 || any(v.pa?.green, MONO)) },
   { id: 'G6', level: 'moderate', kind: 'gain', label: 'an AChro-Puce recurrent duplication classed PIEV (susceptibility)', call: i => hits(i, 'dup', ['PIEV']) },
   { id: 'G7', level: 'moderate', kind: 'gain', label: '35 to 49 protein-coding genes (section 3B for gains: 0.45 point)', call: i => (i.refseq && i.genes.length >= 35 && i.genes.length < 50 ? `${i.genes.length} protein-coding genes` : null) },
   { id: 'G8', level: 'low', kind: 'gain', label: 'protein-coding genes gained, none of the above', gene: () => true },
+  { id: 'G11', level: 'low', kind: 'gain', label: `a ClinGen dosage region (triplosensitivity score 2 or 3) only partly gained (under ${REGION_COVER * 100} %)`, call: i => regionText(i, 'ts', 0, false) },
   { id: 'G9', level: 'low', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 3 (uncertain significance)', call: i => hits(i, 'dup', ['3']) },
   { id: 'G10', level: 'low', kind: 'gain', label: 'an AChro-Puce recurrent duplication of class 2 or 1 (likely benign, benign)', call: i => hits(i, 'dup', ['2', '1']) },
 ];
@@ -110,6 +123,12 @@ export const SCORE_RULES: Rule[] = [
 function big(i: ScoreInput, genes: number): string | null {
   const parts = [...(i.refseq && i.genes.length >= genes ? [`${i.genes.length} protein-coding genes`] : []), ...(i.sizeKb > BIG_KB ? [`${(i.sizeKb / 1000).toFixed(3)} Mb`] : [])];
   return parts.length ? parts.join(', ') : null;
+}
+/** the regions of this score (0: score 2 or 3) covered REGION_COVER or more (`full`), or only partly */
+function regionText(i: ScoreInput, key: 'hi' | 'ts', score: number, full: boolean): string | null {
+  const h = (i.regions ?? []).filter(r => (score ? r[key] === score : r[key] === 2 || r[key] === 3) && (r.covered >= REGION_COVER) === full);
+  if (!h.length) return null;
+  return h.map(r => full ? `${r.label} (${r.id}, ${pct(r.covered)} covered)` : `${r.label} (${r.id}): partial overlap (${pct(r.covered)})`).join('; ');
 }
 function hits(i: ScoreInput, type: 'del' | 'dup', cls: AchroClass[]): string | null {
   const h = i.achro.filter(a => a.type === type && a.cls.some(c => cls.includes(c)));

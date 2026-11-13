@@ -12,7 +12,7 @@ import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import { ACHRO_REGIONS, type AchroClass } from './achropuce';
 import { RO_MATCH, type PopulationSv } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
-import { scoreCnv, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
+import { scoreCnv, type RegionHit, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
 
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
@@ -23,6 +23,8 @@ export interface CnvAnn {
   genes: CnvGene[];
   dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>;
   achro: AchroHit[];
+  /** the ClinGen dosage regions (ISCA-…) the call overlaps, with the share of each region it covers */
+  regions: RegionHit[];
   /** the sources that did not answer */
   missing: string[];
   /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more, and those lying inside it whatever their share; not in the priority */
@@ -137,7 +139,7 @@ function pump() {
 }
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
 async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
-  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], missing: [], dgv: [] });
+  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], regions: [], missing: [], dgv: [] });
   const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing: string[] = [];
   let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
   try {
@@ -156,6 +158,16 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
       missing.push(...a.notes.filter(n => /unavailable/i.test(n)));
     } catch (e) { missing.push(`ClinGen dosage and gnomAD constraint (${msg(e)})`); }
   }
+  // ClinGen dosage regions: those the call overlaps, with the share of the region it covers
+  let regions: RegionHit[] = [];
+  if (ld.getDosageRegions) {
+    try {
+      regions = (await ld.getDosageRegions(c.chrom, s0, e0)).flatMap(r => {
+        const ov = Math.min(e0, r.end) - Math.max(s0, r.start);
+        return ov > 0 && r.end > r.start ? [{ id: r.id, label: r.label, hi: r.hi, ts: r.ts, covered: Math.min(1, ov / (r.end - r.start)) }] : [];
+      });
+    } catch (e) { missing.push(`ClinGen dosage regions (${msg(e)})`); }
+  }
   // DGV Gold: the records sharing 80 % of the call or more, the call inside one counting 100 %
   let dgv: DgvHit[] = [], dgvError: string | undefined;
   if (ld.getPopulationSvs) {
@@ -164,7 +176,7 @@ async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram)
   let band: string | undefined;
   if (!c.cytoband && ld.getCytobands) { try { band = bandOf(await ld.getCytobands(c.chrom), s0, e0); } catch { /* the band stays unknown */ } }
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), missing, dgv, dgvError, band });
+  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), regions, missing, dgv, dgvError, band });
   wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 
@@ -249,6 +261,6 @@ export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes
   const waiting = asked.filter(m => m === 'loading' || m === undefined).length;
   const failed = asked.filter(m => m === 'error').length;
   const missing = [...ann.missing, ...(failed ? [`PanelApp (${failed} gene${failed > 1 ? 's' : ''} not answered)`] : []), ...(ann.genes.length > PANELAPP_MAX_GENES ? [`PanelApp asked for ${PANELAPP_MAX_GENES} of the ${ann.genes.length} genes`] : [])];
-  const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, sex: s.sex[c.sampleKey] ?? null, sizeKb: c.sizeKb, genes, refseq: ann.source === 'refseq', achro: ann.achro });
+  const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, sex: s.sex[c.sampleKey] ?? null, sizeKb: c.sizeKb, genes, refseq: ann.source === 'refseq', achro: ann.achro, regions: ann.regions });
   return { ann, genes, score, waiting, missing };
 }
