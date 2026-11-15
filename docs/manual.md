@@ -228,6 +228,8 @@ are annotated: when the tab holds more calls than that, the question says so, an
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end and the type (or copy number, ISCN, log ratio), with the delimiter and header row guessed and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names only, and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
 Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
 order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,

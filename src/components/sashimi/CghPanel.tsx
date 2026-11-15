@@ -8,6 +8,7 @@ import { labHits, parseLabBenign, LAB_COVER, type LabHit } from './cghLabBenign'
 import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
+import { CghMapDialog } from './CghMapDialog';
 import { Icon, Stepper, Segmented, Pill } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
@@ -28,7 +29,7 @@ export function CghAddButton({ compact }: { compact?: boolean }) {
     <label className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium cursor-pointer whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50 ${compact ? 'h-[26px] px-2 text-xs rounded-lg' : ''}`}
       title={'Array-CGH calls of one or more patients: the interval table of each sample exported by CytoGenomics (.txt: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), a BED (chrom, start, end, a name saying del / dup or x1 / x3), or zip files holding them (one patient per zip).\nRead in this page, never sent anywhere. Files can also be dropped on the page.'}>
       <Icon name="upload" size={compact ? 13 : 15} />{compact ? 'Add samples' : 'Add array-CGH samples'}
-      <input ref={input} data-cgh-input type="file" multiple accept=".txt,.tsv,.bed,.xls,.zip,text/plain,application/zip" className="hidden"
+      <input ref={input} data-cgh-input type="file" multiple accept=".txt,.tsv,.csv,.bed,.xls,.zip,text/plain,application/zip" className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>
   );
@@ -37,6 +38,7 @@ export function CghAddButton({ compact }: { compact?: boolean }) {
 /** The question asked once the files are read: the minimum number of probes, with what it keeps of each sample. */
 export function CghProbeDialog() {
   const s = useCgh();
+  if (s.toMap.length) return <CghMapDialog key={s.toMap[0].name} item={s.toMap[0]} />;
   return s.pending ? <ProbeQuestion p={s.pending} init={s.filter.minProbes} initKb={s.filter.minKb} loaded={s.files} /> : null;
 }
 /** the patient's sex: changes the priority of X-linked recessive genes and the copies drawn for chrX / chrY */
@@ -96,6 +98,8 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
           </table>}
           {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
+          {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
+            <button className="text-accent-700 hover:underline" onClick={() => cgh.remap(f)}>{f.remembered ? '(change…)' : 'columns…'}</button></div>)}
           {p.notes.map(e => <div key={e} className="text-[11px] text-slate-500">{e}</div>)}
           {p.errors.map(e => <div key={e} className="text-[11px] text-red-700">{e}</div>)}
         </div>

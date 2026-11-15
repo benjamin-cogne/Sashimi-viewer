@@ -10,6 +10,7 @@
  * tab, with the classification typed in the table, and can be written back as the same table.
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
+import { norm, parseNum, splitDelimited, joinDelimited, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
 export type CghKind = 'loss' | 'gain';
 export type CghSex = 'male' | 'female';
@@ -66,15 +67,15 @@ export interface CghFile {
   headerLine: number | null; commentCol: number | null;
   samples: CghSample[];
   warnings: string[];
+  /** the delimiter (tab for the software's own export), and the columns this file was read with (null for a BED) */
+  delim: string; spec: MapSpec | null;
+  /** the zip's patient name, to read the file again with other columns */
+  fallback?: string;
+  /** rows not read (unreadable, or a Type value set to ignore) and the first reason; whether a remembered mapping was used */
+  skipped: number; firstSkip: string | null; remembered?: boolean;
 }
 
-const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
-const num = (s: string | undefined): number | null => {
-  const t = (s ?? '').trim().replace(/,/g, '');
-  if (!t || /^(na|nan|-)$/i.test(t)) return null;
-  const n = Number(t);
-  return Number.isFinite(n) ? n : null;
-};
+const num = (s: string | undefined): number | null => parseNum(s);
 /** chr1, 1, chrX, X → chr1, chrX; null for anything else */
 export function cghChrom(s: string): string | null {
   const m = s.trim().match(/^(?:chr)?(\d{1,2}|X|Y|M|MT)$/i);
@@ -95,7 +96,10 @@ export function iscnCopies(iscn: string | null): { copies: number | null; copies
   if (m) return { copies: +m[1], copiesHi: m[2] ? +m[2] : null, amp: false };
   return { copies: null, copiesHi: null, amp: !!iscn && /\)\s*amp\b/i.test(iscn) };
 }
-const kindOfText = (t: string): CghKind | null => (/del|loss|perte|\bx[01]\b/i.test(t) ? 'loss' : /amp|gain|dup|\bx[3-9]\b/i.test(t) ? 'gain' : null);
+export const kindOfText = (raw: string): CghKind | null => {
+  const t = raw.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return /del|loss|perte|\bx[01]\b/i.test(t) ? 'loss' : /amp|gain|dup|\bx[3-9]\b/i.test(t) ? 'gain' : null;
+};
 /** the classification cell: the class before `;;`, and the rest */
 function splitClass(cell: string): { classification: string; classRest: string } {
   const i = cell.indexOf(';;');
@@ -107,38 +111,45 @@ let fileSeq = 0;
  * One file: an interval table (CytoGenomics) or a BED. Throws when no call can be read from it. The sample is the
  * table's Record Name, else `fallbackSample` (a zip's name: one patient per zip), else the file's name.
  */
-export function parseCghFile(text: string, fileName: string, fallbackSample?: string): CghFile {
+export function parseCghFile(text: string, fileName: string, fallbackSample?: string, spec?: MapSpec): CghFile {
   // the commoner line ending (a file may mix them), written back the same
   const crlf = (text.match(/\r\n/g) ?? []).length, eol = crlf * 2 > (text.match(/\n/g) ?? []).length ? '\r\n' : '\n';
   const lines = text.replace(/^﻿/, '').split(/\r?\n/);
   const id = `cgh${++fileSeq}`;
   const leaf = fileName.split(/[›/\\]/).pop()!.trim();
   const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|bed|xls)$/i, '');
-  const hi = lines.findIndex(l => { const c = l.split('\t').map(norm); return c.includes('chromosome') && c.includes('start') && (c.includes('stop') || c.includes('end')); });
-  const f = hi >= 0 ? parseInterval(lines, hi, id, fileName, base, eol) : parseBed(lines, id, fileName, base, eol);
-  return { ...f, saveAs: leaf.replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
+  let f: Omit<CghFile, 'saveAs'>;
+  if (spec) f = parseInterval(lines, id, fileName, base, eol, spec);
+  else {
+    const hi = lines.findIndex(l => { const c = l.split('\t').map(norm); return c.includes('chromosome') && c.includes('start') && (c.includes('stop') || c.includes('end')); });
+    try {
+      f = hi >= 0 ? parseInterval(lines, id, fileName, base, eol, { cols: autoCols(lines[hi].split('\t').map(norm)), opts: AUTO_OPTS(hi) }) : parseBed(lines, id, fileName, base, eol);
+    } catch (e) {
+      // a delimited table whose columns are not recognised: the caller asks which column is which
+      const t = detectTable(lines);
+      if (t && t.ncols >= 3) throw new NeedsMapping((e as Error).message);
+      throw e;
+    }
+  }
+  return { ...f, fallback: fallbackSample, saveAs: leaf.replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
 }
 
-function parseInterval(lines: string[], hi: number, id: string, fileName: string, base: string, eol: string): Omit<CghFile, 'saveAs'> {
+function parseInterval(lines: string[], id: string, fileName: string, base: string, eol: string, spec: MapSpec): Omit<CghFile, 'saveAs'> {
+  const { cols: c, opts } = spec, hi = opts.headerRow, d = opts.delim;
+  const sp = (l: string) => (d === '\t' ? l.split('\t') : splitDelimited(l, d));
+  // a decimal comma only where the delimiter is not the comma (a log ratio, a size, a copy number)
+  const dec = d !== ',', nn = (s: string | undefined) => parseNum(s, dec);
   const meta: [string, string][] = [];
   for (const l of lines.slice(0, hi)) {
-    const [k, ...v] = l.split('\t');
+    const [k, ...v] = sp(l);
     if (k?.trim()) meta.push([k.trim().replace(/:$/, ''), v.join(' ').trim()]);
   }
   const metaOf = (re: RegExp) => meta.find(([k]) => re.test(k))?.[1] || null;
   const buildText = metaOf(/^genome$/i);
   const record = metaOf(/^record name$/i);
-  const head = lines[hi].split('\t').map(norm);
-  const col = (...names: string[]) => { for (const n of names) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
-  const c = {
-    chrom: col('chromosome', 'chr', 'chrom'), start: col('start'), stop: col('stop', 'end'), band: col('cytoband', 'band'),
-    genes: col('genename', 'genenames', 'genes', 'gene'), size: col('sizekb', 'size'), type: col('type', 'aberrationtype'),
-    probes: col('probes', 'probe', 'nprobes', 'numprobes', 'numberofprobes'), lr: col('meanlogratio', 'logratio', 'log2ratio'),
-    iscn: col('iscn'), sup: col('suppress', 'suppressed'), cls: col('classification', 'class'),
-    note: col('comment', 'comments', 'note', 'notes', 'commentaire', 'commentaires'),
-    sample: col('samplename', 'sample', 'recordname', 'arrayname'),
-  };
   const warnings: string[] = [];
+  let skipped = 0, firstSkip: string | null = null, ignored = 0;
+  const skip = (why: string) => { skipped++; firstSkip ??= why; };
   if (c.probes < 0) warnings.push('no #Probes column: the minimum number of probes cannot be applied');
   const samples = new Map<string, CghSample>();
   const declared = new Map<string, number>();
@@ -149,29 +160,33 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
     const foot = l.match(/^\s*([^\t=]+?)\s*=\s*(\d+)\s*$/);
     if (foot) { declared.set(foot[1], +foot[2]); continue; }
     if (/^number of calls/i.test(l)) continue;
-    const f = l.split('\t');
-    const chrom = cghChrom(f[c.chrom] ?? '');
-    const start = num(f[c.start]), end = num(f[c.stop]);
-    if (!chrom || start == null || end == null || end < start) { warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
+    const f = sp(l);
+    const chrom = c.chrom >= 0 ? cghChrom(f[c.chrom] ?? '') : null;
+    const s0 = num(f[c.start]), end = num(f[c.stop]);
+    const start = s0 != null && opts.zeroBased ? s0 + 1 : s0;
+    if (!chrom || start == null || end == null || end < start) { skip(`line ${i + 1}: ${!chrom ? 'chromosome' : 'start / end'} not a position (${l.slice(0, 40)})`); warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
     const iscnRaw = c.iscn >= 0 ? (f[c.iscn] ?? '').trim() : '';
     const iscn = iscnRaw && !/^na$/i.test(iscnRaw) ? iscnRaw : null;
-    const cn = iscnCopies(iscn);
+    let cn = iscnCopies(iscn);
+    if (cn.copies == null && !cn.amp && c.copies >= 0) { const n = nn(f[c.copies]); if (n != null) cn = { copies: Math.round(n), copiesHi: null, amp: false }; }
     const typeText = c.type >= 0 ? (f[c.type] ?? '').trim() : '';
-    const lr = c.lr >= 0 ? num(f[c.lr]) : null;
-    const kind = kindOfText(typeText) ?? (cn.amp ? 'gain' : cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
-    if (!kind) { warnings.push(`line ${i + 1}: no type, copy number or log ratio, not read`); continue; }
+    const lr = c.lr >= 0 ? nn(f[c.lr]) : null;
+    const choice = typeText ? opts.typeMap[typeText.toLowerCase()] : undefined;
+    if (choice === 'ignore') { ignored++; skip(`line ${i + 1}: type "${typeText}" ignored`); continue; }
+    const kind = choice ?? kindOfText(typeText) ?? (cn.amp ? 'gain' : cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
+    if (!kind) { skip(`line ${i + 1}: no type, copy number or log ratio`); warnings.push(`line ${i + 1}: no type, copy number or log ratio, not read`); continue; }
     const cell = c.cls >= 0 ? (f[c.cls] ?? '') : '';
     if (cell.trim()) { if (cell.includes(';;')) suffixYes++; else suffixNo++; }
     const name = (c.sample >= 0 && f[c.sample]?.trim()) || record || base;
     let s = samples.get(name);
     if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex: sexOf(metaOf(/^(gender|sex|sexe)$/i)) }; samples.set(name, s); }
-    const size = c.size >= 0 ? num(f[c.size]) : null;
+    const size = c.size >= 0 ? nn(f[c.size]) : null;
     s.cnvs.push({
       id: `${id}:${i}`, sample: name, sampleKey: s.key, chrom, start, end,
       cytoband: c.band >= 0 ? (f[c.band] ?? '').trim() : '',
       genes: c.genes >= 0 ? (f[c.genes] ?? '').split(/[,;]/).map(g => g.trim()).filter(Boolean) : [],
-      sizeKb: size ?? (end - start) / 1000, kind, typeText: typeText || (kind === 'loss' ? 'Deletion' : 'Gain'),
-      probes: c.probes >= 0 ? num(f[c.probes]) : null, logRatio: lr, iscn, ...cn,
+      sizeKb: size != null ? size * SIZE_MULT[opts.sizeUnit] : (end - start) / 1000, kind, typeText: typeText || (kind === 'loss' ? 'Deletion' : 'Gain'),
+      probes: c.probes >= 0 ? nn(f[c.probes]) : null, logRatio: lr, iscn, ...cn,
       suppressed: c.sup >= 0 && /^(true|yes|1)$/i.test((f[c.sup] ?? '').trim()),
       ...splitClass(cell), note: c.note >= 0 ? (f[c.note] ?? '').trim() : '', line: i,
     });
@@ -181,8 +196,9 @@ function parseInterval(lines: string[], hi: number, id: string, fileName: string
     // the footer counts the calls the software made; a different count is said, not corrected
     if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
   }
+  if (ignored) warnings.push(`${ignored} row${ignored > 1 ? 's' : ''} ignored by their type`);
   if (!samples.size) throw new Error(`${fileName}: no call could be read (an interval table needs Chromosome, Start, Stop and a Type, an ISCN or a log ratio).`);
-  return { id, name: fileName, format: 'interval', build: cghBuild(buildText), buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings };
+  return { id, name: fileName, format: 'interval', build: cghBuild(buildText) ?? opts.build, buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings, delim: d, spec, skipped, firstSkip };
 }
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
@@ -207,7 +223,7 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
   if (noType) warnings.push(`${noType} interval${noType > 1 ? 's' : ''} without a type (the 4th column should say del / dup, loss / gain or x1 / x3), not read`);
   if (!s.cnvs.length) throw new Error(`${fileName}: neither an interval table (no Chromosome / Start / Stop header) nor a BED with typed intervals.`);
   warnings.unshift('BED: no probe count, the minimum number of probes does not apply');
-  return { id, name: fileName, format: 'bed', build: null, buildText: null, meta: [], lines, eol, classCol: null, classSuffix: '', headerLine: null, commentCol: null, samples: [s], warnings };
+  return { id, name: fileName, format: 'bed', build: null, buildText: null, meta: [], lines, eol, classCol: null, classSuffix: '', headerLine: null, commentCol: null, samples: [s], warnings, delim: '\t', spec: null, skipped: noType, firstSkip: noType ? 'no type in the 4th column' : null };
 }
 
 /**
@@ -216,24 +232,25 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
  * a BED gets the class and the note as two last columns.
  */
 export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note): string {
-  const out = file.lines.slice();
+  const out = file.lines.slice(), d = file.delim, sp = (l: string) => (d === '\t' ? l.split('\t') : splitDelimited(l, d));
   const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const byLine = new Map(file.samples.flatMap(s => s.cnvs).map(c => [c.line, c]));
   // an interval table: its Classification and Comment columns, added after the last one when missing
   let classCol = file.classCol, noteCol = file.commentCol;
   if (file.headerLine != null && (classCol == null || noteCol == null)) {
-    const h = out[file.headerLine].replace(/\t+$/, '').split('\t');
+    const h = sp(out[file.headerLine]);
+    while (h.length && h[h.length - 1] === '') h.pop();
     if (classCol == null) { classCol = h.length; h.push('Classification'); }
     if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
-    out[file.headerLine] = h.join('\t');
+    out[file.headerLine] = joinDelimited(h, d);
   }
   for (const [i, cnv] of byLine) {
     const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
     const cell = cls ? `${cls}${cnv.classRest || file.classSuffix}` : '';
     if (classCol != null && noteCol != null) {
-      const f = out[i].split('\t');
+      const f = sp(out[i]);
       while (f.length <= Math.max(classCol, noteCol)) f.push('');
-      f[classCol] = cell; f[noteCol] = note; out[i] = f.join('\t');
+      f[classCol] = cell; f[noteCol] = note; out[i] = joinDelimited(f, d);
     } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}`;
   }
   return out.join(file.eol);

@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
 import { parseCghFile, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
+import { NeedsMapping, findMap, type MapSpec } from './cghMapping';
 import { seriesOf } from './cghSeries';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
@@ -41,6 +42,8 @@ export interface CghState {
   shown: string | null;
   /** files read, waiting for the minimum number of probes; the files that could not be read */
   pending: { files: CghFile[]; errors: string[]; notes: string[] } | null;
+  /** tables whose columns were not recognised (or whose columns are changed), waiting for the column mapping; `orig` is kept when it is cancelled */
+  toMap: { name: string; text: string; fallback?: string; spec?: MapSpec; orig?: CghFile }[];
   /** classes changed since the last export */
   dirty: boolean;
   /** the patients (sample keys) with classes or notes not exported yet */
@@ -71,7 +74,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {}, lab: loadStoredLab(), labStored: true };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {}, lab: loadStoredLab(), labStored: true };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -83,7 +86,13 @@ if (typeof window !== 'undefined') window.addEventListener('beforeunload', onUnl
 
 /** a file's text: UTF-8, else Windows-1252 (an export from a Windows PC) */
 const decode = (buf: Uint8Array | ArrayBuffer): string => { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); } };
-const TABLE = /\.(txt|tsv|xls|bed)$/i;
+const TABLE = /\.(txt|tsv|csv|xls|bed)$/i;
+/** a file's text read with the mapping remembered for its header when there is one, else by its header's names */
+function readTable(text: string, name: string, fallback?: string): CghFile {
+  const hit = findMap(text.replace(/^﻿/, '').split(/\r?\n/));
+  if (hit) { try { return { ...parseCghFile(text, name, fallback, { ...hit.spec, opts: { ...hit.spec.opts, headerRow: hit.row } }), remembered: true }; } catch { /* the remembered columns do not fit: by names */ } }
+  return parseCghFile(text, name, fallback);
+}
 /** the tables of a zip, and of the zips inside it (one level): macOS's resource files left out, the other files counted */
 function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; bytes: Uint8Array }[]; skipped: number } {
   let skipped = 0;
@@ -112,7 +121,7 @@ export const cgh = {
   setModes(m: Record<string, GeneModes | 'loading' | 'error'>) { set({ modes: { ...state.modes, ...m } }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
-    const files: CghFile[] = [], errors: string[] = [], notes: string[] = [];
+    const files: CghFile[] = [], errors: string[] = [], notes: string[] = [], toMap: CghState['toMap'] = [];
     const seen = new Set([...state.files].map(f => f.lines.join('\n')));
     const take = (f: CghFile) => { const k = f.lines.join('\n'); if (seen.has(k)) { notes.push(`${f.name}: already added`); return; } seen.add(k); files.push(f); };
     for (const f of Array.from(list)) {
@@ -122,20 +131,34 @@ export const cgh = {
           // one patient per zip: its interval tables (a .txt must be one: other text files are skipped), its BED files
           const { entries, skipped } = zipEntries(buf);
           const patient = f.name.replace(/\.zip$/i, '');
-          let n = 0, other = skipped;
+          let n = 0, other = skipped, asked = 0;
           for (const e of entries) {
             try {
-              const t = parseCghFile(decode(e.bytes), `${f.name} › ${e.path}`, patient);
+              const text = decode(e.bytes), t = (() => { try { return readTable(text, `${f.name} › ${e.path}`, patient); } catch (x) { if (x instanceof NeedsMapping) { toMap.push({ name: `${f.name} › ${e.path}`, text, fallback: patient }); asked++; return null; } throw x; } })();
+              if (!t) continue;
               if (t.format === 'bed' && !/\.bed$/i.test(e.path)) { other++; continue; }
               take(t); n++;
             } catch { other++; }
           }
-          if (!n) errors.push(`${f.name}: no interval table or BED inside (${entries.length + skipped} file${entries.length + skipped > 1 ? 's' : ''})`);
+          if (!n && !asked) errors.push(`${f.name}: no interval table or BED inside (${entries.length + skipped} file${entries.length + skipped > 1 ? 's' : ''})`);
           else if (other) notes.push(`${f.name}: ${n} table${n > 1 ? 's' : ''} read, ${other} other file${other > 1 ? 's' : ''} skipped`);
-        } else take(parseCghFile(decode(buf), f.name));
+        } else { const text = decode(buf); try { take(readTable(text, f.name)); } catch (x) { if (x instanceof NeedsMapping) toMap.push({ name: f.name, text }); else throw x; } }
       } catch (e) { errors.push(`${f.name}: ${(e as Error).message.replace(`${f.name}: `, '')}`); }
     }
-    set({ pending: { files, errors, notes } });
+    set({ pending: files.length || errors.length || notes.length || !toMap.length ? { files, errors, notes } : null, toMap: [...state.toMap, ...toMap] });
+  },
+  /** the table at the head of the queue read with the columns chosen (null: skipped, or kept as it was) */
+  mapped(file: CghFile | null) {
+    const [head, ...toMap] = state.toMap;
+    const add = file ?? head?.orig;
+    const pending = state.pending ?? { files: [], errors: [], notes: [] };
+    const next = add ? { ...pending, files: [...pending.files, add] } : pending;
+    set({ toMap, pending: toMap.length || next.files.length || next.errors.length || next.notes.length ? next : null });
+  },
+  /** a file read, to be read again with other columns */
+  remap(f: CghFile) {
+    const p = state.pending; if (!p || !f.spec) return;
+    set({ pending: { ...p, files: p.files.filter(x => x !== f) }, toMap: [...state.toMap, { name: f.name, text: f.lines.join(f.eol), fallback: f.fallback, spec: f.spec, orig: f }] });
   },
   /** the files accepted with this minimum and the sexes chosen (by sample key; the file's own when not chosen) */
   accept(minProbes: number, sexes: Record<string, CghSex | null> = {}, minKb = state.filter.minKb) {
