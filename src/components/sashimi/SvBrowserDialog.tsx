@@ -7,6 +7,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import SvGeneSummary, { type GeneSummary } from './SvGeneSummary';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
 import { parseLocus } from './geometry';
@@ -77,6 +78,8 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const close = () => { setLink(null, build); onClose(); };
   const [shown, setShown] = useState<Shown | null>(null);
   const [focus, setFocus] = useState<{ start: number; end: number; key: number } | null>(null);
+  /** the genes the event changes, as the browser reads them (next to the nomenclature) */
+  const [geneSum, setGeneSum] = useState<GeneSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -233,7 +236,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           {error && <div className="text-[12px] text-red-700 mt-2">{error}</div>}
           {note && <div className="text-[11.5px] text-accent-800 mt-1">{note}</div>}
           {sv && rec && (
-            <div className="mt-2 grid grid-cols-[1fr_1fr] gap-4 text-xs">
+            <div className="mt-2 grid grid-cols-1 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1.2fr)] gap-4 text-xs">
               <div>
                 <div className="text-[10.5px] font-semibold text-slate-700">Rebuilt chromosome</div>
                 <div className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-0.5">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
@@ -242,6 +245,8 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                 <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as heterozygous, 2 copies on the flanks; no read depth (open the cartoon on a sample for that).</div>
               </div>
               <SvNomenclatureBox rec={rec} build={build} bands={bands} />
+              {geneSum ? <SvGeneSummary s={geneSum} onGene={g => { const pad = Math.max(2000, (g.end - g.start) * 0.15); setFocus({ start: g.start - pad, end: g.end + pad, key: Date.now() }); }} />
+                : <div className="text-[10.5px] text-slate-400">Genes in the event: reading them…</div>}
             </div>
           )}
         </div>
@@ -250,7 +255,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : shown.kind === 'variant' ? `variant:${shown.text}` : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
-            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark}
+            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark} onGeneSummary={setGeneSum}
             variant={variant ? {
               start: variant.v.start, end: variant.v.end, key: variant.text,
               label: variant.hgvsg ? variant.typed.replace(/\(([^)]*)\)/, '') : variant.v.hgvs,

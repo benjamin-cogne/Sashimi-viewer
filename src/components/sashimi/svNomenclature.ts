@@ -42,7 +42,7 @@ export interface SvNomenclature {
 }
 export const NOMENCLATURE_WARNING = 'Automated draft: check before any clinical report.';
 /** the versions followed, to state in a report (ISCN 2024 §4.2a) */
-export const NOMENCLATURE_VERSIONS = 'HGVS nomenclature (varnomen.hgvs.org) · ISCN 2024';
+export const NOMENCLATURE_VERSIONS = 'HGVS nomenclature (varnomen.hgvs.org)';
 
 const num = (c: string) => c.replace(/^chr/i, '');
 const comma = (n: number) => n.toLocaleString('en-US');

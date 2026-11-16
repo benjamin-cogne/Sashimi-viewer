@@ -17,6 +17,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { reconstruct, type SvReconstruction } from './svModel';
 import type { Cytoband } from './svNomenclature';
+import { MOI, type GeneSummary, type GeneSummaryItem } from './SvGeneSummary';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, LOEUF_CLASS, loeufClass, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
@@ -133,6 +134,8 @@ interface Props {
   highlight?: { start: number; end: number; key: number } | null;
   /** a small variant marked on the reference (no rebuilt chromosome): its stretch (0-based half-open), a label, its card's lines */
   variant?: { start: number; end: number; key: string; label: string; lines: string[] };
+  /** the genes the event changes, with their constraint and PanelApp readings, as they come in (null: no event) */
+  onGeneSummary?: (s: GeneSummary | null) => void;
 }
 
 /** the small variant's mark */
@@ -284,17 +287,6 @@ const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first 
 
 
 
-/** Modes of inheritance (PanelApp), as colours and words. */
-const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
-  AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
-  'AD+AR': { color: '#7c3aed', short: 'AD/AR', label: 'mono- or biallelic' },
-  AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },
-  XLR: { color: '#db2777', short: 'XLR', label: 'X-linked, females biallelic' },
-  XLD: { color: '#9d174d', short: 'XLD', label: 'X-linked, females may be affected' },
-  MT: { color: '#059669', short: 'MT', label: 'mitochondrial' },
-  '?': { color: '#94a3b8', short: '?', label: 'unknown / other' },
-  none: { color: '#cbd5e1', short: '—', label: 'not in PanelApp' },
-};
 
 
 /** Which genes are drawn: every criterion set must hold (empty or 'any' = not filtering on it). */
@@ -330,7 +322,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -571,6 +563,37 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <title>{`Mode of inheritance (PanelApp): ${MOI[m.cls].label}${m.fromPanel ? ` in ${m.fromPanel}` : m.m ? ` · ${m.m.parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}`).join(', ')}` : ''}${(() => { const ds = diseasesOf(sym); return ds.length ? `\nDisease: ${ds.slice(0, 5).map(d => d.name).join('; ')}${ds.length > 5 ? `; +${ds.length - 5} more` : ''}` : ''; })()}`}</title></g>;
   };
   useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ---- the gene summary (next to the nomenclature): the genes the event changes, their constraint, where they are green ----
+  /** where a gene is green (diagnostic grade) in PanelApp: the loaded panel, then every panel of the source; its mode there */
+  const greenOf = (sym: string): { cls: MoiClass | null | 'pending'; panels: string[] } => {
+    const classes = new Set<MoiClass>(), panels: string[] = [];
+    const pg = panel?.genes.get(sym.toUpperCase());
+    if (pg && pg.confidence === 3) { classes.add(pg.moi ? classifyMoi(pg.moi) : '?'); panels.push(panel!.name); }
+    const m = modes.current.get(sym);
+    if (m && typeof m === 'object') {
+      for (const e of m.entries) if (e.confidence === 3) { classes.add(e.cls); if (panels.length < 4 && !panels.includes(e.panel)) panels.push(e.panel); }
+    } else if ((m === 'loading' || m === undefined) && !classes.size) return { cls: 'pending', panels };
+    if (!classes.size) return { cls: null, panels };
+    if (classes.has('AD+AR') || (classes.has('AD') && classes.has('AR'))) return { cls: 'AD+AR', panels };
+    const named: MoiClass[] = [...classes].filter(c => c !== '?');
+    const order: MoiClass[] = ['AD', 'AR', 'XLD', 'XLR', 'MT'];
+    return { cls: named.length ? order.find(c => named.includes(c)) ?? named[0] : '?', panels };
+  };
+  const geneSummary = useMemo((): GeneSummary | null => {
+    if (!eventRec) return null;
+    const WHOLE = new Set<string>(['deleted', 'duplicated', 'moved']), PART = new Set<string>(['intragenic-del', 'intragenic-dup', 'partial-copy', 'disrupted', 'fusion']);
+    const items: GeneSummaryItem[] = story.genes.filter(g => WHOLE.has(g.kind) || PART.has(g.kind)).map(g => {
+      const c = ann.constraint.get(g.gene.symbol), gr = greenOf(g.gene.symbol);
+      return {
+        symbol: g.gene.symbol, start: g.gene.start, end: g.gene.end, kind: g.kind, whole: WHOLE.has(g.kind),
+        coding: g.gene.transcripts.some(t => t.cdsStart != null && t.cdsEnd != null && t.cdsEnd > t.cdsStart),
+        loeuf: c?.loeuf ?? null, pli: c?.pli ?? null, version: c?.version ?? null, green: gr.cls, greenPanels: gr.panels,
+      };
+    });
+    return { cnv: story.genes.some(g => g.kind === 'deleted' || g.kind === 'duplicated' || g.kind === 'intragenic-del' || g.kind === 'intragenic-dup' || g.kind === 'partial-copy') || (rec?.lost.length ?? 0) > 0, items, constraintLoading: ann.loading, source: moiSrc.label };
+  }, [eventRec, rec, story, ann, panel, modesVersion, moiSrc.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onGeneSummaryRef = useRef(onGeneSummary); onGeneSummaryRef.current = onGeneSummary;
+  useEffect(() => { onGeneSummaryRef.current?.(geneSummary); }, [geneSummary]);
   /** does a gene pass the gene filter (a criterion whose data is still on its way does not hold yet) */
   const passes = (sym: string): boolean => {
     const f = geneFilter;

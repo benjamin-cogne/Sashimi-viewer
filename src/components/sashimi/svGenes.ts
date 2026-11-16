@@ -49,6 +49,10 @@ export interface GeneAnnotations {
  * browser's help "for the interpretation of Mendelian disease cases" (the 85th LOEUF percentile); v2.1.1: < 0.35
  * (Karczewski et al. 2020). gnomAD advises reading LOEUF as a continuous value.
  */
+/**
+ * gnomAD's recommended LOEUF threshold: < 0.45 for v4 (gnomAD v4.1.1, March 2026: the 16.7th percentile, where 0.35
+ * stood in v2.1.1; unchanged in v4.1.2), < 0.35 for v2.1.1.
+ */
 export const LOEUF_INTOLERANT: Record<string, number> = { v4: 0.45, 'v2.1.1': 0.35 };
 /**
  * gnomAD's general cut-off for a constrained gene: < 0.6 for v4.0 ("due to expected shifts in the LOEUF distribution
