@@ -4173,6 +4173,22 @@ export default function SashimiViewer({
     });
     return out;
   }, [panelOrder, displayTracks]);
+  /**
+   * Each sample's colour: by its place among the sample tracks as they are drawn (panels dragged, samples added or made
+   * primary included), so that the second track on screen is never orange or yellow (see TRACK_COLORS). Groups and
+   * GTEx tissues keep their own colours.
+   */
+  const sampleColor = useMemo(() => {
+    const byKey = new Map(displayTracks.map(t => [panelKeyOf(t), t]));
+    const m = new Map<number, string>();
+    for (const key of orderKeys) {
+      const t = byKey.get(key);
+      if (!t || t.gtex || t.group || m.has(t.sampleId)) continue;
+      m.set(t.sampleId, TRACK_COLORS[m.size % TRACK_COLORS.length]);
+    }
+    return m;
+  }, [orderKeys, displayTracks]);
+  const colorOfSample = (sid: number) => sampleColor.get(sid) ?? TRACK_COLORS[Math.max(0, tracks.findIndex(t => t.sampleId === sid)) % TRACK_COLORS.length];
 
   /** Per-sample usage events (arc labels in %), same computation as the group tracks on the sample's own junctions. */
   const usageEvents = useMemo(() => {
@@ -4249,7 +4265,7 @@ export default function SashimiViewer({
     // the samples with a methylation panel: with two or more, each panel gets the row of the island differences
     const methylDiffRow = showMethyl && !!ds.getMethylation && displayTracks.filter(t => isDnaTrack(t) && !t.gtex && !t.group).length >= 2;
     const place = (track: TrackData, idx: number) => {
-      const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? TRACK_COLORS[idx % TRACK_COLORS.length];
+      const color = track.gtex ? track.gtex.tissue.color : track.group?.color ?? colorOfSample(track.sampleId);
       const trackAgg = track.group ? track.group.agg : !track.gtex ? usageEvents.get(track.sampleId) : undefined;
       const trackEvents = trackAgg?.events;
       const otherGroups = track.group ? displayTracks.filter(o => o.group && o.sampleId !== track.sampleId) : [];
@@ -4771,7 +4787,7 @@ export default function SashimiViewer({
   const legendItems = (() => {
     const y = 14;
     const items: { w: number; el: JSX.Element }[] = [];
-    const primaryColor = TRACK_COLORS[0];
+    const primaryColor = comparedTracks[0] && !comparedTracks[0].group && !comparedTracks[0].gtex ? colorOfSample(comparedTracks[0].sampleId) : comparedTracks[0]?.group?.color ?? TRACK_COLORS[0];
     const line = (color: string, dashed: boolean, label: string, key: string) => items.push({
       w: label.length * 5.6 + 40,
       el: (
@@ -6519,7 +6535,7 @@ export default function SashimiViewer({
     };
     const stripFor = (idx: number): PopStrip | null => {
       const u = usageOf(idx); if (!u) return null;
-      const colorOf = new Map(tracks.map((t, i) => [t.sampleId, TRACK_COLORS[i % TRACK_COLORS.length]]));
+      const colorOf = new Map(tracks.map(t => [t.sampleId, colorOfSample(t.sampleId)]));
       return { values: u.per.filter(p => p.u.usage != null).map(p => ({ value: p.u.usage!, name: p.sample.sample_name, color: colorOf.get(p.sample.sample_id) ?? null })), median: usageCohort(u.values).median };
     };
     const exonIdx = (rank: number) => tx ? tx.exons.findIndex(e => e.rank === rank) : -1;
@@ -6973,7 +6989,7 @@ export default function SashimiViewer({
                       <button key={s.id} onClick={() => toggleSample(s)}
                         title={shown ? `Shown as track ${idx + 1}${idx === 0 ? ' (primary)' : ''} · click to remove it from the plot` : 'Click to show this sample as a track'}
                         className={`w-full text-left px-3 py-1.5 text-xs flex items-center gap-2 ${shown ? 'bg-accent-50 text-accent-900 font-semibold hover:bg-accent-100' : 'text-slate-800 hover:bg-slate-50'}`}>
-                        <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={shown ? { background: TRACK_COLORS[idx % TRACK_COLORS.length] } : { border: '1px solid #cbd5e1' }} />
+                        <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={shown ? { background: colorOfSample(s.id) } : { border: '1px solid #cbd5e1' }} />
                         <span className="flex-1 truncate">{s.name}</span>
                         {shown && <span className="text-accent-600 text-[10px] font-medium">✓ shown</span>}
                       </button>
@@ -7227,7 +7243,7 @@ export default function SashimiViewer({
             <span className="inline-flex items-center gap-1.5 pr-1 text-[12.5px] font-semibold text-accent-700"><Icon name="reads" size={15} />Reads</span>
             {tracks.length > 1 && (() => {
               // whose reads: one button, the list of the shown samples in their track colours, and all of them
-              const colorOf = (sid: number) => TRACK_COLORS[Math.max(0, tracks.findIndex(tr => tr.sampleId === sid)) % TRACK_COLORS.length];
+              const colorOf = colorOfSample;
               return (
                 <PickButton prefix="reads of" label="Reads of" value={readsAll ? 'all' : String(effectiveReadsSampleId ?? '')}
                   onChange={v => { if (v === 'all') setReadsAll(true); else { setReadsAll(false); setReadsSampleId(parseInt(v)); } }}
@@ -7473,7 +7489,7 @@ export default function SashimiViewer({
         })()}
         {inspect && (
           <RepeatInspector locus={inspect} ds={ds} onClose={() => setInspect(null)}
-            samples={tracks.filter(t => t.sampleId > 0 && !t.gtex).map((t, i) => ({ id: t.sampleId, name: t.sampleName, color: TRACK_COLORS[i % TRACK_COLORS.length] }))} />
+            samples={tracks.filter(t => t.sampleId > 0 && !t.gtex).map(t => ({ id: t.sampleId, name: t.sampleName, color: colorOfSample(t.sampleId) }))} />
         )}
 
         {/* HTML tooltip (crisper text than SVG, never exported) */}
@@ -7576,7 +7592,7 @@ export default function SashimiViewer({
             return jointOf(j.a, j.b, reads, refAt);
           };
           return <SvCartoon chrom={currentChrom} window={win} candidates={candidates} initialSelected={initial} models={models} build={build} geneLoaders={svGeneLoaders} loadJoint={loadJoint}
-            sample={{ name: track.sampleName, color: TRACK_COLORS[Math.max(0, idx) % TRACK_COLORS.length], coverage: track.coverage, sampled: !!track.sampled }} controls={controls}
+            sample={{ name: track.sampleName, color: colorOfSample(track.sampleId), coverage: track.coverage, sampled: !!track.sampled }} controls={controls}
             onClose={() => setSvCartoon(null)} />;
         })()}
         {cartoon && (
@@ -7806,7 +7822,7 @@ export default function SashimiViewer({
                     className="px-2 py-0.5 rounded-full bg-accent-600 text-white text-[11px] font-semibold hover:bg-accent-700" title="Animated cartoon: the chromosome rebuilt from this junction (and the arcs picked with shift-click), the segments lost or copied, and the copy number of each against the read depth (experimental)">🎬 Rebuild the SV</button>
                 )}
                 {popoverContent.cartoon && (
-                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: TRACK_COLORS[Math.max(0, si) % TRACK_COLORS.length], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
+                  <button onClick={() => { const c = popoverContent.cartoon!; const idx = tracks.findIndex(t => t.junctions.some(k => junctionKey(k) === junctionKey(c.j))); const si = c.sampleId != null ? tracks.findIndex(t => t.sampleId === c.sampleId) : idx; setCartoon({ j: c.j, model: c.model, label: c.label, fusion: c.fusion, color: tracks[Math.max(0, si)] ? colorOfSample(tracks[Math.max(0, si)].sampleId) : TRACK_COLORS[0], sample: tracks[Math.max(0, si)]?.sampleName ?? '' }); }}
                     className="px-2 py-0.5 rounded-full bg-accent-600 text-white text-[11px] font-semibold hover:bg-accent-700" title={popoverContent.cartoon.fusion ? 'Animated cartoon of the fusion transcript: the fused mRNA, its translation across the junction, NMD or the fusion protein and its domains (experimental)' : 'Animated cartoon: splicing, translation, NMD or protein consequence (experimental)'}>🎬 Cartoon</button>
                 )}
                 {popover.kind !== 'exon' && popover.kind !== 'retention' && popover.kind !== 'trans' && (() => {
