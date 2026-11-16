@@ -75,7 +75,7 @@ export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' 
             {events.length > 1 && <span className="text-[10.5px] text-slate-500">total {sizeText(total)}</span>}
           </span>
         ) : <span className="text-[10.5px] text-slate-400" title="The rearrangement changes no copy number (balanced)">no gain or loss</span>}
-        <button onClick={copy} className="text-[10.5px] text-accent-700 hover:underline">{copied ? 'copied' : 'copy'}</button>
+        <button onClick={copy} className="ml-auto text-[10.5px] text-accent-700 hover:underline" title="Copy the whole nomenclature (HGVS, ISCN, the versions followed and the warning), as plain text">{copied ? 'copied' : 'copy all'}</button>
       </div>
       {n.hgvs.map(h => row('HGVS', h, 'HGVS allele form: the changes on the reference from pter to qter (HGVS recommendations, complex HGVS/ISCN). Best positions from the reads, not shifted by the 3′ rule.'))}
       {n.uncertainty && <div className="text-[10.5px] text-slate-500">breakpoints {n.uncertainty} around the positions given</div>}
