@@ -512,7 +512,14 @@ const SEQ_NOTE_H = 14;
 // Categorical slots validated for colour-vision deficiency (adjacent-pair ΔE ≥ 8);
 // red is reserved for "junction unique to the primary sample" and never used for a track.
 
-const TRACK_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7'];
+/**
+ * The samples' colours, in the order tracks take them. The same seven as before, reordered so that the second and third
+ * tracks are never orange, yellow or pink: next to the first track, those read like the red of its junctions found in
+ * no other sample (UNIQUE_COLOR; orange was ΔE2000 13 from it, 7 for deuteranopes). Dark green (ΔE 70 from that red,
+ * far from the first track's blue) comes second, indigo (the farthest from the red for red-green colour-blind eyes)
+ * third; the warm colours only from the fifth track on.
+ */
+const TRACK_COLORS = ['#2a78d6', '#008300', '#4a3aa7', '#1baf7a', '#eb6834', '#eda100', '#e87ba4'];
 const UNIQUE_COLOR = '#e34948';
 const INK = {
   bg: '#ffffff', text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8',
