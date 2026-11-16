@@ -20,6 +20,7 @@ import type { ExonPhase } from './sashimi/geometry';
 import { fusionFrame, fusionHgvs, fusionPeptide, type FusionEnd, type FusionPeptide } from './sashimi/fusionFrame';
 import SpliceCartoon from './sashimi/SpliceCartoon';
 import SvCartoon from './sashimi/SvCartoon';
+import { plainCopy } from './sashimi/SvNomenclatureBox';
 import { jointOf, jointReads, TEMPLATE_SPAN, type SvJoint } from './sashimi/svJoint';
 import { junctionsOfEvidence, type SvJunction } from './sashimi/svModel';
 import { fusionStory, fusionStoryPossible, fusionWindows, spliceEvent, spliceStory, storyWindows, type SpliceStory } from './sashimi/spliceModel';
@@ -6878,7 +6879,7 @@ export default function SashimiViewer({
   const pickerList = 'max-h-56 overflow-y-auto';
 
   const content = (
-    <div className={embedded ? `${t.bg} ${t.text} w-full` : `${t.bg} ${t.text} rounded-xl shadow-2xl w-full max-w-[95vw] border ${t.border}`}>
+    <div className={embedded ? `${t.bg} ${t.text} w-full` : `${t.bg} ${t.text} rounded-xl shadow-2xl w-full max-w-[95vw] border ${t.border}`} onCopy={plainCopy}>
       {/* Header: the title row (gene, locus, zoom, search; samples on the right), the sectioned toolbar, and the reads strip when the reads track is on */}
       <div className="border-b border-slate-200 bg-slate-50">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-5 pt-3.5 pb-2.5">

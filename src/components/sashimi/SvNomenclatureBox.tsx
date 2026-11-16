@@ -5,6 +5,20 @@ import { useEffect, useState } from 'react';
 import type { SvReconstruction } from './svModel';
 import { nomenclatureOf, NOMENCLATURE_WARNING, NOMENCLATURE_VERSIONS, type Cytoband } from './svNomenclature';
 
+/**
+ * A copy as plain text only: pasted into a report, the text takes the document's font and size, not the page's
+ * (a selection copies as HTML by default, with the monospace font and the shading of the fields). Text fields keep
+ * the browser's own copy (already plain).
+ */
+export function plainCopy(e: React.ClipboardEvent) {
+  const t = e.target as HTMLElement;
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+  const text = window.getSelection()?.toString() ?? '';
+  if (!text) return;
+  e.preventDefault();
+  e.clipboardData.setData('text/plain', text);
+}
+
 /** The bands of a chromosome, fetched once per chromosome (undefined while missing or unavailable). */
 export function useCytobands(chrom: string, get?: (chrom: string) => Promise<Cytoband[]>): Cytoband[] | undefined {
   const [bands, setBands] = useState<{ chrom: string; list: Cytoband[] } | null>(null);
@@ -20,6 +34,7 @@ export function useCytobands(chrom: string, get?: (chrom: string) => Promise<Cyt
 export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' }: { rec: SvReconstruction; build: string; bands?: Cytoband[]; zygosity?: 'het' | 'hom' }) {
   const n = nomenclatureOf(rec, build, c => (c === rec.chrs[0] ? bands : undefined), zygosity);
   const [copied, setCopied] = useState(false);
+  const [rowCopied, setRowCopied] = useState<string | null>(null);
   if (!n.hgvs.length && !n.iscnSeq.length) return null;
   const unc = n.uncertainty ? ` (breakpoints ${n.uncertainty})` : '';
   // what a report takes: HGVS and the two ISCN 2024 formats, the versions followed, the warning (not the junction line)
@@ -28,14 +43,19 @@ export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' 
     const text = `${lines.join('\n')}\n${NOMENCLATURE_VERSIONS}\n${NOMENCLATURE_WARNING}`;
     navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => { /* clipboard blocked */ });
   };
+  // one field, copied alone (plain text: it takes the font of the document it is pasted into)
+  const copyRow = (text: string) => {
+    navigator.clipboard?.writeText(text).then(() => { setRowCopied(text); setTimeout(() => setRowCopied(c => (c === text ? null : c)), 1500); }).catch(() => { /* clipboard blocked */ });
+  };
   const row = (label: string, text: string, title: string) => (
     <div className="mt-0.5" title={title}>
       <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide mr-1">{label}</span>
       <span className="font-mono text-[11px] bg-accent-50 text-accent-900 rounded px-1.5 py-0.5 select-all break-all">{text}</span>
+      <button type="button" onClick={() => copyRow(text)} className="ml-1 text-[10px] text-accent-700 hover:underline align-middle" title="Copy this field alone, as plain text">{rowCopied === text ? '✓' : 'copy'}</button>
     </div>
   );
   return (
-    <div className="mt-1">
+    <div className="mt-1" onCopy={plainCopy}>
       <div className="flex items-center gap-2">
         <span className="text-[10.5px] font-semibold text-slate-700">Nomenclature (draft)</span>
         <button onClick={copy} className="text-[10.5px] text-accent-700 hover:underline">{copied ? 'copied' : 'copy'}</button>

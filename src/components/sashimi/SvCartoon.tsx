@@ -13,7 +13,7 @@ import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathTex
   type SvJunction, type SvSegment, type SvPiece, type SegmentDepth } from './svModel';
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
-import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
 import { refineJunction, jointHint, jointSummary, TEMPLATE_MIN, TEMPLATE_SPAN, type SvJoint } from './svJoint';
 
 // ======================== Timeline ========================
@@ -243,7 +243,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const ders = rec.ders.filter(d => d.rearranged || rec.ders.length === 1);
   const toGenes = () => genesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   return (
-    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
+    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} onCopy={plainCopy}>
       <div className="w-full min-h-full pb-4">
         {/* the SV browser's full-screen page, with the reconstruction from the reads added: back to the viewer from its bar (or Esc) */}
         {/* the Sashimi viewer's app bar */}

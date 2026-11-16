@@ -6,7 +6,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
-import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
 import SvGeneSummary, { type GeneSummary } from './SvGeneSummary';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
@@ -195,7 +195,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const full = useMemo<SvGeneLoaders>(() => ({ ...loaders, fallback: [] }), [loaders]);
   const rec = sv?.rec;
   return (
-    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
+    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} onCopy={plainCopy}>
       <div className="w-full min-h-full pb-4">
         {/* a full-screen page: back to the Sashimi viewer from its bar (or Esc) */}
         {/* the Sashimi viewer's app bar */}
