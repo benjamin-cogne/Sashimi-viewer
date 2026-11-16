@@ -4,6 +4,10 @@
 import { useEffect, useState } from 'react';
 import type { SvReconstruction } from './svModel';
 import { nomenclatureOf, NOMENCLATURE_WARNING, NOMENCLATURE_VERSIONS, type Cytoband } from './svNomenclature';
+import { cnvEvents } from './svPopulation';
+
+/** A length for reading: bp under 1 kb, kb under 1 Mb, Mb above. */
+export const sizeText = (n: number) => (n < 1000 ? `${n} bp` : n < 1e6 ? `${(n / 1e3).toFixed(n < 1e4 ? 2 : n < 1e5 ? 1 : 0)} kb` : `${(n / 1e6).toFixed(2)} Mb`);
 
 /**
  * A copy as plain text only: pasted into a report, the text takes the document's font and size, not the page's
@@ -37,6 +41,9 @@ export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' 
   const [rowCopied, setRowCopied] = useState<string | null>(null);
   if (!n.hgvs.length && !n.iscnSeq.length) return null;
   const unc = n.uncertainty ? ` (breakpoints ${n.uncertainty})` : '';
+  // the copies gained or lost, each with its length, and their total
+  const events = rec.chrs.flatMap(c => cnvEvents(rec, c));
+  const total = events.reduce((a, e) => a + (e.end - e.start), 0);
   // what a report takes: HGVS and the two ISCN 2024 formats, the versions followed, the warning (not the junction line)
   const lines = [...n.hgvs.map(h => `${h}${unc}`), ...(n.iscn ? [n.iscn] : []), ...(n.iscnArr ? [n.iscnArr] : [])];
   const copy = () => {
@@ -58,6 +65,16 @@ export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' 
     <div className="mt-1" onCopy={plainCopy}>
       <div className="flex items-center gap-2">
         <span className="text-[10.5px] font-semibold text-slate-700">Nomenclature (draft)</span>
+        {events.length > 0 ? (
+          <span className="inline-flex items-center gap-1 flex-wrap" title={`Copies ${events.length > 1 ? 'gained or lost' : events[0].kind === 'loss' ? 'lost' : 'gained'}, from the breakpoints: ${events.map(e => `${e.kind === 'loss' ? 'loss' : 'gain'} of ${(e.end - e.start).toLocaleString('en-US')} bp`).join(', ')}${events.length > 1 ? `; ${total.toLocaleString('en-US')} bp in all` : ''}`}>
+            {events.map((e, i) => (
+              <span key={i} className={`text-[10.5px] font-semibold rounded px-1.5 py-px ${e.kind === 'loss' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                {e.kind === 'loss' ? 'DEL' : e.copies > 2 ? `GAIN ×${e.copies}` : 'DUP'} {sizeText(e.end - e.start)}
+              </span>
+            ))}
+            {events.length > 1 && <span className="text-[10.5px] text-slate-500">total {sizeText(total)}</span>}
+          </span>
+        ) : <span className="text-[10.5px] text-slate-400" title="The rearrangement changes no copy number (balanced)">no gain or loss</span>}
         <button onClick={copy} className="text-[10.5px] text-accent-700 hover:underline">{copied ? 'copied' : 'copy'}</button>
       </div>
       {n.hgvs.map(h => row('HGVS', h, 'HGVS allele form: the changes on the reference from pter to qter (HGVS recommendations, complex HGVS/ISCN). Best positions from the reads, not shifted by the 3′ rule.'))}
