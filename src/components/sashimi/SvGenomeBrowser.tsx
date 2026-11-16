@@ -43,6 +43,8 @@ let VW = 1200, X1 = VW - 14, PW = X1 - X0, XC = (X0 + X1) / 2;
 const setWidth = (w: number) => { VW = w; X1 = w - 14; PW = X1 - X0; XC = (X0 + X1) / 2; };
 const DGV_LANE_H = 9, DGV_MAX_LANES = 8;
 const DGV_COLOR = { loss: '#dc2626', gain: '#2563eb', both: '#7c3aed', unknown: '#64748b' } as const;
+/** under each rebuilt chromosome: its junctions' labels, then its own coordinates */
+const DER_RULER_H = 36;
 const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H = 20, RIB_H = 118;
 const IDEO_Y = 22, IDEO_H = 13, LENS_H = 22, RULER_H = 24;
 /** the deepest zoom (bp across the plot), and the spans past which genes become bars, then a density profile */
@@ -1094,7 +1096,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const yRib = y; if (ders.length) y += RIB_H;
   const derY = ders.map((d, i) => {
     const band = y; y += BAND_H;
-    const ruler = y; y += 24;
+    const ruler = y; y += DER_RULER_H;
     const genesY = y; y += keep(`der${i}`, lod === 'density' ? derPacked[i].height + 40 : derPacked[i].height) + 4;
     const tad = domains.length ? y : -1; if (domains.length) y += TAD_H;
     y += 18;
@@ -1141,12 +1143,35 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
 
   // ---- gestures: drag to pan (a fling goes on), Ctrl / ⌘ + wheel or pinch to zoom, two-finger swipe to pan, double-click to zoom in,
   //      drag along the ruler to zoom on a stretch, click or drag on the ideogram to go there ----
-  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo' | 'select'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number } | null>(null);
+  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo' | 'select'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number; der?: string } | null>(null);
+  /**
+   * The rows of the rebuilt chromosomes (their band down to the next one), their offsets and the figure's height, for
+   * the gestures: over a rebuilt chromosome a zoom keeps its line-up (what is under the pointer there stays, a fusion
+   * included) and a Ctrl / ⌘ + drag picks a stretch of it, in its own positions.
+   */
+  const derRowsRef = useRef<{ d: DerLayout; y0: number; y1: number }[]>([]);
+  derRowsRef.current = ders.map((d, i) => ({ d, y0: derY[i].band - 6, y1: i + 1 < ders.length ? derY[i + 1].band - 6 : H }));
+  const derOffRef = useRef(derOff); derOffRef.current = derOff;
+  const svgHRef = useRef(H); svgHRef.current = H;
+  const derAt = (yy: number) => derRowsRef.current.find(r => yy >= r.y0 && yy < r.y1)?.d ?? null;
+  const derNamed = (name: string) => ders.find(d => d.name === name) ?? null;
+  /** the reference stretches a stretch [s, e) of a rebuilt chromosome (its own positions, as toDer) is made of, in its order */
+  const derToRef = (d: DerLayout, s0: number, e0: number) => d.pieces.flatMap(dp => {
+    const [lo, hi] = pieceRange(dp, L);
+    let a = toDer(dp, lo), b = toDer(dp, hi); if (a > b) [a, b] = [b, a];
+    const x0 = Math.max(a, s0), x1 = Math.min(b, e0); if (x1 <= x0) return [];
+    const r = (v: number) => (dp.piece.reversed ? dp.seg.end - (v - dp.derStart) : dp.seg.start + (v - dp.derStart));
+    const ra = r(x0), rb = r(x1);
+    return [{ letter: dp.seg.letter, rev: !!dp.piece.reversed, s: Math.round(Math.min(ra, rb)), e: Math.round(Math.max(ra, rb)) }];
+  });
   /** the click that ends a drag opens no card */
   const suppressClick = useRef(false);
   const [band, setBand] = useState<{ a: number; b: number } | null>(null);
-  /** an interval picked with Ctrl / ⌘ + drag: highlighted on the reference axis (it follows the view) until closed */
-  const [sel, setSel] = useState<{ s: number; e: number } | null>(null);
+  /**
+   * an interval picked with Ctrl / ⌘ + drag: highlighted (it follows the view) until closed. On the reference, or, when
+   * picked over a rebuilt chromosome, on it (`der`: its name; s, e in its positions, as toDer)
+   */
+  const [sel, setSel] = useState<{ s: number; e: number; der?: string } | null>(null);
   const [selCopied, setSelCopied] = useState(false);
   // an interval asked for (typed coordinates): highlighted as a Ctrl / ⌘ + drag would, with its bar
   useEffect(() => { if (highlight) { setSel({ s: highlight.start, e: highlight.end }); setSelCopied(false); } }, [highlight?.key]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1158,7 +1183,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     anim.current = {}; suppressClick.current = false;
     const x = toSvgX(e.clientX), yy = toSvgY(e.clientY);
     const kind = yy < IDEO_Y + IDEO_H + 4 ? 'ideo' : (e.ctrlKey || e.metaKey) && x >= X0 && x <= X1 ? 'select' : yy >= yRuler && yy < yRuler + RULER_H ? 'band' : 'pan';
-    dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId };
+    dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId, der: kind === 'select' ? derAt(yy)?.name : undefined };
     if (kind === 'ideo') { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); flyTo(p - sp / 2, p + sp / 2, 320); }
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -1176,7 +1201,16 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     dragRef.current = null; suppressClick.current = d.moved;
     if (d.kind === 'select') {
       const a = band ? Math.min(band.a, band.b) : d.x0, b = band ? Math.max(band.a, band.b) : d.x0; setBand(null);
-      if (d.moved && b - a > 2) { const s0 = vpRef.current.s, k = bppRef.current; setSel({ s: Math.max(0, Math.round(s0 + (a - X0) * k)), e: Math.min(L, Math.round(s0 + (b - X0) * k)) }); setSelCopied(false); }
+      if (d.moved && b - a > 2) {
+        const s0 = vpRef.current.s, k = bppRef.current, rs = s0 + (a - X0) * k, re = s0 + (b - X0) * k;
+        const dl = d.der ? derNamed(d.der) : null;
+        if (dl) {
+          // on the rebuilt chromosome: its own positions under the pointer (the reference's plus its offset in view)
+          const off = derOffRef.current.get(dl) ?? 0, ext = derExtent(dl);
+          setSel({ s: Math.max(ext.lo, Math.round(rs + off)), e: Math.min(ext.hi, Math.round(re + off)), der: dl.name });
+        } else setSel({ s: Math.max(0, Math.round(rs)), e: Math.min(L, Math.round(re)) });
+        setSelCopied(false);
+      }
       return;
     }
     if (d.kind === 'band' && band) {
@@ -1200,8 +1234,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const v = vpRef.current, sp = v.e - v.s;
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const f = Math.exp(e.deltaY * unit * 0.0022), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
-        moveTo(at - (at - v.s) * f, at + (v.e - at) * f, at);
+        // never past the closest zoom: clamped there, the view would recentre and leave the point under the pointer
+        const f = Math.max(MIN_SPAN / sp, Math.exp(e.deltaY * unit * 0.0022)), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
+        // over a rebuilt chromosome its line-up stays: the point under the pointer there (a fusion) stays under it
+        const overDer = !!derAt(((e.clientY - r.top) / r.height) * svgHRef.current);
+        moveTo(at - (at - v.s) * f, at + (v.e - at) * f, overDer ? undefined : at);
       } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
         e.preventDefault();
         const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit, sh = dx / r.width * VW * bppRef.current;
@@ -1213,8 +1250,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [txs.loading, L]); // eslint-disable-line react-hooks/exhaustive-deps
   const onDoubleClick = (e: React.MouseEvent) => {
     const x = toSvgX(e.clientX); if (x < X0 || x > X1) return;
-    const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : 0.5;
-    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320, at);
+    const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : Math.max(0.5, MIN_SPAN / (v.e - v.s));
+    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320, derAt(toSvgY(e.clientY)) ? 'keep' : at);
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const v = vpRef.current, sp = v.e - v.s;
@@ -1224,8 +1261,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     else if ((e.key === 'e' || e.key === 'E') && rec) { e.preventDefault(); eventView(); }
     else if (e.key === 'Escape' && sel) { e.preventDefault(); e.stopPropagation(); setSel(null); }
   };
-  const zoomToSel = () => { if (sel) { const pad = Math.max(100, (sel.e - sel.s) * 0.04); flyTo(sel.s - pad, sel.e + pad); } };
-  const selText = sel ? `${chrom}:${fmt(sel.s + 1)}-${fmt(sel.e)}` : '';
+  const selDer = sel?.der ? derNamed(sel.der) : null;
+  /** where a highlighted position is drawn: on the reference, or on its rebuilt chromosome */
+  const selX = (v: number) => (selDer ? derX(selDer, v) : refX(v));
+  const zoomToSel = () => {
+    if (!sel) return;
+    const pad = Math.max(100, (sel.e - sel.s) * 0.04);
+    // a stretch of a rebuilt chromosome: its line-up kept, so the stretch itself fills the view (a fusion with its two partners)
+    if (selDer) { const off = derOff.get(selDer) ?? 0; flyTo(sel.s - off - pad, sel.e - off + pad, 480, 'keep'); }
+    else flyTo(sel.s - pad, sel.e + pad);
+  };
+  const selPieces = sel && selDer ? derToRef(selDer, sel.s, sel.e) : [];
+  const selDerLo = selDer ? derExtent(selDer).lo : 0;
+  const pieceText = (q: { letter: string; rev: boolean; s: number; e: number }) => `${chrom}:${fmt(q.s + 1)}-${fmt(q.e)}${q.rev ? ' (inverted)' : ''}`;
+  const selText = !sel ? '' : selDer
+    ? `${selDer.name}:${fmt(sel.s - selDerLo + 1)}-${fmt(sel.e - selDerLo)} = ${selPieces.map(pieceText).join(' + ')}`
+    : `${chrom}:${fmt(sel.s + 1)}-${fmt(sel.e)}`;
 
   // ---- ruler ----
   const step = niceStep(ve - vp.s, 9);
@@ -1309,6 +1360,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
         {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
           <g key={d.name}><text x={14} y={derY[i].band + 9} fontWeight={700} fill={C.accent}>{d.name}</text>
+            <text x={14} y={derY[i].ruler + DER_RULER_H - 5} fontSize={9} fill={C.muted}><title>{`Positions along ${d.name} itself (1 at its start; the reference's own before the event), recalculated from the rebuilt chromosome`}</title>{`${d.name} coord.`}</text>
             <text x={14} y={derY[i].band + 21} fontSize={9.5} fontFamily={MONO}>{kb(len)}</text>
             {Math.abs(diff) >= 1 && <text x={14} y={derY[i].band + 32} fontSize={9.5} fontWeight={700} fontFamily={MONO} fill={diff > 0 ? '#15803d' : C.lost}>{diff > 0 ? '+' : '−'}{kb(Math.abs(diff))}</text>}
           </g>); })}
@@ -1538,6 +1590,20 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                   </g>
                 );
               })}
+              {(() => {
+                // its own coordinates (position 1 at its start: the reference's before the event), under its junctions' labels
+                const ext = derExtent(d), off = derOff.get(d) ?? 0;
+                const v0 = Math.max(ext.lo, vp.s + off), v1 = Math.min(ext.hi, vp.e + off);
+                if (v1 <= v0) return null;
+                const st = niceStep(v1 - v0, 9), yT = Y.band + BAND_H, out: React.ReactNode[] = [];
+                for (let t = Math.ceil((v0 - ext.lo) / st) * st; t <= v1 - ext.lo; t += st) {
+                  const x = derX(d, t + ext.lo);
+                  if (x < X0 - 1 || x > X1 + 1) continue;
+                  out.push(<g key={`dt${t}`}><line x1={x} x2={x} y1={yT} y2={yT + 4} stroke={C.muted} strokeWidth={0.8} />
+                    <text x={x} y={Y.ruler + DER_RULER_H - 5} fontSize={9} textAnchor="middle" fill={C.muted} fontFamily={MONO}>{tickText(t, st)}</text></g>);
+                }
+                return <g pointerEvents="none">{out}</g>;
+              })()}
               {d.pieces.slice(1).map((dp, i) => {
                 const x = derX(d, dp.derStart), via = dp.piece.via, alt = i % 2;
                 if (x < X0 - 2 || x > X1 + 2) return null;
@@ -1663,12 +1729,15 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       {domains.length > 0 && ders.map((d, i) => <text key={`tadl${i}`} x={14} y={derY[i].tad + 16} fontSize={10.5} fill={C.muted}>TADs</text>)}
       {/* the stretch being chosen on the ruler */}
       {sel && (() => {
-        const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e));
+        const a = Math.max(X0, selX(sel.s)), b = Math.min(X1, selX(sel.e));
         if (b <= a) return null;
+        // a stretch of a rebuilt chromosome: highlighted on its rows (the reference above holds it elsewhere, or twice)
+        const di = selDer ? ders.indexOf(selDer) : -1;
+        const top = di >= 0 ? derY[di].band - 4 : yRuler, bot = di >= 0 ? (di + 1 < ders.length ? derY[di + 1].band - 8 : H - 6) : H - 6;
         return <g pointerEvents="none" data-export="skip">
-          <rect x={a} y={yRuler} width={Math.max(1, b - a)} height={H - yRuler - 6} fill="#f59e0b" fillOpacity={0.12} />
-          {refX(sel.s) >= X0 && <line x1={a} x2={a} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
-          {refX(sel.e) <= X1 && <line x1={b} x2={b} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+          <rect x={a} y={top} width={Math.max(1, b - a)} height={bot - top} fill="#f59e0b" fillOpacity={0.12} />
+          {selX(sel.s) >= X0 && <line x1={a} x2={a} y1={top} y2={bot} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+          {selX(sel.e) <= X1 && <line x1={b} x2={b} y1={top} y2={bot} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
         </g>;
       })()}
       {/* the small variant searched: a line (a band when wider) through every track, its name on the ruler */}
@@ -1824,19 +1893,28 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           // the bar over the highlighted interval, in the box's pixels (centred on its visible part)
           const r = svgRef.current?.getBoundingClientRect(), br = boxRef.current?.getBoundingClientRect();
           if (!r || !br) return null;
-          const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e)), k = r.width / VW;
-          const inView = b > a, mid = inView ? (a + b) / 2 : refX(sel.s) < X0 ? X0 : X1;
-          const left = r.left - br.left + mid * k, top = r.top - br.top + (yRuler + RULER_H / 2) * k;
+          const a = Math.max(X0, selX(sel.s)), b = Math.min(X1, selX(sel.e)), k = r.width / VW;
+          const inView = b > a, mid = inView ? (a + b) / 2 : selX(sel.s) < X0 ? X0 : X1;
+          const di = selDer ? ders.indexOf(selDer) : -1;
+          const left = r.left - br.left + mid * k, top = r.top - br.top + (di >= 0 ? derY[di].band - 16 : yRuler + RULER_H / 2) * k;
           return (
             <div className="absolute z-30 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1 rounded-md border border-amber-300 bg-white/95 shadow-md px-1.5 py-0.5 text-[11px] whitespace-nowrap"
               style={{ left: Math.max(170, Math.min(br.width - 170, left)), top }} onMouseDown={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-              {!inView && refX(sel.e) <= X0 ? <span className="text-slate-400">◂</span> : null}
-              <span className="font-mono text-slate-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
-              <span className="text-slate-400">· {kb(sel.e - sel.s)}</span>
-              <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title="Zoom to the highlighted interval">🔍 zoom to region</button>
+              {!inView && selX(sel.e) <= X0 ? <span className="text-slate-400">◂</span> : null}
+              {selDer ? <>
+                <span className="font-mono text-slate-700" title={`the highlighted interval on the rebuilt chromosome ${selDer.name}, in its own coordinates (1-based, inclusive)`}>{selDer.name}:{fmt(sel.s - selDerLo + 1)}-{fmt(sel.e - selDerLo)}</span>
+                <span className="text-slate-400">· {kb(sel.e - sel.s)} · from</span>
+                <span className="font-mono text-slate-600" title="the stretches of the reference it is made of, in its order (each with its segment letter)">
+                  {selPieces.slice(0, 3).map((q, i) => <span key={i}>{i ? ' + ' : ''}<b className="font-sans text-slate-500">{q.letter}{q.rev ? '′' : ''}</b> {pieceText(q)}</span>)}{selPieces.length > 3 ? ` + ${selPieces.length - 3} more` : ''}
+                </span>
+              </> : <>
+                <span className="font-mono text-slate-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
+                <span className="text-slate-400">· {kb(sel.e - sel.s)}</span>
+              </>}
+              <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title={selDer ? `Zoom to this stretch of ${selDer.name} (the rebuilt chromosome stays lined up under it)` : 'Zoom to the highlighted interval'}>🔍 zoom to region</button>
               <button onClick={() => { void navigator.clipboard?.writeText(selText).then(() => setSelCopied(true), () => {}); }} className="px-1.5 py-0.5 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy the coordinates">{selCopied ? '✓ copied' : 'copy'}</button>
               <button onClick={() => setSel(null)} className="px-1 text-slate-400 hover:text-slate-700 text-sm leading-none" title="Remove the highlight (Esc)">×</button>
-              {!inView && refX(sel.s) >= X1 ? <span className="text-slate-400">▸</span> : null}
+              {!inView && selX(sel.s) >= X1 ? <span className="text-slate-400">▸</span> : null}
             </div>
           );
         })()}
@@ -1859,7 +1937,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)}</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
-        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
+        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom (over a rebuilt chromosome, about its own point under the pointer: a fusion stays), two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it; over a rebuilt chromosome, in its own coordinates, with the reference stretches it is made of), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
       <div className="px-5 mt-2 pb-1">
         {rec && !story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-slate-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}
