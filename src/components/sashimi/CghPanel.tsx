@@ -1,16 +1,16 @@
 /**
- * Array-CGH in the SV browser: the button that adds samples (interval tables from CytoGenomics, or BED files), the
- * question of the minimum number of probes, and the frame listing each sample's calls between the search and the
- * browser. A call clicked is drawn in the browser as a deletion or a duplication, with the browser's own tracks.
+ * The array-CGH page's frame: the button that adds samples, the questions asked once files are read (columns, minimum
+ * number of probes), and the table of each patient's calls with their annotations. A call clicked is drawn by the page
+ * in the SV browser's own browser, as a deletion or a duplication.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { labHits, parseLabBenign, LAB_COVER, type LabHit } from './cghLabBenign';
 import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { CghMapDialog } from './CghMapDialog';
 import { Icon, Stepper, Segmented, Pill } from './controls';
-import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_ACCEPT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
@@ -23,13 +23,12 @@ const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : 
 const KIND = { loss: { color: '#dc2626', bg: '#fee2e2', word: 'del' }, gain: { color: '#2563eb', bg: '#dbeafe', word: 'dup' } } as const;
 
 /** "＋ Add samples": the files picked (several at once), read in the page. */
-export function CghAddButton({ compact }: { compact?: boolean }) {
-  const input = useRef<HTMLInputElement>(null);
+function CghAddButton({ compact }: { compact?: boolean }) {
   return (
     <label className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium cursor-pointer whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50 ${compact ? 'h-[26px] px-2 text-xs rounded-lg' : ''}`}
       title={'Array-CGH calls of one or more patients: the interval table of each sample exported by CytoGenomics (.txt: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), a BED (chrom, start, end, a name saying del / dup or x1 / x3), or zip files holding them (one patient per zip).\nRead in this page, never sent anywhere. Files can also be dropped on the page.'}>
       <Icon name="upload" size={compact ? 13 : 15} />{compact ? 'Add samples' : 'Add array-CGH samples'}
-      <input ref={input} data-cgh-input type="file" multiple accept=".txt,.tsv,.csv,.bed,.xls,.zip,text/plain,application/zip" className="hidden"
+      <input data-cgh-input type="file" multiple accept={CGH_ACCEPT} className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>
   );
@@ -42,7 +41,7 @@ export function CghProbeDialog() {
   return s.pending ? <ProbeQuestion p={s.pending} init={s.filter.minProbes} initKb={s.filter.minKb} loaded={s.files} /> : null;
 }
 /** the patient's sex: changes the priority of X-linked recessive genes and the copies drawn for chrX / chrY */
-export const SEX_MARK: Record<CghSex, string> = { male: '♂', female: '♀' };
+const SEX_MARK: Record<CghSex, string> = { male: '♂', female: '♀' };
 function SexSelect({ value, onChange, title }: { value: CghSex | null; onChange: (v: CghSex | null) => void; title?: string }) {
   return <select value={value ?? ''} onChange={e => onChange((e.target.value || null) as CghSex | null)} aria-label="Sex of the patient"
     title={title ?? "The patient's sex: a male's chrX loss is hemizygous (a green X-linked recessive gene is then HIGH), and his chrX / chrY are drawn with one copy"}
@@ -64,7 +63,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   const noCount = p.files.some(f => f.format === 'bed' || f.warnings.some(w => /no #Probes/.test(w)));
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
-      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !over && (e.target as HTMLElement).tagName !== 'SELECT') cgh.accept(n, sexes, kb); }}>
+      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !over && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
       <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
@@ -137,13 +136,14 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     if (r.top < bb.top + head) box.scrollTop -= bb.top + head - r.top;
     else if (r.bottom > bb.bottom) box.scrollTop += r.bottom - bb.bottom;
   }, [s.shown]);
+  // each call's genes and priority, recomputed when an answer comes, not at each keystroke (viewOf reads ann, modes, sex)
+  const views = useMemo(() => new Map(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs)).map(c => [c.id, viewOf(s, c)])), [s.files, s.ann, s.modes, s.sex]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hints = useMemo(() => rearrangementHints(s), [s.files, s.ann]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!s.files.length) return null;
   const samples = s.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const listed = s.sample ? samples.filter(e => e.x.key === s.sample) : samples;
   const all = listed.flatMap(({ x, f }) => x.cnvs.map(c => ({ c, f })));
   const series = seriesOf(s.files);
-  const views = new Map(all.map(({ c }) => [c.id, viewOf(s, c)]));
-  const hints = rearrangementHints(s);
   const lab = labHits(s.files, s.lab);
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const rows = all.filter(({ c }) => passes(s, c));
@@ -155,7 +155,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   /** a call clicked: drawn below with its detail under its row; clicked again, its detail folds or unfolds */
   const show = (i: number, click = false) => {
     const r = rows[i]; if (!r) return;
-    if (click && r.c.id === s.shown) { setFolded(f => !f); return; }
+    if (click && r.c.id === s.shown) { setFolded(x => !x); return; }
     cgh.setShown(r.c.id); onShow(r.c, r.f);
   };
   const at = rows.findIndex(r => r.c.id === s.shown);
@@ -168,7 +168,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     }
-    cgh.exported(listed.map(e => e.x.key));
+    // a file holds every sample it was read with: all of them are exported
+    cgh.exported([...new Set(listed.map(e => e.f))].flatMap(fl => fl.samples.map(x => x.key)));
   };
   /** classes or notes of the patients listed not exported yet */
   const listedDirty = listed.some(e => s.dirtyKeys[e.x.key]);
@@ -211,7 +212,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           options={[{ value: 'all', label: 'all', hint: 'Losses and gains' }, { value: 'loss', label: 'losses', hint: 'Deletions only' }, { value: 'gain', label: 'gains', hint: 'Gains and amplifications only' }]} />
         <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title="Smaller calls are not analysed: neither listed nor annotated">size ≥
           <select value={f.minKb} onChange={e => cgh.setFilter({ minKb: Number(e.target.value) })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
-            {[0, 10, 50, 100, 200, 500, 1000].map(v => <option key={v} value={v}>{v === 0 ? 'any' : v >= 1000 ? `${v / 1000} Mb` : `${v} kb`}</option>)}
+            {SIZES.map(v => <option key={v} value={v}>{sizeWord(v)}</option>)}
           </select></label>
         <label className="inline-flex items-center gap-1 h-[26px] pl-2 pr-1 rounded-lg border border-slate-200 bg-white text-slate-500" title="Classified or not (a class from the file counts)">class
           <select value={f.classed} onChange={e => cgh.setFilter({ classed: e.target.value as typeof f.classed })} className="bg-transparent font-medium text-slate-800 outline-none cursor-pointer">
@@ -522,7 +523,7 @@ const dosageText = (v: number | null) => (v == null ? '' : v === 30 ? '30 (AR)' 
 /** a share: under 1 % said so rather than 0 % */
 const pctText = (f: number) => (f > 0 && f < 0.005 ? '<1%' : `${Math.round(f * 100)}%`);
 /** how a DGV Gold CNV lies against the call, drawn: the call (dark) and the DGV CNV (violet) */
-export const DGV_REL: Record<DgvRelation, { word: string; call: [number, number]; dgv: [number, number] }> = {
+const DGV_REL: Record<DgvRelation, { word: string; call: [number, number]; dgv: [number, number] }> = {
   within: { word: 'the call lies inside a DGV Gold CNV', call: [7, 15], dgv: [1, 21] },
   contains: { word: 'the call holds a DGV Gold CNV', call: [1, 21], dgv: [6, 16] },
   overlaps: { word: 'the call and a DGV Gold CNV overlap on one side', call: [1, 14], dgv: [8, 21] },

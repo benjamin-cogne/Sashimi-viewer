@@ -9,9 +9,9 @@ import type { CghCnv } from './cghIntervals';
 import type { CghState } from './cghStore';
 
 /** a call this close to a chromosome end is terminal: arrays carry no probes in the telomeric repeats */
-export const TERMINAL_BP = 500_000;
+const TERMINAL_BP = 500_000;
 /** the share of an arm a call must cover to be a whole arm */
-export const ARM_COVER = 0.9;
+const ARM_COVER = 0.9;
 const ACROCENTRIC = new Set(['13', '14', '15', '21', '22']);
 
 export interface CnvTopo {
@@ -51,12 +51,12 @@ export function topoOf(c: Pick<CghCnv, 'chrom' | 'start' | 'end'>, build: Genome
   return ends.length || span ? { ends, span } : undefined;
 }
 
-export const HINT_TRANSLOCATION = 'terminal loss + terminal gain in this patient: a derivative of an unbalanced translocation is possible (parental karyotype / FISH)';
-export const HINT_PERICENTRIC = 'terminal loss and terminal gain on opposite arms of the same chromosome: a recombinant of a pericentric inversion is possible (parental karyotype / FISH)';
-export const HINT_INVDUPDEL = 'terminal loss with an adjacent gain on the same end: an inverted duplication-deletion is possible (parental karyotype / FISH)';
+const HINT_TRANSLOCATION = 'terminal loss + terminal gain in this patient: a derivative of an unbalanced translocation is possible (parental karyotype / FISH)';
+const HINT_PERICENTRIC = 'terminal loss and terminal gain on opposite arms of the same chromosome: a recombinant of a pericentric inversion is possible (parental karyotype / FISH)';
+const HINT_INVDUPDEL = 'terminal loss with an adjacent gain on the same end: an inverted duplication-deletion is possible (parental karyotype / FISH)';
 
 /** the smallest call (kb) a rearrangement hint is given for */
-export const HINT_MIN_KB = 500;
+const HINT_MIN_KB = 500;
 /** per call id, the hints of its patient's terminal losses and gains (among the analysed calls the annotation has read) */
 export function rearrangementHints(s: CghState): Map<string, string[]> {
   const out = new Map<string, string[]>();

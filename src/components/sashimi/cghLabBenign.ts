@@ -8,9 +8,9 @@ import { cghChrom, type CghCnv, type CghFile, type CghKind } from './cghInterval
 
 /** an entry matches a call when it shares this much of the CALL (overlap / call length) */
 export const LAB_COVER = 0.8;
-export const LAB_KEY = 'sashimi.cghLabBenign';
+const LAB_KEY = 'sashimi.cghLabBenign';
 /** above this many characters the list is kept in memory only */
-export const LAB_MAX_STORED = 2_000_000;
+const LAB_MAX_STORED = 2_000_000;
 
 export interface LabEntry { chrom: string; /** 1-based inclusive */ start: number; end: number; name: string; type: CghKind | 'both' }
 export interface LabBenign { fileName: string; entries: LabEntry[]; /** lines that held an interval / lines skipped as unreadable (headers and comments not counted) */ read: number; skipped: number }
@@ -21,7 +21,7 @@ const typeOf = (t: string): CghKind | 'both' => (/del|loss|perte|\bx[01]\b/i.tes
 export function parseLabBenign(text: string, fileName: string): LabBenign {
   const entries: LabEntry[] = [];
   let skipped = 0;
-  for (const raw of text.replace(/^﻿/, '').split(/\r\n|\n|\r/)) {
+  for (const raw of text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/)) {
     const l = raw.trim();
     if (!l || /^(track|browser|#)/i.test(l)) continue;
     const f = raw.includes('\t') ? raw.split('\t').map(x => x.trim()) : l.split(/\s+/);
@@ -38,7 +38,7 @@ export function parseLabBenign(text: string, fileName: string): LabBenign {
 
 export interface LabHit { entry: LabEntry; pct: number }
 /** the best entry of a compatible type sharing LAB_COVER of the call or more */
-export function labMatch(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, entries: LabEntry[]): LabHit | null {
+function labMatch(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, entries: LabEntry[]): LabHit | null {
   const len = c.end - c.start + 1;
   let best: LabHit | null = null;
   for (const e of entries) {

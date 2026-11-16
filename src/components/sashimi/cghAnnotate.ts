@@ -38,7 +38,7 @@ export interface CnvAnn {
   topo?: CnvTopo;
 }
 /** the band of a call, as an interval table writes it: p21.1, or p21.2 - p21.1 */
-export function bandOf(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
+function bandOf(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
   const at = (pos: number) => bands.find(b => b.start <= pos && pos < b.end)?.name;
   const a = at(s0), z = at(Math.max(s0, e0 - 1));
   return !a || !z ? undefined : a === z ? a : `${a} - ${z}`;
@@ -55,7 +55,7 @@ export const DGV_COVER = 0.8;
  * the call's length, with the record's inner or outer extent, the one sharing more; and how they lie against each other.
  * A record lying inside the call (one of its extents) is kept whatever its share, as 'contains'.
  */
-export function dgvHits(kind: 'loss' | 'gain', s0: number, e0: number, svs: PopulationSv[]): DgvHit[] {
+function dgvHits(kind: 'loss' | 'gain', s0: number, e0: number, svs: PopulationSv[]): DgvHit[] {
   const len = Math.max(1, e0 - s0);
   const out: DgvHit[] = [];
   for (const v of svs) {
@@ -78,7 +78,7 @@ export const PANELAPP_MAX_GENES = 1000;
 export const PANEL_SOURCE = PANEL_SOURCES[0];
 
 /** the genes of a window from its RefSeq models: each gene's principal model (MANE / RefSeq Select, else the longest) */
-export function genesOf(txs: SvTranscript[], s0: number, e0: number, kind?: 'loss' | 'gain'): CnvGene[] {
+function genesOf(txs: SvTranscript[], s0: number, e0: number, kind?: 'loss' | 'gain'): CnvGene[] {
   const by = new Map<string, SvTranscript[]>();
   for (const t of txs) { if (t.end <= s0 || t.start >= e0) continue; const l = by.get(t.gene) ?? []; l.push(t); by.set(t.gene, l); }
   return [...by.entries()].map(([symbol, list]) => {
@@ -93,7 +93,7 @@ export function genesOf(txs: SvTranscript[], s0: number, e0: number, kind?: 'los
 }
 
 /** the AChro-Puce regions a call matches (its type), as the SV browser matches them: the sheet's critical genes, else its coordinates */
-export function achroHits(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, genes: CnvGene[], build: GenomeBuild): AchroHit[] {
+function achroHits(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, genes: CnvGene[], build: GenomeBuild): AchroHit[] {
   const t = c.kind === 'loss' ? 'del' : 'dup';
   const out: AchroHit[] = [];
   for (const r of ACHRO_REGIONS) {
@@ -243,7 +243,7 @@ function pumpModes() {
 }
 
 /** a gene's PanelApp entries as the score reads them; null while asked or when PanelApp failed */
-export function panelView(m: GeneModes | 'loading' | 'error' | undefined): PanelView | null {
+function panelView(m: GeneModes | 'loading' | 'error' | undefined): PanelView | null {
   if (!m || m === 'loading' || m === 'error') return null;
   const best = m.entries.reduce<0 | 1 | 2 | 3>((b, e) => (e.confidence > b ? e.confidence : b), 0);
   return {

@@ -1,7 +1,7 @@
 /**
  * The array-CGH samples of the SV browser, kept for the tab's life (the SV browser can be closed and opened again):
  * the files read, the class given to each call, the filter, the call shown. Nothing of a patient is written to the
- * browser's storage: only the settings (the minimum number of probes, the filter) are remembered.
+ * browser's storage: only the filter here (the lab's benign list and the column mappings in their own modules).
  */
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
@@ -87,9 +87,11 @@ if (typeof window !== 'undefined') window.addEventListener('beforeunload', onUnl
 /** a file's text: UTF-8, else Windows-1252 (an export from a Windows PC) */
 const decode = (buf: Uint8Array | ArrayBuffer): string => { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); } };
 const TABLE = /\.(txt|tsv|csv|xls|bed)$/i;
+/** the file pickers' list (kept in step with what `add` reads) */
+export const CGH_ACCEPT = '.txt,.tsv,.csv,.bed,.xls,.zip,text/plain,application/zip';
 /** a file's text read with the mapping remembered for its header when there is one, else by its header's names */
 function readTable(text: string, name: string, fallback?: string): CghFile {
-  const hit = findMap(text.replace(/^﻿/, '').split(/\r?\n/));
+  const hit = findMap(text.replace(/^\uFEFF/, '').split(/\r?\n/));
   if (hit) { try { return { ...parseCghFile(text, name, fallback, { ...hit.spec, opts: { ...hit.spec.opts, headerRow: hit.row } }), remembered: true }; } catch { /* the remembered columns do not fit: by names */ } }
   return parseCghFile(text, name, fallback);
 }
@@ -122,7 +124,7 @@ export const cgh = {
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [], notes: string[] = [], toMap: CghState['toMap'] = [];
-    const seen = new Set([...state.files].map(f => f.lines.join('\n')));
+    const seen = new Set([...state.files, ...(state.pending?.files ?? [])].map(f => f.lines.join('\n')));
     const take = (f: CghFile) => { const k = f.lines.join('\n'); if (seen.has(k)) { notes.push(`${f.name}: already added`); return; } seen.add(k); files.push(f); };
     for (const f of Array.from(list)) {
       try {
@@ -145,7 +147,9 @@ export const cgh = {
         } else { const text = decode(buf); try { take(readTable(text, f.name)); } catch (x) { if (x instanceof NeedsMapping) toMap.push({ name: f.name, text }); else throw x; } }
       } catch (e) { errors.push(`${f.name}: ${(e as Error).message.replace(`${f.name}: `, '')}`); }
     }
-    set({ pending: files.length || errors.length || notes.length || !toMap.length ? { files, errors, notes } : null, toMap: [...state.toMap, ...toMap] });
+    // files dropped while the question is open join it
+    const p = state.pending, next = { files: [...(p?.files ?? []), ...files], errors: [...(p?.errors ?? []), ...errors], notes: [...(p?.notes ?? []), ...notes] };
+    set({ pending: next.files.length || next.errors.length || next.notes.length ? next : null, toMap: [...state.toMap, ...toMap] });
   },
   /** the table at the head of the queue read with the columns chosen (null: skipped, or kept as it was) */
   mapped(file: CghFile | null) {

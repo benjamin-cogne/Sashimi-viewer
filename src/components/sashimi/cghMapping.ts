@@ -1,7 +1,7 @@
 /**
  * Column mapping of an array-CGH table: the delimited text (tab, `;` or `,`, quoted fields) is split, its header row
  * and delimiter guessed, its columns matched to the fields of a call by name (English and French variants), and what the
- * user chose is remembered by the header's column names only (never a cell value of a patient's row).
+ * user chose is remembered by the header's column names (and the Type words given loss or gain), never a patient's row.
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
 
@@ -10,8 +10,8 @@ export const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀
 export type Field = 'chrom' | 'start' | 'stop' | 'band' | 'genes' | 'size' | 'type' | 'copies' | 'probes' | 'lr' | 'iscn' | 'sup' | 'cls' | 'note' | 'sample';
 /** the column index of each field, -1 when the table has none */
 export type ColMap = Record<Field, number>;
-export const FIELDS: Field[] = ['chrom', 'start', 'stop', 'type', 'copies', 'iscn', 'lr', 'probes', 'size', 'band', 'genes', 'cls', 'note', 'sample', 'sup'];
-export const noCols = (): ColMap => Object.fromEntries(FIELDS.map(f => [f, -1])) as ColMap;
+const FIELDS: Field[] = ['chrom', 'start', 'stop', 'type', 'copies', 'iscn', 'lr', 'probes', 'size', 'band', 'genes', 'cls', 'note', 'sample', 'sup'];
+const noCols = (): ColMap => Object.fromEntries(FIELDS.map(f => [f, -1])) as ColMap;
 export type TypeChoice = 'loss' | 'gain' | 'ignore';
 export interface MapOpts {
   delim: string;
@@ -22,8 +22,10 @@ export interface MapOpts {
   sizeUnit: 'bp' | 'kb' | 'Mb';
   /** the build to take when the file states none */
   build: GenomeBuild | null;
-  /** what each Type value that does not say loss or gain means (lower case) */
+  /** what a Type value that does not say loss or gain means (lower case): only the values given loss or gain are kept */
   typeMap: Record<string, TypeChoice>;
+  /** a Type value neither recognised nor in typeMap is ignored (the mapping dialog's default), else read from the copy number / log ratio */
+  ignoreOtherTypes?: boolean;
 }
 export interface MapSpec { cols: ColMap; opts: MapOpts }
 /** thrown by the automatic reading when a table looks delimited but its columns are not recognised */
@@ -136,7 +138,7 @@ const MAPS_KEY = 'sashimi.cghColumnMaps';
 const MAPS_MAX = 20;
 interface Stored { sig: string; spec: MapSpec }
 const loadMaps = (): Stored[] => { try { const v = JSON.parse(localStorage.getItem(MAPS_KEY) ?? '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
-export const sigOf = (cells: string[]) => cells.map(norm).join('|');
+const sigOf = (cells: string[]) => cells.map(norm).join('|');
 export function rememberMap(header: string[], spec: MapSpec) {
   if (header.filter(h => h.trim()).length < 3) return;
   const sig = sigOf(header);

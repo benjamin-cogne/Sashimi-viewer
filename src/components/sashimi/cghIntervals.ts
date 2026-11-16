@@ -15,7 +15,7 @@ import { norm, parseNum, splitDelimited, joinDelimited, detectTable, autoCols, A
 export type CghKind = 'loss' | 'gain';
 export type CghSex = 'male' | 'female';
 /** a sex as a header line may write it (Gender / Sex: Male, F, Femme…) */
-export const sexOf = (v: string | null | undefined): CghSex | null => (!v ? null : /^\s*(m|male|homme|masculin)\b/i.test(v) ? 'male' : /^\s*(f|female|femme|f[ée]minin)\b/i.test(v) ? 'female' : null);
+const sexOf = (v: string | null | undefined): CghSex | null => (!v ? null : /^\s*(m|male|homme|masculin)\b/i.test(v) ? 'male' : /^\s*(f|female|femme|f[ée]minin)\b/i.test(v) ? 'female' : null);
 export interface CghCnv {
   /** unique within the tab: file, row */
   id: string;
@@ -75,7 +75,6 @@ export interface CghFile {
   skipped: number; firstSkip: string | null; remembered?: boolean;
 }
 
-const num = (s: string | undefined): number | null => parseNum(s);
 /** chr1, 1, chrX, X → chr1, chrX; null for anything else */
 export function cghChrom(s: string): string | null {
   const m = s.trim().match(/^(?:chr)?(\d{1,2}|X|Y|M|MT)$/i);
@@ -91,7 +90,7 @@ export function cghBuild(s: string | null | undefined): GenomeBuild | null {
   return null;
 }
 /** copies from an ISCN: …(72523846_72667555)x1, x1~2, amp */
-export function iscnCopies(iscn: string | null): { copies: number | null; copiesHi: number | null; amp: boolean } {
+function iscnCopies(iscn: string | null): { copies: number | null; copiesHi: number | null; amp: boolean } {
   const m = iscn?.match(/\)\s*x\s*(\d+)(?:\s*~\s*(\d+))?/i);
   if (m) return { copies: +m[1], copiesHi: m[2] ? +m[2] : null, amp: false };
   return { copies: null, copiesHi: null, amp: !!iscn && /\)\s*amp\b/i.test(iscn) };
@@ -114,7 +113,7 @@ let fileSeq = 0;
 export function parseCghFile(text: string, fileName: string, fallbackSample?: string, spec?: MapSpec): CghFile {
   // the commoner line ending (a file may mix them), written back the same
   const crlf = (text.match(/\r\n/g) ?? []).length, eol = crlf * 2 > (text.match(/\n/g) ?? []).length ? '\r\n' : '\n';
-  const lines = text.replace(/^﻿/, '').split(/\r?\n/);
+  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   const id = `cgh${++fileSeq}`;
   const leaf = fileName.split(/[›/\\]/).pop()!.trim();
   const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|bed|xls)$/i, '');
@@ -162,7 +161,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     if (/^number of calls/i.test(l)) continue;
     const f = sp(l);
     const chrom = c.chrom >= 0 ? cghChrom(f[c.chrom] ?? '') : null;
-    const s0 = num(f[c.start]), end = num(f[c.stop]);
+    const s0 = parseNum(f[c.start]), end = parseNum(f[c.stop]);
     const start = s0 != null && opts.zeroBased ? s0 + 1 : s0;
     if (!chrom || start == null || end == null || end < start) { skip(`line ${i + 1}: ${!chrom ? 'chromosome' : 'start / end'} not a position (${l.slice(0, 40)})`); warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
     const iscnRaw = c.iscn >= 0 ? (f[c.iscn] ?? '').trim() : '';
@@ -171,7 +170,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     if (cn.copies == null && !cn.amp && c.copies >= 0) { const n = nn(f[c.copies]); if (n != null) cn = { copies: Math.round(n), copiesHi: null, amp: false }; }
     const typeText = c.type >= 0 ? (f[c.type] ?? '').trim() : '';
     const lr = c.lr >= 0 ? nn(f[c.lr]) : null;
-    const choice = typeText ? opts.typeMap[typeText.toLowerCase()] : undefined;
+    const choice = typeText ? opts.typeMap[typeText.toLowerCase()] ?? (opts.ignoreOtherTypes && !kindOfText(typeText) ? 'ignore' : undefined) : undefined;
     if (choice === 'ignore') { ignored++; skip(`line ${i + 1}: type "${typeText}" ignored`); continue; }
     const kind = choice ?? kindOfText(typeText) ?? (cn.amp ? 'gain' : cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
     if (!kind) { skip(`line ${i + 1}: no type, copy number or log ratio`); warnings.push(`line ${i + 1}: no type, copy number or log ratio, not read`); continue; }
@@ -210,7 +209,7 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
     const l = lines[i];
     if (!l.trim() || /^(track|browser|#)/i.test(l)) continue;
     const f = l.split(/\t/).length >= 3 ? l.split('\t') : l.trim().split(/\s+/);
-    const chrom = cghChrom(f[0] ?? ''), a = num(f[1]), b = num(f[2]);
+    const chrom = cghChrom(f[0] ?? ''), a = parseNum(f[1]), b = parseNum(f[2]);
     if (!chrom || a == null || b == null || b <= a) { warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
     const name = (f[3] ?? '').trim();
     // an ISCN as name, else x1 / x3 / x1~2 alone, else amp
@@ -263,9 +262,6 @@ export function cnvHubUrl(cnv: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>,
   if (build !== 'GRCh37') return null;
   return `https://cnvhub.net/CNV/Result/hg19-${cnv.chrom}-${cnv.start}-${cnv.end}-${cnv.kind}`;
 }
-
-/** The text the SV browser's box takes for a CNV: DEL / DUP before its coordinates. */
-export const cnvSearchText = (cnv: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>) => `${cnv.kind === 'loss' ? 'DEL' : 'DUP'} ${cnv.chrom}:${cnv.start}-${cnv.end}`;
 
 /** The copy number as the ISCN writes it, for the table: x1, x0, x3, x1~2, amp, else the type. */
 export const copyText = (c: CghCnv) => (c.copies != null ? `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}` : c.amp ? 'amp' : c.kind === 'loss' ? 'loss' : 'gain');

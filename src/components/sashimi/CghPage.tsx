@@ -10,7 +10,7 @@ import { segmentColors } from './svColors';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { CghFrame, CghProbeDialog } from './CghPanel';
-import { cgh, useCgh } from './cghStore';
+import { cgh, useCgh, CGH_ACCEPT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 
@@ -64,11 +64,11 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const full = useMemo<SvGeneLoaders | null>(() => (loaders ? { ...loaders, fallback: [] } : null), [loaders]);
   const rec = drawn?.parsed.rec;
   const colors = useMemo(() => (rec ? segmentColors(rec) : new Map<number, string>()), [rec]);
-  // the calls this page lists are in the store: a call drawn from a sample taken off stays until another is clicked
   // the call drawn, while its patient is on the list
   const c = drawn && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
   // a male's chrX and chrY: one copy, the call on it (no other homologue)
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
+  const band = c ? bandOfCall(c, s.ann[c.id]) : '', iscn = c && drawn ? iscnOf(c, drawn.build, band) : null;
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!over) setOver(true); }}
@@ -95,9 +95,9 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden">
             <div className="px-5 pt-2 flex flex-wrap items-baseline gap-x-2 text-xs">
               <span className="text-sm font-bold">{c.sample}</span>
-              {!iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id])) && bandOfCall(c, s.ann[c.id]) && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{bandOfCall(c, s.ann[c.id]).replace(/\s+/g, '')}</span>}
-              {iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id]))
-                ? <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN written from the band (the file\'s, else the cytogenetic bands), the positions and the copies of the file (it gives no ISCN)'}>{iscnOf(c, drawn.build, bandOfCall(c, s.ann[c.id]))}</span>
+              {!iscn && band && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{band.replace(/\s+/g, '')}</span>}
+              {iscn
+                ? <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN written from the band (the file\'s, else the cytogenetic bands), the positions and the copies of the file (it gives no ISCN)'}>{iscn}</span>
                 : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">({c.kind}, no ISCN in the file)</span></span>}
               <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes != null ? `${c.probes} probes` : 'probes not given'}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
             </div>
@@ -118,7 +118,7 @@ function AddInline() {
   return (
     <label className="inline-flex items-center gap-1.5 h-[34px] px-4 rounded-[6px] bg-accent-600 text-white text-[12.5px] font-semibold hover:bg-accent-700 cursor-pointer">
       Add samples (.txt, .bed, .zip)
-      <input data-cgh-input type="file" multiple accept=".txt,.tsv,.bed,.xls,.zip,text/plain,application/zip" className="hidden"
+      <input data-cgh-input type="file" multiple accept={CGH_ACCEPT} className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>
   );

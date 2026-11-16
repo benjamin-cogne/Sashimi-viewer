@@ -66,7 +66,7 @@ export interface Reason { id: string; level: Level; text: string }
 export interface Score { level: Level; reasons: Reason[] }
 
 /** a call larger than this (kb) is high priority whatever its genes (the AChro-Puce network's rule) */
-export const BIG_KB = 1000;
+const BIG_KB = 1000;
 const MONO: MoiClass[] = ['AD', 'AD+AR', 'XLD'];
 const BI: MoiClass[] = ['AR', 'AD+AR'];
 const any = (xs: MoiClass[] | undefined, of: MoiClass[]) => !!xs?.some(x => of.includes(x));

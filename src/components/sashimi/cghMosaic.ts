@@ -9,7 +9,7 @@ import type { CghCnv, CghSex } from './cghIntervals';
 export const MOSAIC_TAG_BELOW = 0.8;
 
 /** the calculator's own function: chrom 'autosome' | 'X' | 'Y', sex 'F' (anything else: male), event 'del' | 'dup' */
-export function computeMosaicism(lr: number, event: 'del' | 'dup', chrom: 'autosome' | 'X' | 'Y', sexe: 'F' | 'M'): number {
+function computeMosaicism(lr: number, event: 'del' | 'dup', chrom: 'autosome' | 'X' | 'Y', sexe: 'F' | 'M'): number {
   let f = 0;
   const hemi = (chrom === 'X' || chrom === 'Y') && sexe !== 'F';
   if (event === 'del') f = hemi ? 1 - Math.pow(2, lr) : 2 - 2 * Math.pow(2, lr);

@@ -14,7 +14,7 @@ const DELIMS: [string, string][] = [['\t', 'tab'], [';', 'semicolon ;'], [',', '
 const SEL = 'h-[26px] px-1.5 rounded border border-slate-200 bg-white text-[11.5px] outline-none cursor-pointer max-w-[210px]';
 
 export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
-  const lines = useMemo(() => item.text.replace(/^﻿/, '').split(/\r?\n/), [item.text]);
+  const lines = useMemo(() => item.text.replace(/^\uFEFF/, '').split(/\r?\n/), [item.text]);
   const first = useMemo(() => {
     const t = detectTable(lines);
     return item.spec?.opts ?? { delim: t?.delim ?? '\t', headerRow: t?.headerRow ?? Math.max(0, lines.findIndex(l => l.trim())), zeroBased: false, sizeUnit: 'kb', build: 'GRCh37', typeMap: {} } as MapOpts;
@@ -34,7 +34,9 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
     for (const r of data) { const v = (r[cols.type] ?? '').trim(); if (v && !kindOfText(v) && !seen.has(v.toLowerCase())) seen.set(v.toLowerCase(), v); }
     return [...seen.values()].slice(0, 30);
   }, [data, cols.type]);
-  const spec: MapSpec = useMemo(() => ({ cols, opts: { delim, headerRow, zeroBased, sizeUnit, build: statesBuild ? null : build, typeMap: Object.fromEntries(odd.map(v => [v.toLowerCase(), typeMap[v.toLowerCase()] ?? 'ignore'])) } }), [cols, delim, headerRow, zeroBased, sizeUnit, build, statesBuild, odd, typeMap]);
+  const spec: MapSpec = useMemo(() => ({ cols, opts: { delim, headerRow, zeroBased, sizeUnit, build: statesBuild ? null : build, ignoreOtherTypes: true,
+    // only the values given a meaning: an ignored one is the default, and is not remembered
+    typeMap: Object.fromEntries(odd.flatMap(v => { const t = typeMap[v.toLowerCase()]; return t && t !== 'ignore' ? [[v.toLowerCase(), t]] : []; })) } }), [cols, delim, headerRow, zeroBased, sizeUnit, build, statesBuild, odd, typeMap]);
   const ready = REQUIRED.every(f => cols[f] >= 0) && ONE_OF.some(f => cols[f] >= 0);
   const res = useMemo((): { file: CghFile | null; msg: string } => {
     if (!ready) return { file: null, msg: 'Choose Chromosome, Start, End and one of Type, Copy number, ISCN, Log ratio.' };
