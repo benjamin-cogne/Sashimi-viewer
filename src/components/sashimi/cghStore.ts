@@ -5,8 +5,10 @@
  */
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
-import { parseCghFile, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
-import { NeedsMapping, findMap, type MapSpec } from './cghMapping';
+import { parseCghFile, leafOf, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
+import { NeedsMapping, findMap, splitRecords, type MapSpec } from './cghMapping';
+import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from './cghFormats';
+import { isVcf, parseVcf } from './cghVcf';
 import { seriesOf } from './cghSeries';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
@@ -84,16 +86,31 @@ export const useCgh = () => useSyncExternalStore(subscribe, () => state);
 const onUnload = (e: BeforeUnloadEvent) => { if (state.dirty) { e.preventDefault(); e.returnValue = ''; } };
 if (typeof window !== 'undefined') window.addEventListener('beforeunload', onUnload);
 
-/** a file's text: UTF-8, else Windows-1252 (an export from a Windows PC) */
-const decode = (buf: Uint8Array | ArrayBuffer): string => { try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); } };
-const TABLE = /\.(txt|tsv|csv|xls|bed)$/i;
+/** the files a zip's entries are read from (a .xls may be a text export, or an old binary refused with a message) */
+const TABLE = /\.(txt|tsv|csv|xlsx?|bed|vcf)(\.gz)?$/i;
 /** the file pickers' list (kept in step with what `add` reads) */
-export const CGH_ACCEPT = '.txt,.tsv,.csv,.bed,.xls,.zip,text/plain,application/zip';
+export const CGH_ACCEPT = '.txt,.tsv,.csv,.bed,.xls,.xlsx,.vcf,.gz,.zip,text/plain,application/zip';
+/** what the pickers take, in words (the page's help and the buttons' tooltips) */
+export const CGH_FILES_TEXT = 'the interval table of each patient exported by CytoGenomics (.txt), any other table of calls (.txt, .tsv, .csv, .xlsx: its columns are asked when not recognised; a position in one cell such as chr1:72523846-72667555 or an ISCN is read), BED files, SV / CNV VCF files (.vcf, .vcf.gz: DEL, DUP, CNV), or zip files of them (one patient per zip). Text in UTF-8, UTF-16 or Windows-1252; an old binary .xls must be saved as .xlsx, .csv or tab-separated text first';
 /** a file's text read with the mapping remembered for its header when there is one, else by its header's names */
 function readTable(text: string, name: string, fallback?: string): CghFile {
-  const hit = findMap(text.replace(/^\uFEFF/, '').split(/\r?\n/));
+  const hit = findMap(splitRecords(text));
   if (hit) { try { return { ...parseCghFile(text, name, fallback, { ...hit.spec, opts: { ...hit.spec.opts, headerRow: hit.row } }), remembered: true }; } catch { /* the remembered columns do not fit: by names */ } }
   return parseCghFile(text, name, fallback);
+}
+type ReadOne = { file: CghFile; note?: string } | { toMap: CghState['toMap'][number] };
+/** one file's bytes: gzip unpacked, an .xlsx's first worksheet, a VCF, else a table or a BED (its columns asked when not recognised) */
+function readBytes(bytes: Uint8Array, name: string, fallback?: string): ReadOne {
+  const b = isGzip(bytes) ? gunzip(bytes) : bytes;
+  if (isOle(b)) throw new Error(OLE_MESSAGE);
+  // a zip here is a workbook (zips themselves are opened by `add`)
+  const xlsx = isZip(b);
+  const text = xlsx ? xlsxText(b) : decodeText(b);
+  if (!xlsx && isVcf(text)) return { file: parseVcf(text, name, fallback) };
+  try {
+    const file = readTable(text, name, fallback);
+    return { file, note: xlsx ? `${leafOf(name)}: first worksheet read; exported as tab-separated text (${file.saveAs})` : undefined };
+  } catch (x) { if (x instanceof NeedsMapping) return { toMap: { name, text, fallback } }; throw x; }
 }
 /** the tables of a zip, and of the zips inside it (one level): macOS's resource files left out, the other files counted */
 function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; bytes: Uint8Array }[]; skipped: number } {
@@ -136,15 +153,19 @@ export const cgh = {
           let n = 0, other = skipped, asked = 0;
           for (const e of entries) {
             try {
-              const text = decode(e.bytes), t = (() => { try { return readTable(text, `${f.name} › ${e.path}`, patient); } catch (x) { if (x instanceof NeedsMapping) { toMap.push({ name: `${f.name} › ${e.path}`, text, fallback: patient }); asked++; return null; } throw x; } })();
-              if (!t) continue;
-              if (t.format === 'bed' && !/\.bed$/i.test(e.path)) { other++; continue; }
-              take(t); n++;
-            } catch { other++; }
+              const r = readBytes(e.bytes, `${f.name} › ${e.path}`, patient);
+              if ('toMap' in r) { toMap.push(r.toMap); asked++; continue; }
+              if (r.file.format === 'bed' && !/\.bed$/i.test(e.path)) { other++; continue; }
+              take(r.file); n++;
+              if (r.note) notes.push(r.note);
+            } catch (x) { if ((x as Error).message === OLE_MESSAGE) errors.push(`${f.name} › ${e.path}: ${OLE_MESSAGE}`); else other++; }
           }
           if (!n && !asked) errors.push(`${f.name}: no interval table or BED inside (${entries.length + skipped} file${entries.length + skipped > 1 ? 's' : ''})`);
           else if (other) notes.push(`${f.name}: ${n} table${n > 1 ? 's' : ''} read, ${other} other file${other > 1 ? 's' : ''} skipped`);
-        } else { const text = decode(buf); try { take(readTable(text, f.name)); } catch (x) { if (x instanceof NeedsMapping) toMap.push({ name: f.name, text }); else throw x; } }
+        } else {
+          const r = readBytes(buf, f.name);
+          if ('toMap' in r) toMap.push(r.toMap); else { take(r.file); if (r.note) notes.push(r.note); }
+        }
       } catch (e) { errors.push(`${f.name}: ${(e as Error).message.replace(`${f.name}: `, '')}`); }
     }
     // files dropped while the question is open join it

@@ -7,15 +7,15 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 
 export const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
 
-export type Field = 'chrom' | 'start' | 'stop' | 'band' | 'genes' | 'size' | 'type' | 'copies' | 'probes' | 'lr' | 'iscn' | 'sup' | 'cls' | 'note' | 'sample';
+export type Field = 'chrom' | 'start' | 'stop' | 'pos' | 'band' | 'genes' | 'size' | 'type' | 'copies' | 'probes' | 'lr' | 'iscn' | 'sup' | 'cls' | 'note' | 'sample';
 /** the column index of each field, -1 when the table has none */
 export type ColMap = Record<Field, number>;
-const FIELDS: Field[] = ['chrom', 'start', 'stop', 'type', 'copies', 'iscn', 'lr', 'probes', 'size', 'band', 'genes', 'cls', 'note', 'sample', 'sup'];
+const FIELDS: Field[] = ['chrom', 'start', 'stop', 'pos', 'type', 'copies', 'iscn', 'lr', 'probes', 'size', 'band', 'genes', 'cls', 'note', 'sample', 'sup'];
 const noCols = (): ColMap => Object.fromEntries(FIELDS.map(f => [f, -1])) as ColMap;
 export type TypeChoice = 'loss' | 'gain' | 'ignore';
 export interface MapOpts {
   delim: string;
-  /** line of the header (0-based, in the file's lines) */
+  /** line of the header (0-based, in the file's lines); -1: no header row, every line is a call */
   headerRow: number;
   /** BED-like start, moved to 1-based */
   zeroBased: boolean;
@@ -31,6 +31,31 @@ export interface MapSpec { cols: ColMap; opts: MapOpts }
 /** thrown by the automatic reading when a table looks delimited but its columns are not recognised */
 export class NeedsMapping extends Error {}
 
+/**
+ * The text's records: lines ending in CR LF, LF or CR alone, a quoted field ("…" opened at a field's start) holding
+ * line breaks kept in its record. A quote left open to the end is not one: the plain lines are returned.
+ */
+export function splitRecords(text: string): string[] {
+  const t = text.replace(/^\uFEFF/, '');
+  if (!t.includes('"')) return t.split(/\r\n|\n|\r/);
+  const out: string[] = [];
+  let start = 0, q = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (q) { if (ch === '"') { if (t[i + 1] === '"') i++; else q = false; } continue; }
+    if (ch === '"') { const p = t[i - 1]; if (i === start || p === '\t' || p === ';' || p === ',') q = true; }
+    else if (ch === '\n' || ch === '\r') { out.push(t.slice(start, i)); if (ch === '\r' && t[i + 1] === '\n') i++; start = i + 1; }
+  }
+  if (q) return t.split(/\r\n|\n|\r/);
+  out.push(t.slice(start));
+  return out;
+}
+/** the commoner line ending of a text (a file may mix them), written back the same */
+export function eolOf(text: string): string {
+  const crlf = (text.match(/\r\n/g) ?? []).length, lf = (text.match(/\n/g) ?? []).length - crlf, cr = (text.match(/\r/g) ?? []).length - crlf;
+  return cr > crlf && cr > lf ? '\r' : crlf > lf ? '\r\n' : '\n';
+}
+
 /** a line split at a one-character delimiter, "quoted, fields" and "" kept; a quote only opens at a field's start */
 export function splitDelimited(line: string, d: string): string[] {
   if (!line.includes('"')) return line.split(d);
@@ -45,7 +70,7 @@ export function splitDelimited(line: string, d: string): string[] {
   out.push(cur);
   return out;
 }
-export const joinDelimited = (cells: string[], d: string) => (d === '\t' ? cells.join(d) : cells.map(c => (c.includes(d) || c.includes('"') || /[\r\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(d));
+export const joinDelimited = (cells: string[], d: string) => cells.map(c => (d === '\t' ? /[\t\r\n]/.test(c) : c.includes(d) || c.includes('"') || /[\r\n]/.test(c)) ? `"${c.replace(/"/g, '""')}"` : c).join(d);
 
 /** a number, with a decimal comma read as one when `decimal` (else commas are thousands separators) */
 export function parseNum(s: string | undefined, decimal = false): number | null {
@@ -57,30 +82,65 @@ export function parseNum(s: string | undefined, decimal = false): number | null 
   return Number.isFinite(n) ? n : null;
 }
 const isNum = (s: string) => /^[-+]?\d+(?:[.,]\d+)*$/.test(s.trim());
+/** a position: digits, or digits grouped by threes with one separator (, . space ' ’), else a plain number */
+export function parsePos(s: string | undefined): number | null {
+  const t = (s ?? '').trim();
+  if (/^\d+$/.test(t)) return Number(t);
+  if (/^\d{1,3}([,. '’\u00a0\u202f])\d{3}(?:\1\d{3})*$/.test(t)) return Number(t.replace(/\D/g, ''));
+  return parseNum(t);
+}
+const POS = String.raw`\d[\d,. '’\u00a0\u202f]*?`;
+const REGION = new RegExp(String.raw`^(?:chr)?(\d{1,2}|X|Y|MT?)\s*:\s*(?:g\.)?(${POS})\s*(?:-|–|\.\.|_)\s*(${POS})\s*$`, 'i');
+const ISCN_REGION = /(?:^|[\s\]])(\d{1,2}|X|Y)(?:[pq][\d.]*){0,2}\s*\(\s*([\d,]+)\s*[_-]\s*([\d,]+)\s*\)/i;
+/** a region in one cell: chr1:72523846-72667555, 1:72,523,846-72,667,555, chr1:72523846..72667555, or an ISCN's
+ * 1p31.1(72523846_72667555); the chromosome as written (1, X, MT), positions as written (1-based for an ISCN) */
+export function parseRegion(s: string | undefined): { chrom: string; start: number; end: number; iscn: boolean } | null {
+  const t = (s ?? '').trim();
+  const m = t.match(REGION), i = m ? null : t.match(ISCN_REGION);
+  const r = m ?? i;
+  if (!r) return null;
+  const a = parsePos(r[2]), b = parsePos(r[3]);
+  return a == null || b == null ? null : { chrom: r[1], start: a, end: b, iscn: !!i };
+}
+/** a copy number as a cell writes it: x1, 1, 1.0, CN=1, CN:1, 1 copy, 3 copies; null for anything else */
+export function copiesOf(s: string | undefined): number | null {
+  const m = (s ?? '').trim().match(/^(?:x|cn\s*[=:]?\s*)?(\d+(?:[.,]\d+)?)\s*(?:cop(?:y|ies))?$/i);
+  return m ? Math.round(Number(m[1].replace(',', '.'))) : null;
+}
+/** a row's cells without the empty ones a trailing delimiter leaves */
+const width = (l: string, d: string) => { const c = splitDelimited(l, d); let n = c.length; while (n > 0 && !c[n - 1].trim()) n--; return n; };
+/** how much a row looks like a call: numbers, and a region in one cell counting for two */
+const dataScore = (cells: string[]) => cells.reduce((k, c) => k + (parseRegion(c) ? 2 : isNum(c) ? 1 : 0), 0);
 
-/** the delimiter and the header row of a delimited table, null when the text does not look like one (≥ 3 columns) */
+/**
+ * The delimiter and the header row of a delimited table (≥ 2 columns, a trailing delimiter not counted; 2 only with a
+ * position in one cell), headerRow -1 when it has none (its rows are calls); null when the text does not look like one.
+ */
 export function detectTable(lines: string[]): { delim: string; headerRow: number; ncols: number } | null {
   const rows = lines.map((l, i) => ({ l, i })).filter(r => r.l.trim()).slice(0, 40);
   let best: { delim: string; mode: number; n: number } | null = null;
   for (const delim of ['\t', ';', ',']) {
     const freq = new Map<number, number>();
-    for (const r of rows) { const k = splitDelimited(r.l, delim).length; if (k >= 3) freq.set(k, (freq.get(k) ?? 0) + 1); }
+    for (const r of rows) { const k = width(r.l, delim); if (k >= 3 || (k === 2 && splitDelimited(r.l, delim).some(c => parseRegion(c)))) freq.set(k, (freq.get(k) ?? 0) + 1); }
     for (const [mode, n] of freq) if (n >= 2 && (!best || n > best.n || (n === best.n && mode > best.mode && best.delim !== '\t'))) best = { delim, mode, n };
   }
   if (!best) return null;
-  const same = rows.filter(r => splitDelimited(r.l, best!.delim).length === best!.mode);
+  const { delim, mode } = best;
+  const same = rows.filter(r => width(r.l, delim) === mode);
   for (let k = 0; k < same.length - 1; k++) {
-    const cells = splitDelimited(same[k].l, best.delim).map(c => c.trim()).filter(Boolean);
-    const next = splitDelimited(same[k + 1].l, best.delim);
-    if (cells.length && cells.filter(c => !isNum(c)).length * 2 > cells.length && next.filter(isNum).length >= 2) return { delim: best.delim, headerRow: same[k].i, ncols: best.mode };
+    const cells = splitDelimited(same[k].l, delim).map(c => c.trim()).filter(Boolean);
+    // a header: mostly words, no call's numbers; the row after it a call
+    if (cells.length && cells.filter(c => !isNum(c)).length * 2 > cells.length && dataScore(cells) < 2 && dataScore(splitDelimited(same[k + 1].l, delim)) >= 2) return { delim, headerRow: same[k].i, ncols: mode };
   }
-  return null;
+  // no header: rows that are calls from the first one
+  return same.filter(r => dataScore(splitDelimited(r.l, delim)) >= 2).length * 2 >= same.length ? { delim, headerRow: -1, ncols: mode } : null;
 }
 
 const SYN: Record<Field, string[]> = {
   chrom: ['chromosome', 'chrom', 'chr', 'chromosom', 'contig'],
   start: ['start', 'debut', 'begin', 'startpos', 'startposition', 'chromstart', 'from', 'pos', 'position'],
   stop: ['stop', 'end', 'fin', 'endpos', 'endposition', 'chromend', 'finish', 'to'],
+  pos: ['location', 'coordinates', 'coordinate', 'region', 'locus', 'interval', 'genomicposition', 'genomiccoordinates', 'cnvposition', 'localisation'],
   type: ['type', 'aberrationtype', 'aberration', 'cnvtype', 'event', 'evenement', 'variationtype', 'vartype', 'alteration', 'anomalie', 'call', 'status'],
   copies: ['copynumber', 'copies', 'copynb', 'nbcopies', 'cnstate', 'cn', 'ploidy'],
   iscn: ['iscn', 'nomenclature'],
@@ -94,8 +154,11 @@ const SYN: Record<Field, string[]> = {
   sample: ['samplename', 'sample', 'recordname', 'arrayname', 'echantillon', 'patient', 'patientid', 'sampleid', 'id'],
   sup: ['suppress', 'suppressed'],
 };
-/** the columns by their names, loosely (English and French synonyms, then a name beginning with one); one column serves one field */
-export function guessCols(header: string[]): ColMap {
+/**
+ * The columns by their names, loosely (English and French synonyms, then a name beginning with one), then by their
+ * cells (`rows`: a region in one cell, an ISCN, a chromosome followed by two positions, a type); one column, one field.
+ */
+export function guessCols(header: string[], rows: string[][] = []): ColMap {
   const h = header.map(norm), cols = noCols(), used = new Set<number>();
   for (const pass of [0, 1]) for (const f of FIELDS) {
     if (cols[f] >= 0) continue;
@@ -104,6 +167,24 @@ export function guessCols(header: string[]): ColMap {
       if (i >= 0) { cols[f] = i; used.add(i); break; }
     }
   }
+  const sample = rows.slice(0, 30), n = Math.max(header.length, ...sample.map(r => r.length));
+  /** the share of a column's filled cells that pass a test */
+  const share = (j: number, ok: (v: string) => boolean) => { const v = sample.map(r => (r[j] ?? '').trim()).filter(Boolean); return v.length ? v.filter(ok).length / v.length : 0; };
+  const take = (f: Field, j: number) => { for (const g of FIELDS) if (cols[g] === j) cols[g] = -1; cols[f] = j; used.add(j); };
+  for (let j = 0; j < n && sample.length; j++) {
+    // a column named for another field keeps it, unless named as a position (Position, Chr) and holding whole regions
+    if (used.has(j) && cols.chrom !== j && cols.start !== j && cols.stop !== j) continue;
+    if (cols.iscn < 0 && share(j, v => /arr\s*\[|\)\s*(x\d|amp)/i.test(v)) >= 0.8) take('iscn', j);
+    else if (cols.pos < 0 && share(j, v => !!parseRegion(v)) >= 0.8) take('pos', j);
+  }
+  if (cols.chrom < 0 && cols.pos < 0 && sample.length) {
+    const j = [...Array(n).keys()].find(k => !used.has(k) && share(k, v => /^(chr)?(\d{1,2}|X|Y)$/i.test(v)) >= 0.8);
+    if (j != null && share(j + 1, isNum) >= 0.8 && share(j + 2, isNum) >= 0.8 && !used.has(j + 1) && !used.has(j + 2)) { take('chrom', j); if (cols.start < 0) take('start', j + 1); if (cols.stop < 0) take('stop', j + 2); }
+  }
+  if (cols.type < 0 && sample.length) {
+    const j = [...Array(n).keys()].find(k => !used.has(k) && share(k, v => /del|dup|loss|gain|amp|perte|^x\d|^cn\b/i.test(v)) >= 0.8);
+    if (j != null) take('type', j);
+  }
   return cols;
 }
 /** the columns of an interval table as the software exports it: by exact name (the header already normalised) */
@@ -111,7 +192,7 @@ export function autoCols(head: string[]): ColMap {
   const col = (...names: string[]) => { for (const n of names) { const i = head.indexOf(n); if (i >= 0) return i; } return -1; };
   return {
     chrom: col('chromosome', 'chr', 'chrom'), start: col('start'), stop: col('stop', 'end'), band: col('cytoband', 'band'),
-    genes: col('genename', 'genenames', 'genes', 'gene'), size: col('sizekb', 'size'), type: col('type', 'aberrationtype'), copies: -1,
+    genes: col('genename', 'genenames', 'genes', 'gene'), size: col('sizekb', 'size'), type: col('type', 'aberrationtype'), copies: -1, pos: -1,
     probes: col('probes', 'probe', 'nprobes', 'numprobes', 'numberofprobes'), lr: col('meanlogratio', 'logratio', 'log2ratio'),
     iscn: col('iscn'), sup: col('suppress', 'suppressed'), cls: col('classification', 'class'),
     note: col('comment', 'comments', 'note', 'notes', 'commentaire', 'commentaires'),
@@ -125,7 +206,8 @@ export const SIZE_MULT = { bp: 1 / 1000, kb: 1, Mb: 1000 } as const;
 export function guessSizeUnit(rows: string[][], c: ColMap, decimal: boolean): 'bp' | 'kb' | 'Mb' {
   const dev: Record<string, number[]> = { bp: [], kb: [], Mb: [] };
   for (const r of rows.slice(0, 60)) {
-    const s = parseNum(r[c.size], decimal), a = parseNum(r[c.start]), b = parseNum(r[c.stop]);
+    const reg = c.pos >= 0 ? parseRegion(r[c.pos]) : null;
+    const s = parseNum(r[c.size], decimal), a = reg?.start ?? parsePos(r[c.start]), b = reg?.end ?? parsePos(r[c.stop]);
     if (s == null || a == null || b == null || s <= 0 || b <= a) continue;
     for (const u of ['bp', 'kb', 'Mb'] as const) dev[u].push(Math.abs(Math.log(s * 1000 * SIZE_MULT[u] / (b - a))));
   }

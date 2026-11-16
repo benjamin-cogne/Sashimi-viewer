@@ -1,7 +1,8 @@
 /**
  * Array-CGH calls for the SV browser: the interval tables exported per sample by Agilent CytoGenomics (a few header
  * lines, `Genome hg19`, `Record Name …`, then one row per call: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb),
- * Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), or a BED file (chrom, start, end, name).
+ * Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), any other table once its columns are mapped, or a BED
+ * file (chrom, start, end, name). The SV VCF is read in cghVcf.ts, the bytes (encodings, .xlsx, .gz) in cghFormats.ts.
  *
  * Columns are found by their header, not by their place. Positions of the interval table are read as the ISCN of the
  * same row writes them (1-based, the first and last probe of the call); a BED's start is 0-based and moved to 1-based.
@@ -10,7 +11,7 @@
  * tab, with the classification typed in the table, and can be written back as the same table.
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
-import { norm, parseNum, splitDelimited, joinDelimited, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
+import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
 export type CghKind = 'loss' | 'gain';
 export type CghSex = 'male' | 'female';
@@ -53,13 +54,13 @@ export interface CghSample { key: string; name: string; fileId: string; declared
   sex: CghSex | null }
 export interface CghFile {
   /** the file's name (for a file of a zip: zip › path inside), and the name its export is saved under */
-  id: string; name: string; saveAs: string; format: 'interval' | 'bed';
+  id: string; name: string; saveAs: string; format: 'interval' | 'bed' | 'vcf';
   /** the build the file states (Genome hg19 → GRCh37), null when it states none */
   build: GenomeBuild | null; buildText: string | null;
   /** the header lines as key / value (Array Design Info, Creation Date…) */
   meta: [string, string][];
   lines: string[]; eol: string;
-  /** the Classification column (interval table), or null (a BED: the class is added as a last column) */
+  /** the Classification column (interval table), or null (a BED: the class is added as a last column; a VCF: in INFO) */
   classCol: number | null;
   /** whether the file's classifications end with `;;` (written the same way back) */
   classSuffix: string;
@@ -75,11 +76,13 @@ export interface CghFile {
   skipped: number; firstSkip: string | null; remembered?: boolean;
 }
 
-/** chr1, 1, chrX, X → chr1, chrX; null for anything else */
+/** chr1, 1, CHR1, Chr1, chrX, X, 23, 24 → chr1, chrX, chrY; chrM for M / MT (skipped by the readers); null for anything else */
 export function cghChrom(s: string): string | null {
   const m = s.trim().match(/^(?:chr)?(\d{1,2}|X|Y|M|MT)$/i);
   if (!m) return null;
   const c = m[1].toUpperCase();
+  if (c === '23') return 'chrX';
+  if (c === '24') return 'chrY';
   if (/^\d+$/.test(c) && (+c < 1 || +c > 22)) return null;
   return `chr${c === 'MT' ? 'M' : c}`;
 }
@@ -95,10 +98,16 @@ function iscnCopies(iscn: string | null): { copies: number | null; copiesHi: num
   if (m) return { copies: +m[1], copiesHi: m[2] ? +m[2] : null, amp: false };
   return { copies: null, copiesHi: null, amp: !!iscn && /\)\s*amp\b/i.test(iscn) };
 }
+/** a loss or a gain as a Type cell says it (deletion, CN loss, hemizygous, perte, x1, CN=1, 1 copy; dup, amp, trip, CN gain, x3…) */
 export const kindOfText = (raw: string): CghKind | null => {
-  const t = raw.normalize('NFD').replace(/[̀-ͯ]/g, '');
-  return /del|loss|perte|\bx[01]\b/i.test(t) ? 'loss' : /amp|gain|dup|\bx[3-9]\b/i.test(t) ? 'gain' : null;
+  const t = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return /del|loss|perte|hemi|\bx[01]\b|\bcn\s*[=:]?\s*[01]\b|\b[01]\s*cop/i.test(t) ? 'loss'
+    : /amp|gain|dup|trip|\bx[3-9]\b|\bcn\s*[=:]?\s*([3-9]|\d\d)\b|\b[3-9]\s*cop/i.test(t) ? 'gain' : null;
 };
+/** a copy-neutral call (LOH, ROH, AOH, cnLOH, UPD): skipped, counted */
+export const isLohText = (t: string) => /\b(?:cn-?)?loh\b|\b[ar]oh\b|heterozygosity|homozygosity|copy[- ]?neutral|uniparental|\bupd\b/i.test(t);
+/** a count said in a warning: 3 rows, 1 row */
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 /** the classification cell: the class before `;;`, and the rest */
 function splitClass(cell: string): { classification: string; classRest: string } {
   const i = cell.indexOf(';;');
@@ -106,17 +115,23 @@ function splitClass(cell: string): { classification: string; classRest: string }
 }
 
 let fileSeq = 0;
+/** a file's id, unique within the tab */
+export const nextFileId = (prefix = 'cgh') => `${prefix}${++fileSeq}`;
+/** a BED of three columns: no type to read */
+class UntypedBed extends Error {}
+/** the file's name without its folders (a zip's path) */
+export const leafOf = (fileName: string) => fileName.split(/[›/\\]/).pop()!.trim();
 /**
- * One file: an interval table (CytoGenomics) or a BED. Throws when no call can be read from it. The sample is the
- * table's Record Name, else `fallbackSample` (a zip's name: one patient per zip), else the file's name.
+ * One file's text: an interval table (CytoGenomics, or mapped by `spec`) or a BED. Throws when no call can be read,
+ * NeedsMapping when it is a delimited table whose columns are not recognised. The sample is the table's Record Name,
+ * else `fallbackSample` (a zip's name: one patient per zip), else the file's name. An .xlsx (read as tab-separated
+ * text) is exported as .classified.txt.
  */
 export function parseCghFile(text: string, fileName: string, fallbackSample?: string, spec?: MapSpec): CghFile {
-  // the commoner line ending (a file may mix them), written back the same
-  const crlf = (text.match(/\r\n/g) ?? []).length, eol = crlf * 2 > (text.match(/\n/g) ?? []).length ? '\r\n' : '\n';
-  const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
-  const id = `cgh${++fileSeq}`;
-  const leaf = fileName.split(/[›/\\]/).pop()!.trim();
-  const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|bed|xls)$/i, '');
+  const eol = eolOf(text), lines = splitRecords(text);
+  const id = nextFileId();
+  const leaf = leafOf(fileName);
+  const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|csv|bed|xlsx?)$/i, '');
   let f: Omit<CghFile, 'saveAs'>;
   if (spec) f = parseInterval(lines, id, fileName, base, eol, spec);
   else {
@@ -124,22 +139,22 @@ export function parseCghFile(text: string, fileName: string, fallbackSample?: st
     try {
       f = hi >= 0 ? parseInterval(lines, id, fileName, base, eol, { cols: autoCols(lines[hi].split('\t').map(norm)), opts: AUTO_OPTS(hi) }) : parseBed(lines, id, fileName, base, eol);
     } catch (e) {
-      // a delimited table whose columns are not recognised: the caller asks which column is which
-      const t = detectTable(lines);
-      if (t && t.ncols >= 3) throw new NeedsMapping((e as Error).message);
+      // a delimited table whose columns are not recognised (or with no header row): the caller asks which column is which
+      const t = !(e instanceof UntypedBed) && detectTable(lines);
+      if (t) throw new NeedsMapping((e as Error).message);
       throw e;
     }
   }
-  return { ...f, fallback: fallbackSample, saveAs: leaf.replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
+  return { ...f, fallback: fallbackSample, saveAs: leaf.replace(/\.xlsx$/i, '.txt').replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
 }
 
 function parseInterval(lines: string[], id: string, fileName: string, base: string, eol: string, spec: MapSpec): Omit<CghFile, 'saveAs'> {
   const { cols: c, opts } = spec, hi = opts.headerRow, d = opts.delim;
-  const sp = (l: string) => (d === '\t' ? l.split('\t') : splitDelimited(l, d));
+  const sp = (l: string) => splitDelimited(l, d);
   // a decimal comma only where the delimiter is not the comma (a log ratio, a size, a copy number)
   const dec = d !== ',', nn = (s: string | undefined) => parseNum(s, dec);
   const meta: [string, string][] = [];
-  for (const l of lines.slice(0, hi)) {
+  for (const l of lines.slice(0, Math.max(0, hi))) {
     const [k, ...v] = sp(l);
     if (k?.trim()) meta.push([k.trim().replace(/:$/, ''), v.join(' ').trim()]);
   }
@@ -147,31 +162,43 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   const buildText = metaOf(/^genome$/i);
   const record = metaOf(/^record name$/i);
   const warnings: string[] = [];
-  let skipped = 0, firstSkip: string | null = null, ignored = 0;
+  let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, iscnBuild: GenomeBuild | null = null;
   const skip = (why: string) => { skipped++; firstSkip ??= why; };
   if (c.probes < 0) warnings.push('no #Probes column: the minimum number of probes cannot be applied');
+  // stored mappings from before the one-cell position have no `pos`
+  const posCol = c.pos ?? -1;
   const samples = new Map<string, CghSample>();
   const declared = new Map<string, number>();
   let suffixYes = 0, suffixNo = 0;
   for (let i = hi + 1; i < lines.length; i++) {
     const l = lines[i];
     if (!l.trim()) continue;
-    const foot = l.match(/^\s*([^\t=]+?)\s*=\s*(\d+)\s*$/);
+    // the footer's count per sample (26A0657=36): a line of one cell, not a call's CN=1
+    const foot = sp(l).filter(x => x.trim()).length === 1 ? l.match(/^\s*([^\t=]+?)\s*=\s*(\d+)\s*$/) : null;
     if (foot) { declared.set(foot[1], +foot[2]); continue; }
     if (/^number of calls/i.test(l)) continue;
     const f = sp(l);
-    const chrom = c.chrom >= 0 ? cghChrom(f[c.chrom] ?? '') : null;
-    const s0 = parseNum(f[c.start]), end = parseNum(f[c.stop]);
-    const start = s0 != null && opts.zeroBased ? s0 + 1 : s0;
-    if (!chrom || start == null || end == null || end < start) { skip(`line ${i + 1}: ${!chrom ? 'chromosome' : 'start / end'} not a position (${l.slice(0, 40)})`); warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
     const iscnRaw = c.iscn >= 0 ? (f[c.iscn] ?? '').trim() : '';
     const iscn = iscnRaw && !/^na$/i.test(iscnRaw) ? iscnRaw : null;
-    let cn = iscnCopies(iscn);
-    if (cn.copies == null && !cn.amp && c.copies >= 0) { const n = nn(f[c.copies]); if (n != null) cn = { copies: Math.round(n), copiesHi: null, amp: false }; }
+    // the position: Chromosome / Start / End, else one cell (chr1:1-2), else the ISCN's (1-based as written)
+    let chromText = c.chrom >= 0 ? f[c.chrom] ?? '' : '', s0 = c.start >= 0 ? parsePos(f[c.start]) : null, end = c.stop >= 0 ? parsePos(f[c.stop]) : null, shift = opts.zeroBased;
+    if (!cghChrom(chromText) || s0 == null || end == null) {
+      const r = (posCol >= 0 ? parseRegion(f[posCol]) : null) ?? (iscn ? parseRegion(iscn) : null);
+      if (r) { chromText = r.chrom; s0 = r.start; end = r.end; shift = opts.zeroBased && !r.iscn; }
+    }
+    const chrom = cghChrom(chromText);
+    if (chrom === 'chrM') { mito++; skip(`line ${i + 1}: chrM`); continue; }
+    if (s0 != null && end != null && end < s0) { [s0, end] = [end, s0]; swapped++; }
+    const start = s0 != null && shift ? s0 + 1 : s0;
+    if (!chrom || start == null || end == null || end < start) { skip(`line ${i + 1}: ${!chrom ? 'chromosome' : 'start / end'} not a position (${l.slice(0, 40)})`); warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
+    if (iscn) iscnBuild ??= cghBuild(iscn.match(/arr\s*\[([^\]]+)\]/i)?.[1]);
     const typeText = c.type >= 0 ? (f[c.type] ?? '').trim() : '';
+    let cn = iscnCopies(iscn);
+    if (cn.copies == null && !cn.amp) { const n = c.copies >= 0 ? copiesOf(f[c.copies]) : null; if (n != null) cn = { copies: n, copiesHi: null, amp: false }; }
     const lr = c.lr >= 0 ? nn(f[c.lr]) : null;
-    const choice = typeText ? opts.typeMap[typeText.toLowerCase()] ?? (opts.ignoreOtherTypes && !kindOfText(typeText) ? 'ignore' : undefined) : undefined;
+    const choice = typeText ? opts.typeMap[typeText.toLowerCase()] ?? (opts.ignoreOtherTypes && !kindOfText(typeText) && !isLohText(typeText) ? 'ignore' : undefined) : undefined;
     if (choice === 'ignore') { ignored++; skip(`line ${i + 1}: type "${typeText}" ignored`); continue; }
+    if (!choice && isLohText(typeText)) { loh++; skip(`line ${i + 1}: copy-neutral (${typeText})`); continue; }
     const kind = choice ?? kindOfText(typeText) ?? (cn.amp ? 'gain' : cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
     if (!kind) { skip(`line ${i + 1}: no type, copy number or log ratio`); warnings.push(`line ${i + 1}: no type, copy number or log ratio, not read`); continue; }
     const cell = c.cls >= 0 ? (f[c.cls] ?? '') : '';
@@ -195,23 +222,31 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     // the footer counts the calls the software made; a different count is said, not corrected
     if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
   }
-  if (ignored) warnings.push(`${ignored} row${ignored > 1 ? 's' : ''} ignored by their type`);
-  if (!samples.size) throw new Error(`${fileName}: no call could be read (an interval table needs Chromosome, Start, Stop and a Type, an ISCN or a log ratio).`);
-  return { id, name: fileName, format: 'interval', build: cghBuild(buildText) ?? opts.build, buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings, delim: d, spec, skipped, firstSkip };
+  if (ignored) warnings.push(`${count(ignored, 'row')} ignored by their type`);
+  if (loh) warnings.push(`${count(loh, 'LOH / ROH row')} skipped (copy-neutral)`);
+  if (mito) warnings.push(`${count(mito, 'call')} on chrM skipped`);
+  if (swapped) warnings.push(`${count(swapped, 'row')} with start after end: the two swapped`);
+  if (!samples.size) throw new Error(`${fileName}: no call could be read (an interval table needs Chromosome, Start, Stop, or a position in one column, and a Type, a copy number, an ISCN or a log ratio).`);
+  return { id, name: fileName, format: 'interval', build: cghBuild(buildText) ?? iscnBuild ?? opts.build, buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi >= 0 ? hi : null, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings, delim: d, spec, skipped, firstSkip };
 }
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
 function parseBed(lines: string[], id: string, fileName: string, base: string, eol: string): Omit<CghFile, 'saveAs'> {
   const s: CghSample = { key: `${id}:${base}`, name: base, fileId: id, declaredCalls: null, cnvs: [], sex: null };
   const warnings: string[] = [];
-  let noType = 0;
+  let noType = 0, loh = 0, mito = 0, swapped = 0, wide = false;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (!l.trim() || /^(track|browser|#)/i.test(l)) continue;
     const f = l.split(/\t/).length >= 3 ? l.split('\t') : l.trim().split(/\s+/);
-    const chrom = cghChrom(f[0] ?? ''), a = parseNum(f[1]), b = parseNum(f[2]);
+    const chrom = cghChrom(f[0] ?? '');
+    let a = parsePos(f[1]), b = parsePos(f[2]);
+    if (chrom === 'chrM') { mito++; continue; }
+    if (a != null && b != null && b < a) { [a, b] = [b, a]; swapped++; }
     if (!chrom || a == null || b == null || b <= a) { warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
     const name = (f[3] ?? '').trim();
+    if (f.slice(3).some(x => x.trim())) wide = true;
+    if (isLohText(name)) { loh++; continue; }
     // an ISCN as name, else x1 / x3 / x1~2 alone, else amp
     const bare = name.match(/(?:^|[^a-z])x(\d+)(?:~(\d+))?(?![a-z0-9])/i);
     const cn = name.includes('(') ? iscnCopies(name) : bare ? { copies: +bare[1], copiesHi: bare[2] ? +bare[2] : null, amp: false } : { copies: null, copiesHi: null, amp: /\bamp/i.test(name) };
@@ -219,7 +254,11 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
     if (!kind) { noType++; continue; }
     s.cnvs.push({ id: `${id}:${i}`, sample: base, sampleKey: s.key, chrom, start: a + 1, end: b, cytoband: '', genes: [], sizeKb: (b - a) / 1000, kind, typeText: name || kind, probes: null, logRatio: null, iscn: null, ...cn, suppressed: false, classification: '', classRest: '', note: '', line: i });
   }
-  if (noType) warnings.push(`${noType} interval${noType > 1 ? 's' : ''} without a type (the 4th column should say del / dup, loss / gain or x1 / x3), not read`);
+  if (noType) warnings.push(`${count(noType, 'interval')} without a type (the 4th column should say del / dup, loss / gain or x1 / x3), not read`);
+  if (loh) warnings.push(`${count(loh, 'LOH / ROH interval')} skipped (copy-neutral)`);
+  if (mito) warnings.push(`${count(mito, 'interval')} on chrM skipped`);
+  if (swapped) warnings.push(`${count(swapped, 'interval')} with start after end: the two swapped`);
+  if (!s.cnvs.length && noType && !wide) throw new UntypedBed(`${fileName}: a BED of three columns (chrom, start, end) says no type: add a 4th column saying del / dup, loss / gain or x1 / x3.`);
   if (!s.cnvs.length) throw new Error(`${fileName}: neither an interval table (no Chromosome / Start / Stop header) nor a BED with typed intervals.`);
   warnings.unshift('BED: no probe count, the minimum number of probes does not apply');
   return { id, name: fileName, format: 'bed', build: null, buildText: null, meta: [], lines, eol, classCol: null, classSuffix: '', headerLine: null, commentCol: null, samples: [s], warnings, delim: '\t', spec: null, skipped: noType, firstSkip: noType ? 'no type in the 4th column' : null };
@@ -228,12 +267,13 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
 /**
  * The file written back, each call with the class and the note given in the browser, the other lines as they were. An
  * interval table gets its Classification column filled and a Comment column (added after the last one when it has none);
- * a BED gets the class and the note as two last columns.
+ * a BED gets the class and the note as two last columns; a VCF gets them in INFO (CGH_CLASS, CGH_NOTE, percent-encoded).
  */
 export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note): string {
-  const out = file.lines.slice(), d = file.delim, sp = (l: string) => (d === '\t' ? l.split('\t') : splitDelimited(l, d));
+  const out = file.lines.slice(), d = file.delim, sp = (l: string) => splitDelimited(l, d);
   const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const byLine = new Map(file.samples.flatMap(s => s.cnvs).map(c => [c.line, c]));
+  if (file.format === 'vcf') return exportVcf(file, out, byLine, classOf, c => flat(noteOf(c)));
   // an interval table: its Classification and Comment columns, added after the last one when missing
   let classCol = file.classCol, noteCol = file.commentCol;
   if (file.headerLine != null && (classCol == null || noteCol == null)) {
@@ -242,6 +282,11 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
     if (classCol == null) { classCol = h.length; h.push('Classification'); }
     if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
     out[file.headerLine] = joinDelimited(h, d);
+  } else if (file.format === 'interval' && (classCol == null || noteCol == null)) {
+    // a table without a header row: the missing columns after the widest call row
+    const w = Math.max(...[...byLine.keys()].map(i => { const f = sp(out[i]); let n = f.length; while (n > 0 && !f[n - 1].trim()) n--; return n; }));
+    if (classCol == null) classCol = noteCol === w ? w + 1 : w;
+    if (noteCol == null) noteCol = Math.max(w, classCol + 1);
   }
   for (const [i, cnv] of byLine) {
     const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
@@ -252,6 +297,25 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
       f[classCol] = cell; f[noteCol] = note; out[i] = joinDelimited(f, d);
     } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}`;
   }
+  return out.join(file.eol);
+}
+/** INFO values: no blank, `;`, `=`, `,` or `%` as such */
+export const vcfEncode = (t: string) => t.replace(/[%;=,\s]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
+function exportVcf(file: CghFile, out: string[], byLine: Map<number, CghCnv>, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string): string {
+  for (const [i, cnv] of byLine) {
+    const f = out[i].split('\t'), cls = classOf(cnv).trim(), note = noteOf(cnv);
+    const info = (f[7] ?? '').split(';').filter(x => x && x !== '.' && !/^CGH_(CLASS|NOTE)=/.test(x));
+    if (cls) info.push(`CGH_CLASS=${vcfEncode(cls)}`);
+    if (note) info.push(`CGH_NOTE=${vcfEncode(note)}`);
+    while (f.length < 8) f.push('.');
+    f[7] = info.join(';') || '.';
+    out[i] = f.join('\t');
+  }
+  const h = out.findIndex(l => l.startsWith('#CHROM'));
+  const add = [['CGH_CLASS', 'Classification given in the array-CGH page'], ['CGH_NOTE', 'Note given in the array-CGH page']]
+    .filter(([id]) => !out.some(l => l.startsWith(`##INFO=<ID=${id},`)))
+    .map(([id, d]) => `##INFO=<ID=${id},Number=1,Type=String,Description="${d} (percent-encoded)">`);
+  if (h >= 0) out.splice(h, 0, ...add);
   return out.join(file.eol);
 }
 

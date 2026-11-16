@@ -10,7 +10,7 @@ import { segmentColors } from './svColors';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { CghFrame, CghProbeDialog } from './CghPanel';
-import { cgh, useCgh, CGH_ACCEPT } from './cghStore';
+import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 
@@ -37,7 +37,7 @@ export function CghOpenButton() {
   const n = s.files.reduce((k, f) => k + f.samples.length, 0);
   return (
     <button onClick={() => cgh.setOpen(true)} className="ml-auto inline-flex items-center gap-1.5 h-[28px] px-2.5 rounded-[6px] border text-[12px] font-medium bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50"
-      title="Array-CGH: the interval tables of your patients (CytoGenomics .txt, BED or zip), each call classified and drawn in this browser (GRCh37)">
+      title="Array-CGH: the calls of your patients (CytoGenomics interval tables, other tables, .xlsx, BED, VCF or zip), each call classified and drawn in this browser (GRCh37)">
       Array-CGH{n ? <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{n}</span> : null} ▸</button>
   );
 }
@@ -85,7 +85,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
         {!s.files.length && (
           <div className={`mx-4 mt-3 rounded-xl border-2 border-dashed ${over ? 'border-accent-400 bg-accent-50' : 'border-slate-300 bg-white'} px-6 py-10 text-center`}>
             <div className="text-base font-bold">Array-CGH samples</div>
-            <div className="text-xs text-slate-500 mt-1 max-w-2xl mx-auto">Drop here, or add, the interval table of each patient exported by CytoGenomics (.txt), BED files, or zip files (one patient each: the interval tables inside are read, the other files skipped). Read in this page, never sent anywhere.</div>
+            <div className="text-xs text-slate-500 mt-1 max-w-2xl mx-auto">Drop here, or add, {CGH_FILES_TEXT}. Read in this page, never sent anywhere.</div>
             <div className="mt-4 flex justify-center"><AddInline /></div>
           </div>
         )}
@@ -117,7 +117,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
 function AddInline() {
   return (
     <label className="inline-flex items-center gap-1.5 h-[34px] px-4 rounded-[6px] bg-accent-600 text-white text-[12.5px] font-semibold hover:bg-accent-700 cursor-pointer">
-      Add samples (.txt, .bed, .zip)
+      Add samples (.txt, .csv, .xlsx, .bed, .vcf, .zip)
       <input data-cgh-input type="file" multiple accept={CGH_ACCEPT} className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>

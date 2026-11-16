@@ -9,8 +9,9 @@ import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { CghMapDialog } from './CghMapDialog';
+import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill } from './controls';
-import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_ACCEPT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_RECURRENT, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
@@ -26,7 +27,7 @@ const KIND = { loss: { color: '#dc2626', bg: '#fee2e2', word: 'del' }, gain: { c
 function CghAddButton({ compact }: { compact?: boolean }) {
   return (
     <label className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium cursor-pointer whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50 ${compact ? 'h-[26px] px-2 text-xs rounded-lg' : ''}`}
-      title={'Array-CGH calls of one or more patients: the interval table of each sample exported by CytoGenomics (.txt: Chromosome, Start, Stop, Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification), a BED (chrom, start, end, a name saying del / dup or x1 / x3), or zip files holding them (one patient per zip).\nRead in this page, never sent anywhere. Files can also be dropped on the page.'}>
+      title={`Array-CGH calls of one or more patients: ${CGH_FILES_TEXT}.\nRead in this page, never sent anywhere. Files can also be dropped on the page.`}>
       <Icon name="upload" size={compact ? 13 : 15} />{compact ? 'Add samples' : 'Add array-CGH samples'}
       <input data-cgh-input type="file" multiple accept={CGH_ACCEPT} className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
@@ -60,7 +61,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   const many = every.length > CGH_MAX_ANNOTATED, over = kept > CGH_MAX_ANNOTATED;
   const [sexes, setSexes] = useState<Record<string, CghSex | null>>(() => Object.fromEntries(p.files.flatMap(f => f.samples.map(x => [x.key, x.sex]))));
   const samples = p.files.flatMap(f => f.samples.map(x => ({ x, f })));
-  const noCount = p.files.some(f => f.format === 'bed' || f.warnings.some(w => /no #Probes/.test(w)));
+  const noCount = p.files.some(f => f.format !== 'interval' || f.warnings.some(w => /no #Probes/.test(w)));
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !over && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
@@ -95,8 +96,8 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
               </tr>;
             })}</tbody>
           </table>}
-          {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED): its calls are all kept.</div>}
-          {p.files.flatMap(f => f.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
+          {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
+          {p.files.flatMap(f => f.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
             <button className="text-accent-700 hover:underline" onClick={() => cgh.remap(f)}>{f.remembered ? '(change…)' : 'columns…'}</button></div>)}
           {p.notes.map(e => <div key={e} className="text-[11px] text-slate-500">{e}</div>)}
@@ -197,7 +198,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <LabBenignButton />
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
           <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
-            title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns).\nClasses and notes are kept in this tab only: export them to keep them.'}>
+            title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.'}>
             <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>
         </span>
       </div>
@@ -296,13 +297,13 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           </tbody>
         </table>
       </div>
-      {s.files.some(fl => fl.warnings.some(w => !/^BED: no probe/.test(w))) && <div className="px-5 text-[10.5px] text-amber-700">{s.files.flatMap(fl => fl.warnings.filter(w => !/^BED: no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</div>}
+      {s.files.some(fl => fl.warnings.some(w => !/^(BED|VCF): no probe/.test(w))) && <div className="px-5 text-[10.5px] text-amber-700">{s.files.flatMap(fl => fl.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</div>}
       <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4">
         <summary className="cursor-pointer text-accent-700 font-medium select-none">ⓘ How the calls are read, annotated, ranked and exported</summary>
         Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row (click it again to fold them): the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
         Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
-        Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column).
+        Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column; a VCF in INFO; an .xlsx as tab-separated text).
         <PriorityRules />
       </details>
     </div>
@@ -382,7 +383,7 @@ function LabBenignButton() {
   const [msg, setMsg] = useState('');
   const load = async (f: File) => {
     try {
-      const r = parseLabBenign(new TextDecoder('utf-8').decode(await f.arrayBuffer()), f.name);
+      const r = parseLabBenign(decodeText(new Uint8Array(await f.arrayBuffer())), f.name);
       if (!r.entries.length) { setMsg(`${f.name}: no interval read (${r.skipped} line${r.skipped === 1 ? '' : 's'} skipped)`); return; }
       setMsg(''); cgh.setLab(r);
     } catch (e) { setMsg(`${f.name}: ${(e as Error).message}`); }

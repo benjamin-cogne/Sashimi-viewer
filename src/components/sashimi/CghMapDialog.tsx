@@ -1,32 +1,36 @@
 /**
  * The column mapping of an array-CGH table whose columns were not recognised (or are to be changed): delimiter and
- * header row, a preview, one select per field, what the Type values mean. The choice is remembered by the header.
+ * header row (or none: the columns are then named column 1, 2…), a preview, one select per field, what the Type values
+ * mean. The choice is remembered by the header (a table without one is not remembered).
  */
 import { useMemo, useState } from 'react';
 import { cgh, type CghState } from './cghStore';
 import { parseCghFile, cghBuild, kindOfText, type CghFile } from './cghIntervals';
-import { detectTable, guessCols, guessSizeUnit, rememberMap, splitDelimited, type ColMap, type Field, type MapOpts, type MapSpec, type TypeChoice } from './cghMapping';
+import { detectTable, guessCols, guessSizeUnit, rememberMap, splitDelimited, splitRecords, type ColMap, type Field, type MapOpts, type MapSpec, type TypeChoice } from './cghMapping';
 
-const LABEL: Record<Field, string> = { chrom: 'Chromosome', start: 'Start', stop: 'End', type: 'Type (del / dup / loss / gain…)', copies: 'Copy number', iscn: 'ISCN', lr: 'Log ratio', probes: 'Probes', size: 'Size', band: 'Cytoband', genes: 'Genes', cls: 'Classification', note: 'Comment', sample: 'Sample name', sup: 'Suppress' };
-const REQUIRED: Field[] = ['chrom', 'start', 'stop'], ONE_OF: Field[] = ['type', 'copies', 'iscn', 'lr'];
+const LABEL: Record<Field, string> = { chrom: 'Chromosome', start: 'Start', stop: 'End', pos: 'Position (one column)', type: 'Type (del / dup / loss / gain…)', copies: 'Copy number', iscn: 'ISCN', lr: 'Log ratio', probes: 'Probes', size: 'Size', band: 'Cytoband', genes: 'Genes', cls: 'Classification', note: 'Comment', sample: 'Sample name', sup: 'Suppress' };
+const PLACE: Field[] = ['chrom', 'start', 'stop'], ONE_OF: Field[] = ['type', 'copies', 'iscn', 'lr'];
 const OPTIONAL: Field[] = ['probes', 'size', 'band', 'genes', 'cls', 'note', 'sample', 'sup'];
 const DELIMS: [string, string][] = [['\t', 'tab'], [';', 'semicolon ;'], [',', 'comma ,']];
 const SEL = 'h-[26px] px-1.5 rounded border border-slate-200 bg-white text-[11.5px] outline-none cursor-pointer max-w-[210px]';
 
 export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
-  const lines = useMemo(() => item.text.replace(/^\uFEFF/, '').split(/\r?\n/), [item.text]);
+  const lines = useMemo(() => splitRecords(item.text), [item.text]);
+  /** a row's cells, and the header's (generated names when the table has no header row) */
+  const rowsFrom = (d: string, h: number) => lines.slice(h + 1).filter(l => l.trim()).map(l => splitDelimited(l, d));
+  const headerOf = (d: string, h: number) => (h >= 0 ? splitDelimited(lines[h] ?? '', d) : Array.from({ length: Math.max(0, ...rowsFrom(d, h).slice(0, 40).map(r => r.length)) }, () => ''));
   const first = useMemo(() => {
     const t = detectTable(lines);
     return item.spec?.opts ?? { delim: t?.delim ?? '\t', headerRow: t?.headerRow ?? Math.max(0, lines.findIndex(l => l.trim())), zeroBased: false, sizeUnit: 'kb', build: 'GRCh37', typeMap: {} } as MapOpts;
   }, [lines, item.spec]);
   const [delim, setDelim] = useState(first.delim), [headerRow, setHeaderRow] = useState(first.headerRow);
-  const [cols, setCols] = useState<ColMap>(() => item.spec?.cols ?? guessCols(splitDelimited(lines[first.headerRow] ?? '', first.delim)));
+  const [cols, setCols] = useState<ColMap>(() => item.spec?.cols ?? guessCols(headerOf(first.delim, first.headerRow), rowsFrom(first.delim, first.headerRow)));
   const [zeroBased, setZeroBased] = useState(first.zeroBased), [sizeUnit, setSizeUnit] = useState(first.sizeUnit);
   const [build, setBuild] = useState(first.build ?? 'GRCh37'), [typeMap, setTypeMap] = useState(first.typeMap);
 
-  const header = splitDelimited(lines[headerRow] ?? '', delim);
-  const data = useMemo(() => lines.slice(headerRow + 1).filter(l => l.trim()).map(l => splitDelimited(l, delim)), [lines, headerRow, delim]);
-  const statesBuild = lines.slice(0, headerRow).some(l => cghBuild(l));
+  const data = useMemo(() => rowsFrom(delim, headerRow), [lines, headerRow, delim]); // eslint-disable-line react-hooks/exhaustive-deps
+  const header = useMemo(() => headerOf(delim, headerRow), [lines, headerRow, delim]); // eslint-disable-line react-hooks/exhaustive-deps
+  const statesBuild = lines.slice(0, Math.max(0, headerRow)).some(l => cghBuild(l));
   // the Type values that say neither loss nor gain: each needs a choice (ignored until one is made)
   const odd = useMemo(() => {
     if (cols.type < 0) return [];
@@ -37,20 +41,21 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
   const spec: MapSpec = useMemo(() => ({ cols, opts: { delim, headerRow, zeroBased, sizeUnit, build: statesBuild ? null : build, ignoreOtherTypes: true,
     // only the values given a meaning: an ignored one is the default, and is not remembered
     typeMap: Object.fromEntries(odd.flatMap(v => { const t = typeMap[v.toLowerCase()]; return t && t !== 'ignore' ? [[v.toLowerCase(), t]] : []; })) } }), [cols, delim, headerRow, zeroBased, sizeUnit, build, statesBuild, odd, typeMap]);
-  const ready = REQUIRED.every(f => cols[f] >= 0) && ONE_OF.some(f => cols[f] >= 0);
+  // the place: Chromosome, Start and End, or one column holding it, or an ISCN (it holds the place and the copies)
+  const ready = (PLACE.every(f => cols[f] >= 0) || cols.pos >= 0 || cols.iscn >= 0) && ONE_OF.some(f => cols[f] >= 0);
   const res = useMemo((): { file: CghFile | null; msg: string } => {
-    if (!ready) return { file: null, msg: 'Choose Chromosome, Start, End and one of Type, Copy number, ISCN, Log ratio.' };
+    if (!ready) return { file: null, msg: 'Choose Chromosome, Start and End (or a Position in one column, or an ISCN), and one of Type, Copy number, ISCN, Log ratio.' };
     try {
       const f = parseCghFile(item.text, item.name, item.fallback, spec), n = f.samples.reduce((k, x) => k + x.cnvs.length, 0);
       return { file: f, msg: `${n} row${n === 1 ? '' : 's'} read, ${f.skipped} skipped${f.firstSkip ? ` (first: ${f.firstSkip})` : ''}` };
     } catch (e) { return { file: null, msg: `0 rows read: ${(e as Error).message.replace(`${item.name}: `, '')}` }; }
   }, [ready, spec, item]);
 
-  const guess = (d: string, h: number) => { setCols(guessCols(splitDelimited(lines[h] ?? '', d))); setTypeMap({}); };
+  const guess = (d: string, h: number) => { setCols(guessCols(headerOf(d, h), rowsFrom(d, h))); setTypeMap({}); };
   const setCol = (f: Field, v: number) => {
     const next = { ...cols, [f]: v };
     setCols(next);
-    if ((f === 'size' || f === 'start' || f === 'stop') && next.size >= 0 && next.start >= 0 && next.stop >= 0) setSizeUnit(guessSizeUnit(data, next, delim !== ','));
+    if ((f === 'size' || f === 'start' || f === 'stop' || f === 'pos') && next.size >= 0 && ((next.start >= 0 && next.stop >= 0) || next.pos >= 0)) setSizeUnit(guessSizeUnit(data, next, delim !== ','));
   };
   const field = (f: Field, required: boolean) => <label key={f} className="flex items-center gap-2 py-0.5">
     <span className={`w-[170px] shrink-0 ${required ? 'font-semibold' : ''}`}>{LABEL[f]}{required ? ' *' : ''}</span>
@@ -61,7 +66,7 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
     {f === 'size' && cols.size >= 0 && <select value={sizeUnit} onChange={e => setSizeUnit(e.target.value as MapOpts['sizeUnit'])} aria-label="Size unit" className={SEL}>{['bp', 'kb', 'Mb'].map(u => <option key={u}>{u}</option>)}</select>}
   </label>;
   const cancel = () => cgh.mapped(null);
-  const use = () => { if (!res.file) return; rememberMap(header, spec); cgh.mapped(res.file); };
+  const use = () => { if (!res.file) return; if (headerRow >= 0) rememberMap(header, spec); cgh.mapped(res.file); };
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Column mapping"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancel(); } }}>
@@ -76,6 +81,7 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
               <select value={delim} onChange={e => { setDelim(e.target.value); guess(e.target.value, headerRow); }} aria-label="Delimiter" className={SEL}>{DELIMS.map(([v, t]) => <option key={v} value={v}>{t}</option>)}</select></label>
             <label className="flex items-center gap-1.5"><span className="font-semibold">Header row</span>
               <select value={headerRow} onChange={e => { const h = Number(e.target.value); setHeaderRow(h); guess(delim, h); }} aria-label="Header row" className={SEL}>
+                <option value={-1}>none (every line is a call)</option>
                 {lines.slice(0, 30).map((l, i) => l.trim() ? <option key={i} value={i}>line {i + 1}: {l.slice(0, 28)}</option> : null)}</select></label>
           </div>
           <div className="overflow-x-auto border border-slate-200 rounded" data-map-preview>
@@ -85,7 +91,8 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
             </table>
           </div>
           <div className="grid sm:grid-cols-2 gap-x-6">
-            <div>{REQUIRED.map(f => field(f, true))}
+            <div>{PLACE.map(f => field(f, true))}
+              <div className="text-[11px] text-slate-500 mt-1">or the place in one column (chr1:72523846-72667555, or an ISCN):</div>{field('pos', false)}
               <div className="text-[11px] text-slate-500 mt-1.5">At least one of these (in this order of preference):</div>{ONE_OF.map(f => field(f, false))}</div>
             <div><div className="text-[11px] text-slate-500">Optional</div>{OPTIONAL.map(f => field(f, false))}</div>
           </div>
