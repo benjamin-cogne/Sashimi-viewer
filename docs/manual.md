@@ -222,7 +222,9 @@ header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `ga
 one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
 already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
-analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). At most 200 calls
+analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
+with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
+the slider's span, 500 bp or 8 Mb, is kept), the same control in the list's filters. At most 200 calls
 are annotated: when the tab holds more calls than that, the question says so, and when more would pass the minimums,
 *Analyse* stays off until the number of probes and / or the size is raised. And
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
@@ -248,14 +250,14 @@ links staying on the right.
 
 **Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
 fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
-*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and, when the
-patient's **DLRS** is typed next to the sex, the interval at ± DLRS. Indicative only (no biological variability); chrX / chrY
+*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and the
+estimated fraction. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
-patients; the tooltip and the call's detail name them with their overlap. The *series* filter keeps the calls found in no other patient (*unique*) or in at
-least 2 others (*recurrent*). Not written to the export.
+patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients
+to a value: *any*, *=*, *≥*, *≤*, *>*, *<* and a number (*= 0*: in no other patient; *≥ 2*: in at least 2 others). Not written to the export.
 
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons

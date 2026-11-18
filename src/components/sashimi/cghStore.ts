@@ -26,13 +26,16 @@ export interface CghFilter {
   query: string;
   /** the calls in genomic order, or the highest priority first */
   sort: 'position' | 'priority';
-  /** recurrence in the series: any call, in no other patient, or in at least SERIES_RECURRENT others */
-  series: 'any' | 'unique' | 'recurrent';
+  /** recurrence in the series: the number of OTHER patients carrying the call (the Series column) compared to seriesN */
+  series: SeriesOp;
+  seriesN: number;
   /** the laboratory's benign list: any call, those not in it, those in it */
   lab: 'any' | 'not' | 'in';
 }
-/** "recurrent": the call is found in at least this many other patients */
-export const SERIES_RECURRENT = 2;
+export type SeriesOp = 'any' | '=' | '≥' | '≤' | '>' | '<';
+export const SERIES_OPS: SeriesOp[] = ['any', '=', '≥', '≤', '>', '<'];
+const seriesOk = (op: SeriesOp, n: number, k: number) =>
+  op === '=' ? n === k : op === '≥' ? n >= k : op === '≤' ? n <= k : op === '>' ? n > k : op === '<' ? n < k : true;
 export interface CghState {
   files: CghFile[];
   /** the class given in the browser, by call id (else the file's own) */
@@ -57,8 +60,6 @@ export interface CghState {
   modes: Record<string, GeneModes | 'loading' | 'error'>;
   /** each patient's sex, by sample key (absent: not given) */
   sex: Record<string, CghSex>;
-  /** each patient's DLRS (derivative log ratio spread), by sample key, for the mosaic interval (absent: not given; not persisted) */
-  dlrs: Record<string, number>;
   /** a note on each call, by call id (else the file's) */
   notes: Record<string, string>;
   /** the laboratory's list of benign CNVs (a reference, kept in localStorage), and whether it could be stored */
@@ -72,11 +73,11 @@ export const CGH_MAX_ANNOTATED = 200;
 /** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
 export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
 const loadFilter = (): CghFilter => {
-  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any', lab: 'any' };
+  const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any', seriesN: 1, lab: 'any' };
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, dlrs: {}, notes: {}, lab: loadStoredLab(), labStored: true };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -207,7 +208,6 @@ export const cgh = {
   setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
-  setDlrs(key: string, v: number | null) { const dlrs = { ...state.dlrs }; if (v != null && v > 0) dlrs[key] = v; else delete dlrs[key]; set({ dlrs }); },
   /** a sample taken off the list (its file too when it was the file's only sample) */
   remove(sampleKey: string) {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);
@@ -232,7 +232,7 @@ export function passes(s: CghState, c: CghCnv): boolean {
   const cls = classOf(s, c).trim();
   if (f.classed === 'unclassified' && cls) return false;
   if (f.classed === 'classified' && !cls) return false;
-  if (f.series !== 'any') { const n = seriesOf(s.files).get(c.id)?.hits.length ?? 0; if (f.series === 'unique' ? n > 0 : n < SERIES_RECURRENT) return false; }
+  if (f.series !== 'any') { const n = seriesOf(s.files).get(c.id)?.hits.length ?? 0; if (!seriesOk(f.series, n, f.seriesN)) return false; }
   if (f.lab !== 'any' && (labHits(s.files, s.lab).has(c.id) !== (f.lab === 'in'))) return false;
   const q = f.query.trim().toLowerCase();
   if (q) {

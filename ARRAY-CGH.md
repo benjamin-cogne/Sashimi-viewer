@@ -13,14 +13,16 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - `.xlsx` (first sheet), BED, SV VCF (`.vcf`, `.vcf.gz`);
   - zips holding any of these (one patient each).
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
-- **Import question.** Minimum number of probes (3) and minimum size; at most 200 calls annotated; sex per patient.
-- **Table.** One tab per patient plus *All patients*, filters, sort by priority.
+- **Import question.** Minimum number of probes (3) and minimum size (log slider: any, 10 kb to 5 Mb, or a value typed in
+  bp / kb / Mb, also in the filter bar); at most 200 calls annotated; sex per patient.
+- **Table.** One tab per patient plus *All patients*, filters (series: the number of other patients carrying the call
+  compared with = ≥ ≤ > < n), sort by priority.
 - **Per call, read on GRCh37** by the SV browser's own routes (UCSC, PanelApp, gnomAD):
   - RefSeq genes; PanelApp ratings and modes of inheritance (asked 25 genes a request);
   - ClinGen HI / TS of genes and of ISCA regions; gnomAD LOEUF;
   - AChro-Puce recurrent CNVs; DGV Gold (3 relations);
   - exons cut and reading frame; terminal / arm / chromosome labels; rearrangement hints;
-  - mosaic fraction (AChro-Puce formula, optional DLRS); recurrence in the loaded series; the laboratory's benign
+  - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
 - **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
@@ -39,7 +41,7 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `CghPage.tsx` | the page (bar, frame, browser below); `CghOpenButton`, `CghPageSlot` used by the SV browser |
 | `CghPanel.tsx` | the frame: tabs, filters, table, detail, import question |
 | `CghMapDialog.tsx` | column-mapping dialog |
-| `cghStore.ts` | state (files, classes, notes, sex, DLRS, filters, annotations) |
+| `cghStore.ts` | state (files, classes, notes, sex, filters, annotations) |
 | `cghIntervals.ts` | interval table / BED parsing, export, classes, CNV-Hub link |
 | `cghMapping.ts` | delimiter and header detection, column guessing, remembered mappings |
 | `cghFormats.ts` | decoding (BOM, UTF-16, cp1252), xlsx reading, `.xls` detection |

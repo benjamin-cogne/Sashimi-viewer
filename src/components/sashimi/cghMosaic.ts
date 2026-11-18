@@ -25,11 +25,11 @@ const PAR: Record<string, [number, number][]> = {
 const inPar = (c: CghCnv) => (PAR[c.chrom] ?? []).some(([a, b]) => c.start >= a && c.end <= b);
 
 export type Mosaic =
-  | { ok: true; f: number; lo: number | null; hi: number | null; expected: number; hemi: boolean; why?: undefined }
+  | { ok: true; f: number; expected: number; hemi: boolean; why?: undefined }
   | { ok: false; why: 'sex' };
 
 /** the estimate for a call, or null when none applies (no log ratio, not a one-copy change); `sex needed` for chrX / chrY outside the PARs */
-export function mosaicOf(c: CghCnv, sex: CghSex | undefined, dlrs?: number): Mosaic | null {
+export function mosaicOf(c: CghCnv, sex: CghSex | undefined): Mosaic | null {
   if (c.logRatio == null || c.amp || c.copiesHi != null) return null;
   const sexChrom = (c.chrom === 'chrX' || c.chrom === 'chrY') && !inPar(c);
   if (sexChrom && !sex) return { ok: false, why: 'sex' };
@@ -40,8 +40,5 @@ export function mosaicOf(c: CghCnv, sex: CghSex | undefined, dlrs?: number): Mos
   const chrom = sexChrom ? (c.chrom === 'chrX' ? 'X' : 'Y') : 'autosome';
   const ev = c.kind === 'loss' ? 'del' : 'dup', sx = sex === 'male' ? 'M' : 'F';
   const f = computeMosaicism(c.logRatio, ev, chrom, sx);
-  const d = dlrs != null && dlrs > 0 ? dlrs : null;
-  const a = d != null ? computeMosaicism(c.logRatio - d, ev, chrom, sx) : null, b = d != null ? computeMosaicism(c.logRatio + d, ev, chrom, sx) : null;
-  return { ok: true, f, lo: a != null && b != null ? Math.min(a, b) : null, hi: a != null && b != null ? Math.max(a, b) : null,
-    expected: Math.log2((c.kind === 'loss' ? base - 1 : base + 1) / base), hemi };
+  return { ok: true, f, expected: Math.log2((c.kind === 'loss' ? base - 1 : base + 1) / base), hemi };
 }
