@@ -995,13 +995,15 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     return { n, loss, gain, other, max, matched: clinSvInView.filter(clinMatch) };
   })();
   const clinSvItems: { v: ClinvarVariant; lane: number; a: number; b: number }[] = [];
+  /** SVs left out when every lane is taken at their place (drawn over others before) */
+  let clinSvHidden = 0;
   if (clinSvShown) {
     const ends: number[] = [];
     for (const v of [...(clinSvAll ? clinSvView.list : clinAgg?.matched ?? [])].sort((p, q) => p.start - q.start)) {
       const a = refX(v.start), b = Math.max(refX(v.end), a + 2);
       if (b < X0 || a > X1) continue;
       let lane = ends.findIndex(e => e + 2 < a);
-      if (lane < 0) { if (ends.length < CLIN_SV_MAX_LANES) { lane = ends.length; ends.push(b); } else { lane = ends.indexOf(Math.min(...ends)); ends[lane] = Math.max(ends[lane], b); } }
+      if (lane < 0) { if (ends.length < CLIN_SV_MAX_LANES) { lane = ends.length; ends.push(b); } else { clinSvHidden++; continue; } }
       else ends[lane] = b;
       clinSvItems.push({ v, lane, a: cx(a), b: cx(b) });
     }
@@ -1297,6 +1299,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {yClinSv >= 0 && clinSvInView.length > 0 && clinSvStack > CLIN_SV_STACK_MAX && <text x={14} y={yClinSv + 20} fontSize={9.5} fill={C.accent} style={{ cursor: 'pointer' }}
           onClick={e => { e.stopPropagation(); const v = clinSvForce === 'all' ? 'auto' : 'all'; setClinSvForce(v); store.set('sashimi.svClinvarSvMode', v); }}>
           {clinSvAll ? `▾ summary` : `▸ all SVs (${clinSvInView.length})`}<title>{clinSvAll ? `Sum the SVs up (up to ${clinSvStack} lie over one point): how many cover each point (losses above, gains below), the ones matching the event as bars` : 'Every ClinVar SV in view, one bar each'}</title></text>}
+        {yClinSv >= 0 && clinSvHidden > 0 && <text x={14} y={yClinSv + 32} fontSize={9.5} fill={C.lost}>+{clinSvHidden} SV not drawn<tspan x={14} dy={11}>(zoom in)</tspan><title>{`${clinSvHidden} ClinVar SVs find no free lane among the ${CLIN_SV_MAX_LANES} at their place: zoom in to see them`}</title></text>}
         {yClinSv >= 0 && <text x={14} y={yClinSv + 8} fontWeight={600} fill={C.text}>ClinVar SV<title>ClinVar variants of 50 bp or more classified pathogenic or likely pathogenic (UCSC track clinvarCnv)</title></text>}
         {yClinSnv >= 0 && <g fontSize={9} pointerEvents="none">
           <text x={14} y={yClinSnv + 8}><tspan fill={CLIN_EFFECT_COLOR.lof}>● LoF</tspan><tspan fill={C.faint}> · </tspan><tspan fill={CLIN_LOF_ESC}>● NMD escape</tspan></text>
