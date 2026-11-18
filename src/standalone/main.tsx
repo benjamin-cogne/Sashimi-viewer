@@ -1381,6 +1381,8 @@ function App() {
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
         <span>·</span>
+        <a href="mailto:benjamin.cogne@chu-nantes.fr?subject=Sashimi%20viewer" className="hover:text-accent-700 underline decoration-dotted" title="Questions or feedback on the Sashimi viewer: write to benjamin.cogne@chu-nantes.fr">Contact</a>
+        <span>·</span>
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-accent-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>
         <span>CC BY-NC 4.0</span>

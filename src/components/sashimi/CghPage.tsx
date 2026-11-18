@@ -80,7 +80,11 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <button onClick={onBack} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the SV browser (Esc)">← SV browser</button>
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
-          <span className="ml-auto text-[11px] text-bar-muted">Esc: back to the SV browser</span>
+          <span className="ml-auto text-[11px] text-bar-muted">
+            CGH-array support implemented by Wallid Deb (CHU Nantes) · <a href="mailto:wallid.deb@chu-nantes.fr?subject=Sashimi%20viewer%20%E2%80%94%20Array-CGH" className="underline decoration-dotted hover:text-bar-text" title="Questions or feedback on the array-CGH page: write to wallid.deb@chu-nantes.fr">Contact</a>
+          </span>
+          <span className="text-[11px] text-bar-muted">·</span>
+          <span className="text-[11px] text-bar-muted">Esc: back to the SV browser</span>
         </div>
         {!s.files.length && (
           <div className={`mx-4 mt-3 rounded-xl border-2 border-dashed ${over ? 'border-accent-400 bg-accent-50' : 'border-slate-300 bg-white'} px-6 py-10 text-center`}>

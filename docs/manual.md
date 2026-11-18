@@ -223,7 +223,7 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
-**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
+**Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
 Esc to go back; the samples stay while the tab is open). **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
