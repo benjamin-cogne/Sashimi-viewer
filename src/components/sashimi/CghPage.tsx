@@ -13,6 +13,7 @@ import { CghFrame, CghProbeDialog } from './CghPanel';
 import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
+import ContactLink from '../ContactLink';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
 const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
@@ -81,7 +82,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
           <span className="ml-auto text-[11px] text-bar-muted">
-            CGH-array support implemented by Wallid Deb (CHU Nantes) · <a href="mailto:wallid.deb@chu-nantes.fr?subject=Sashimi%20viewer%20%E2%80%94%20Array-CGH" className="underline decoration-dotted hover:text-bar-text" title="Questions or feedback on the array-CGH page: write to wallid.deb@chu-nantes.fr">Contact</a>
+            CGH-array support implemented by Wallid Deb (CHU Nantes) · <ContactLink email="wallid.deb@chu-nantes.fr" subject="Sashimi viewer — Array-CGH" className="hover:text-bar-text" />
           </span>
           <span className="text-[11px] text-bar-muted">·</span>
           <span className="text-[11px] text-bar-muted">Esc: back to the SV browser</span>
