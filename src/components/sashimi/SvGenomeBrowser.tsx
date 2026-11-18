@@ -14,7 +14,7 @@
  * under one label. Chromatin domains from a BED the user loads are drawn over the reference and under the rebuilt
  * chromosome, new domains outlined.
  */
-import React, { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { reconstruct, type SvReconstruction } from './svModel';
 import type { Cytoband } from './svNomenclature';
 import { chromLength } from '../../standalone/assembly';
@@ -368,6 +368,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [showClinSnv, setShowClinSnv] = useState<boolean>(() => store.get<boolean>('sashimi.svClinvarSnv') ?? true);
   /** the ClinVar SVs one by one (expanded), or summed up as a profile (the default) */
   // bars unless more than CLIN_SV_STACK_MAX are stacked over a point (then summed up), or every SV as bars when asked
+  // the SVG's ids made unique per browser: the array-CGH page draws a second browser over the SV browser's, and a shared
+  // id={sid('clip')} resolved to the first one, whose shorter clip hid all below a grown track (ClinVar SV "all SVs")
+  const svgUid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
+  const sid = (k: string) => `svb-${svgUid}-${k}`;
   const [clinSvForce, setClinSvForce] = useState<'auto' | 'all'>(() => (store.get<string>('sashimi.svClinvarSvMode') === 'all' ? 'all' : 'auto'));
   /** ClinVar SNVs summed per gene (by default) or each variant on its own */
   const [clinSnvMode, setClinSnvMode] = useState<'gene' | 'each'>(() => (store.get<string>('sashimi.svClinvarSnvMode') === 'each' ? 'each' : 'gene'));
@@ -1262,17 +1266,17 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       onContextMenu={e => { if (e.ctrlKey) e.preventDefault(); /* Ctrl + click on a Mac: the selection, not the menu */ }}
       onClick={() => { if (!suppressClick.current) { setPinned(null); setLinked(null); } }} onDoubleClick={onDoubleClick}>
       <defs>
-        <clipPath id="svb-clip"><rect x={X0 - 2} y={0} width={PW + 4} height={H} /></clipPath>
-        <clipPath id="svb-ideo"><rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} rx={IDEO_H / 2} /></clipPath>
-        <pattern id="svb-lost" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fef2f2" /><line x1="0" y1="0" x2="0" y2="6" stroke={C.lost} strokeWidth="1.6" /></pattern>
-        <linearGradient id="svb-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#fbfcfd" /><stop offset="1" stopColor="#f4f7fa" /></linearGradient>
-        <linearGradient id="svb-lens" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={C.accent} stopOpacity={0.16} /><stop offset="1" stopColor={C.accent} stopOpacity={0.03} /></linearGradient>
-        <linearGradient id="svb-dens" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#64748b" stopOpacity={0.55} /><stop offset="1" stopColor="#64748b" stopOpacity={0.12} /></linearGradient>
+        <clipPath id={sid('clip')}><rect x={X0 - 2} y={0} width={PW + 4} height={H} /></clipPath>
+        <clipPath id={sid('ideo')}><rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} rx={IDEO_H / 2} /></clipPath>
+        <pattern id={sid('lost')} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fef2f2" /><line x1="0" y1="0" x2="0" y2="6" stroke={C.lost} strokeWidth="1.6" /></pattern>
+        <linearGradient id={sid('bg')} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#fbfcfd" /><stop offset="1" stopColor="#f4f7fa" /></linearGradient>
+        <linearGradient id={sid('lens')} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={C.accent} stopOpacity={0.16} /><stop offset="1" stopColor={C.accent} stopOpacity={0.03} /></linearGradient>
+        <linearGradient id={sid('dens')} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#64748b" stopOpacity={0.55} /><stop offset="1" stopColor="#64748b" stopOpacity={0.12} /></linearGradient>
       </defs>
-      <rect width={VW} height={H} fill="url(#svb-bg)" rx={12} />
+      <rect width={VW} height={H} fill={`url(#${sid('bg')})`} rx={12} />
       {/* ideogram: the whole chromosome, the part in view boxed, the event's breakpoints marked */}
       <text x={14} y={IDEO_Y + 10} fontSize={11} fontWeight={700} fill={C.text}>{chrom}</text>
-      <g clipPath="url(#svb-ideo)">
+      <g clipPath={`url(#${sid('ideo')})`}>
         <rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} fill={STAIN.gneg} />
         {bands.map(b => b.stain === 'acen'
           ? <path key={b.name + b.start} d={b.name.startsWith('p') ? `M${ix(b.start)},${IDEO_Y} L${ix(b.end)},${IDEO_Y + IDEO_H / 2} L${ix(b.start)},${IDEO_Y + IDEO_H} Z` : `M${ix(b.end)},${IDEO_Y} L${ix(b.start)},${IDEO_Y + IDEO_H / 2} L${ix(b.end)},${IDEO_Y + IDEO_H} Z`} fill={STAIN.acen} />
@@ -1281,7 +1285,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <rect x={X0} y={IDEO_Y} width={PW} height={IDEO_H} rx={IDEO_H / 2} fill="none" stroke="#94a3b8" strokeWidth={0.8} />
       {bands.filter(b => ix(b.end) - ix(b.start) > textWidth(b.name) * 0.78 + 6 && b.stain !== 'acen').map(b => <text key={`bl${b.name}${b.start}`} x={(ix(b.start) + ix(b.end)) / 2} y={IDEO_Y - 3} fontSize={8} textAnchor="middle" fill={C.faint}>{b.name}</text>)}
       {rec && bpKey.split(',').filter(Boolean).map(p => <path key={`ibp${p}`} d={`M${ix(+p)},${IDEO_Y - 1} l-3,-5 h6 z`} fill={C.lost} />)}
-      <path d={`M${ix(Math.max(0, vp.s))},${IDEO_Y + IDEO_H} L${X0},${IDEO_Y + IDEO_H + LENS_H} H${X1} L${ix(Math.max(0, vp.s)) + vl},${IDEO_Y + IDEO_H} Z`} fill="url(#svb-lens)" />
+      <path d={`M${ix(Math.max(0, vp.s))},${IDEO_Y + IDEO_H} L${X0},${IDEO_Y + IDEO_H + LENS_H} H${X1} L${ix(Math.max(0, vp.s)) + vl},${IDEO_Y + IDEO_H} Z`} fill={`url(#${sid('lens')})`} />
       <rect x={ix(Math.max(0, vp.s)) - 1} y={IDEO_Y - 2} width={vl + 2} height={IDEO_H + 4} rx={3} fill={C.accent} fillOpacity={0.12} stroke={C.accent} strokeWidth={1.4} />
       {/* track names */}
       <g fontSize={10.5} fill={C.muted}>
@@ -1312,7 +1316,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       </g>
       {/* ruler: drag along it to zoom on a stretch */}
       <rect x={X0} y={yRuler} width={PW} height={RULER_H - 4} fill="#eef2f6" rx={4} style={{ cursor: 'col-resize' }}><title>Drag along the ruler to zoom on a stretch</title></rect>
-      <g clipPath="url(#svb-clip)">
+      <g clipPath={`url(#${sid('clip')})`}>
         {ticks.map(t => <g key={`tk${t}`}><line x1={refX(t)} x2={refX(t)} y1={yRuler + RULER_H - 9} y2={yRuler + RULER_H - 4} stroke={C.faint} />{refX(t) > X0 + 28 && refX(t) < X1 - 28 && <text x={refX(t)} y={yRuler + 11} fontSize={9} textAnchor="middle" fill={C.muted} fontFamily={MONO}>{tickText(t, step)}</text>}</g>)}
         {/* grid lines through the tracks */}
         {ticks.map(t => <line key={`gl${t}`} x1={refX(t)} x2={refX(t)} y1={yRuler + RULER_H} y2={rec ? yRefBand : H - 8} stroke={C.grid} strokeWidth={0.6} />)}
@@ -1326,7 +1330,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {/* breakpoints through the reference */}
         {rec && rec.segs.filter(s => !s.first && inView(refX(s.start), refX(s.start))).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={yRuler + RULER_H} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={strongEvent ? 2 : 1} strokeDasharray={strongEvent ? '6 3' : '3 3'} opacity={strongEvent ? 0.9 : 0.55} />)}
         {/* reference genes */}
-        {density && <path d={density.d} transform={`translate(0 ${yDens + 34}) scale(1 34)`} fill="url(#svb-dens)" stroke="none"><title>{`genes per ${kb(3 / ppb)}: up to ${density.max}`}</title></path>}
+        {density && <path d={density.d} transform={`translate(0 ${yDens + 34}) scale(1 34)`} fill={`url(#${sid('dens')})`} stroke="none"><title>{`genes per ${kb(3 / ppb)}: up to ${density.max}`}</title></path>}
         {refItems.items.map(({ g, lane, labeled }) => {
           const gi = impactOf.get(g.symbol), col = geneColor(g.symbol, gi);
           const yy = yRefGenes + refItems.laneY[lane];
@@ -1504,7 +1508,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const va = Math.max(a, X0), vb = Math.min(b, X1);
           return (
             <g key={`rb${s.id}`}>
-              <rect x={a} y={yRefBand} width={Math.max(1, b - a)} height={BAND_H} fill={lost ? 'url(#svb-lost)' : col} fillOpacity={lost ? 1 : 0.85} stroke="#fff" strokeWidth={1} />
+              <rect x={a} y={yRefBand} width={Math.max(1, b - a)} height={BAND_H} fill={lost ? `url(#${sid('lost')})` : col} fillOpacity={lost ? 1 : 0.85} stroke="#fff" strokeWidth={1} />
               {vb - va > 14 && <text x={(va + vb) / 2} y={yRefBand + 14} fontSize={11.5} fontWeight={700} textAnchor="middle" fill={lost ? C.lost : '#fff'}>{s.letter}</text>}
               {lost && vb - va > 30 && <text x={(va + vb) / 2} y={yRefBand + BAND_H + 13} fontSize={10} fontWeight={700} textAnchor="middle" fill={C.lost}>lost · {kb(s.end - s.start)}</text>}
             </g>
@@ -1525,7 +1529,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const Y = derY[di], packed = derPacked[di], dd = derDensity[di], yDd = Y.genes + packed.height + 2;
           return (
             <g key={`der${d.name}`}>
-              {dd && <path d={dd.d} transform={`translate(0 ${yDd + 34}) scale(1 34)`} fill="url(#svb-dens)" stroke="none"><title>{`genes per ${kb(3 / ppb)} on ${d.name}: up to ${dd.max}`}</title></path>}
+              {dd && <path d={dd.d} transform={`translate(0 ${yDd + 34}) scale(1 34)`} fill={`url(#${sid('dens')})`} stroke="none"><title>{`genes per ${kb(3 / ppb)} on ${d.name}: up to ${dd.max}`}</title></path>}
               {d.pieces.map(dp => {
                 const [lo, hi] = pieceRange(dp, L);
                 let a = cx(derX(d, toDer(dp, lo))), b = cx(derX(d, toDer(dp, hi)));
@@ -1646,7 +1650,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         const copies = ders.flatMap((d, di) => derPacked[di].items.filter(b => b.genes.includes(linkSym)).map(b => ({ x0: Math.max(X0, b.x0) - 4, x1: Math.min(X1, Math.max(b.xg, b.x0 + b.lw)) + 4, y: derY[di].genes + derPacked[di].laneY[b.lane] - 2, h: b.h + 4, xg: (Math.max(X0, b.x0) + Math.min(X1, b.xg)) / 2 })));
         const rx = ri ? (Math.max(X0, ri.x0) + Math.min(X1, ri.xg)) / 2 : 0;
         return (
-          <g pointerEvents="none" clipPath="url(#svb-clip)">
+          <g pointerEvents="none" clipPath={`url(#${sid('clip')})`}>
             {ref && <rect x={ref.x0} y={ref.y} width={ref.x1 - ref.x0} height={ref.h} rx={6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeWidth={1.6} />}
             {copies.map((k, i) => <rect key={`cp${i}`} x={k.x0} y={k.y} width={k.x1 - k.x0} height={k.h} rx={6} fill={C.accent} fillOpacity={0.08} stroke={C.accent} strokeWidth={1.6} />)}
             {ref && copies.map((k, i) => {

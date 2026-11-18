@@ -61,7 +61,7 @@ Also new: this file, `ARRAY-CGH.md`.
 | File | Change |
 |---|---|
 | `src/components/sashimi/SvBrowserDialog.tsx` | imports `CghOpenButton`, `CghPageSlot`, `cgh`; the button in the header; the page slot; Esc goes up one level (question / mapping dialog → page → viewer) |
-| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints) |
+| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints); **bug fix, also visible in the SV browser**: the SVG's ids (`svb-clip`, gradients, pattern) made unique per instance with `useId` (`sid(...)`): the array-CGH page's browser drawn over the SV browser's resolved `url(#svb-clip)` to the other, shorter one, so a grown ClinVar SV track (*▸ all SVs*) hid all below it |
 | `src/standalone/ucsc.ts` | new `getDosageRegions` + `DosageRegion` (ClinGen ISCA regions; `getDosageScores` untouched) |
 | `src/standalone/svLoaders.ts` | wires `getDosageRegions` |
 
