@@ -156,12 +156,35 @@ export function parseSvLink(hash: string, search: string): { text: string; build
   return null;
 }
 
-/** The page's address with the SV browser's search in its fragment (`sv`, and `build` when GRCh37); null text: without it. */
-export function svLinkHref(text: string | null, build: GenomeBuild): string {
-  const p = new URLSearchParams(window.location.hash.replace(/^#\/?/, '').includes('=') ? window.location.hash.replace(/^#\/?/, '') : '');
-  p.delete('sv');
-  if (text) { p.set('sv', text); if (build === 'GRCh37') p.set('build', 'GRCh37'); else if (!p.has('variant') && !p.has('locus')) p.delete('build'); }
+/**
+ * The page a link opens straight away: the SV browser (#sv, or #sv=… with a search) or its array-CGH page (#cgh);
+ * `page=sv` / `page=cgh` read the same, in the fragment or the query. null: neither.
+ */
+export function parsePageLink(hash: string, search: string): 'sv' | 'cgh' | null {
+  for (const raw of [hash.replace(/^#\/?/, ''), search.replace(/^\?/, '')]) {
+    const keys = raw.split('&').filter(Boolean).map(x => { try { return decodeURIComponent(x.split('=')[0]).toLowerCase(); } catch { return ''; } });
+    if (keys.includes('cgh') || keys.includes('array-cgh')) return 'cgh';
+    if (keys.includes('sv')) return 'sv';
+    const page = new URLSearchParams(raw).get('page')?.toLowerCase();
+    if (page === 'cgh' || page === 'array-cgh') return 'cgh';
+    if (page === 'sv') return 'sv';
+  }
+  return null;
+}
+
+/**
+ * The page's address with the SV browser in its fragment: `sv=` and its search (and `build` when GRCh37), `sv` alone for
+ * the SV browser without a search, `cgh` for its array-CGH page; page null: none of them (the viewer).
+ */
+export function svLinkHref(text: string | null, build: GenomeBuild, page: 'sv' | 'cgh' | null = text ? 'sv' : null): string {
+  const raw = window.location.hash.replace(/^#\/?/, '');
+  const p = new URLSearchParams(raw.includes('=') || /(^|&)(sv|cgh)(&|$)/.test(raw) ? raw : '');
+  p.delete('sv'); p.delete('cgh'); p.delete('page');
+  if (page === 'sv') p.set('sv', text ?? '');
+  if (page === 'cgh') p.set('cgh', '');
+  if (page === 'sv' && text && build === 'GRCh37') p.set('build', 'GRCh37');
   else if (!p.has('variant') && !p.has('locus')) p.delete('build');
-  const h = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',');
+  // a page without a search reads #sv or #cgh, not #sv=
+  const h = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',').replace(/(^|&)(sv|cgh)=(?=&|$)/g, '$1$2');
   return `${window.location.pathname}${window.location.search}${h ? `#${h}` : ''}`;
 }

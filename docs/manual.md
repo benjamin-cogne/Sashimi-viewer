@@ -435,11 +435,16 @@ genomic `chr2:g.60461323del` or on a transcript `NM_022893.4:c.1592del`, moved t
 or by Ensembl's Variant Recoder when VariantValidator fails or gives no answer in 10 s: marked on the reference, no rebuilt chromosome, the view on its gene, ClinVar variants each at its place),
 coordinates (opened with
 a quarter of the interval on each side, the interval highlighted), a chromosome or a gene. `build=GRCh37` for hg19
-positions. The SV browser keeps the address bar on its last search, and **🔗 copy link** copies it.
+positions. `#sv` alone opens the SV browser without a search, and `#cgh` its **Array-CGH** page (also typed in the
+address bar while the viewer is open). The address follows the page shown: `#sv=…` with the SV browser's last search
+(or `#sv`), `#cgh` on the Array-CGH page, nothing once back in the viewer; it can be bookmarked, and **🔗 copy link**
+copies it.
 
 ```
 …/sashimi-viewer.html#sv=DEL%2020:399240-599326
 …/sashimi-viewer.html#sv=20:399240-599326&build=GRCh37
+…/sashimi-viewer.html#sv
+…/sashimi-viewer.html#cgh
 ```
 
 ## Sessions and HTML export

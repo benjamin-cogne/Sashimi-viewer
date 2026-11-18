@@ -4,7 +4,7 @@
  * the same chromosome, else the reference alone). GRCh38 by default, GRCh37 on demand: an `NC_` accession's version
  * picks its build by itself.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
 import SvGeneSummary, { type GeneSummary } from './SvGeneSummary';
@@ -20,7 +20,7 @@ import { rememberGene } from '../../standalone/geneSuggest';
 import { svLinkHref } from '../../standalone/link';
 import { parseSmallGenomic, TRANSCRIPT_HGVS_RE, SMALL_KIND_WORD, SMALL_MAX, type SmallVariant } from './smallVariant';
 import { CghOpenButton, CghPageSlot } from './CghPage';
-import { cgh } from './cghStore';
+import { cgh, useCgh } from './cghStore';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -59,13 +59,15 @@ type ShownVariant = { kind: 'variant'; chrom: string; start: number; end: number
 type Shown = { kind: 'sv'; parsed: ParsedSv; text: string } | { kind: 'region'; chrom: string; start: number; end: number } | ShownVariant;
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 
-export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose, initial }: {
+export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose, initial, initialPage }: {
   build: string; loaders: Loaders;
   /** loaders for another build (the SV browser's own switch); without it, the session's build only */
   loadersFor?: (build: GenomeBuild) => Loaders;
   onClose: () => void;
   /** a search to run at once (a link: #sv=…), in its build when it gives one */
   initial?: { text: string; build?: GenomeBuild };
+  /** a link to the array-CGH page (#cgh): it opens at once */
+  initialPage?: 'cgh';
 }) {
   // each opening starts from the default settings (the gene panel aside), before the view below reads them
   useState(() => { resetSvBrowserSettings(); save(BUILD_KEY, ''); return 0; });
@@ -76,8 +78,19 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const [mark, setMark] = useState<{ start: number; end: number; key: number } | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   /** the address bar follows the search, so the page's address is a link to it */
-  const setLink = (t: string | null, b: GenomeBuild) => { try { history.replaceState(history.state, '', svLinkHref(t, b)); } catch { /* a sandboxed frame */ } setLinkCopied(false); };
-  const close = () => { setLink(null, build); onClose(); };
+  /** the search in the address (its last), to put back when the array-CGH page closes */
+  const linkText = useRef<string | null>(null);
+  const setLink = (t: string | null, b: GenomeBuild) => { linkText.current = t; try { history.replaceState(history.state, '', svLinkHref(t, b, cgh.get().open ? 'cgh' : t !== null || !closing.current ? 'sv' : null)); } catch { /* a sandboxed frame */ } setLinkCopied(false); };
+  const closing = useRef(false);
+  const close = () => { closing.current = true; setLink(null, build); onClose(); };
+  // the address follows the page shown: #sv (with its search) for this page, #cgh for the array-CGH page, so that it can
+  // be copied or bookmarked; a link to the array-CGH page opens it
+  const cghOpen = useCgh().open;
+  useEffect(() => { if (initialPage === 'cgh') cgh.setOpen(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (closing.current) return;
+    try { history.replaceState(history.state, '', svLinkHref(cghOpen ? null : linkText.current, build, cghOpen ? 'cgh' : 'sv')); } catch { /* a sandboxed frame */ }
+  }, [cghOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [shown, setShown] = useState<Shown | null>(null);
   const [focus, setFocus] = useState<{ start: number; end: number; key: number } | null>(null);
   /** the genes the event changes, as the browser reads them (next to the nomenclature) */
