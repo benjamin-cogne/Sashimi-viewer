@@ -79,6 +79,11 @@ Also new: this file, `ARRAY-CGH.md`.
 
 ## Merging into `dev` (to do by hand)
 
+**Update.** `dev` has since merged this branch (`a720409`). As of `origin/dev` = `3248eee`, merging the later commits
+(size slider, series operator, DLRS removed, the SV browser's unique SVG ids) gives **one conflict**,
+`sashimi-viewer.html` (take either side, rebuild); `SvGenomeBrowser.tsx`, `CghPanel.tsx` and `docs/manual.md` merge
+automatically. The first merge, for the record:
+
 As of `origin/dev` = `6515ae6` (checked in memory with `git merge-tree`, nothing written), a merge gives **two
 conflicts**:
 
