@@ -5,7 +5,7 @@
  */
 import type { GenomeBuild } from './ensembl';
 import { chromLength } from './assembly';
-import { getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getTranscript, getClinvar } from './ucsc';
+import { getRegionTranscripts, getDosageScores, getDosageRegions, getCytobands, getDgvGold, getTranscript, getClinvar } from './ucsc';
 import { getConstraint } from './gnomad';
 import { mapAssembly, recodeHgvs } from './ensembl';
 import { vvRecode } from './variantValidator';
@@ -27,6 +27,7 @@ export function svLoadersFor(build: GenomeBuild): Omit<SvGeneLoaders, 'fallback'
   return {
     getTranscripts: (c, a, b) => getRegionTranscripts(build, c, a, b),
     getAnnotations: (c, a, b, sy) => geneAnnotations(build, c, a, b, sy),
+    getDosageRegions: (c, a, b) => getDosageRegions(build, c, a, b),
     getCytobands: c => getCytobands(build, c, chromLength(build, c) ?? 300_000_000),
     getPopulationSvs: async (c, a, b) => (await getDgvGold(build, c, a, b)).map(parseDgvItem).filter((v): v is PopulationSv => !!v),
     liftOver: (from, to, chrom, start, end) => mapAssembly(from, to, chrom, start, end),

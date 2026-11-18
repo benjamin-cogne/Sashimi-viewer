@@ -223,6 +223,110 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
+**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
+Esc to go back; the samples stay while the tab is open). **Add samples**, or drop files on the page: interval tables
+exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
+Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
+header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
+one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
+already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
+**minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
+analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). At most 200 calls
+are annotated: when the tab holds more calls than that, the question says so, and when more would pass the minimums,
+*Analyse* stays off until the number of probes and / or the size is raised. And
+each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
+marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
+
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+
+Files read (also inside zips):
+
+- **Text tables** (`.txt`, `.tsv`, `.csv`, a CytoGenomics `.xls` that is text): tab, `;` or `,`; UTF-8 with or without BOM, UTF-16 LE / BE (BOM, or recognised by its NUL bytes), else Windows-1252; CR LF, LF or CR alone; blank lines, trailing delimiters, quoted fields holding delimiters or line breaks.
+- **`.xlsx`**: the first worksheet (shared and inline strings, numbers), read as a table; exported as tab-separated text (`.classified.txt`), never as `.xlsx`. An Excel 97-2003 binary `.xls` is refused: save it as `.xlsx`, `.csv` or tab-separated text.
+- **BED**: `chr1`, `1`, `CHR1`, `Chr1`, `23` / `24` for X / Y; a 4th column saying the type (a BED of three columns is refused with that reason).
+- **SV / CNV VCF** (`.vcf`, `.vcf.gz`): SVTYPE DEL / DUP / CNV (or ALT `<DEL>`, `<DUP>`, `<CNn>`) with END or SVLEN; the copy number from the first sample's CN; BND / INV / INS skipped and counted, records the sample does not carry (GT 0/0) skipped; the first sample read (a note when there are more); the build from `##reference` / `##contig`; no probe count, as for a BED. Exported with the class and the note in INFO (`CGH_CLASS`, `CGH_NOTE`, percent-encoded), read back on the next load.
+- **Positions**: thousand separators (`,` `.` space `'`) read; a start after its end swapped, said in a note; one cell such as `chr1:72523846-72667555`, `1:72,523,846-72,667,555`, `chr1:72523846..72667555`, or an ISCN `arr[GRCh37] 1p31.1(72523846_72667555)x1`, which alone gives the chromosome, the positions, the copy number (and the build when the file states none).
+- **Types**: del / deletion / loss / perte / délétion / CN loss / homozygous or hemizygous deletion, dup / duplication / gain / amplification / amp / triplication / CN gain / high copy gain; a copy number as `x1`, `1`, `CN=1`, `1 copy`. LOH / ROH / AOH / cnLOH rows and calls on chrM are skipped and counted.
+
+The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
+Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
+order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
+copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
+build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
+links staying on the right.
+
+**Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
+fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
+*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and, when the
+patient's **DLRS** is typed next to the sex, the interval at ± DLRS. Indicative only (no biological variability); chrX / chrY
+outside the PARs need the sex.
+
+**Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
+chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
+patients; the tooltip and the call's detail name them with their overlap. The *series* filter keeps the calls found in no other patient (*unique*) or in at
+least 2 others (*recurrent*). Not written to the export.
+
+- **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
+  their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
+  of that gene.
+- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call covering 80 % of a region or more takes its HI score (loss) or TS score (gain) as for a gene (score 3 HIGH, 2 MODERATE), a smaller overlap is only listed as LOW. The SV browser is unchanged.
+- **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
+  shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
+  the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One
+  medallion per way they lie, with the best share and how many: the call inside a DGV CNV, the call holding one (at any
+  share), or the two overlapping on one side; each record's frequency,
+  samples and studies in its tooltip and under the row. It does not change the priority.
+- **Position tag** (Band cell): *ter* when the call starts or ends within 500 kb of a chromosome end (arrays have no probes in the telomeric repeats), *arm* when it covers 90 % of an arm or more, *chr* for 90 % of both arms (an acrocentric's q arm alone); the cytobands come over the network, nothing is shown before. A patient with a terminal loss and a terminal gain (each of 500 kb or more: small subtelomeric calls are common) on different chromosome ends gets a **possible** derivative of an unbalanced translocation hint on both calls (same chromosome, opposite ends: possible recombinant of a pericentric inversion; a gain adjacent to a terminal loss: possible inverted duplication-deletion), to check by parental karyotype / FISH. It does not change the priority.
+- **Lab benign CNVs (BED)…** (header bar): the laboratory's list of benign CNVs (chrom, start 0-based, end, optional name that may say del / dup / loss / gain, else the entry applies to both types; other columns ignored, `chr` optional, `track` / `browser` / `#` lines skipped; the chip says how many lines were read and skipped). It is a laboratory reference, not patient data: it is kept in this browser (localStorage, unless above ~2 MB; × removes it) for the next sessions. A call sharing 80 % of itself with an entry of its type gets a grey-violet *lab benign* tag (entry and share in the tooltip and the detail), a *lab list* filter, and, if unclassified, a **→ Benign?** button that sets the class on click: a suggestion only, never applied by itself, and the priority is unchanged.
+- **Genes**: the RefSeq NM_ genes of the interval (UCSC `ncbiRefSeqCurated`). The file's *Gene Name* is used only when
+  they cannot be read, and the cell then says *file*. For a gene the call cuts, the detail's *In the call* cell reads
+  the principal transcript taking the call's first and last probes as breakpoints (theoretical: the true ones lie
+  between probes): the exons wholly inside (*exons 45–50 of 79*), a breakpoint inside an exon (frame undetermined), the
+  frame of an intragenic loss or tandem gain from the coding bases inside (*in frame* / *out of frame*, *start / stop
+  codon lost*, *non-coding exons (UTR)*), the 5′ or 3′ part of a gene the call reaches past (truncated, or a partial
+  copy), or *intronic (between exons N and N+1)*; the transcript and coding bases are in its tooltip. It does not change the priority.
+- **PanelApp**: every gene of the call is asked of PanelApp (Genomics England, every panel; up to 1,000 genes per call,
+  25 genes a request, one request at a time, as PanelApp refuses bursts; a batch not answered is asked again twice),
+  then listed by its best rating, green first (with their modes of inheritance:
+  AD, AR, AD/AR, XLR, XLD), then amber, then red (counted).
+- **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
+  gnomAD LOEUF (v2.1.1 on GRCh37).
+- **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
+  level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
+  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode that is
+  haploinsufficient (ClinGen HI 2 or 3) or LoF-intolerant (else MODERATE: its disease may not come from a loss), both copies
+  (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
+  deletion of class 5 or 4, or 35 protein-coding genes or more and / or more than 1 Mb; MODERATE for an HI score of 2, a LoF-intolerant gene
+  (LOEUF < 0.35 in v2.1.1, < 0.45 in v4, or pLI ≥ 0.9; losses only), one copy of a green biallelic gene (look for a
+  second variant), one copy of a green X-linked recessive gene in a female or when the sex is not given, a green gene without a mode
+  or an amber monoallelic one, a PIEV region, or 25 to 34 genes; LOW for other exons lost, genes cut without an exon,
+  or an AChro-Puce region of class 3, 2 or 1 (said, never lowering a higher level).
+  Gains: HIGH for a whole gene with a TS score of 3, an AChro-Puce duplication of class 5 or 4, or 50 genes or more
+  and / or more than 1 Mb;
+  MODERATE for a TS score of 2, a breakpoint inside an HI 3 or green monoallelic gene, a PIEV region, or 35 to 49 genes;
+  LOW otherwise (an AChro-Puce region of class 3, 2 or 1 included). A call meeting no HIGH or MODERATE rule is LOW,
+  one without a protein-coding gene included. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
+  Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
+  is still being asked.
+
+Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
+or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
+as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
+its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
+tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
+homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
+array ISCN on one line (the file's; written from the band and the copy number when the file gives both but no ISCN,
+else the positions alone: no copy number is assumed). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
+significance, Likely pathogenic, Pathogenic, PIEV, Male Reference, Female Reference, NS (non significant: recurring
+technical artifact / atypical log ratio); a class already written in the file is read into that list when its words are
+recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin féminin*…). The **✎** of a row opens a
+**note** on the call. Each row also links to the call's **CNV-Hub** page
+(`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
+carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
+each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
+after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
+the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
+
 ## Reads, haplotypes and phasing
 
 **Reads track**: mismatches, indels and splice gaps, IGV-style, up to the *window ≤* width; up to 2,500 reads per
@@ -378,7 +482,10 @@ BAM/CRAM/FASTA files are read with the browser's File API and decoded on the mac
 annotation hosts listed below and carry a gene name, a genomic interval or the letters typed in a search box, never
 reads, sample names or file names. The browser keeps the last genes opened, the folded bar, favourite GTEx tissues
 and, in Chrome and Edge, a bookmark (a permission, not a copy) of the folders and files added. **Session files and
-exported pages are patient data**: a session names files and samples, an exported page holds reads and coverage.
+exported pages are patient data**: a session names files and samples, an exported page holds reads and coverage. Array-CGH
+interval tables and zips are read in the page as well; their calls and classes stay in the tab (never in the browser's
+storage). The genes, scores and PanelApp entries of a call are asked with its interval and gene names only, as the SV
+browser asks them, and only a click on *CNV-Hub ↗* sends a call's position and type, to cnvhub.net.
 
 ## Deploying in a clinical laboratory
 

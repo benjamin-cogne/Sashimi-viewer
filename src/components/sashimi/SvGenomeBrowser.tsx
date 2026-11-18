@@ -100,6 +100,8 @@ const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t 
 export interface SvGeneLoaders {
   getTranscripts?: (chrom: string, start: number, end: number) => Promise<SvTranscript[]>;
   getAnnotations?: (chrom: string, start: number, end: number, symbols: string[]) => Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
+  /** ClinGen curated dosage regions (ISCA-…) overlapping a 0-based half-open window (used by the array-CGH page) */
+  getDosageRegions?: (chrom: string, start: number, end: number) => Promise<{ id: string; label: string; start: number; end: number; hi: number | null; ts: number | null }[]>;
   /** the cytogenetic bands of a chromosome (the ideogram, the ISCN of the event) */
   getCytobands?: (chrom: string) => Promise<Cytoband[]>;
   /** CNV regions of the general population (DGV Gold Standard) over a 0-based half-open window */
@@ -136,6 +138,8 @@ interface Props {
   variant?: { start: number; end: number; key: string; label: string; lines: string[] };
   /** the genes the event changes, with their constraint and PanelApp readings, as they come in (null: no event) */
   onGeneSummary?: (s: GeneSummary | null) => void;
+  /** the event's losses and gains shaded through the tracks, its breakpoints drawn bolder (the array-CGH page) */
+  strongEvent?: boolean;
 }
 
 /** the small variant's mark */
@@ -322,7 +326,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary, strongEvent }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -1399,8 +1403,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const a = cx(refX(d.start)), b = cx(refX(d.end)), h = Math.min(TAD_H - 6, (b - a) / 2);
           return <path key={`rt${d.start}`} d={`M${a},${yRefTad + TAD_H} L${(a + b) / 2},${yRefTad + TAD_H - h} L${b},${yRefTad + TAD_H} Z`} fill={i % 2 ? '#dfe5ee' : '#e9eef4'} stroke="#a9b6c6" strokeWidth={0.8}><title>{`domain ${d.name ?? ''}: ${chrom}:${fmt(d.start + 1)}-${fmt(d.end)} (${kb(d.end - d.start)})`}</title></path>;
         })}
+        {/* the event's losses and gains shaded through the tracks (array-CGH) */}
+        {strongEvent && cnv.map(({ ev }) => { const a = cx(refX(ev.start)), b = cx(refX(ev.end)); return b > a ? <rect key={`evb${ev.start}`} x={a} y={yRuler + RULER_H} width={b - a} height={yRefBand + BAND_H - yRuler - RULER_H} fill={ev.kind === 'loss' ? '#dc2626' : '#2563eb'} opacity={0.07} pointerEvents="none" /> : null; })}
         {/* breakpoints through the reference */}
-        {rec && rec.segs.filter(s => !s.first && inView(refX(s.start), refX(s.start))).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={yRuler + RULER_H} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={1} strokeDasharray="3 3" opacity={0.55} />)}
+        {rec && rec.segs.filter(s => !s.first && inView(refX(s.start), refX(s.start))).map(s => <line key={`bpl${s.id}`} x1={refX(s.start)} x2={refX(s.start)} y1={yRuler + RULER_H} y2={yRefBand + BAND_H} stroke={C.lost} strokeWidth={strongEvent ? 2 : 1} strokeDasharray={strongEvent ? '6 3' : '3 3'} opacity={strongEvent ? 0.9 : 0.55} />)}
         {/* reference genes */}
         {density && <path d={density.d} transform={`translate(0 ${yDens + 34}) scale(1 34)`} fill="url(#svb-dens)" stroke="none"><title>{`genes per ${kb(3 / ppb)}: up to ${density.max}`}</title></path>}
         {refItems.items.map(({ g, lane, labeled }) => {

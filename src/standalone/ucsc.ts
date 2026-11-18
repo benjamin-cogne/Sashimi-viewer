@@ -494,6 +494,29 @@ function dosageOf(it: any): { symbol: string; score: number } | null {
   const v = named ? Number(named[1]) : Number(it.score);
   return Number.isFinite(v) && DOSAGE_VALUES.has(v) ? { symbol, score: v } : null;
 }
+/** a ClinGen curated recurrent region (ISCA-…): its label, 0-based half-open span, haploinsufficiency and triplosensitivity scores */
+export interface DosageRegion { id: string; label: string; start: number; end: number; hi: number | null; ts: number | null }
+/** The ClinGen dosage regions overlapping a 0-based half-open window (same cached track responses as getDosageScores). */
+export async function getDosageRegions(build: GenomeBuild, chrom: string, start: number, end: number): Promise<DosageRegion[]> {
+  const out = new Map<string, DosageRegion>();
+  for (const which of ['hi', 'ts'] as const) {
+    let items: any[] | null = null;
+    for (const track of DOSAGE_TRACKS[which]) { try { items = await trackWindow(build, track, chrom, start, end); break; } catch { /* next spelling */ } }
+    if (!items) throw new Error('ClinGen dosage tracks unavailable from the UCSC API');
+    for (const it of items) {
+      const id = String(it?.name ?? '');
+      if (!/^ISCA-/.test(id)) continue;
+      const s = Number(it.chromStart), e = Number(it.chromEnd);
+      if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s || e <= start || s >= end) continue;
+      const named = Object.entries(it).find(([k, v]) => /(haplo|triplo|dosage).*score|score.*(haplo|triplo|dosage)/i.test(k) && DOSAGE_VALUES.has(Number(v)));
+      const v = named ? Number(named[1]) : Number(it.score);
+      const cur = out.get(id) ?? { id, label: String(it.geneId ?? it.label ?? id), start: s, end: e, hi: null, ts: null };
+      if (Number.isFinite(v) && DOSAGE_VALUES.has(v)) cur[which] = v;
+      out.set(id, cur);
+    }
+  }
+  return [...out.values()];
+}
 export async function getDosageScores(build: GenomeBuild, chrom: string, start: number, end: number): Promise<Map<string, { hi: number | null; ts: number | null }>> {
   const out = new Map<string, { hi: number | null; ts: number | null }>();
   for (const which of ['hi', 'ts'] as const) {
