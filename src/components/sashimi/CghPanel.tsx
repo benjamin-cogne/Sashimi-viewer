@@ -14,7 +14,7 @@ import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
-import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
+import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
@@ -581,7 +581,7 @@ function DosageCell({ c, v }: { c: CghCnv; v: View }) {
     <td className="px-1.5 py-0.5 whitespace-nowrap">
       {scored.slice(0, 1).map(x => <span key={x.g.symbol} className="mr-1.5 font-semibold" style={{ color: x[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`ClinGen ${c.kind === 'loss' ? 'haploinsufficiency' : 'triplosensitivity'} score ${x[key]} (${x[key] === 3 ? 'sufficient' : 'some'} evidence)`}>{word}{x[key]} <i className="font-normal">{x.g.symbol}</i></span>)}
       {scored.length > 1 && <span className="text-slate-500 mr-1.5" title={scored.slice(1).map(x => `${word}${x[key]} ${x.g.symbol}`).join(', ')}>+{scored.length - 1}</span>}
-      {regs.map(r => <span key={r.id} className="mr-1.5 font-semibold" style={{ color: r[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`${r.label} (${r.id}): ClinGen region, ${word} ${r[key]}, ${Math.round(r.covered * 100)} % of it in the call`}>{word}{r[key]} region{r.covered < REGION_COVER ? ` ${Math.round(r.covered * 100)} %` : ''}</span>)}
+      {regs.map(r => <span key={r.id} className="mr-1.5 font-semibold" style={{ color: r[key] === 3 ? '#b91c1c' : '#c2410c' }} title={`${r.label} (${r.id}): ClinGen region, ${word} ${r[key]}, ${Math.round(r.covered * 100)} % of it in the call`}>{word}{r[key]} region{r.covered < 0.999 ? ` ${Math.min(99, Math.round(r.covered * 100))} %` : ''}</span>)}
       {low && <span className="text-slate-600" title={`Lowest gnomAD LOEUF of the call (${low.version ?? ''}): ${low.g.symbol} ${low.loeuf!.toFixed(2)}${low.pli != null ? `, pLI ${low.pli.toFixed(2)}` : ''}`}>LOEUF {low.loeuf!.toFixed(2)}</span>}
       {!scored.length && !regs.length && !low && <span className="text-slate-300">—</span>}
     </td>

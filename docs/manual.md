@@ -266,7 +266,7 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
   of that gene.
-- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call covering 80 % of a region or more takes its HI score (loss) or TS score (gain) as for a gene (score 3 HIGH, 2 MODERATE), a smaller overlap is only listed as LOW. The SV browser is unchanged.
+- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call holding a whole region of score 3 is HIGH (ACMG/ClinGen 2A; a region whose ends are the call's counts as whole), 80-99 % of it MODERATE (*partial overlap (2B): check the critical region / causative gene is included*, as 2B scores 0 when they are not); a score-2 region 80 % covered or more is MODERATE; a smaller overlap is only listed as LOW. The SV browser is unchanged.
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
   the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One
@@ -290,7 +290,9 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
-  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode that is
+  HIGH for exons of a gene with a ClinGen HI score of 3 (the whole gene, its 5′ coding end, or coding exons beyond the
+  last one: 2A / 2C-1 / 2D-4; when only its UTR exons (2C-2 / 2D-1) or only its last exon (2D-2 / 2D-3) are lost, from
+  the exons of its principal transcript, MODERATE, also for the PanelApp rule below; genes read from the file only stay HIGH), of a PanelApp green gene with a monoallelic mode that is
   haploinsufficient (ClinGen HI 2 or 3) or LoF-intolerant (else MODERATE: its disease may not come from a loss), both copies
   (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
   deletion of class 5 or 4, or 35 protein-coding genes or more and / or more than 1 Mb; MODERATE for an HI score of 2, a LoF-intolerant gene

@@ -27,7 +27,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - exons cut and reading frame; terminal / arm / chromosome labels; rearrangement hints;
   - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
-- **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
+- **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification. Per Riggs et al. 2020: a ClinGen HI 3 / TS 3 region is HIGH only wholly in the call (2A, share ≥ 0.999), MODERATE at 80-99 % (2B: check the critical region); an HI 3 gene losing only UTR exons (2C-2 / 2D-1) or only its last exon (2D-2 / 2D-3) is MODERATE (`sparing()`, from `CnvExons.cds` and the exon ranks; genes unknown to RefSeq stay HIGH).
 - **Retry.** Failures kept per call and source (`CnvAnn.failed`; PanelApp per gene): *↻ retry (n)* in the column header (per patient; a menu in All patients) and a *retry* per source in the detail re-ask only what failed (`retry()` in `cghAnnotate.ts`); an unexpected error ends the call on what was read.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
   Comment columns (a VCF: INFO `CGH_CLASS` / `CGH_NOTE`; an xlsx: a tab-separated `.classified.txt`).

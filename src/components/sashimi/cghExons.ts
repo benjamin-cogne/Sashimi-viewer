@@ -15,6 +15,8 @@ export interface CnvExons {
   inside: number[]; partial: number[];
   /** coding bases of the exons wholly inside (null: non-coding transcript) */
   coding: number | null;
+  /** coding bases in the call, partly cut exons included (null: non-coding): 0 tells a UTR-only loss (2C-2 / 2D-1) */
+  cds: number | null;
   where: 'intragenic' | '5p' | '3p';
   /** both ends in one intron: the exons around it */
   intron: [number, number] | null;
@@ -35,6 +37,8 @@ export function exonsInCall(tx: SvTranscript, s0: number, e0: number, kind: 'los
   const partial = tx.exons.filter(e => overlap(e.start, e.end, s0, e0) > 0 && !(e.start >= s0 && e.end <= e0)).map(e => e.rank).sort((a, b) => a - b);
   const coding = tx.cdsStart == null || tx.cdsEnd == null || tx.cdsEnd <= tx.cdsStart ? null
     : tx.exons.filter(e => inside.includes(e.rank)).reduce((k, e) => k + codingOf(tx, e), 0);
+  const cds = coding == null ? null
+    : tx.exons.reduce((k, e) => k + overlap(Math.max(e.start, s0), Math.min(e.end, e0), tx.cdsStart!, tx.cdsEnd!), 0);
   const leftIn = s0 > tx.start, rightIn = e0 < tx.end;
   // the side of the gene the call reaches past: its left end is the 5′ end on the + strand
   const where: CnvExons['where'] = leftIn && rightIn ? 'intragenic' : (!leftIn) === plus ? '5p' : '3p';
@@ -70,5 +74,5 @@ export function exonsInCall(tx: SvTranscript, s0: number, e0: number, kind: 'los
   const side = where === '5p' ? `5′ part (${ranksText(all)} of ${n}, with the promoter)` : where === '3p' ? `3′ part (${ranksText(all)} of ${n})` : run;
   const text = [side, cut, label].filter(Boolean).join(' · ');
   const severe = ['out-of-frame', 'start-lost', 'stop-lost', 'start-stop-lost', 'truncated'].includes(effect);
-  return { tx: tx.id, strand: tx.strand > 0 ? 1 : -1, n, inside, partial, coding, where, intron, effect, text, severe };
+  return { tx: tx.id, strand: tx.strand > 0 ? 1 : -1, n, inside, partial, coding, cds, where, intron, effect, text, severe };
 }
