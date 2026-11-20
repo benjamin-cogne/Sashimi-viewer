@@ -18,6 +18,11 @@ import { cgh, type CghState } from './cghStore';
 import { topoOf, type CnvTopo } from './cghTopo';
 
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
+/** the parts of a call's annotation read (and retried) on their own */
+export type CghSource = 'genes' | 'dosage' | 'regions' | 'dgv' | 'bands';
+export const CGH_SOURCES: CghSource[] = ['genes', 'dosage', 'regions', 'dgv', 'bands'];
+/** the sources whose failure leaves the priority incomplete (DGV Gold and the bands are not in it) */
+const PRIORITY_SOURCES: CghSource[] = ['genes', 'dosage', 'regions'];
 export interface CnvAnn {
   state: 'loading' | 'done';
   /** RefSeq's genes, or the file's names when RefSeq could not be read */
@@ -27,8 +32,12 @@ export interface CnvAnn {
   achro: AchroHit[];
   /** the ClinGen dosage regions (ISCA-…) the call overlaps, with the share of each region it covers */
   regions: RegionHit[];
-  /** the sources that did not answer */
+  /** the sources that did not answer and weigh on the priority (genes, dosage, regions), readable; kept from `failed` */
   missing: string[];
+  /** each source that did not answer, its readable reason: what a manual retry asks again (PanelApp: per gene, modes[sym] === 'error') */
+  failed: Partial<Record<CghSource, string>>;
+  /** the sources being asked again */
+  asking: CghSource[];
   /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more, and those lying inside it whatever their share; not in the priority */
   dgv: DgvHit[];
   dgvError?: string;
@@ -126,13 +135,40 @@ function achroHits(c: Pick<CghCnv, 'chrom' | 'start' | 'end' | 'kind'>, genes: C
 
 // ---- the queue of calls ----
 let loadersFor: ((b: GenomeBuild) => Loaders) | null = null;
-const queue: { c: CghCnv; build: GenomeBuild }[] = [];
+/** a call to read: every source, or only those `only` names (a manual retry) */
+type Job = { c: CghCnv; build: GenomeBuild; only?: CghSource[] };
+const queue: Job[] = [];
 let running = 0;
 /** annotate these calls (those not yet asked) */
 export function annotate(items: { c: CghCnv; build: GenomeBuild }[], lf: (b: GenomeBuild) => Loaders) {
   loadersFor = lf;
-  const known = cgh.get().ann;
-  for (const it of items) if (!known[it.c.id] && !queue.some(q => q.c.id === it.c.id)) queue.push(it);
+  const known = cgh.get().ann, put: Record<string, CnvAnn> = {};
+  for (const it of items) if (!known[it.c.id] && !queue.some(q => q.c.id === it.c.id)) { queue.push(it); put[it.c.id] = placeholder(); }
+  // a call queued shows as waiting (…), not as not annotated, and is never asked twice
+  if (Object.keys(put).length) cgh.setAnns(put);
+  pump();
+}
+/**
+ * Ask again, for these calls, only the sources that failed (PanelApp: only the genes not answered), through the same
+ * queue (two calls at a time) and PanelApp's batches: what answered is kept and not asked again.
+ */
+export function retry(items: { c: CghCnv; build: GenomeBuild }[], sources: (CghSource | 'panelapp')[], lf: (b: GenomeBuild) => Loaders) {
+  loadersFor = lf;
+  const st = cgh.get(), put: Record<string, CnvAnn> = {};
+  if (sources.includes('panelapp')) {
+    const syms = items.flatMap(({ c }) => (st.ann[c.id]?.genes ?? []).slice(0, PANELAPP_MAX_GENES).map(g => g.symbol)).filter(x => st.modes[x] === 'error');
+    wantModes([...new Set(syms)], true);
+  }
+  for (const it of items) {
+    const a = st.ann[it.c.id];
+    if (!a || a.state !== 'done') continue;
+    const only = (sources.filter(x => x !== 'panelapp') as CghSource[]).filter(x => a.failed[x] && !a.asking.includes(x));
+    if (!only.length) continue;
+    const q = queue.find(j => j.c.id === it.c.id);
+    if (q) q.only = q.only ? [...new Set([...q.only, ...only])] : undefined; else queue.push({ ...it, only });
+    put[it.c.id] = { ...a, asking: [...a.asking, ...only] };
+  }
+  if (Object.keys(put).length) cgh.setAnns(put);
   pump();
 }
 function pump() {
@@ -142,49 +178,89 @@ function pump() {
     void run(it).finally(() => { running--; pump(); });
   }
 }
+const placeholder = (): CnvAnn => ({ state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], regions: [], missing: [], failed: {}, asking: [], dgv: [] });
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
-async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
-  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], regions: [], missing: [], dgv: [] });
-  const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing: string[] = [];
-  let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
-  try {
-    if (!ld.getTranscripts) throw new Error('no gene source for this build');
-    genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0, c.kind);
-  } catch (e) {
-    source = 'file';
-    genes = c.genes.map(symbol => ({ symbol, tx: '', start: s0, end: e0, whole: false, exons: true }));
-    missing.push(`RefSeq genes (${msg(e)}): the file's Gene Name instead`);
-  }
-  let dosage = new Map<string, DosageScore>(), constraint = new Map<string, Constraint>();
-  if (ld.getAnnotations && genes.length) {
+type Bands = Awaited<ReturnType<NonNullable<Loaders['getCytobands']>>>;
+/** the readable `missing` from `failed`: the sources weighing on the priority */
+const missingOf = (f: CnvAnn['failed']) => PRIORITY_SOURCES.flatMap(x => (f[x] ? [f[x]!] : []));
+/** each source read into `a`, its failure written to a.failed[source] (cleared when it answers) */
+const STEPS: Record<CghSource, (c: CghCnv, ld: Loaders, a: CnvAnn, out: { bands?: Bands }) => Promise<void>> = {
+  async genes(c, ld, a) {
+    const s0 = c.start - 1, e0 = c.end;
     try {
-      const a = await ld.getAnnotations(c.chrom, s0, e0, genes.map(g => g.symbol));
-      dosage = a.dosage; constraint = a.constraint;
-      missing.push(...a.notes.filter(n => /unavailable/i.test(n)));
-    } catch (e) { missing.push(`ClinGen dosage and gnomAD constraint (${msg(e)})`); }
-  }
+      if (!ld.getTranscripts) throw new Error('no gene source for this build');
+      a.genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0, c.kind); a.source = 'refseq'; delete a.failed.genes;
+    } catch (e) {
+      a.source = 'file';
+      a.genes = c.genes.map(symbol => ({ symbol, tx: '', start: s0, end: e0, whole: false, exons: true }));
+      a.failed.genes = `RefSeq genes (${msg(e)}): the file's Gene Name instead`;
+    }
+  },
+  async dosage(c, ld, a) {
+    delete a.failed.dosage;
+    if (!ld.getAnnotations || !a.genes.length) { a.dosage = new Map(); a.constraint = new Map(); return; }
+    try {
+      const r = await ld.getAnnotations(c.chrom, c.start - 1, c.end, a.genes.map(g => g.symbol));
+      a.dosage = r.dosage; a.constraint = r.constraint;
+      const un = r.notes.filter(n => /unavailable/i.test(n));
+      if (un.length) a.failed.dosage = un.join('; ');
+    } catch (e) { a.failed.dosage = `ClinGen dosage and gnomAD constraint (${msg(e)})`; }
+  },
   // ClinGen dosage regions: those the call overlaps, with the share of the region it covers
-  let regions: RegionHit[] = [];
-  if (ld.getDosageRegions) {
+  async regions(c, ld, a) {
+    if (!ld.getDosageRegions) return;
+    const s0 = c.start - 1, e0 = c.end;
     try {
-      regions = (await ld.getDosageRegions(c.chrom, s0, e0)).flatMap(r => {
+      a.regions = (await ld.getDosageRegions(c.chrom, s0, e0)).flatMap(r => {
         const ov = Math.min(e0, r.end) - Math.max(s0, r.start);
         return ov > 0 && r.end > r.start ? [{ id: r.id, label: r.label, hi: r.hi, ts: r.ts, covered: Math.min(1, ov / (r.end - r.start)) }] : [];
       });
-    } catch (e) { missing.push(`ClinGen dosage regions (${msg(e)})`); }
-  }
+      delete a.failed.regions;
+    } catch (e) { a.failed.regions = `ClinGen dosage regions (${msg(e)})`; }
+  },
   // DGV Gold: the records sharing 80 % of the call or more, the call inside one counting 100 %
-  let dgv: DgvHit[] = [], dgvError: string | undefined;
-  if (ld.getPopulationSvs) {
-    try { dgv = dgvHits(c.kind, s0, e0, await ld.getPopulationSvs(c.chrom, s0, e0)); } catch (e) { dgvError = msg(e); }
+  async dgv(c, ld, a) {
+    if (!ld.getPopulationSvs) return;
+    try { a.dgv = dgvHits(c.kind, c.start - 1, c.end, await ld.getPopulationSvs(c.chrom, c.start - 1, c.end)); a.dgvError = undefined; delete a.failed.dgv; }
+    catch (e) { a.dgvError = msg(e); a.failed.dgv = `DGV Gold (${a.dgvError})`; }
+  },
+  // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram); they also place the call (terminal, arm)
+  async bands(c, ld, a, out) {
+    if (!ld.getCytobands) return;
+    try { const b = await ld.getCytobands(c.chrom); out.bands = b; if (!c.cytoband) a.band = bandOf(b, c.start - 1, c.end); delete a.failed.bands; }
+    catch (e) { a.failed.bands = `cytogenetic bands (${msg(e)})`; }
+  },
+};
+async function run({ c, build, only }: Job) {
+  const prev = cgh.get().ann[c.id];
+  // a retry starts from what answered (copied: the store's object is never changed in place); a first read from nothing
+  const a: CnvAnn = only && prev?.state === 'done' ? { ...prev, failed: { ...prev.failed }, asking: [] } : { ...placeholder(), state: 'done' };
+  if (!only) cgh.setAnn(c.id, placeholder());
+  const steps = new Set<CghSource>(only ?? CGH_SOURCES), out: { bands?: Bands } = {}, done = new Set<CghSource>();
+  let step: CghSource | null = null;
+  try {
+    const ld = loadersFor!(build);
+    for (const x of CGH_SOURCES) {
+      if (!steps.has(x)) continue;
+      step = x;
+      const before = x === 'genes' ? a.genes.map(g => g.symbol).join(',') + a.source : '';
+      await STEPS[x](c, ld, a, out);
+      done.add(x);
+      // genes read again (after a failure): their dosage and constraint are asked again for the new list; their exons
+      // come with them (genesOf), AChro-Puce by genes and PanelApp for the new genes follow below
+      if (x === 'genes' && only && before !== a.genes.map(g => g.symbol).join(',') + a.source) steps.add('dosage');
+    }
+  } catch (e) {
+    // an unexpected throw: what was read is kept, the step it stopped at and those not read are said, and can be retried
+    for (const x of steps) if (!done.has(x)) a.failed[x] = `${x === step ? '' : 'not read: '}annotation stopped (${msg(e)})`;
   }
-  // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram)
-  let band: string | undefined;
-  let bands: Awaited<ReturnType<NonNullable<Loaders['getCytobands']>>> | null = null;
-  if (ld.getCytobands) { try { bands = await ld.getCytobands(c.chrom); } catch { /* the band stays unknown */ } }
-  if (!c.cytoband && bands) band = bandOf(bands, s0, e0);
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), regions, missing, dgv, dgvError, band, topo: topoOf(c, build, bands) });
-  wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
+  try { a.achro = achroHits(c, a.genes, build); if (out.bands || !only) a.topo = topoOf(c, build, out.bands ?? null); } catch { /* left as it was */ }
+  a.missing = missingOf(a.failed);
+  // a retry's sources asked again since this job started stay marked as asked
+  const now = cgh.get().ann[c.id];
+  a.asking = only && now ? now.asking.filter(x => !steps.has(x)) : [];
+  cgh.setAnn(c.id, a);
+  wantModes(a.genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
 }
 
 // ---- PanelApp, by batches of genes ----
@@ -197,9 +273,10 @@ const putMode = (sym: string, m: GeneModes | 'loading' | 'error') => {
   pendingModes[sym] = m;
   if (!flushTimer) flushTimer = setTimeout(() => { flushTimer = null; const p = pendingModes; pendingModes = {}; cgh.setModes(p); }, 150);
 };
-function wantModes(symbols: string[]) {
+/** `again`: the genes PanelApp did not answer ('error') are asked again too (a manual retry) */
+function wantModes(symbols: string[], again = false) {
   const known = cgh.get().modes;
-  for (const s of symbols) if (!(s in known) && !(s in pendingModes) && !modeQueue.includes(s)) { modeQueue.push(s); putMode(s, 'loading'); }
+  for (const s of symbols) if ((!(s in known) || (again && known[s] === 'error')) && !(s in pendingModes && pendingModes[s] !== 'error') && !modeQueue.includes(s)) { modeQueue.push(s); putMode(s, 'loading'); }
   pumpModes();
 }
 /**
@@ -255,9 +332,9 @@ function panelView(m: GeneModes | 'loading' | 'error' | undefined): PanelView | 
 }
 
 /** a call's genes with their scores, its priority, and what is still asked or missing */
-export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes: GeneView[]; score: Score | null; waiting: number; missing: string[] } {
+export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes: GeneView[]; score: Score | null; waiting: number; missing: string[]; paFailed: number; /** priority sources asked again: the priority stays incomplete until they answer */ asking: number } {
   const ann = s.ann[c.id];
-  if (!ann || ann.state === 'loading') return { ann, genes: [], score: null, waiting: 0, missing: [] };
+  if (!ann || ann.state === 'loading') return { ann, genes: [], score: null, waiting: 0, missing: [], paFailed: 0, asking: 0 };
   const genes: GeneView[] = ann.genes.map((g, i) => {
     const d = ann.dosage.get(g.symbol), k = ann.constraint.get(g.symbol);
     return { g, hi: d?.hi ?? null, ts: d?.ts ?? null, loeuf: k?.loeuf ?? null, pli: k?.pli ?? null, version: k?.version ?? null,
@@ -269,5 +346,5 @@ export function viewOf(s: CghState, c: CghCnv): { ann: CnvAnn | undefined; genes
   const failed = asked.filter(m => m === 'error').length;
   const missing = [...ann.missing, ...(failed ? [`PanelApp (${failed} gene${failed > 1 ? 's' : ''} not answered)`] : []), ...(ann.genes.length > PANELAPP_MAX_GENES ? [`PanelApp asked for ${PANELAPP_MAX_GENES} of the ${ann.genes.length} genes`] : [])];
   const score = scoreCnv({ kind: c.kind, copies: c.copies, chrom: c.chrom, sex: s.sex[c.sampleKey] ?? null, sizeKb: c.sizeKb, genes, refseq: ann.source === 'refseq', achro: ann.achro, regions: ann.regions });
-  return { ann, genes, score, waiting, missing };
+  return { ann, genes, score, waiting, missing, paFailed: failed, asking: ann.asking.filter(x => PRIORITY_SOURCES.includes(x)).length };
 }

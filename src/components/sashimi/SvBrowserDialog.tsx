@@ -198,7 +198,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
       // Esc goes up one level: the array-CGH questions (they answer it themselves), the array-CGH page, then this page
       if (e.key !== 'Escape') return;
       const g = cgh.get();
-      if (g.pending || g.toMap.length) return;
+      if (g.pending || g.toMap.length || g.help) return;
       if (g.open) { cgh.setOpen(false); return; }
       close();
     };

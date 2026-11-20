@@ -14,6 +14,7 @@ import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 import ContactLink from '../ContactLink';
+import { CghGuide, CghGuideButton } from './CghGuide';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
 const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
@@ -81,7 +82,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <button onClick={onBack} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the SV browser (Esc)">← SV browser</button>
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
-          <span className="ml-auto text-[11px] text-bar-muted">
+          <CghGuideButton />
+          <span className="text-[11px] text-bar-muted">
             CGH-array support implemented by Wallid Deb (CHU Nantes) · <ContactLink email="wallid.deb@chu-nantes.fr" subject="Sashimi viewer — Array-CGH" className="hover:text-bar-text" />
           </span>
           <span className="text-[11px] text-bar-muted">·</span>
@@ -114,6 +116,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
         )}
       </div>
       <CghProbeDialog />
+      <CghGuide />
     </div>
   );
 }

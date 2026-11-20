@@ -7,24 +7,31 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 
 ## What the page does
 
+- **Quick guide.** *? Quick guide* in the page's bar: seven steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
-    recognised, remembered by column names);
+    recognised, remembered by column names, only when the header row looks like one);
   - `.xlsx` (first sheet), BED, SV VCF (`.vcf`, `.vcf.gz`);
   - zips holding any of these (one patient each).
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
-- **Import question.** Minimum number of probes (3) and minimum size; at most 200 calls annotated; sex per patient.
-- **Table.** One tab per patient plus *All patients*, filters, sort by priority.
+- **Import question.** Minimum number of probes (3) and minimum size (log slider: any, 10 kb to 5 Mb, or a value typed in
+  bp / kb / Mb, also in the filter bar); the 200 largest calls annotated by
+  themselves, the others on demand (*annotate*); each patient's calls under the minimums revealed on demand (*+ N more*); sex per patient.
+- **Table.** One tab per patient plus *All patients*, filters (series: the number of other patients carrying the call
+  compared with = ≥ ≤ > < n; a sample name loaded twice is one patient, said at import), gene search (file genes and
+  RefSeq genes read), sort by priority.
 - **Per call, read on GRCh37** by the SV browser's own routes (UCSC, PanelApp, gnomAD):
   - RefSeq genes; PanelApp ratings and modes of inheritance (asked 25 genes a request);
   - ClinGen HI / TS of genes and of ISCA regions; gnomAD LOEUF;
   - AChro-Puce recurrent CNVs; DGV Gold (3 relations);
   - exons cut and reading frame; terminal / arm / chromosome labels; rearrangement hints;
-  - mosaic fraction (AChro-Puce formula, optional DLRS); recurrence in the loaded series; the laboratory's benign
+  - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
 - **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
+- **Retry.** Failures kept per call and source (`CnvAnn.failed`; PanelApp per gene): *↻ retry (n)* in the column header (per patient; a menu in All patients) and a *retry* per source in the detail re-ask only what failed (`retry()` in `cghAnnotate.ts`); an unexpected error ends the call on what was read.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
   Comment columns (a VCF: INFO `CGH_CLASS` / `CGH_NOTE`; an xlsx: a tab-separated `.classified.txt`).
+  Several files: a list with one *export* per file and *export all* (one download at a time, each file marked as it starts).
 - **The browser below.** The call clicked is drawn as DEL / DUP in the SV browser's own `SvGenomeBrowser`, with the
   same tracks.
 
@@ -39,7 +46,7 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `CghPage.tsx` | the page (bar, frame, browser below); `CghOpenButton`, `CghPageSlot` used by the SV browser |
 | `CghPanel.tsx` | the frame: tabs, filters, table, detail, import question |
 | `CghMapDialog.tsx` | column-mapping dialog |
-| `cghStore.ts` | state (files, classes, notes, sex, DLRS, filters, annotations) |
+| `cghStore.ts` | state (files, classes, notes, sex, filters, annotations) |
 | `cghIntervals.ts` | interval table / BED parsing, export, classes, CNV-Hub link |
 | `cghMapping.ts` | delimiter and header detection, column guessing, remembered mappings |
 | `cghFormats.ts` | decoding (BOM, UTF-16, cp1252), xlsx reading, `.xls` detection |
@@ -59,7 +66,7 @@ Also new: this file, `ARRAY-CGH.md`.
 | File | Change |
 |---|---|
 | `src/components/sashimi/SvBrowserDialog.tsx` | imports `CghOpenButton`, `CghPageSlot`, `cgh`; the button in the header; the page slot; Esc goes up one level (question / mapping dialog → page → viewer) |
-| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints) |
+| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints); **bug fix, also visible in the SV browser**: the SVG's ids (`svb-clip`, gradients, pattern) made unique per instance with `useId` (`sid(...)`): the array-CGH page's browser drawn over the SV browser's resolved `url(#svb-clip)` to the other, shorter one, so a grown ClinVar SV track (*▸ all SVs*) hid all below it; bug fix, also visible in the SV browser: in "▸ all SVs", ClinVar SVs that find no free lane among the 60 are no longer drawn over others but counted ("+n SV not drawn (zoom in)") |
 | `src/standalone/ucsc.ts` | new `getDosageRegions` + `DosageRegion` (ClinGen ISCA regions; `getDosageScores` untouched) |
 | `src/standalone/svLoaders.ts` | wires `getDosageRegions` |
 
@@ -76,6 +83,11 @@ Also new: this file, `ARRAY-CGH.md`.
 - A 120-call load test annotates in about 70 s with no request refused.
 
 ## Merging into `dev` (to do by hand)
+
+**Update.** `dev` has since merged this branch (`a720409`). As of `origin/dev` = `3248eee`, merging the later commits
+(size slider, series operator, DLRS removed, the SV browser's unique SVG ids) gives **one conflict**,
+`sashimi-viewer.html` (take either side, rebuild); `SvGenomeBrowser.tsx`, `CghPanel.tsx` and `docs/manual.md` merge
+automatically. The first merge, for the record:
 
 As of `origin/dev` = `6515ae6` (checked in memory with `git merge-tree`, nothing written), a merge gives **two
 conflicts**:

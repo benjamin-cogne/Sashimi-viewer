@@ -224,20 +224,25 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
 **Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **Add samples**, or drop files on the page: interval tables
+Esc to go back; the samples stay while the tab is open). **? Quick guide**, in the page's bar, walks through it in seven steps
+with screenshots (Esc or × closes it, not the page). **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
 one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
 already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
-analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). At most 200 calls
-are annotated: when the tab holds more calls than that, the question says so, and when more would pass the minimums,
-*Analyse* stays off until the number of probes and / or the size is raised. And
+analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
+with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
+the slider's span, 500 bp or 8 Mb, is kept), the same control in the list's filters. At most 200 calls
+are annotated by themselves, over all patients, the largest first: when more pass the minimums, the question says so,
+the others are listed with *not annotated* and an *annotate* button (or *annotate them* in the count line, 200 a click).
+Each patient's calls under the minimums are counted on a line under its calls (*+ N more calls…*): clicked, they are
+listed (lighter, tagged *1 probe*) and annotated on demand; *− hide them* folds them again. And
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
-A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
 
 Files read (also inside zips):
 
@@ -249,7 +254,7 @@ Files read (also inside zips):
 - **Types**: del / deletion / loss / perte / délétion / CN loss / homozygous or hemizygous deletion, dup / duplication / gain / amplification / amp / triplication / CN gain / high copy gain; a copy number as `x1`, `1`, `CN=1`, `1 copy`. LOH / ROH / AOH / cnLOH rows and calls on chrM are skipped and counted.
 
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
-Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
+Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene (the file's Gene Name or the RefSeq genes read for the call), a band (`16p11`) or a chromosome;
 order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
 copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
 build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
@@ -257,14 +262,15 @@ links staying on the right.
 
 **Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
 fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
-*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and, when the
-patient's **DLRS** is typed next to the sex, the interval at ± DLRS. Indicative only (no biological variability); chrX / chrY
+*mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and the
+estimated fraction. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
-patients; the tooltip and the call's detail name them with their overlap. The *series* filter keeps the calls found in no other patient (*unique*) or in at
-least 2 others (*recurrent*). Not written to the export.
+patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients
+to a value: *any*, *=*, *≥*, *≤*, *>*, *<* and a number (*= 0*: in no other patient; *≥ 2*: in at least 2 others). Not written to the export.
+A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26A0657 loaded twice (file A, file B)*).
 
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
@@ -308,6 +314,7 @@ least 2 others (*recurrent*). Not written to the export.
   one without a protein-coding gene included. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
   is still being asked.
+**Retry.** A source that did not answer (RefSeq genes, PanelApp per gene, ClinGen dosage / regions and gnomAD, DGV Gold, cytogenetic bands; an unexpected error included) shows **↻ retry (n)** in its column's header (Genes, PanelApp, Dosage, Type for DGV Gold, Band), n the listed calls (PanelApp: genes) of the patient to ask again: in *All patients* it opens one button per patient. Only those sources are asked again for those calls (PanelApp 25 genes a request); genes read again bring their dosage, exons, AChro-Puce and PanelApp along. The call's detail lists each *Not available* source with its own *retry*; the *?* goes once every source has answered.
 
 Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
 or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
@@ -326,6 +333,7 @@ carries the call's position and type). Classes and notes are kept in the tab onl
 each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
 after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
+With several files in the tab, the button opens a list: one **export** per file (one download, its patients marked exported) and **export all**, one file after another a moment apart, each marked as its download starts (the browser may ask to allow several downloads).
 
 ## Reads, haplotypes and phasing
 
