@@ -134,7 +134,7 @@ Requirements and the layout of the sources are in the [manual](docs/manual.md#bu
 
 ## Cite
 
-Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.2, 2026.
+Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.3, 2026.
 https://github.com/benjamin-cogne/Sashimi-viewer — see [`CITATION.cff`](CITATION.cff).
 
 Contact: Benjamin Cogné (CHU Nantes), [benjamin.cogne@chu-nantes.fr](mailto:benjamin.cogne@chu-nantes.fr). Array-CGH page: Wallid Deb
