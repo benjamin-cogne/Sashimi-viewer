@@ -13,6 +13,7 @@ import { CghFrame, CghProbeDialog, CghExamplesMenu } from './CghPanel';
 import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
+import { clinGenTrack } from './CghClinGenTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
@@ -30,6 +31,8 @@ function drawOf(c: CghCnv, f: CghFile): Drawn {
 }
 /** the browser redrawn only when its own props change, not at each answer of the annotations */
 const Browser = memo(SvGenomeBrowser);
+// one track object per build: the memoised browser redraws only when it changes
+const TRACKS = { GRCh37: clinGenTrack('GRCh37'), GRCh38: clinGenTrack('GRCh38') } as Record<GenomeBuild, ReturnType<typeof clinGenTrack>>;
 
 /** The SV browser's way in: the button (with the number of samples) and the page over it. Each listens to the array-CGH
  * state by itself, so that the SV browser is not redrawn when the calls are annotated. */
@@ -105,7 +108,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
             </div>
             <div className="[&>div:first-child]:mt-2">
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
-                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent />
+                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={TRACKS[drawn.build]} />
             </div>
           </div>
         )}

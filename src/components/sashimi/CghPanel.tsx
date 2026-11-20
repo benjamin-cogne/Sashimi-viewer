@@ -17,6 +17,7 @@ import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCn
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
+import { CghRecurrentDetail } from './CghClinGenTrack';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
@@ -427,7 +428,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} onRetry={srcs => retryNow([c], srcs)} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} build={buildOf.get(c.id) ?? 'GRCh37'} onRetry={srcs => retryNow([c], srcs)} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
@@ -616,7 +617,7 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; onRetry: (srcs: (CghSource | 'panelapp')[]) => void; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, build, onRetry, lab, hints, sex, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; build: GenomeBuild; onRetry: (srcs: (CghSource | 'panelapp')[]) => void; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
@@ -657,6 +658,7 @@ function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, on
           <div className="font-semibold text-slate-900">ClinGen dosage regions</div>
           {regionsScored(c, v.ann.regions).map(r => <div key={r.id}>{r.label} <span className="text-slate-500">({r.id})</span>: HI <b>{r.hi ?? '–'}</b>, TS <b>{r.ts ?? '–'}</b> <span className="text-slate-500">({Math.round(r.covered * 100)} % of the region in the call)</span></div>)}
         </div>}
+        <CghRecurrentDetail chrom={c.chrom} start={c.start} end={c.end} kind={c.kind} build={build} />
         {v.ann.achro.length > 0 && <div data-cgh-achro>
           <div className="font-semibold text-slate-900">AChro-Puce</div>
           {v.ann.achro.map(a => <div key={a.id}>{a.name}: <b>{a.cls.join(' / ')}</b> <span className="text-slate-500">({a.how})</span></div>)}
