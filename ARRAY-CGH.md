@@ -28,6 +28,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
 - **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
+- **Retry.** Failures kept per call and source (`CnvAnn.failed`; PanelApp per gene): *↻ retry (n)* in the column header (per patient; a menu in All patients) and a *retry* per source in the detail re-ask only what failed (`retry()` in `cghAnnotate.ts`); an unexpected error ends the call on what was read.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
   Comment columns (a VCF: INFO `CGH_CLASS` / `CGH_NOTE`; an xlsx: a tab-separated `.classified.txt`).
   Several files: a list with one *export* per file and *export all* (one download at a time, each file marked as it starts).

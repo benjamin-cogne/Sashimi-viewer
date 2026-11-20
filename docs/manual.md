@@ -305,6 +305,7 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
   one without a protein-coding gene included. The evidence is weighed as in the ACMG / ClinGen technical standards for CNVs (Riggs et al., Genet
   Med 2020;22:245-57, sections 2 and 3). A dashed badge with *?* is incomplete: a source did not answer, or PanelApp
   is still being asked.
+**Retry.** A source that did not answer (RefSeq genes, PanelApp per gene, ClinGen dosage / regions and gnomAD, DGV Gold, cytogenetic bands; an unexpected error included) shows **↻ retry (n)** in its column's header (Genes, PanelApp, Dosage, Type for DGV Gold, Band), n the listed calls (PanelApp: genes) of the patient to ask again: in *All patients* it opens one button per patient. Only those sources are asked again for those calls (PanelApp 25 genes a request); genes read again bring their dosage, exons, AChro-Puce and PanelApp along. The call's detail lists each *Not available* source with its own *retry*; the *?* goes once every source has answered.
 
 Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
 or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below

@@ -13,7 +13,7 @@ import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
-import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
+import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
@@ -181,6 +181,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   }, [auto, loadersFor]); // eslint-disable-line react-hooks/exhaustive-deps
   /** on demand: up to CGH_MAX_ANNOTATED of these, the largest first (the queue skips those annotated or queued) */
   const annotateNow = (cs: CghCnv[]) => { if (loadersFor) annotate(largestFirst(cs.filter(c => !s.ann[c.id])).slice(0, CGH_MAX_ANNOTATED).map(c => ({ c, build: buildOf.get(c.id) ?? 'GRCh37' })), loadersFor); };
+  /** ask again, for these calls, only the sources given that failed (the queue skips the others) */
+  const retryNow = (cs: CghCnv[], srcs: (CghSource | 'panelapp')[]) => { if (loadersFor) retry(cs.map(c => ({ c, build: buildOf.get(c.id) ?? 'GRCh37' })), srcs, loadersFor); };
   // the call clicked kept in the table's view (the table only, never the page), when it changes
   const tableBox = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -222,6 +224,16 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const notAnn = rows.filter(({ c }) => !s.ann[c.id] && !auto.has(c.id)).map(({ c }) => c);
   const minWords = `fewer than ${s.filter.minProbes} probe${s.filter.minProbes > 1 ? 's' : ''}${s.filter.minKb ? ` or smaller than ${sizeWord(s.filter.minKb)}` : ''}`;
   const anySuppressed = all.some(({ c }) => c.suppressed);
+  // per column, each listed patient's calls (PanelApp: genes) to ask again; the control is hidden when none failed
+  const retryOf = (col: RetryCol): RetryGroup[] => listed.map(({ x }) => {
+    const cs = rows.filter(r => r.c.sampleKey === x.key).map(r => r.c), src = RETRY_SRC[col];
+    const n = col === 'panelapp'
+      ? new Set(cs.flatMap(c => (s.ann[c.id]?.genes ?? []).slice(0, PANELAPP_MAX_GENES).map(g => g.symbol).filter(g => s.modes[g] === 'error'))).size
+      : cs.filter(c => src.some(k => s.ann[c.id]?.failed[k as CghSource] && !s.ann[c.id]!.asking.includes(k as CghSource))).length;
+    const asking = col === 'panelapp' ? 0 : cs.filter(c => src.some(k => s.ann[c.id]?.asking.includes(k as CghSource))).length;
+    return { key: x.key, name: x.name, n, asking, run: () => retryNow(cs, src) };
+  });
+  const rc = (col: RetryCol) => <RetryCtl col={col} groups={retryOf(col)} />;
   const f = s.filter;
   const moreN = (s.lab && f.lab !== 'any' ? 1 : 0) + (samples.length > 1 && f.series !== 'any' ? 1 : 0) + (anySuppressed && f.hideSuppressed ? 1 : 0);
   /** a call clicked: drawn below with its detail under its row; clicked again, its detail folds or unfolds */
@@ -333,13 +345,13 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
             <tr className="border-b border-slate-200">
               {!s.sample && samples.length > 1 && <th className="px-1.5 py-0.5 font-medium">Sample</th>}
-              <th className="px-1.5 py-0.5 font-medium">Band</th><th className="px-1.5 py-0.5 font-medium">Position (GRCh37)</th>
-              <th className="px-1.5 py-0.5 font-medium text-right">Size</th><th className="px-1.5 py-0.5 font-medium">Type</th>
+              <th className="px-1.5 py-0.5 font-medium">Band{rc('bands')}</th><th className="px-1.5 py-0.5 font-medium">Position (GRCh37)</th>
+              <th className="px-1.5 py-0.5 font-medium text-right">Size</th><th className="px-1.5 py-0.5 font-medium">Type{rc('dgv')}</th>
               <th className="px-1.5 py-0.5 font-medium text-right" title="#Probes · mean log ratio">Probes · LogR</th>
               {samples.length > 1 && <th className="px-1.5 py-0.5 font-medium text-right" title={`Recurrence in the loaded series: other patients with a call of the same type on the same chromosome (reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %) / other patients loaded. Every call counts, those under the minimums too.`}>Series</th>}
-              <th className="px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes</th>
-              <th className="px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp</th>
-              <th className="px-1.5 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage</th>
+              <th className="px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes{rc('genes')}</th>
+              <th className="px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp{rc('panelapp')}</th>
+              <th className="px-1.5 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage{rc('dosage')}</th>
               <th className="px-1.5 py-0.5 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority</th>
               <th className="px-1.5 py-0.5 font-medium sticky right-[72px] z-[1] bg-slate-50 shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]">Classification</th><th className="px-1.5 py-0.5 font-medium sticky right-0 z-[1] bg-slate-50 w-[72px] min-w-[72px]">Links</th>
             </tr>
@@ -394,7 +406,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} onRetry={srcs => retryNow([c], srcs)} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
             {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
@@ -425,6 +437,45 @@ function BelowTag({ c, minProbes, minKb }: { c: CghCnv; minProbes: number; minKb
 }
 const waitingDot = (n: number) => (n ? <span className="text-slate-400" title={`PanelApp: ${n} gene${n > 1 ? 's' : ''} still asked`}> …</span> : null);
 type View = ReturnType<typeof viewOf>;
+
+// ---- manual retry: per column, per patient, only what failed ----
+type RetryCol = 'genes' | 'panelapp' | 'dosage' | 'dgv' | 'bands';
+/** the sources each column asks again: Dosage holds ClinGen genes + gnomAD and the ClinGen regions; Type the DGV Gold medallion */
+const RETRY_SRC: Record<RetryCol, (CghSource | 'panelapp')[]> = { genes: ['genes'], panelapp: ['panelapp'], dosage: ['dosage', 'regions'], dgv: ['dgv'], bands: ['bands'] };
+const RETRY_WORD: Record<RetryCol, string> = { genes: 'RefSeq genes', panelapp: 'PanelApp', dosage: 'ClinGen dosage (genes and regions) and gnomAD constraint', dgv: 'DGV Gold', bands: 'cytogenetic bands' };
+const SOURCE_WORD: Record<CghSource, string> = { genes: 'RefSeq genes', dosage: 'ClinGen dosage and gnomAD constraint', regions: 'ClinGen dosage regions', dgv: 'DGV Gold', bands: 'cytogenetic bands' };
+interface RetryGroup { key: string; name: string; n: number; asking: number; run: () => void }
+const RetryLink = ({ onClick }: { onClick: () => void }) => <button className="text-accent-700 hover:underline font-medium" onClick={onClick} title="Ask this source again for this call">retry</button>;
+const RETRY_BTN = 'ml-1 px-1 rounded border border-amber-300 bg-amber-50 text-[10px] font-semibold text-amber-800 hover:bg-amber-100 align-middle';
+/**
+ * A column's retry: one patient listed, a button; several, a small menu with one button per patient (and all of them),
+ * so that only that patient's failed calls (or genes) are asked again. Hidden when nothing failed.
+ */
+function RetryCtl({ col, groups }: { col: RetryCol; groups: RetryGroup[] }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const failed = groups.filter(g => g.n > 0), n = failed.reduce((k, g) => k + g.n, 0), asking = groups.reduce((k, g) => k + g.asking, 0);
+  useEffect(() => {
+    if (!at) return;
+    const off = (e: Event) => { if (!(e.target as HTMLElement).closest?.('[data-cgh-retry-menu]')) setAt(null); };
+    document.addEventListener('mousedown', off); return () => document.removeEventListener('mousedown', off);
+  }, [at]);
+  if (!n) return asking ? <span className="ml-1 text-[10px] text-slate-400 font-normal" title={`${RETRY_WORD[col]}: asked again`}>↻ …</span> : null;
+  const what = col === 'panelapp' ? `gene${n > 1 ? 's' : ''}` : `call${n > 1 ? 's' : ''}`;
+  const title = `${RETRY_WORD[col]} did not answer for ${n} ${what}${groups.length > 1 ? ` (${failed.length} patient${failed.length > 1 ? 's' : ''})` : ''}: ask again only those`;
+  if (groups.length === 1) return <button className={RETRY_BTN} data-cgh-retry={col} title={title} onClick={e => { e.stopPropagation(); failed[0].run(); }}>↻ retry ({n})</button>;
+  return <>
+    <button className={RETRY_BTN} data-cgh-retry={col} title={title} aria-haspopup="true" aria-expanded={!!at}
+      onClick={e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); setAt(at ? null : { x: Math.min(r.left, window.innerWidth - 270), y: r.bottom + 4 }); }}>↻ retry ({n}) ▾</button>
+    {/* fixed: the table's box scrolls and would clip it */}
+    {at && <div data-cgh-retry-menu={col} role="dialog" className="fixed z-50 w-[260px] bg-white border border-slate-200 rounded-lg shadow-lg p-1.5 text-[11px] font-normal text-slate-700 whitespace-normal" style={{ left: at.x, top: at.y }}>
+      <div className="px-1 pb-1 text-slate-500">{RETRY_WORD[col]}: ask again</div>
+      {failed.map(g => <div key={g.key} className="flex items-center gap-2 px-1 py-0.5">
+        <span className="flex-1 truncate font-semibold">{g.name}</span><span className="text-slate-500 tabular-nums">{g.n} {col === 'panelapp' ? `gene${g.n > 1 ? 's' : ''}` : `call${g.n > 1 ? 's' : ''}`}</span>
+        <button className={RETRY_BTN} onClick={() => { g.run(); if (failed.length === 1) setAt(null); }}>↻ retry</button></div>)}
+      {failed.length > 1 && <div className="flex justify-end px-1 pt-1 border-t border-slate-100 mt-1"><button className={RETRY_BTN} onClick={() => { failed.forEach(g => g.run()); setAt(null); }}>↻ all ({n})</button></div>}
+    </div>}
+  </>;
+}
 
 /** the small amber tag of a call whose log ratio says a share of the cells only carries it */
 function MosaicTag({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
@@ -538,13 +589,13 @@ function DosageCell({ c, v }: { c: CghCnv; v: View }) {
 }
 function PriorityBadge({ v }: { v: View }) {
   if (!v.score) return <span className="text-slate-400">…</span>;
-  const st = LEVEL_STYLE[v.score.level], incomplete = v.missing.length > 0 || v.waiting > 0;
+  const st = LEVEL_STYLE[v.score.level], incomplete = v.missing.length > 0 || v.waiting > 0 || v.asking > 0;
   const title = [...v.score.reasons.map(r => `${LEVEL_STYLE[r.level].label}: ${r.text}`), ...(v.waiting ? [`PanelApp still asked for ${v.waiting} gene${v.waiting > 1 ? 's' : ''}`] : []), ...v.missing.map(m => `Not available: ${m}`)].join('\n') || 'No protein-coding gene in the call';
   return <span className={`inline-flex items-center rounded px-1.5 text-[10.5px] font-bold ${incomplete && v.score.level !== 'high' ? 'border border-dashed' : ''}`} style={{ color: st.color, background: st.bg, borderColor: st.color }} title={title}>{st.label}{incomplete && v.score.level !== 'high' ? ' ?' : ''}</span>;
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
-function CnvDetail({ c, v, lab, hints, sex, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
+function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; onRetry: (srcs: (CghSource | 'panelapp')[]) => void; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
     ref={el => { if (el && focusNote) { el.focus(); onNoteFocused(); } }}
@@ -553,7 +604,7 @@ function CnvDetail({ c, v, lab, hints, sex, series, note, focusNote, onNoteFocus
   const seen = series && series.others > 0 ? <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Series</span> {series.hits.length ? <>found in {series.hits.length} of {series.others} other patient{series.others > 1 ? 's' : ''}: {series.hits.map(h => `${h.name} (${Math.round(h.pct * 100)} %)`).join(', ')}</> : <>in none of the {series.others} other patient{series.others > 1 ? 's' : ''}</>}<span className="text-slate-500"> · same type, reciprocal overlap ≥ {Math.round(SERIES_OVERLAP * 100)} %</span></div> : null;
   const mosaic = <>{seen}<MosaicLine c={c} sex={sex} /></>;
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
-  const key = c.kind === 'loss' ? 'hi' : 'ts';
+  const ann = v.ann, key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position
   const genes = v.genes.slice().sort((a, b) => (b.pa?.best ?? 0) - (a.pa?.best ?? 0) || (b[key] ?? 0) % 10 - (a[key] ?? 0) % 10 || a.g.start - b.g.start);
   const shownGenes = allGenes ? genes : genes.slice(0, 8);
@@ -569,13 +620,17 @@ function CnvDetail({ c, v, lab, hints, sex, series, note, focusNote, onNoteFocus
           <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>
           {v.score.reasons.length ? v.score.reasons.map(r => <div key={r.id}>{dot(r.level)}{r.text}</div>) : <div className="text-slate-500">No protein-coding gene in the call.</div>}
           {v.waiting > 0 && <div className="text-slate-500">PanelApp: {v.waiting} gene{v.waiting > 1 ? 's' : ''} still asked…</div>}
-          {v.missing.map(m => <div key={m} className="text-amber-700">Not available: {m}</div>)}
+          {CGH_SOURCES.filter(x => x !== 'dgv' && (ann.failed[x] || ann.asking.includes(x))).map(x => <div key={x} className="text-amber-700" data-cgh-failed={x}>
+            {ann.asking.includes(x) ? <span className="text-slate-500">{SOURCE_WORD[x]}: asked again…</span> : <>Not available: {ann.failed[x]} · <RetryLink onClick={() => onRetry([x])} /></>}</div>)}
+          {v.paFailed > 0 && <div className="text-amber-700" data-cgh-failed="panelapp">Not available: PanelApp ({v.paFailed} gene{v.paFailed > 1 ? 's' : ''} not answered) · <RetryLink onClick={() => onRetry(['panelapp'])} /></div>}
+          {v.missing.filter(m => /^PanelApp asked for/.test(m)).map(m => <div key={m} className="text-amber-700">Not available: {m}</div>)}
         </div>
         {(v.ann.dgv.length > 0 || v.ann.dgvError) && <div>
           <div className="font-semibold text-slate-900">DGV Gold (same type: ≥ {Math.round(DGV_COVER * 100)} % of the call shared, or inside the call whatever its share)</div>
           {dgvShown(v.ann.dgv).map(x => <div key={x.id} className="flex flex-wrap items-center gap-x-1"><DgvIcon rel={x.rel} />{x.id} <span className="text-slate-500">({x.type})</span>: <b>{pctText(x.cover)}</b> <span className="text-slate-500">· {DGV_REL[x.rel].word}</span>{x.freq ? ` · frequency ${x.freq}` : ''}{x.samples != null ? ` · ${x.samples} samples` : ''}</div>)}
           {v.ann.dgv.length > dgvShown(v.ann.dgv).length && <div className="text-slate-500">+{v.ann.dgv.length - dgvShown(v.ann.dgv).length} more DGV CNVs inside the call (in the medallion's tooltip)</div>}
-          {v.ann.dgvError && <div className="text-amber-700">not available ({v.ann.dgvError})</div>}
+          {v.ann.asking.includes('dgv') ? <div className="text-slate-500">asked again…</div>
+            : v.ann.dgvError && <div className="text-amber-700" data-cgh-failed="dgv">not available ({v.ann.dgvError}) · <RetryLink onClick={() => onRetry(['dgv'])} /></div>}
         </div>}
         {regionsScored(c, v.ann.regions).length > 0 && <div>
           <div className="font-semibold text-slate-900">ClinGen dosage regions</div>
