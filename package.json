@@ -38,6 +38,7 @@
     "@gmod/shared-read-cache": "^1.7.2",
     "fflate": "^0.8.3",
     "generic-filehandle2": "^2.4.0",
+    "mediabunny": "1.65.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
