@@ -36,7 +36,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 - **The browser below.** The call clicked is drawn as DEL / DUP in the SV browser's own `SvGenomeBrowser`, with the
   same tracks, plus **ClinGen CNV regions** (only here, through the optional `extraTrack` prop): HI 3 / TS 3 dosage
   regions (red / blue, link to ClinGen), the ClinGen recurrent CNV list v2.0 (hatched orange) and its breakpoint / LCR
-  segments (grey), a *PIEV* tag where AChro-Puce classes the region PIEV (≥ 80 % reciprocal, same type). Embedded data
+  segments (grey), folded by default (*▸ show recurrent CNVs / LCRs*), a *PIEV* tag where AChro-Puce classes the region PIEV (≥ 80 % reciprocal, same type). Embedded data
   (`cghClinGenData.ts`, read 2026-11-20 from the UCSC API and https://ftp.clinicalgenome.org/; no licence stated in the
   BED files), no request. The call's detail adds *ClinGen recurrent CNVs*: regions matched (share of region / of call)
   and whether each end lies in a breakpoint / LCR segment (± 50 kb). Priority rules unchanged.

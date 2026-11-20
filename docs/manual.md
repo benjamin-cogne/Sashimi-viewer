@@ -324,7 +324,7 @@ or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rul
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
 its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp) plus one of this page
 only, **ClinGen CNV regions** (its own toggle, on by default; the SV browser does not have it): the ClinGen dosage regions
-scored HI 3 (red) or TS 3 (blue; both: half and half), click one for its ClinGen page; the regions of the ClinGen recurrent
+scored HI 3 (red) or TS 3 (blue; both: half and half), click one for its ClinGen page; folded by default; *▸ show recurrent CNVs / LCRs* under them adds the regions of the ClinGen recurrent
 CNV list v2.0 (hatched orange) and its breakpoint / LCR segments (thin grey, named: BP1-BP4, LCR22A-H, ...), so one sees
 whether a call's ends fall in the expected LCRs; a *PIEV* tag (*PIEV del* / *PIEV dup* when one type only) on a region
 AChro-Puce classes PIEV (≥ 80 % reciprocal overlap with the sheet's coordinates, same type), to tell susceptibility

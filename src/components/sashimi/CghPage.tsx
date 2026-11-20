@@ -32,7 +32,6 @@ function drawOf(c: CghCnv, f: CghFile): Drawn {
 /** the browser redrawn only when its own props change, not at each answer of the annotations */
 const Browser = memo(SvGenomeBrowser);
 // one track object per build: the memoised browser redraws only when it changes
-const TRACKS = { GRCh37: clinGenTrack('GRCh37'), GRCh38: clinGenTrack('GRCh38') } as Record<GenomeBuild, ReturnType<typeof clinGenTrack>>;
 
 /** The SV browser's way in: the button (with the number of samples) and the page over it. Each listens to the array-CGH
  * state by itself, so that the SV browser is not redrawn when the calls are annotated. */
@@ -60,6 +59,9 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   });
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
+  // the ClinGen track folded by default: HI 3 / TS 3 regions only, the recurrent list and its LCRs on demand
+  const [recOpen, setRecOpen] = useState(false);
+  const track = useMemo(() => clinGenTrack(drawn?.build ?? 'GRCh37', recOpen, () => setRecOpen(o => !o)), [drawn?.build, recOpen]);
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
     try { setDrawn(drawOf(c, f)); setError(null); } catch (e) { setError(`${c.chrom}:${c.start}-${c.end}: ${(e as Error).message}`); }
@@ -108,7 +110,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
             </div>
             <div className="[&>div:first-child]:mt-2">
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
-                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={TRACKS[drawn.build]} />
+                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />
             </div>
           </div>
         )}
