@@ -5,12 +5,12 @@ const { chromium } = require('playwright');
 const fs = require('fs'), path = require('path');
 const D = path.resolve('docs/cgh-demo'), OUT = path.resolve('src/assets/cgh-guide');
 const PAGE = 'file://' + path.resolve('sashimi-viewer.html') + '#sv=chr1';
-const MAX_W = 900, Q = 0.7;
+const MAX_W = 1400, Q = 0.8;
 
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
   const b = await chromium.launch();
-  const p = await b.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1 });
+  const p = await b.newPage({ viewport: { width: 1400, height: 900 }, deviceScaleFactor: 1.5 });
   p.on('pageerror', e => console.error('page error:', e.message));
   await p.goto(PAGE);
   await p.click('button:has-text("Array-CGH")');

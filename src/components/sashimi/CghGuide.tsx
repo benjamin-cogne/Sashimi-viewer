@@ -60,19 +60,19 @@ export function CghGuide() {
   if (!open) return null;
   const s = STEPS[i], btn = 'h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed';
   return (
-    <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Quick guide" data-cgh-guide
+    <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-3 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Quick guide" data-cgh-guide
       onClick={e => { if (e.target === e.currentTarget) cgh.setHelp(false); }}>
-      <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-4xl text-slate-900 text-xs mt-10">
+      <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-[min(1240px,96vw)] text-slate-900 text-sm mt-6">
         <div className="px-4 pt-3 pb-2 border-b border-slate-200 flex items-start gap-3">
           <div>
-            <div className="font-bold text-sm">Array-CGH: quick guide</div>
-            <div className="text-[11px] text-slate-500 mt-0.5">Step {i + 1} of {STEPS.length}: {s.title}. Screenshots of invented demo data.</div>
+            <div className="font-bold text-base">Array-CGH: quick guide</div>
+            <div className="text-[12.5px] text-slate-500 mt-0.5">Step {i + 1} of {STEPS.length}: {s.title}. Screenshots of invented demo data.</div>
           </div>
           <button onClick={() => cgh.setHelp(false)} className="ml-auto text-slate-400 hover:text-slate-700 text-lg leading-none px-1" aria-label="Close the guide" title="Close (Esc)">×</button>
         </div>
         <div className="px-4 py-3 space-y-3">
-          <div className="text-[12.5px] leading-5 text-slate-700">{s.body}</div>
-          <img src={s.img} alt={`Step ${i + 1}: ${s.title}`} className="block max-w-full mx-auto rounded-lg border border-slate-200" />
+          <div className="text-[14.5px] leading-6 text-slate-700 max-w-[1100px]">{s.body}</div>
+          <img src={s.img} alt={`Step ${i + 1}: ${s.title}`} className="block w-full max-w-[1200px] mx-auto rounded-lg border border-slate-200" />
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex items-center gap-2">
           <div className="flex items-center gap-1.5" role="tablist" aria-label="Steps">
