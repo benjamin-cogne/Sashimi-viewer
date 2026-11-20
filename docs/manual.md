@@ -225,8 +225,10 @@ already added is not added twice), the patient named by the table's Record Name,
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
 with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
 the slider's span, 500 bp or 8 Mb, is kept), the same control in the list's filters. At most 200 calls
-are annotated: when the tab holds more calls than that, the question says so, and when more would pass the minimums,
-*Analyse* stays off until the number of probes and / or the size is raised. And
+are annotated by themselves, over all patients, the largest first: when more pass the minimums, the question says so,
+the others are listed with *not annotated* and an *annotate* button (or *annotate them* in the count line, 200 a click).
+Each patient's calls under the minimums are counted on a line under its calls (*+ N more calls…*): clicked, they are
+listed (lighter, tagged *1 probe*) and annotated on demand; *− hide them* folds them again. And
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 

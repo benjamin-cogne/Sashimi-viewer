@@ -14,7 +14,8 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - zips holding any of these (one patient each).
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
 - **Import question.** Minimum number of probes (3) and minimum size (log slider: any, 10 kb to 5 Mb, or a value typed in
-  bp / kb / Mb, also in the filter bar); at most 200 calls annotated; sex per patient.
+  bp / kb / Mb, also in the filter bar); the 200 largest calls annotated by
+  themselves, the others on demand (*annotate*); each patient's calls under the minimums revealed on demand (*+ N more*); sex per patient.
 - **Table.** One tab per patient plus *All patients*, filters (series: the number of other patients carrying the call
   compared with = ≥ ≤ > < n), sort by priority.
 - **Per call, read on GRCh37** by the SV browser's own routes (UCSC, PanelApp, gnomAD):

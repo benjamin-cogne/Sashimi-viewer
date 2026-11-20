@@ -64,12 +64,16 @@ export interface CghState {
   notes: Record<string, string>;
   /** the laboratory's list of benign CNVs (a reference, kept in localStorage), and whether it could be stored */
   lab: LabBenign | null; labStored: boolean;
+  /** the patients (sample keys) whose calls under the minimums are listed too (this tab only) */
+  revealed: Record<string, true>;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
 export const CGH_MIN_PROBES_DEFAULT = 3;
-/** at most this many calls are annotated (genes, PanelApp, ClinGen, gnomAD, DGV): more, and a minimum must be raised */
+/** at most this many calls are annotated by themselves (genes, PanelApp, ClinGen, gnomAD, DGV), the largest first; the others on demand, as many a click */
 export const CGH_MAX_ANNOTATED = 200;
+/** the largest first, ties in file order (Array.sort is stable) */
+export const largestFirst = <T extends { sizeKb: number }>(cs: T[]) => cs.slice().sort((a, b) => b.sizeKb - a.sizeKb);
 /** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
 export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
 const loadFilter = (): CghFilter => {
@@ -77,7 +81,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -138,6 +142,10 @@ export const cgh = {
   get: () => state,
   setOpen(open: boolean) { set({ open }); },
   setAnn(id: string, a: CnvAnn) { set({ ann: { ...state.ann, [id]: a } }); },
+  /** many calls' annotations at once (the queue's placeholders: one redraw) */
+  setAnns(m: Record<string, CnvAnn>) { set({ ann: { ...state.ann, ...m } }); },
+  /** a patient's calls under the minimums listed, or hidden again */
+  setRevealed(key: string, on: boolean) { const revealed = { ...state.revealed }; if (on) revealed[key] = true; else delete revealed[key]; set({ revealed }); },
   setModes(m: Record<string, GeneModes | 'loading' | 'error'>) { set({ modes: { ...state.modes, ...m } }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
@@ -223,10 +231,10 @@ export const classOf = (s: CghState, c: CghCnv) => s.classes[c.id] ?? toClass(c.
 /** a call's note: the one written in the browser, else the file's */
 export const noteOf = (s: CghState, c: CghCnv) => s.notes[c.id] ?? c.note;
 
-/** whether a call is listed */
-export function passes(s: CghState, c: CghCnv): boolean {
+/** whether a call is listed; `belowToo`: the minimums left aside (a patient's calls under them, revealed on demand) */
+export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
   const f = s.filter;
-  if (!isAnalysed(c, f.minProbes, f.minKb)) return false;
+  if (!belowToo && !isAnalysed(c, f.minProbes, f.minKb)) return false;
   if (f.kind !== 'all' && c.kind !== f.kind) return false;
   if (f.hideSuppressed && c.suppressed) return false;
   const cls = classOf(s, c).trim();

@@ -131,8 +131,10 @@ let running = 0;
 /** annotate these calls (those not yet asked) */
 export function annotate(items: { c: CghCnv; build: GenomeBuild }[], lf: (b: GenomeBuild) => Loaders) {
   loadersFor = lf;
-  const known = cgh.get().ann;
-  for (const it of items) if (!known[it.c.id] && !queue.some(q => q.c.id === it.c.id)) queue.push(it);
+  const known = cgh.get().ann, put: Record<string, CnvAnn> = {};
+  for (const it of items) if (!known[it.c.id] && !queue.some(q => q.c.id === it.c.id)) { queue.push(it); put[it.c.id] = placeholder(); }
+  // a call queued shows as waiting (…), not as not annotated, and is never asked twice
+  if (Object.keys(put).length) cgh.setAnns(put);
   pump();
 }
 function pump() {
@@ -142,9 +144,10 @@ function pump() {
     void run(it).finally(() => { running--; pump(); });
   }
 }
+const placeholder = (): CnvAnn => ({ state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], regions: [], missing: [], dgv: [] });
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
 async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
-  cgh.setAnn(c.id, { state: 'loading', source: 'refseq', genes: [], dosage: new Map(), constraint: new Map(), achro: [], regions: [], missing: [], dgv: [] });
+  cgh.setAnn(c.id, placeholder());
   const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing: string[] = [];
   let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
   try {

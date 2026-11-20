@@ -11,7 +11,7 @@ import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
-import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, viewOf, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, REGION_COVER, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
@@ -100,7 +100,7 @@ function SizeSlider({ value, onChange, delay = 300, className = '' }: { value: n
 function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['pending']>; init: number; initKb: number; loaded: CghFile[] }) {
   const [n, setN] = useState<number>(init);
   const [kb, setKb] = useState<number>(initKb);
-  // every call of the tab (loaded and added): too many, and a minimum must be raised before they are annotated
+  // every call of the tab (loaded and added): past the cap, the largest are annotated now and the others on demand
   const every = [...loaded, ...p.files].flatMap(f => f.samples.flatMap(x => x.cnvs));
   const kept = every.filter(c => isAnalysed(c, n, kb)).length;
   const many = every.length > CGH_MAX_ANNOTATED, over = kept > CGH_MAX_ANNOTATED;
@@ -109,7 +109,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   const noCount = p.files.some(f => f.format !== 'interval' || f.warnings.some(w => /no #Probes/.test(w)));
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
-      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !over && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
+      onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
       <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
@@ -125,9 +125,9 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
             <span className="font-semibold">Minimum size</span>
             <SizeSlider value={kb} onChange={setKb} delay={120} />
           </div>}
-          {many && <div className={`rounded-lg border px-3 py-2 text-[11.5px] ${over ? 'border-red-300 bg-red-50 text-red-800' : 'border-amber-300 bg-amber-50 text-amber-900'}`} role="alert">
-            <b>{every.length.toLocaleString('en-US')} calls in all</b> (this tab's patients and these). Only the calls with {n}+ probes{kb ? ` and of ${sizeWord(kb)} or more` : ''} are annotated (genes, PanelApp, ClinGen, gnomAD, DGV Gold); the others are not.
-            {over ? <> <b>{kept.toLocaleString('en-US')} would be: more than the {CGH_MAX_ANNOTATED} the page annotates.</b> Raise the minimum number of probes and / or the minimum size.</> : <> {kept.toLocaleString('en-US')} will be.</>}
+          {many && <div className="rounded-lg border px-3 py-2 text-[11.5px] border-amber-300 bg-amber-50 text-amber-900" role="status" data-cgh-count>
+            <b>{every.length.toLocaleString('en-US')} calls in all</b> (this tab's patients and these). The calls with {n}+ probes{kb ? ` and of ${sizeWord(kb)} or more` : ''} are listed and annotated (genes, PanelApp, ClinGen, gnomAD, DGV Gold); the others are listed per patient on demand.
+            {over ? <> <b>{kept.toLocaleString('en-US')} calls pass the minimums: the {CGH_MAX_ANNOTATED} largest are annotated now, the others on demand.</b></> : <> {kept.toLocaleString('en-US')} will be.</>}
           </div>}
           {samples.length > 0 && <table className="w-full text-[11.5px]">
             <thead><tr className="text-left text-slate-500 border-b border-slate-200"><th className="py-1 font-medium">Sample</th><th className="font-medium">File</th><th className="font-medium">Build</th><th className="font-medium">Sex</th><th className="font-medium text-right">Calls</th><th className="font-medium text-right">Analysed</th></tr></thead>
@@ -150,7 +150,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
           <button onClick={() => cgh.cancel()} className="h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50">Cancel</button>
-          {samples.length > 0 && <button autoFocus disabled={over} onClick={() => cgh.accept(n, sexes, kb)} title={over ? `More than ${CGH_MAX_ANNOTATED} calls: raise a minimum first` : undefined} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
+          {samples.length > 0 && <button autoFocus onClick={() => cgh.accept(n, sexes, kb)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
         </div>
       </div>
     </div>
@@ -168,11 +168,16 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const [noteFocus, setNoteFocus] = useState<string | null>(null);
   /** the detail under the call clicked folded (a second click on its row) */
   const [folded, setFolded] = useState(false);
-  // every analysed call of every patient: its genes (RefSeq, GRCh37), dosage, constraint, PanelApp, AChro-Puce
+  // the analysed calls of every patient, the CGH_MAX_ANNOTATED largest: their genes (RefSeq), dosage, constraint, PanelApp, AChro-Puce
+  const buildOf = useMemo(() => new Map(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.map(c => [c.id, fl.build ?? 'GRCh37'] as const)))), [s.files]);
+  const auto = useMemo(() => new Set(largestFirst(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.filter(c => isAnalysed(c, s.filter.minProbes, s.filter.minKb)))))
+    .slice(0, CGH_MAX_ANNOTATED).map(c => c.id)), [s.files, s.filter.minProbes, s.filter.minKb]);
   useEffect(() => {
     if (!loadersFor) return;
-    annotate(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.filter(c => isAnalysed(c, s.filter.minProbes, s.filter.minKb)).map(c => ({ c, build: fl.build ?? 'GRCh37' })))).slice(0, CGH_MAX_ANNOTATED), loadersFor);
-  }, [s.files, s.filter.minProbes, s.filter.minKb, loadersFor]);
+    annotate(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.filter(c => auto.has(c.id)).map(c => ({ c, build: fl.build ?? 'GRCh37' })))), loadersFor);
+  }, [auto, loadersFor]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** on demand: up to CGH_MAX_ANNOTATED of these, the largest first (the queue skips those annotated or queued) */
+  const annotateNow = (cs: CghCnv[]) => { if (loadersFor) annotate(largestFirst(cs.filter(c => !s.ann[c.id])).slice(0, CGH_MAX_ANNOTATED).map(c => ({ c, build: buildOf.get(c.id) ?? 'GRCh37' })), loadersFor); };
   // the call clicked kept in the table's view (the table only, never the page), when it changes
   const tableBox = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -192,10 +197,27 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const series = seriesOf(s.files);
   const lab = labHits(s.files, s.lab);
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
-  const rows = all.filter(({ c }) => passes(s, c));
-  if (s.filter.sort === 'priority') rows.sort((a, b) => rank(b.c.id) - rank(a.c.id));
-  const fewProbes = all.filter(({ c }) => !isAnalysed(c, s.filter.minProbes, s.filter.minKb)).length;
-  const analysedAll = s.files.reduce((k, fl) => k + fl.samples.reduce((m, x) => m + x.cnvs.filter(c => isAnalysed(c, s.filter.minProbes, s.filter.minKb)).length, 0), 0);
+  const byRank = (l: typeof all) => { if (s.filter.sort === 'priority') l.sort((a, b) => rank(b.c.id) - rank(a.c.id)); return l; };
+  const isBelow = (c: CghCnv) => !isAnalysed(c, s.filter.minProbes, s.filter.minKb);
+  // each patient's calls under the minimums (the other filters applied), listed after its own when revealed
+  const below = new Map(listed.map(({ x, f }) => [x.key, byRank(x.cnvs.filter(c => isBelow(c) && passes(s, c, true)).map(c => ({ c, f })))]));
+  /** a patient's line under its calls: N more under the minimums (to reveal), or hide them */
+  type Item = { row: { c: CghCnv; f: CghFile } } | { more: { key: string; name: string; n: number; open: boolean } };
+  const blockOf = (x: (typeof listed)[number]['x']): Item[] => {
+    const b = below.get(x.key) ?? [], open = !!s.revealed[x.key];
+    if (!b.length) return [];
+    return open ? [{ more: { key: x.key, name: x.name, n: b.length, open } }, ...b.map(row => ({ row })), { more: { key: x.key, name: x.name, n: -1, open } }] : [{ more: { key: x.key, name: x.name, n: b.length, open } }];
+  };
+  // in genomic order the rows stay grouped by patient (each patient's line ends its block); by priority they mix, the lines at the bottom
+  const grouped = s.filter.sort === 'position' || listed.length === 1;
+  const items: Item[] = grouped
+    ? listed.flatMap(({ x, f }) => [...byRank(x.cnvs.filter(c => passes(s, c)).map(c => ({ c, f }))).map(row => ({ row })), ...blockOf(x)])
+    : [...byRank(all.filter(({ c }) => passes(s, c))).map(row => ({ row })), ...listed.flatMap(({ x }) => blockOf(x))];
+  const rows = items.flatMap(it => ('row' in it ? [it.row] : []));
+  const fewProbes = all.filter(({ c }) => isBelow(c)).length;
+  // listed and not annotated: past the automatic set (or revealed under the minimums), never asked yet
+  const notAnn = rows.filter(({ c }) => !s.ann[c.id] && !auto.has(c.id)).map(({ c }) => c);
+  const minWords = `fewer than ${s.filter.minProbes} probe${s.filter.minProbes > 1 ? 's' : ''}${s.filter.minKb ? ` or smaller than ${sizeWord(s.filter.minKb)}` : ''}`;
   const anySuppressed = all.some(({ c }) => c.suppressed);
   const f = s.filter;
   const moreN = (s.lab && f.lab !== 'any' ? 1 : 0) + (samples.length > 1 && f.series !== 'any' ? 1 : 0) + (anySuppressed && f.hideSuppressed ? 1 : 0);
@@ -281,10 +303,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           className="h-[26px] w-[210px] px-2 rounded-lg border border-slate-200 text-xs placeholder:text-slate-400 focus:outline-none focus:border-accent-300" />
         <Segmented size="sm" label="Order" title="The calls in genomic order, or the highest priority first" value={f.sort} onChange={v => cgh.setFilter({ sort: v })}
           options={[{ value: 'position', label: 'position', hint: 'Genomic order, as in the file' }, { value: 'priority', label: 'priority', hint: 'HIGH first, then MODERATE, LOW, none' }]} />
-        <span className="text-slate-500 ml-1">{rows.length} of {all.length} call{all.length > 1 ? 's' : ''} listed{fewProbes ? ` · ${fewProbes} under ${f.minProbes} probe${f.minProbes > 1 ? 's' : ''}${f.minKb ? ` or ${sizeWord(f.minKb)}` : ''} not analysed` : ''}</span>
+        <span className="text-slate-500 ml-1">{rows.length} of {all.length} call{all.length > 1 ? 's' : ''} listed{fewProbes ? ` · ${fewProbes} under ${f.minProbes} probe${f.minProbes > 1 ? 's' : ''}${f.minKb ? ` or ${sizeWord(f.minKb)}` : ''} not analysed` : ''}
+          {notAnn.length > 0 && <span data-cgh-notann> · {notAnn.length} not annotated · <button className="text-accent-700 hover:underline font-medium" onClick={() => annotateNow(notAnn)}
+            title={`Annotate the listed calls not annotated yet (up to ${CGH_MAX_ANNOTATED} a click, the largest first)`}>annotate them</button></span>}</span>
       </div>
-      {analysedAll > CGH_MAX_ANNOTATED && <div className="mx-5 mb-2 rounded-lg border border-red-300 bg-red-50 text-red-800 px-3 py-1.5 text-[11.5px]" role="alert">
-        {analysedAll.toLocaleString('en-US')} calls analysed: only the first {CGH_MAX_ANNOTATED} are annotated. Raise the minimum number of probes and / or the minimum size.</div>}
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className="w-full text-[11.5px] border-collapse">
@@ -303,25 +325,38 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ c, f: fl }, i) => {
+            {items.map(it => {
+              if ('more' in it) {
+                const m = it.more;
+                return <tr key={`more-${m.key}-${m.n}`} data-cgh-more className="border-b border-slate-100 bg-slate-50/60"><td colSpan={13} className="px-2 py-0.5 text-[11px]">
+                  {m.n < 0 ? <button className="text-accent-700 hover:underline" onClick={() => cgh.setRevealed(m.key, false)}>− hide them</button>
+                    : m.open ? <span className="text-slate-500">{m.n} call{m.n > 1 ? 's' : ''} of {m.name} under the minimums ({minWords}), annotated on demand</span>
+                    : <button className="text-accent-700 hover:underline" title={`List them, and annotate up to ${CGH_MAX_ANNOTATED} (the largest first)`}
+                        onClick={() => { cgh.setRevealed(m.key, true); annotateNow((below.get(m.key) ?? []).map(r => r.c)); }}>+ {m.n} more call{m.n > 1 ? 's' : ''} of {m.name} under the minimums ({minWords})</button>}
+                </td></tr>;
+              }
+              const { c, f: fl } = it.row, i = rows.indexOf(it.row);
+              const low = isBelow(c), na = !s.ann[c.id] && !auto.has(c.id);
               const cls = classOf(s, c), col = classColor(cls), on = s.shown === c.id, k = KIND[c.kind];
               const inList = CGH_CLASSES.some(o => o.value === cls), note = noteOf(s, c);
               const hub = cnvHubUrl(c, fl.build ?? 'GRCh37');
               const v = views.get(c.id)!;
               return [
-                <tr key={c.id} data-cgh-row data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
-                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''}`}>
+                <tr key={c.id} data-cgh-row data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
+                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''}`}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} />{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
-                  <GenesCell c={c} v={v} />
+                  {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                    <button className="px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" onClick={() => annotateNow([c])} title="Annotate this call (genes, PanelApp, ClinGen, gnomAD, DGV Gold)">annotate</button></td></>
+                  : <><GenesCell c={c} v={v} />
                   <PanelCell v={v} />
                   <DosageCell c={c} v={v} />
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><PriorityBadge v={v} /></td>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap"><PriorityBadge v={v} /></td></>}
                   <td className="px-1.5 py-0.5 whitespace-nowrap sticky right-[72px] z-[1] bg-inherit shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]" onClick={e => e.stopPropagation()}>
                     <select value={inList ? cls : ''} aria-label={`Classification of ${c.chrom}:${c.start}-${c.end}`} style={{ borderLeftColor: inList ? col ?? '#d3dbe5' : '#d3dbe5' }}
                       title={!inList && cls ? `The file says “${cls}”: kept in the export unless a class is chosen` : 'The class written in the export'}
@@ -361,6 +396,13 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
 
 // ---- the columns of the genes' evidence ----
 const MoiBadge = ({ m }: { m: MoiClass }) => <span className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border leading-[13px]" style={{ color: MOI[m].color, borderColor: `${MOI[m].color}88`, background: `${MOI[m].color}1a` }} title={MOI[m].label}>{MOI[m].short}</span>;
+ /** a listed call never asked (past the automatic set, or under the minimums): grey, annotated on demand */
+const NotAnnCell = () => <td className="px-1.5 py-0.5 text-slate-400 whitespace-nowrap" data-cgh-notann-cell>not annotated</td>;
+/** the subtle mark of a call under the minimums, shown on demand: what it lacks */
+function BelowTag({ c, minProbes, minKb }: { c: CghCnv; minProbes: number; minKb: number }) {
+  const few = c.probes != null && c.probes < minProbes;
+  return <span className="ml-1 inline-flex items-center rounded px-1 text-[9.5px] border border-slate-200 bg-slate-50 text-slate-500 leading-[14px] align-middle" title="Under the minimums: listed on demand">{few ? `${c.probes} probe${c.probes === 1 ? '' : 's'}` : `< ${sizeWord(minKb)}`}</span>;
+}
 const waitingDot = (n: number) => (n ? <span className="text-slate-400" title={`PanelApp: ${n} gene${n > 1 ? 's' : ''} still asked`}> …</span> : null);
 type View = ReturnType<typeof viewOf>;
 
