@@ -13,6 +13,7 @@ import { reconstruct, reconstructAll, rankPaths, SV_BREAKEND_CLUSTER_BP, pathTex
   type SvJunction, type SvSegment, type SvPiece, type SegmentDepth } from './svModel';
 import { KIND_COLOR, segmentColors } from './svColors';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
+import { useClinGenTrack } from './CghClinGenTrack';
 import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
 import { refineJunction, jointHint, jointSummary, TEMPLATE_MIN, TEMPLATE_SPAN, type SvJoint } from './svJoint';
 
@@ -96,6 +97,8 @@ export interface SvCartoonProps {
 }
 
 export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, geneLoaders, loadJoint, onClose }: SvCartoonProps) {
+  /** the browser below as everywhere else: its ClinGen CNV regions track (GRCh37 or GRCh38) */
+  const clinGen = useClinGenTrack(build === 'GRCh37' ? 'GRCh37' : 'GRCh38');
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelected));
   const [zygosity, setZygosity] = useState<'het' | 'hom'>('het');
   const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
@@ -348,7 +351,7 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
             joints={joints} openJoints={openJoints} onOpenJoint={id => setOpenJoints(o => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; })} />
         </div>
         <div ref={genesRef} className="scroll-mt-12" />
-        {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} />}
+        {chosen.length > 0 && <SvGenomeBrowser rec={rec} chrom={chrom} window={win} segColors={segColorMap} flankCopies={copies} zygosity={zygosity} build={build} loaders={loaders} strongEvent extraTrack={clinGen} />}
         </div>
       </div>
     </div>

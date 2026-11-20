@@ -1,8 +1,9 @@
 /**
- * The array-CGH browser's "ClinGen CNV regions" track (SvGenomeBrowser's optional `extraTrack`, absent in the SV browser):
+ * The "ClinGen CNV regions" track (SvGenomeBrowser's optional `extraTrack`), the same in every browser: the SV browser,
+ * the SV cartoon's and the array-CGH page's (useClinGenTrack):
  * HI 3 / TS 3 dosage regions, the recurrent CNV list's regions and its breakpoint / LCR segments, from embedded data.
  */
-import { useId } from 'react';
+import { useId, useMemo, useState } from 'react';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { SvExtraTrack } from './SvGenomeBrowser';
 import { clinGenOn, recurrentOf, shortName, PIEV_RO, LCR_PAD, type ClinGenDosage, type ClinGenRecurrent } from './cghRecurrent';
@@ -38,13 +39,26 @@ function Tag({ x, y, t }: { x: number; y: number; t: ('del' | 'dup')[] }) {
   return <g><rect x={x} y={y - 8} width={w} height={10} rx={2} fill="#fff" stroke={COL.piev} strokeWidth={0.8} /><text x={x + w / 2} y={y} fontSize={7.5} fontWeight={700} fill={COL.piev} textAnchor="middle">{tagText(t)}</text></g>;
 }
 
-function Track({ dos, rec, lcr, nd, nr, x0 }: { dos: Item[]; rec: Item[]; lcr: Item[]; nd: number; nr: number; x0: number }) {
+const FOLD_ROW = 16;
+/** the fold switch, on its own row under the dosage regions (inside the plot: the browser clips its tracks left of x0) */
+function Fold({ open, n, onToggle, x, y }: { open: boolean; n: number; onToggle: () => void; x: number; y: number }) {
+  // a box under the text: a click between its glyphs still hits
+  return <g style={{ cursor: 'pointer' }} onClick={onToggle} data-cgh-fold>
+    <title>{open ? 'Hide the recurrent CNV regions and breakpoint / LCR segments' : 'Show the recurrent CNV regions (list v2.0) and their breakpoint / LCR segments'}</title>
+    <rect x={x} y={y} width={150} height={FOLD_ROW - 2} fill="transparent" />
+    <text x={x + 2} y={y + 10} fontSize={9.5} fill="#0f766e">{open ? '▾ hide' : '▸ show'} recurrent CNVs / LCRs ({n})</text></g>;
+}
+
+function Track({ dos, rec, lcr, nd, nr, x0, fold }: { dos: Item[]; rec: Item[]; lcr: Item[]; nd: number; nr: number; x0: number; fold: { open: boolean; n: number; onToggle: () => void } | null }) {
   const hatch = `cgh-hatch${useId().replace(/:/g, '')}`;
-  const yRec = nd * ROW, yLcr = yRec + nr * ROW;
+  // no dosage region in view: a line saying so takes its place
+  const yFold = nd ? nd * ROW : 16, yRec = yFold + (fold ? FOLD_ROW : 0), yLcr = yRec + nr * ROW;
+  const sw = fold && <Fold {...fold} x={x0 + 2} y={yFold} />;
   const lx = (it: Item) => Math.max(it.a, x0) + 2;
-  if (!dos.length && !rec.length && !lcr.length) return <text x={x0 + 6} y={10} fontSize={9.5} fill={COL.faint}>no ClinGen HI 3 / TS 3 or recurrent region in view</text>;
   return (
     <g fontSize={9.5}>
+      {!dos.length && <text x={x0 + 4} y={10} fontSize={9.5} fill={COL.faint}>no ClinGen HI 3 / TS 3 region in view</text>}
+      {sw}
       <defs><pattern id={hatch} width={5} height={5} patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width={5} height={5} fill="#fff7ed" /><line x1={0} y1={0} x2={0} y2={5} stroke={COL.rec} strokeWidth={1.6} /></pattern></defs>
       {dos.map(it => { const r = it.r as ClinGenDosage, w = Math.max(it.b - it.a, 2), both = r.hi === 3 && r.ts === 3, t = lx(it) + tagW(r.piev);
         return <g key={r.id} transform={`translate(0 ${it.lane * ROW})`}><a href={r.url} target="_blank" rel="noreferrer">
@@ -74,8 +88,14 @@ function Track({ dos, rec, lcr, nd, nr, x0 }: { dos: Item[]; rec: Item[]; lcr: I
 }
 
 const sw = (style: React.CSSProperties) => <span className="inline-block w-4 h-2.5 rounded-sm" style={style} />;
-/** the track for a build: memoise per build (a new object redraws the browser) */
-export function clinGenTrack(build: GenomeBuild): SvExtraTrack {
+/** the track for a build, folded (HI 3 / TS 3 regions only) or open (with the recurrent list and its LCRs): memoise
+ * per build and fold (a new object redraws the browser) */
+/** The track for a browser on `build`, folded at first: one per browser, so the SV browser, the SV cartoon and the array-CGH page draw the same. */
+export function useClinGenTrack(build: GenomeBuild): SvExtraTrack {
+  const [open, setOpen] = useState(false);
+  return useMemo(() => clinGenTrack(build, open, () => setOpen(o => !o)), [build, open]);
+}
+export function clinGenTrack(build: GenomeBuild, open: boolean, onToggle: () => void): SvExtraTrack {
   return {
     id: 'cghClinGen', label: 'ClinGen CNV regions', side: ['ClinGen CNV', 'regions'],
     title: `ClinGen dosage regions scored HI 3 (red) or TS 3 (blue), and the ClinGen recurrent CNV list v2.0 (hatched orange) with its breakpoint / LCR segments (grey): embedded, read ${CLINGEN_READ}; PIEV: the AChro-Puce network classes the region a susceptibility CNV`,
@@ -86,11 +106,13 @@ export function clinGenTrack(build: GenomeBuild): SvExtraTrack {
     layout: ({ chrom, s, e, x, x0 }) => {
       const all = clinGenOn(build, chrom).filter(r => r.end > s && r.start < e);
       const dos = lanes(all.filter(r => r.kind === 'dosage'), x, x0, r => shortName(r.name), 9.5);
-      const rec = lanes(all.filter(r => r.kind === 'recurrent'), x, x0, r => shortName(r.name), 9.5);
-      const lcr = lanes(all.filter(r => r.kind === 'lcr'), x, x0, r => r.name, 9);
+      const extra = all.filter(r => r.kind !== 'dosage').length;
+      const rec = open ? lanes(all.filter(r => r.kind === 'recurrent'), x, x0, r => shortName(r.name), 9.5) : [];
+      const lcr = open ? lanes(all.filter(r => r.kind === 'lcr'), x, x0, r => r.name, 9) : [];
+      const fold = extra ? { open, n: extra, onToggle } : null;
       const n = (its: Item[]) => (its.length ? Math.max(...its.map(i => i.lane)) + 1 : 0);
       const nd = n(dos), nr = n(rec), nl = n(lcr);
-      return { height: Math.max(14, nd * ROW + nr * ROW + nl * LCR_ROW), node: <Track dos={dos} rec={rec} lcr={lcr} nd={nd} nr={nr} x0={x0} /> };
+      return { height: (nd ? nd * ROW : 16) + (extra ? FOLD_ROW : 0) + nr * ROW + nl * LCR_ROW, node: <Track dos={dos} rec={rec} lcr={lcr} nd={nd} nr={nr} x0={x0} fold={fold} /> };
     },
   };
 }

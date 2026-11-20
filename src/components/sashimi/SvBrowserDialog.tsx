@@ -8,6 +8,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
 import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
 import SvGeneSummary, { type GeneSummary } from './SvGeneSummary';
+import { useClinGenTrack } from './CghClinGenTrack';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
 import { parseLocus } from './geometry';
@@ -95,6 +96,8 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   const [focus, setFocus] = useState<{ start: number; end: number; key: number } | null>(null);
   /** the genes the event changes, as the browser reads them (next to the nomenclature) */
   const [geneSum, setGeneSum] = useState<GeneSummary | null>(null);
+  /** the browser as on the array-CGH page: its ClinGen CNV regions track, the event shaded through the tracks */
+  const clinGen = useClinGenTrack(build);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -278,7 +281,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : shown.kind === 'variant' ? `variant:${shown.text}` : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
-            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark} onGeneSummary={setGeneSum}
+            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark} onGeneSummary={setGeneSum} strongEvent extraTrack={clinGen}
             variant={variant ? {
               start: variant.v.start, end: variant.v.end, key: variant.text,
               label: variant.hgvsg ? variant.typed.replace(/\(([^)]*)\)/, '') : variant.v.hgvs,
