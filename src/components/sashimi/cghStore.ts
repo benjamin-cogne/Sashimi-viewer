@@ -250,7 +250,9 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
     // a chromosome (3, chrX) exactly; a band from its start (1p3, 16p11); a gene by part of its name
     const qc = q.replace(/^chr/, '');
     const hit = /^(\d{1,2}|x|y)$/.test(qc) ? c.chrom.toLowerCase() === `chr${qc}`
-      : `${c.chrom.replace(/^chr/, '')}${c.cytoband || s.ann[c.id]?.band || ''}`.toLowerCase().startsWith(qc) || c.genes.some(g => g.toLowerCase().includes(q));
+      : `${c.chrom.replace(/^chr/, '')}${c.cytoband || s.ann[c.id]?.band || ''}`.toLowerCase().startsWith(qc)
+        // the file's Gene Name and the RefSeq genes read for the call
+        || c.genes.some(g => g.toLowerCase().includes(q)) || !!s.ann[c.id]?.genes.some(g => g.symbol.toLowerCase().includes(q));
     if (!hit) return false;
   }
   return true;

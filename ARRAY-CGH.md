@@ -10,7 +10,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 - **Quick guide.** *? Quick guide* in the page's bar: seven steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
-    recognised, remembered by column names);
+    recognised, remembered by column names, only when the header row looks like one);
   - `.xlsx` (first sheet), BED, SV VCF (`.vcf`, `.vcf.gz`);
   - zips holding any of these (one patient each).
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
@@ -18,7 +18,8 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   bp / kb / Mb, also in the filter bar); the 200 largest calls annotated by
   themselves, the others on demand (*annotate*); each patient's calls under the minimums revealed on demand (*+ N more*); sex per patient.
 - **Table.** One tab per patient plus *All patients*, filters (series: the number of other patients carrying the call
-  compared with = ≥ ≤ > < n), sort by priority.
+  compared with = ≥ ≤ > < n; a sample name loaded twice is one patient, said at import), gene search (file genes and
+  RefSeq genes read), sort by priority.
 - **Per call, read on GRCh37** by the SV browser's own routes (UCSC, PanelApp, gnomAD):
   - RefSeq genes; PanelApp ratings and modes of inheritance (asked 25 genes a request);
   - ClinGen HI / TS of genes and of ISCA regions; gnomAD LOEUF;
@@ -29,6 +30,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 - **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
   Comment columns (a VCF: INFO `CGH_CLASS` / `CGH_NOTE`; an xlsx: a tab-separated `.classified.txt`).
+  Several files: a list with one *export* per file and *export all* (one download at a time, each file marked as it starts).
 - **The browser below.** The call clicked is drawn as DEL / DUP in the SV browser's own `SvGenomeBrowser`, with the
   same tracks.
 

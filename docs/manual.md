@@ -233,7 +233,7 @@ listed (lighter, tagged *1 probe*) and annotated on demand; *− hide them* fold
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
-A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
 
 Files read (also inside zips):
 
@@ -245,7 +245,7 @@ Files read (also inside zips):
 - **Types**: del / deletion / loss / perte / délétion / CN loss / homozygous or hemizygous deletion, dup / duplication / gain / amplification / amp / triplication / CN gain / high copy gain; a copy number as `x1`, `1`, `CN=1`, `1 copy`. LOH / ROH / AOH / cnLOH rows and calls on chrM are skipped and counted.
 
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
-Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene, a band (`16p11`) or a chromosome;
+Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene (the file's Gene Name or the RefSeq genes read for the call), a band (`16p11`) or a chromosome;
 order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
 copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
 build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
@@ -261,6 +261,7 @@ outside the PARs need the sex.
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
 patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients
 to a value: *any*, *=*, *≥*, *≤*, *>*, *<* and a number (*= 0*: in no other patient; *≥ 2*: in at least 2 others). Not written to the export.
+A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26A0657 loaded twice (file A, file B)*).
 
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
@@ -322,6 +323,7 @@ carries the call's position and type). Classes and notes are kept in the tab onl
 each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
 after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
+With several files in the tab, the button opens a list: one **export** per file (one download, its patients marked exported) and **export all**, one file after another a moment apart, each marked as its download starts (the browser may ask to allow several downloads).
 
 ## Reads, haplotypes and phasing
 

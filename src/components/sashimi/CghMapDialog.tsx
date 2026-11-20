@@ -6,7 +6,7 @@
 import { useMemo, useState } from 'react';
 import { cgh, type CghState } from './cghStore';
 import { parseCghFile, cghBuild, kindOfText, type CghFile } from './cghIntervals';
-import { detectTable, guessCols, guessSizeUnit, rememberMap, splitDelimited, splitRecords, type ColMap, type Field, type MapOpts, type MapSpec, type TypeChoice } from './cghMapping';
+import { detectTable, guessCols, guessSizeUnit, looksLikeHeader, rememberMap, splitDelimited, splitRecords, type ColMap, type Field, type MapOpts, type MapSpec, type TypeChoice } from './cghMapping';
 
 const LABEL: Record<Field, string> = { chrom: 'Chromosome', start: 'Start', stop: 'End', pos: 'Position (one column)', type: 'Type (del / dup / loss / gain…)', copies: 'Copy number', iscn: 'ISCN', lr: 'Log ratio', probes: 'Probes', size: 'Size', band: 'Cytoband', genes: 'Genes', cls: 'Classification', note: 'Comment', sample: 'Sample name', sup: 'Suppress' };
 const PLACE: Field[] = ['chrom', 'start', 'stop'], ONE_OF: Field[] = ['type', 'copies', 'iscn', 'lr'];
@@ -66,7 +66,8 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
     {f === 'size' && cols.size >= 0 && <select value={sizeUnit} onChange={e => setSizeUnit(e.target.value as MapOpts['sizeUnit'])} aria-label="Size unit" className={SEL}>{['bp', 'kb', 'Mb'].map(u => <option key={u}>{u}</option>)}</select>}
   </label>;
   const cancel = () => cgh.mapped(null);
-  const use = () => { if (!res.file) return; if (headerRow >= 0) rememberMap(header, spec); cgh.mapped(res.file); };
+  const headerOk = headerRow >= 0 && looksLikeHeader(header);
+  const use = () => { if (!res.file) return; if (headerOk) rememberMap(header, spec); cgh.mapped(res.file); };
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6 overflow-y-auto" role="dialog" aria-modal="true" aria-label="Column mapping"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cancel(); } }}>
@@ -106,6 +107,7 @@ export function CghMapDialog({ item }: { item: CghState['toMap'][number] }) {
             <div className="flex flex-wrap gap-x-4 gap-y-1">{odd.map(v => <label key={v} className="flex items-center gap-1.5"><span className="font-mono">{v}</span>
               <select value={typeMap[v.toLowerCase()] ?? 'ignore'} onChange={e => setTypeMap(m => ({ ...m, [v.toLowerCase()]: e.target.value as TypeChoice }))} aria-label={`Meaning of ${v}`} className={SEL}><option>ignore</option><option>loss</option><option>gain</option></select></label>)}</div>
           </div>}
+          {headerRow >= 0 && !headerOk && <div className="text-[11.5px] text-amber-800" data-map-noremember>This row does not look like a header: the choice is not remembered.</div>}
           <div className={`text-[11.5px] ${res.file ? 'text-slate-700' : 'text-red-700'}`} data-map-status>{res.msg}</div>
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">

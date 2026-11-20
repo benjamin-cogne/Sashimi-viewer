@@ -148,46 +148,54 @@ const placeholder = (): CnvAnn => ({ state: 'loading', source: 'refseq', genes: 
 const msg = (e: unknown) => String((e as Error)?.message ?? e);
 async function run({ c, build }: { c: CghCnv; build: GenomeBuild }) {
   cgh.setAnn(c.id, placeholder());
-  const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing: string[] = [];
-  let genes: CnvGene[] = [], source: CnvAnn['source'] = 'refseq';
+  // what is read so far: an unexpected throw still ends on a result (with the error said), never on the placeholder
+  const a: CnvAnn = { ...placeholder(), state: 'done' };
+  let bands: Bands | null = null;
+  try {
+    await readAll(c, build, a, (b) => { bands = b; });
+  } catch (e) {
+    a.missing.push(`annotation stopped (${msg(e)})`);
+  }
+  try { a.achro = achroHits(c, a.genes, build); a.topo = topoOf(c, build, bands); } catch { /* left empty */ }
+  cgh.setAnn(c.id, a);
+  wantModes(a.genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
+}
+type Bands = Awaited<ReturnType<NonNullable<Loaders['getCytobands']>>>;
+async function readAll(c: CghCnv, build: GenomeBuild, a: CnvAnn, gotBands: (b: Bands) => void) {
+  const ld = loadersFor!(build), s0 = c.start - 1, e0 = c.end, missing = a.missing;
   try {
     if (!ld.getTranscripts) throw new Error('no gene source for this build');
-    genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0, c.kind);
+    a.genes = genesOf(await ld.getTranscripts(c.chrom, s0, e0), s0, e0, c.kind);
   } catch (e) {
-    source = 'file';
-    genes = c.genes.map(symbol => ({ symbol, tx: '', start: s0, end: e0, whole: false, exons: true }));
+    a.source = 'file';
+    a.genes = c.genes.map(symbol => ({ symbol, tx: '', start: s0, end: e0, whole: false, exons: true }));
     missing.push(`RefSeq genes (${msg(e)}): the file's Gene Name instead`);
   }
-  let dosage = new Map<string, DosageScore>(), constraint = new Map<string, Constraint>();
+  const genes = a.genes;
   if (ld.getAnnotations && genes.length) {
     try {
-      const a = await ld.getAnnotations(c.chrom, s0, e0, genes.map(g => g.symbol));
-      dosage = a.dosage; constraint = a.constraint;
-      missing.push(...a.notes.filter(n => /unavailable/i.test(n)));
+      const r = await ld.getAnnotations(c.chrom, s0, e0, genes.map(g => g.symbol));
+      a.dosage = r.dosage; a.constraint = r.constraint;
+      missing.push(...r.notes.filter(n => /unavailable/i.test(n)));
     } catch (e) { missing.push(`ClinGen dosage and gnomAD constraint (${msg(e)})`); }
   }
   // ClinGen dosage regions: those the call overlaps, with the share of the region it covers
-  let regions: RegionHit[] = [];
   if (ld.getDosageRegions) {
     try {
-      regions = (await ld.getDosageRegions(c.chrom, s0, e0)).flatMap(r => {
+      a.regions = (await ld.getDosageRegions(c.chrom, s0, e0)).flatMap(r => {
         const ov = Math.min(e0, r.end) - Math.max(s0, r.start);
         return ov > 0 && r.end > r.start ? [{ id: r.id, label: r.label, hi: r.hi, ts: r.ts, covered: Math.min(1, ov / (r.end - r.start)) }] : [];
       });
     } catch (e) { missing.push(`ClinGen dosage regions (${msg(e)})`); }
   }
   // DGV Gold: the records sharing 80 % of the call or more, the call inside one counting 100 %
-  let dgv: DgvHit[] = [], dgvError: string | undefined;
   if (ld.getPopulationSvs) {
-    try { dgv = dgvHits(c.kind, s0, e0, await ld.getPopulationSvs(c.chrom, s0, e0)); } catch (e) { dgvError = msg(e); }
+    try { a.dgv = dgvHits(c.kind, s0, e0, await ld.getPopulationSvs(c.chrom, s0, e0)); } catch (e) { a.dgvError = msg(e); }
   }
   // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram)
-  let band: string | undefined;
-  let bands: Awaited<ReturnType<NonNullable<Loaders['getCytobands']>>> | null = null;
-  if (ld.getCytobands) { try { bands = await ld.getCytobands(c.chrom); } catch { /* the band stays unknown */ } }
-  if (!c.cytoband && bands) band = bandOf(bands, s0, e0);
-  cgh.setAnn(c.id, { state: 'done', source, genes, dosage, constraint, achro: achroHits(c, genes, build), regions, missing, dgv, dgvError, band, topo: topoOf(c, build, bands) });
-  wantModes(genes.slice(0, PANELAPP_MAX_GENES).map(g => g.symbol));
+  if (ld.getCytobands) {
+    try { const b = await ld.getCytobands(c.chrom); gotBands(b); if (!c.cytoband) a.band = bandOf(b, s0, e0); } catch { /* the band stays unknown */ }
+  }
 }
 
 // ---- PanelApp, by batches of genes ----

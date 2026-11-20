@@ -111,6 +111,11 @@ export function copiesOf(s: string | undefined): number | null {
 const width = (l: string, d: string) => { const c = splitDelimited(l, d); let n = c.length; while (n > 0 && !c[n - 1].trim()) n--; return n; };
 /** how much a row looks like a call: numbers, and a region in one cell counting for two */
 const dataScore = (cells: string[]) => cells.reduce((k, c) => k + (parseRegion(c) ? 2 : isNum(c) ? 1 : 0), 0);
+/** a header row: most of its non-empty cells neither numbers nor positions (a data row must never be remembered) */
+export function looksLikeHeader(cells: string[]): boolean {
+  const t = cells.map(c => c.trim()).filter(Boolean);
+  return t.length > 0 && t.filter(c => !isNum(c) && !parseRegion(c) && parsePos(c) == null).length * 2 > t.length;
+}
 
 /**
  * The delimiter and the header row of a delimited table (≥ 2 columns, a trailing delimiter not counted; 2 only with a
@@ -222,7 +227,8 @@ interface Stored { sig: string; spec: MapSpec }
 const loadMaps = (): Stored[] => { try { const v = JSON.parse(localStorage.getItem(MAPS_KEY) ?? '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
 const sigOf = (cells: string[]) => cells.map(norm).join('|');
 export function rememberMap(header: string[], spec: MapSpec) {
-  if (header.filter(h => h.trim()).length < 3) return;
+  // a data row taken for the header would store a patient's values, and match nothing anyway
+  if (header.filter(h => h.trim()).length < 3 || !looksLikeHeader(header)) return;
   const sig = sigOf(header);
   try { localStorage.setItem(MAPS_KEY, JSON.stringify([{ sig, spec }, ...loadMaps().filter(m => m.sig !== sig)].slice(0, MAPS_MAX))); } catch { /* storage blocked */ }
 }

@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { labHits, parseLabBenign, LAB_COVER, type LabHit } from './cghLabBenign';
 import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
-import { seriesOf, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
+import { seriesOf, duplicateNames, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
@@ -97,6 +97,8 @@ function SizeSlider({ value, onChange, delay = 300, className = '' }: { value: n
     </span>
   );
 }
+const EXPORT_GAP_MS = 600;
+const EXPORT_TITLE = 'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.\nSeveral files: one download each, and the browser may ask to allow several downloads.';
 function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['pending']>; init: number; initKb: number; loaded: CghFile[] }) {
   const [n, setN] = useState<number>(init);
   const [kb, setKb] = useState<number>(initKb);
@@ -146,6 +148,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
             <button className="text-accent-700 hover:underline" onClick={() => cgh.remap(f)}>{f.remembered ? '(change…)' : 'columns…'}</button></div>)}
           {p.notes.map(e => <div key={e} className="text-[11px] text-slate-500">{e}</div>)}
+          {duplicateNames([...loaded, ...p.files]).map(e => <div key={e} className="text-[11px] text-amber-700" data-cgh-dup>{e}</div>)}
           {p.errors.map(e => <div key={e} className="text-[11px] text-red-700">{e}</div>)}
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
@@ -228,18 +231,19 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     cgh.setShown(r.c.id); onShow(r.c, r.f);
   };
   const at = rows.findIndex(r => r.c.id === s.shown);
-  const exportAll = () => {
-    for (const fl of new Set(listed.map(e => e.f))) {
-      const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c));
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-      a.download = fl.saveAs;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    }
-    // a file holds every sample it was read with: all of them are exported
-    cgh.exported([...new Set(listed.map(e => e.f))].flatMap(fl => fl.samples.map(x => x.key)));
+  const exportFiles = [...new Set(listed.map(e => e.f))];
+  /** one file written back; a file holds every sample it was read with: all of them are marked exported, only once its download is triggered */
+  const exportOne = (fl: CghFile) => {
+    const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    a.download = fl.saveAs;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    cgh.exported(fl.samples.map(x => x.key));
   };
+  // browsers block or ask before several downloads at once: one after another, each file marked as its own starts
+  const exportAll = () => exportFiles.forEach((fl, i) => setTimeout(() => exportOne(fl), i * EXPORT_GAP_MS));
   /** classes or notes of the patients listed not exported yet */
   const listedDirty = listed.some(e => s.dirtyKeys[e.x.key]);
   const tab = (on: boolean) => `inline-flex items-center gap-1.5 h-8 pl-3 pr-2 -mb-px rounded-t-lg border text-xs whitespace-nowrap ${on ? 'bg-white border-slate-200 border-b-white text-slate-900 font-semibold shadow-[inset_0_2px_0_#0f766e]' : 'bg-slate-50 border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`;
@@ -265,9 +269,25 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <CghAddButton compact />
           <LabBenignButton />
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
-          <button onClick={exportAll} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
-            title={'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.'}>
-            <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>
+{exportFiles.length > 1
+            ? <Popover width={340} title={EXPORT_TITLE} label="Export classified tables"
+                buttonClass={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+                button={<><Icon name="download" size={13} />Export classified tables{listedDirty ? ' •' : ''} ▾</>}>
+                <div className="text-xs" data-cgh-export>
+                  {exportFiles.map(fl => <div key={fl.id} className="flex items-center gap-2 py-1 border-b border-slate-100">
+                    <span className="flex-1 min-w-0 truncate" title={fl.name}>{fl.name}{fl.samples.some(x => s.dirtyKeys[x.key]) ? <span className="text-amber-700"> •</span> : null}
+                      <span className="block text-[10.5px] text-slate-500 truncate">{fl.samples.map(x => x.name).join(', ')} → {fl.saveAs}</span></span>
+                    <button className="h-[24px] px-2 rounded border border-slate-200 hover:border-slate-300 font-medium" onClick={() => exportOne(fl)}>export</button>
+                  </div>)}
+                  <div className="flex items-center gap-2 pt-1.5">
+                    <span className="flex-1 text-[10.5px] text-slate-500">The browser may ask to allow several downloads.</span>
+                    <button className="h-[24px] px-2 rounded bg-accent-600 text-white font-semibold hover:bg-accent-700" title="Each file in turn, a moment apart; the browser may ask to allow several downloads" onClick={exportAll}>export all ({exportFiles.length})</button>
+                  </div>
+                </div>
+              </Popover>
+            : <button onClick={() => exportFiles[0] && exportOne(exportFiles[0])} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+                title={EXPORT_TITLE}>
+                <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>}
         </span>
       </div>
       <div className="pt-2" />
