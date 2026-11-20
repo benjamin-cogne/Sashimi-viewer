@@ -1,4 +1,4 @@
-// Recreates the Array-CGH quick guide's screenshots (src/assets/cgh-guide/step1..6.webp) from the demo inputs here.
+// Recreates the Array-CGH quick guide's screenshots (src/assets/cgh-guide/step*.webp) from the demo inputs here.
 // Synthetic data only. Run from the repo root after `npm run build`: node docs/cgh-demo/make-guide-shots.cjs
 // Needs playwright (chromium) and the network (UCSC, PanelApp, gnomAD annotate the calls).
 const { chromium } = require('playwright');
@@ -79,6 +79,21 @@ const MAX_W = 900, Q = 0.7;
   await mark('[role=tablist]');
   const f3 = await box('[data-cgh-frame]');
   await shot('step3', { x: f3.x, y: f3.y, width: f3.width, height: Math.min(f3.height, 640) });
+
+  // 3b. the browser below the table: the call clicked, drawn with the SV browser's tracks
+  // the whole card (its ISCN line, then the browser); ClinVar SV off for the shot, so the reference and the rebuilt
+  // chromosome fit in the image
+  const card = p.locator('[data-cgh-page] .rounded-xl:has(span.font-mono:has-text("arr["))').last();
+  const cvSv = card.locator('button:has-text("ClinVar SV")').first();
+  await cvSv.click(); await p.waitForTimeout(800);
+  // the card's top just under the page's sticky bar (48 px), so its ISCN line and the browser's header show
+  await card.evaluate(el => { const pg = document.querySelector('[data-cgh-page]'); pg.scrollTop += el.getBoundingClientRect().top - 56; });
+  await p.waitForTimeout(4000);
+  const fb = await card.boundingBox();
+  await mark('[data-cgh-page] span.font-mono:has-text("arr[")');
+  await shot('step3b', { x: fb.x, y: fb.y - 4, width: fb.width, height: Math.min(fb.height + 4, 780) });
+  await cvSv.click(); await p.waitForTimeout(300);
+  await p.evaluate(() => document.querySelector('[data-cgh-page]').scrollTo(0, 0));
 
   // 6. classify, note, export
   const row = '[data-cgh-row]:has-text("1q21.1")';

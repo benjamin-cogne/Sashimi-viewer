@@ -7,7 +7,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 
 ## What the page does
 
-- **Quick guide.** *? Quick guide* in the page's bar: six steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
+- **Quick guide.** *? Quick guide* in the page's bar: seven steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names);
