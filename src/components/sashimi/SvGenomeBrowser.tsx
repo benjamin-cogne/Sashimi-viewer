@@ -140,6 +140,13 @@ interface Props {
   onGeneSummary?: (s: GeneSummary | null) => void;
   /** the event's losses and gains shaded through the tracks, its breakpoints drawn bolder (the array-CGH page) */
   strongEvent?: boolean;
+  /** a track the caller draws under AChro-Puce, with its toggle and legend (the array-CGH page); none in the SV browser */
+  extraTrack?: SvExtraTrack;
+}
+/** a caller's track: `layout` gives its height and drawing (y from 0) for the stretch in view, x(pos) the x of a 0-based position */
+export interface SvExtraTrack {
+  id: string; label: string; side: string[]; title: string; legend: React.ReactNode;
+  layout: (v: { chrom: string; s: number; e: number; x: (pos: number) => number; x0: number; x1: number }) => { height: number; node: React.ReactNode };
 }
 
 /** the small variant's mark */
@@ -326,7 +333,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary, strongEvent }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary, strongEvent, extraTrack }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -365,6 +372,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [pop, setPop] = useState<{ list: PopulationSv[]; loading: boolean; error?: string }>({ list: [], loading: false });
   /** the AChro-Puce recurrent CNVs (their sheets' classes), drawn under the population CNVs */
   const [showAchro, setShowAchro] = useState<boolean>(() => store.get<boolean>('sashimi.svAchro') ?? true);
+  const [showExtra, setShowExtra] = useState<boolean>(() => (extraTrack ? store.get<boolean>(`sashimi.svExtra.${extraTrack.id}`) ?? true : false));
   const [showClinSv, setShowClinSv] = useState<boolean>(() => store.get<boolean>('sashimi.svClinvarSv') ?? true);
   const [showClinSnv, setShowClinSnv] = useState<boolean>(() => store.get<boolean>('sashimi.svClinvarSnv') ?? true);
   /** the ClinVar SVs one by one (expanded), or summed up as a profile (the default) */
@@ -1125,6 +1133,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     }
   }
   const yAchro = showAchro ? y : -1; if (showAchro) y += keep('achro', Math.max(1, ...achroItems.map(d => d.lane + 1)) * ACHRO_LANE_H) + 8;
+  const extraLaid = extraTrack && showExtra ? extraTrack.layout({ chrom, s: vp.s, e: ve, x: p => cx(refX(p)), x0: X0, x1: X1 }) : null;
+  const yExtra = extraLaid ? y : -1; if (extraLaid) y += keep('extra', extraLaid.height) + 8;
   const yRefBand = rec ? y : -1; if (rec) y += BAND_H;
   const yRib = y; if (ders.length) y += RIB_H;
   const derY = ders.map((d, i) => {
@@ -1391,6 +1401,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {yClinSnv >= 0 && clinSnvMode === 'each' && <text x={14} y={yClinSnv + snvH / 2 + 11} fontSize={9.5} fill={C.accent} style={{ cursor: 'pointer' }}
           onClick={e => { e.stopPropagation(); setPinned(null); setTip(null); setClinSnvMode('gene'); store.set('sashimi.svClinvarSnvMode', 'gene'); }}>▾ per gene<title>Count the variants per gene: loss of function above (predicted NMD, predicted escape), missense below</title></text>}
         {yAchro >= 0 && <text x={14} y={yAchro + 10} fontWeight={600} fill={C.text}>AChro-Puce<title>{`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}`}</title></text>}
+        {yExtra >= 0 && extraTrack && <text x={14} y={yExtra + 10} fontWeight={600} fill={C.text}>{extraTrack.side.map((l, i) => <tspan key={l} x={14} dy={i ? 12 : 0}>{l}</tspan>)}<title>{extraTrack.title}</title></text>}
         {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
         {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
           <g key={d.name}><text x={14} y={derY[i].band + 9} fontWeight={700} fill={C.accent}>{d.name}</text>
@@ -1583,6 +1594,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           return <g key={`achro${p.r.id}`}>{bar('del', yy + 1, true)}{bar('dup', yy + 14, !hasDel)}</g>;
         })}
         {yAchro >= 0 && !achroItems.length && <text x={X0 + 6} y={yAchro + 10} fontSize={9.5} fill={C.faint}>{ACHRO_REGIONS.some(r => achroChrom(r) === chrom) ? 'no AChro-Puce recurrent CNV in view' : `no AChro-Puce sheet on ${chrom}`}</text>}
+        {extraLaid && <g transform={`translate(0 ${yExtra})`}>{extraLaid.node}</g>}
         {/* reference band: the event's segments */}
         {rec && rec.segs.map(s => {
           const [lo, hi] = [s.first ? 0 : s.start, s.last ? L : s.end];
@@ -1899,6 +1911,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           title={`ClinVar SNVs and short indels (under 50 bp) classified pathogenic or likely pathogenic, UCSC track clinvarMain: counted per gene (loss of function by predicted NMD, missense) or each at its place; shown below ${kb(CLIN_SNV_MAX_SPAN)} in view`} />}
         <Pill size="sm" icon="grid" label="AChro-Puce" on={showAchro} onChange={v => { setShowAchro(v); store.set('sashimi.svAchro', v); }}
           title={`${ACHRO_SOURCE.title} (${ACHRO_SOURCE.version}): the recurrent CNVs the French network classifies, each with its class for the deletion and the duplication`} />
+        {extraTrack && <Pill size="sm" icon="layers" label={extraTrack.label} on={showExtra} onChange={v => { setShowExtra(v); store.set(`sashimi.svExtra.${extraTrack.id}`, v); }} title={extraTrack.title} />}
         {rec && <label className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium cursor-pointer whitespace-nowrap ${domainsFile ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`} title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
           <Icon name="upload" size={13} />{domainsFile ? `TADs: ${domainsFile.name} (${domains.length})` : 'Add chromatin domains (BED)…'}
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
@@ -1966,6 +1979,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
         {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.del }} /> deletion <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.dup }} /> duplication, the network's class after each bar (click a bar for its sheet); dashed: placed approximately</span>}
+        {extraLaid && extraTrack!.legend}
         {(showClinSv || showClinSnv) && loaders.getClinvar && <span className="inline-flex items-center gap-1">ClinVar (pathogenic / likely pathogenic):
           {showClinSv && !clinSvAll && <> SVs summed up (more than {CLIN_SV_STACK_MAX} overlap here): how many cover each point, <span style={{ color: CLIN_KIND_COLOR.loss }}>losses</span> above the line, <span style={{ color: CLIN_KIND_COLOR.gain }}>gains</span> below, <span style={{ color: CLIN_KIND_COLOR.inv }}>inversions and complex</span> on it{rec ? ', the ones matching a loss or gain of the event as outlined bars under it' : ''} (“▸ all SVs” lists them);</>}
           {showClinSv && clinSvAll && <><span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.loss }} /> loss <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.gain }} /> gain <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.inv }} /> inversion, complex (pale: likely pathogenic){rec ? '; outlined when it matches a loss or gain of the event' : ''};</>}

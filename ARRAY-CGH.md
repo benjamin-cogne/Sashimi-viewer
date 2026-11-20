@@ -7,7 +7,8 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 
 ## What the page does
 
-- **Quick guide.** *? Quick guide* in the page's bar: seven steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
+- **Examples.** *Examples ▾* (empty page and frame bar, as the SV browser offers its examples) adds three invented patients (`cghExamples.ts`, CytoGenomics text, GRCh37) through the normal import question: 22q11.2 LCR22A-D deletion (HIGH), 1q21.1 distal BP3-BP4 duplication (AChro-Puce PIEV, ClinGen TS 2 region: MODERATE), terminal 16q24.3 loss breaking in ANKRD11 intron 4 + terminal 9p24.3 gain (der() hint, ANKRD11 5′ part cut, HIGH). Coordinates checked on UCSC hg19 (ncbiRefSeqCurated, ClinGen tracks). Public build: never real data there.
+- **Quick guide.** *? Quick guide* in the page's bar: an interactive tour of 15 steps on the examples (`CghGuide.tsx`): an outline on the target and a popover beside it (kept on screen, following scroll, never over the target when it fits elsewhere, draggable by its title); each step does its own action (load the examples, Analyse, open More filters or a call): the user only clicks *Next*; Esc / *Skip tour* ends it (the store's `help` keeps Esc from closing the page). Targets found by `data-cgh-*` attributes. The former screenshot guide (`src/assets/cgh-guide/`, `docs/cgh-demo/`) is removed.
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names, only when the header row looks like one);
@@ -27,13 +28,18 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - exons cut and reading frame; terminal / arm / chromosome labels; rearrangement hints;
   - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
-- **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification.
+- **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification. Per Riggs et al. 2020: a ClinGen HI 3 / TS 3 region is HIGH only wholly in the call (2A, share ≥ 0.999), MODERATE at 80-99 % (2B: check the critical region); an HI 3 gene losing only UTR exons (2C-2 / 2D-1) or only its last exon (2D-2 / 2D-3) is MODERATE (`sparing()`, from `CnvExons.cds` and the exon ranks; genes unknown to RefSeq stay HIGH).
 - **Retry.** Failures kept per call and source (`CnvAnn.failed`; PanelApp per gene): *↻ retry (n)* in the column header (per patient; a menu in All patients) and a *retry* per source in the detail re-ask only what failed (`retry()` in `cghAnnotate.ts`); an unexpected error ends the call on what was read.
 - **Classification, note, CNV-Hub link.** **Export classified table** writes each file back with Classification and
   Comment columns (a VCF: INFO `CGH_CLASS` / `CGH_NOTE`; an xlsx: a tab-separated `.classified.txt`).
   Several files: a list with one *export* per file and *export all* (one download at a time, each file marked as it starts).
 - **The browser below.** The call clicked is drawn as DEL / DUP in the SV browser's own `SvGenomeBrowser`, with the
-  same tracks.
+  same tracks, plus **ClinGen CNV regions** (only here, through the optional `extraTrack` prop): HI 3 / TS 3 dosage
+  regions (red / blue, link to ClinGen), the ClinGen recurrent CNV list v2.0 (hatched orange) and its breakpoint / LCR
+  segments (grey), a *PIEV* tag where AChro-Puce classes the region PIEV (≥ 80 % reciprocal, same type). Embedded data
+  (`cghClinGenData.ts`, read 2026-11-20 from the UCSC API and https://ftp.clinicalgenome.org/; no licence stated in the
+  BED files), no request. The call's detail adds *ClinGen recurrent CNVs*: regions matched (share of region / of call)
+  and whether each end lies in a breakpoint / LCR segment (± 50 kb). Priority rules unchanged.
 
 Privacy: patient data stay in memory; `localStorage` only holds settings, column names of mapped tables and the lab list.
 
@@ -58,15 +64,22 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `cghTopo.ts` | terminal / arm / chromosome labels, rearrangement hints |
 | `cghLabBenign.ts` | the laboratory's benign list |
 | `cghExons.ts` | exons cut and reading frame |
+| `cghExamples.ts` | built-in invented example patients |
+| `CghGuide.tsx` | the interactive tour (*? Quick guide*) |
+| `CghClinGenTrack.tsx` | the *ClinGen CNV regions* track (`clinGenTrack(build)`) and the detail's recurrent-CNV lines |
+| `cghRecurrent.ts` | ClinGen regions on a chromosome, AChro-Puce PIEV tags, a call's recurrent matches and LCR ends |
+| `cghClinGenData.ts` | generated data: HI 3 / TS 3 ISCA regions, recurrent CNV list v2.0 (both builds) |
+
+Also `scripts/cgh-clingen-data.mjs` writes `cghClinGenData.ts` from the downloaded UCSC JSON and ClinGen BED files.
 
 Also new: this file, `ARRAY-CGH.md`.
 
-**Shared files changed (whole footprint: 4 files, about 50 lines):**
+**Shared files changed (whole footprint: 4 files, about 65 lines):**
 
 | File | Change |
 |---|---|
 | `src/components/sashimi/SvBrowserDialog.tsx` | imports `CghOpenButton`, `CghPageSlot`, `cgh`; the button in the header; the page slot; Esc goes up one level (question / mapping dialog → page → viewer) |
-| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints); **bug fix, also visible in the SV browser**: the SVG's ids (`svb-clip`, gradients, pattern) made unique per instance with `useId` (`sid(...)`): the array-CGH page's browser drawn over the SV browser's resolved `url(#svb-clip)` to the other, shorter one, so a grown ClinVar SV track (*▸ all SVs*) hid all below it; bug fix, also visible in the SV browser: in "▸ all SVs", ClinVar SVs that find no free lane among the 60 are no longer drawn over others but counted ("+n SV not drawn (zoom in)") |
+| `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints); optional prop `extraTrack` + exported `SvExtraTrack` interface (a caller's track under AChro-Puce: state `showExtra`, `extraLaid` / `yExtra` in the layout before `yRefBand`, its side label, its `<g>` before the reference band, a `Pill` after AChro-Puce's and its legend; absent in the SV browser, so nothing drawn there); **bug fix, also visible in the SV browser**: the SVG's ids (`svb-clip`, gradients, pattern) made unique per instance with `useId` (`sid(...)`): the array-CGH page's browser drawn over the SV browser's resolved `url(#svb-clip)` to the other, shorter one, so a grown ClinVar SV track (*▸ all SVs*) hid all below it; bug fix, also visible in the SV browser: in "▸ all SVs", ClinVar SVs that find no free lane among the 60 are no longer drawn over others but counted ("+n SV not drawn (zoom in)") |
 | `src/standalone/ucsc.ts` | new `getDosageRegions` + `DosageRegion` (ClinGen ISCA regions; `getDosageScores` untouched) |
 | `src/standalone/svLoaders.ts` | wires `getDosageRegions` |
 
@@ -87,20 +100,22 @@ Also new: this file, `ARRAY-CGH.md`.
 **Update.** `dev` has since merged this branch (`a720409`). As of `origin/dev` = `3248eee`, merging the later commits
 (size slider, series operator, DLRS removed, the SV browser's unique SVG ids) gives **one conflict**,
 `sashimi-viewer.html` (take either side, rebuild); `SvGenomeBrowser.tsx`, `CghPanel.tsx` and `docs/manual.md` merge
-automatically. The first merge, for the record:
+automatically. The *ClinGen CNV regions* commit adds `extraTrack` lines in `SvGenomeBrowser.tsx` next to the
+AChro-Puce state, layout, label, drawing, pill and legend lines: if `dev` changed those, keep both sides' lines. The
+first merge, for the record:
 
 As of `origin/dev` = `6515ae6` (checked in memory with `git merge-tree`, nothing written), a merge gives **two
 conflicts**:
 
 1. **`sashimi-viewer.html`.** It is a build output: take either side, then rebuild (step 5).
 2. **`src/components/sashimi/SvGenomeBrowser.tsx`.** `dev` changed the same three places:
-   - **Props interface.** `dev` added `onGeneSummary?`, this branch `strongEvent?`. Keep **both** fields.
+   - **Props interface.** `dev` added `onGeneSummary?`, this branch `strongEvent?` (later also `extraTrack?`, with the `SvExtraTrack` interface after `Props`). Keep **all** fields.
    - **The `MOI` constant.** `dev` moved it to the new `SvGeneSummary.tsx` (`export const MOI` there) and removed it from
      `SvGenomeBrowser.tsx`. Keep `dev`'s side: **drop** this branch's `export const MOI` block. Then, in
      `CghPanel.tsx`, change
      `import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';` to
      `import { type SvGeneLoaders } from './SvGenomeBrowser';` plus `import { MOI } from './SvGeneSummary';`.
-   - **Function signature.** Keep both destructured props: `…, variant, onGeneSummary, strongEvent }: Props)`.
+   - **Function signature.** Keep both destructured props: `…, variant, onGeneSummary, strongEvent, extraTrack }: Props)`.
    - The other two edits of this branch in that file (`getDosageRegions?` in `SvGeneLoaders`, and the `strongEvent`
      lines in the drawing, next to the comment *breakpoints through the reference*) merged without conflict. Check that
      they are still there.

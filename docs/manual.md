@@ -224,8 +224,13 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
 **Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **? Quick guide**, in the page's bar, walks through it in seven steps
-with screenshots (Esc or × closes it, not the page). **Add samples**, or drop files on the page: interval tables
+Esc to go back; the samples stay while the tab is open). **Examples ▾** (on the empty page and in the frame's bar) adds
+invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
+(22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
+EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,
+in the page's bar, is an interactive tour on these examples (added if missing): each of its 15 steps outlines a part of
+the page and explains it, and the tour does the actions itself (loads the examples, Analyse, opens More filters and the
+calls it talks about): only **Next** to click; **Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
@@ -275,7 +280,12 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
   of that gene.
-- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call covering 80 % of a region or more takes its HI score (loss) or TS score (gain) as for a gene (score 3 HIGH, 2 MODERATE), a smaller overlap is only listed as LOW. The SV browser is unchanged.
+- **ClinGen dosage regions**: the curated recurrent regions of the ClinGen dosage track (ISCA-… ids: 17p12 HNPP/CMT1A, MECP2, ...) the call overlaps are listed with the share of each region it covers; a call holding a whole region of score 3 is HIGH (ACMG/ClinGen 2A; a region whose ends are the call's counts as whole), 80-99 % of it MODERATE (*partial overlap (2B): check the critical region / causative gene is included*, as 2B scores 0 when they are not); a score-2 region 80 % covered or more is MODERATE; a smaller overlap is only listed as LOW. The SV browser is unchanged.
+- **ClinGen recurrent CNVs (list v2.0)**, in the call's detail: the regions of ClinGen's recurrent CNV list sharing
+  half of the call and half of themselves at least, with the share of each (of the region, of the call; *PIEV* when
+  AChro-Puce classes that type of CNV of the region a susceptibility CNV), and whether each end of the call lies in a
+  breakpoint / LCR segment of the list (within 50 kb, as arrays have few probes inside LCRs): *Ends in LCR22A and
+  LCR22D: consistent with an LCR-mediated recurrent CNV*, one end only, or neither. Not a priority rule.
 - **DGV Gold**: a medallion after the type when a population CNV of DGV Gold of the same type (or of both types)
   shares 80 % of the call or more (the common stretch over the call's length, with the record's inner or outer extent,
   the one sharing more; a call wholly inside a DGV CNV shares 100 %), or lies inside the call whatever its share. One
@@ -299,7 +309,9 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
-  HIGH for exons of a gene with a ClinGen HI score of 3, of a PanelApp green gene with a monoallelic mode that is
+  HIGH for exons of a gene with a ClinGen HI score of 3 (the whole gene, its 5′ coding end, or coding exons beyond the
+  last one: 2A / 2C-1 / 2D-4; when only its UTR exons (2C-2 / 2D-1) or only its last exon (2D-2 / 2D-3) are lost, from
+  the exons of its principal transcript, MODERATE, also for the PanelApp rule below; genes read from the file only stay HIGH), of a PanelApp green gene with a monoallelic mode that is
   haploinsufficient (ClinGen HI 2 or 3) or LoF-intolerant (else MODERATE: its disease may not come from a loss), both copies
   (x0) of a green biallelic gene, a green X-linked recessive gene lost in a male (or x0), an AChro-Puce recurrent
   deletion of class 5 or 4, or 35 protein-coding genes or more and / or more than 1 Mb; MODERATE for an HI score of 2, a LoF-intolerant gene
@@ -319,7 +331,15 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
 Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
 or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
-its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp). A gain is drawn as a
+its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp) plus one of this page
+only, **ClinGen CNV regions** (its own toggle, on by default; the SV browser does not have it): the ClinGen dosage regions
+scored HI 3 (red) or TS 3 (blue; both: half and half), click one for its ClinGen page; the regions of the ClinGen recurrent
+CNV list v2.0 (hatched orange) and its breakpoint / LCR segments (thin grey, named: BP1-BP4, LCR22A-H, ...), so one sees
+whether a call's ends fall in the expected LCRs; a *PIEV* tag (*PIEV del* / *PIEV dup* when one type only) on a region
+AChro-Puce classes PIEV (≥ 80 % reciprocal overlap with the sheet's coordinates, same type), to tell susceptibility
+regions (15q11.2 BP1-BP2, 1q21.1, 16p11.2, 15q13.3) from high-penetrance syndromes. Its data are embedded (UCSC tracks
+clinGenHaplo / clinGenTriplo and the ClinGen FTP BED files, read 2026-11-20): no request; the priority rules still read
+the dosage regions live. A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
 homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
 array ISCN on one line (the file's; written from the band and the copy number when the file gives both but no ISCN,
