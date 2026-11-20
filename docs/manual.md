@@ -215,7 +215,8 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
 **Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **Add samples**, or drop files on the page: interval tables
+Esc to go back; the samples stay while the tab is open). **? Quick guide**, in the page's bar, walks through it in six steps
+with screenshots (Esc or × closes it, not the page). **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,

@@ -66,6 +66,8 @@ export interface CghState {
   lab: LabBenign | null; labStored: boolean;
   /** the patients (sample keys) whose calls under the minimums are listed too (this tab only) */
   revealed: Record<string, true>;
+  /** the quick guide is open (Esc closes it, not the page) */
+  help: boolean;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -81,7 +83,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -141,6 +143,7 @@ const exportedOf = (keys: string[]) => { const dirtyKeys = { ...state.dirtyKeys 
 export const cgh = {
   get: () => state,
   setOpen(open: boolean) { set({ open }); },
+  setHelp(help: boolean) { set({ help }); },
   setAnn(id: string, a: CnvAnn) { set({ ann: { ...state.ann, [id]: a } }); },
   /** many calls' annotations at once (the queue's placeholders: one redraw) */
   setAnns(m: Record<string, CnvAnn>) { set({ ann: { ...state.ann, ...m } }); },
