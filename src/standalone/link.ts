@@ -137,3 +137,54 @@ export function describeLink(req: LinkRequest): string {
   const what = req.variants.length ? req.variants.map(v => v.label === v.text ? v.text : `${v.text} (${v.label})`).join(', ') : `${req.mark.chrom}:${req.mark.start.toLocaleString('en-US')}${req.mark.end > req.mark.start ? `-${req.mark.end.toLocaleString('en-US')}` : ''}`;
   return `${what} · ${req.build} · window ${req.view.chrom}:${req.view.start.toLocaleString('en-US')}-${req.view.end.toLocaleString('en-US')}`;
 }
+
+/**
+ * A link to the SV browser: `#sv=DEL%2020:399240-599326` (or `?sv=…`), with `&build=GRCh37` when needed. `sv` holds what
+ * the SV browser's box takes: a rearrangement (HGVS, ISCN sequence form, or DEL / DUP / INV before coordinates),
+ * coordinates, a chromosome or a gene. The page opens on the SV browser with it, no alignment needed.
+ */
+export function parseSvLink(hash: string, search: string): { text: string; build?: GenomeBuild } | null {
+  for (const raw of [hash.replace(/^#\/?/, ''), search.replace(/^\?/, '')]) {
+    if (!raw.includes('sv=')) continue;
+    // `+` is a space here (a form-encoded link), as no SV notation holds a plus
+    const p = new URLSearchParams(raw);
+    const text = (p.get('sv') || '').trim();
+    if (!text) continue;
+    const b = (p.get('build') || p.get('genome') || '').toUpperCase();
+    return { text, build: /37|19/.test(b) ? 'GRCh37' : /38/.test(b) ? 'GRCh38' : undefined };
+  }
+  return null;
+}
+
+/**
+ * The page a link opens straight away: the SV browser (#sv, or #sv=… with a search) or its array-CGH page (#cgh);
+ * `page=sv` / `page=cgh` read the same, in the fragment or the query. null: neither.
+ */
+export function parsePageLink(hash: string, search: string): 'sv' | 'cgh' | null {
+  for (const raw of [hash.replace(/^#\/?/, ''), search.replace(/^\?/, '')]) {
+    const keys = raw.split('&').filter(Boolean).map(x => { try { return decodeURIComponent(x.split('=')[0]).toLowerCase(); } catch { return ''; } });
+    if (keys.includes('cgh') || keys.includes('array-cgh')) return 'cgh';
+    if (keys.includes('sv')) return 'sv';
+    const page = new URLSearchParams(raw).get('page')?.toLowerCase();
+    if (page === 'cgh' || page === 'array-cgh') return 'cgh';
+    if (page === 'sv') return 'sv';
+  }
+  return null;
+}
+
+/**
+ * The page's address with the SV browser in its fragment: `sv=` and its search (and `build` when GRCh37), `sv` alone for
+ * the SV browser without a search, `cgh` for its array-CGH page; page null: none of them (the viewer).
+ */
+export function svLinkHref(text: string | null, build: GenomeBuild, page: 'sv' | 'cgh' | null = text ? 'sv' : null): string {
+  const raw = window.location.hash.replace(/^#\/?/, '');
+  const p = new URLSearchParams(raw.includes('=') || /(^|&)(sv|cgh)(&|$)/.test(raw) ? raw : '');
+  p.delete('sv'); p.delete('cgh'); p.delete('page');
+  if (page === 'sv') p.set('sv', text ?? '');
+  if (page === 'cgh') p.set('cgh', '');
+  if (page === 'sv' && text && build === 'GRCh37') p.set('build', 'GRCh37');
+  else if (!p.has('variant') && !p.has('locus')) p.delete('build');
+  // a page without a search reads #sv or #cgh, not #sv=
+  const h = p.toString().replace(/%3A/gi, ':').replace(/%2C/gi, ',').replace(/(^|&)(sv|cgh)=(?=&|$)/g, '$1$2');
+  return `${window.location.pathname}${window.location.search}${h ? `#${h}` : ''}`;
+}

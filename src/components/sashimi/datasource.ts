@@ -1,4 +1,7 @@
+import type { ClinvarVariant } from './clinvar';
+import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import type { MethylWindow } from '../../standalone/methylation';
+import type { PopulationSv } from './svPopulation';
 import type { ArcSupport } from '../../standalone/arcSupport';
 /**
  * Data source used by the Sashimi viewer. The web application implements it with the
@@ -147,6 +150,19 @@ export interface SashimiDataSource {
   getLibraryType?(sampleId: number): Promise<LibraryEvidence>;
   /** Variants previously identified in a sample (clinical indication, diagnostic, chromosome map); absent when the source has no such record. */
   getKnownVariants?(sampleId: number): Promise<KnownVariant[]>;
+  /** Every RefSeq NM_ model overlapping a 0-based half-open window, with its MANE / RefSeq Select status (the SV cartoon's genes). */
+  getRegionTranscripts?(chrom: string, start: number, end: number): Promise<SvTranscript[]>;
+  /**
+   * ClinGen dosage scores and gnomAD LoF constraint of genes of a window; `notes` says where each came from and what
+   * could not be had. Each part fails on its own: a missing one leaves its map empty.
+   */
+  getGeneAnnotations?(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }>;
+  /** The cytogenetic bands of a chromosome (ISCN of a rebuilt SV); absent when the source has none. */
+  getCytobands?(chrom: string): Promise<{ start: number; end: number; name: string; stain: string }[]>;
+  /** CNV regions of the general population (DGV Gold Standard) overlapping a 0-based half-open window. */
+  getPopulationSvs?(chrom: string, start: number, end: number): Promise<PopulationSv[]>;
+  /** ClinVar variants classified pathogenic / likely pathogenic overlapping a 0-based half-open window (SVs ≥ 50 bp, or the shorter ones). */
+  getClinvar?(which: 'sv' | 'snv', chrom: string, start: number, end: number): Promise<ClinvarVariant[]>;
   /** Common variants (dbSNP 155 common via UCSC, Ensembl fallback) overlapping a 0-based half-open window. */
   getCommonSnps(chrom: string, start: number, end: number): Promise<CommonSnp[]>;
   /** GTEx tissues available for tissue tracks (rejects when GTEx cannot be used, e.g. GRCh37). */

@@ -22,8 +22,11 @@ import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild } from './ensembl';
-import { assemblyOfHeader, type AssemblyCall } from './assembly';
-import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript } from './ucsc';
+import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
+import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getClinvar } from './ucsc';
+import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
+import { getConstraint } from './gnomad';
+import type { SvTranscript, DosageScore, Constraint } from '../components/sashimi/svGenes';
 import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
@@ -893,6 +896,20 @@ export class LocalDataSource implements SashimiDataSource {
   getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }
   async getRunSamples(): Promise<SampleRef[]> { return this.list(); }
   getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> { return getRegionGenes(this.reference.build, chrom, start, end, exclude); }
+  getRegionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> { return getRegionTranscripts(this.reference.build, chrom, start, end); }
+  async getGeneAnnotations(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }> {
+    const build = this.reference.build, notes: string[] = [];
+    const [dosage, constraint] = await Promise.all([
+      getDosageScores(build, chrom, start, end).then(d => { notes.push('ClinGen dosage: UCSC Genome Browser'); return d; }).catch(e => { notes.push(`ClinGen dosage unavailable (${e?.message || e})`); return new Map<string, DosageScore>(); }),
+      getConstraint(build, symbols, { chrom, start, end }).then(c => { notes.push(c.source); return c.values as Map<string, Constraint>; }).catch(e => { notes.push(`gnomAD constraint unavailable (${e?.message || e})`); return new Map<string, Constraint>(); }),
+    ]);
+    return { dosage, constraint, notes };
+  }
+  getCytobands(chrom: string) { return getCytobands(this.reference.build, chrom, chromLength(this.reference.build, chrom) ?? 300_000_000); }
+  async getPopulationSvs(chrom: string, start: number, end: number): Promise<PopulationSv[]> {
+    return (await getDgvGold(this.reference.build, chrom, start, end)).map(parseDgvItem).filter((v): v is PopulationSv => !!v);
+  }
+  getClinvar(which: 'sv' | 'snv', chrom: string, start: number, end: number) { return getClinvar(this.reference.build, which, chrom, start, end); }
   getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.reference.build, model); }
   getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.reference.build, chrom, start, end); }
   getGtexTissues(): Promise<GtexTissue[]> {
@@ -1204,7 +1221,10 @@ export class LocalDataSource implements SashimiDataSource {
     const support = !collapsed ? opts?.support : undefined;
     // reads phased in reads mode: more of them read for the phasing, `maxReads` of them returned (answerReads)
     const phased = !collapsed && !support && !!opts?.phase;
-    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
+    // the supporting reads are read with room to spare (only they are kept), then every k-th past the cap below: the
+    // scan's own thinning halves what it holds each time it overflows, which left between half the cap and the cap; it
+    // now only bounds the memory past 32 times the cap
+    const cap = collapsed ? Math.max(40000, maxReads) : support ? 32 * Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
     // filtered and sampled before sequences and qualities are decoded: only the reads shown pay for them; the pair
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
@@ -1214,6 +1234,10 @@ export class LocalDataSource implements SashimiDataSource {
       { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
+    if (support && raw.length > Math.max(1, maxReads)) {
+      const want = Math.max(1, maxReads), step = raw.length / want;
+      raw = Array.from({ length: want }, (_, i) => raw[Math.floor(i * step)]);
+    }
     if (support) {
       // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));

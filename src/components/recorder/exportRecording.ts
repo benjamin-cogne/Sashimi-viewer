@@ -1,0 +1,803 @@
+/**
+ * A recording as one animated SVG (or an HTML page holding it, with play / pause and a time bar).
+ *
+ * The drawings copied during the recording are merged across frames: each element is written once, inline, shown
+ * during the frames that hold it by a CSS animation (visibility, step-end); no <use> references, which the browser
+ * would expand into a full copy of the drawing for every frame. A dialog's HTML blocks are drawn once each
+ * (foreignObject), shown while they are in the dialog, and moved with the dialog's card. A camera above everything
+ * zooms on areas (around the clicks, or drawn by hand) and back, with eased transforms: the drawing is vector, so a zoom
+ * stays sharp. The pointer follows its path, smoothed; each click is a ring that widens and fades. Every animation has
+ * the length of the whole recording, so they stay in step when the player pauses or seeks them, and when looping.
+ *
+ * Only what changes is stored: an element that only moved is written once and moved by the timeline (svgShift.ts); in
+ * the HTML page a dialog's HTML is one box per place, filled with its successive contents, each kept as a list of
+ * pieces (tags with their text) shared by all of them; and the page is saved with its scene compressed (deflate, then
+ * unpacked by the page when it opens).
+ */
+import type { Recording, Layer } from './recorder';
+import { renderCaptions, CAPTION_FADE_MS, type Caption, type Chapter } from './captions';
+import { shiftCanon, type Canon } from './svgShift';
+
+/** A zoom: the area shown (page coordinates) from `start` to `end` (recorded time, ms). */
+export interface Zoom { start: number; end: number; rect: [number, number, number, number]; source: 'auto' | 'drawn' }
+/** How recorded time plays: idle stretches cut, stretches cut by hand, stretches sped up or slowed down (recorded ms). */
+export interface TimeEdits {
+  /** idle stretches (nothing drawn changes, the pointer still) longer than this are cut down to it; 0 keeps them */
+  maxIdleMs: number;
+  cuts: { start: number; end: number }[];
+  speeds: { start: number; end: number; factor: number }[];
+}
+export interface ExportOptions {
+  time: TimeEdits;
+  loop: boolean;
+  /** text drawn in the recording replaced at export: sample names → "Sample 1"… */
+  replace: { from: string; to: string }[];
+  title: string;
+  zooms: Zoom[];
+  pointer: { show: boolean; smooth: boolean; scale: number; clicks: boolean };
+  captions: Caption[];
+  chapters: Chapter[];
+  /** where the HTML page stops (for a talk: → goes on): stops of their own (recorded time), and the moments that stop */
+  stops?: { t: number }[];
+  stopAt?: StopAt;
+}
+/** The moments the page stops at, besides its own stops: its start (the first image, still), each chapter, each title card, each caption. */
+export interface StopAt { start: boolean; chapters: boolean; titles: boolean; captions: boolean }
+export const STOP_AT_DEFAULT: StopAt = { start: true, chapters: true, titles: false, captions: false };
+/** The idle stretch kept by default, in ms. */
+export const MAX_IDLE_DEFAULT_MS = 1000;
+/** Auto-zoom: clicks closer than this in time (ms) share one zoom; the zoom starts ZOOM_IN_MS before the first and holds ZOOM_HOLD_MS after the last. */
+export const ZOOM_GROUP_MS = 3000, ZOOM_IN_MS = 700, ZOOM_HOLD_MS = 1800, ZOOM_OUT_MS = 800;
+/** Auto-zoom magnification by default. */
+export const ZOOM_LEVEL_DEFAULT = 2;
+/** Pause at the end before a loop starts again, in ms. */
+const END_HOLD_MS = 1500;
+const CLICK_MS = 600;
+const EASE = 'cubic-bezier(.65,0,.35,1)';
+
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const pct = (t: number, d: number) => `${Math.max(0, Math.min(100, (t / d) * 100)).toFixed(3).replace(/\.?0+$/, '')}%`;
+const n1 = (v: number) => String(Math.round(v * 10) / 10);
+
+/** The idle stretches the pause shortening removes (recorded ms): what lies past the first `maxIdle` of each gap between events. */
+export function idleCuts(rec: Recording, maxIdle: number): { start: number; end: number }[] {
+  if (!(maxIdle > 0)) return [];
+  const ev = [0, ...rec.frames.map(f => f.t), ...rec.pointer.map(p => p.t), ...rec.clicks.map(c => c.t), rec.duration].sort((a, b) => a - b);
+  const out: { start: number; end: number }[] = [];
+  for (let i = 1; i < ev.length; i++) if (ev[i] - ev[i - 1] > maxIdle) out.push({ start: ev[i - 1] + maxIdle, end: ev[i] });
+  return out;
+}
+
+/**
+ * Recorded time to played time: piecewise linear, with the rate 0 in a cut (idle or by hand) and 1 / factor in a
+ * stretch played faster or slower (a cut wins over a speed).
+ */
+export function timeMap(rec: Recording, edits: TimeEdits): (t: number) => number {
+  const cuts = [...idleCuts(rec, edits.maxIdleMs), ...edits.cuts.filter(c => c.end > c.start)];
+  const speeds = edits.speeds.filter(s => s.end > s.start && s.factor > 0);
+  if (!cuts.length && !speeds.length) return t => t;
+  const cut = (t: number) => cuts.some(c => t >= c.start && t < c.end);
+  // in overlapping speed stretches, the one set last applies
+  const rate = (t: number) => { if (cut(t)) return 0; const sp = speeds.filter(s => t >= s.start && t < s.end); return sp.length ? 1 / sp[sp.length - 1].factor : 1; };
+  const xs = [...new Set([0, rec.duration, ...cuts.flatMap(c => [c.start, c.end]), ...speeds.flatMap(s => [s.start, s.end])])].filter(x => x >= 0 && x <= rec.duration).sort((a, b) => a - b);
+  const acc: number[] = [0], rates: number[] = [];
+  for (let i = 0; i + 1 < xs.length; i++) { const r = rate((xs[i] + xs[i + 1]) / 2); rates.push(r); acc.push(acc[i] + r * (xs[i + 1] - xs[i])); }
+  return t => {
+    if (t <= 0) return t;
+    if (t >= rec.duration) return acc[acc.length - 1] + (t - rec.duration);
+    let lo = 0, hi = xs.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (xs[m] <= t) lo = m; else hi = m; }
+    return acc[lo] + rates[lo] * (t - xs[lo]);
+  };
+}
+/** Played time back to recorded time (the map is monotone). */
+export function invertTime(map: (t: number) => number, played: number, duration: number): number {
+  let lo = 0, hi = duration;
+  for (let k = 0; k < 40; k++) { const m = (lo + hi) / 2; if (map(m) < played) lo = m; else hi = m; }
+  return hi;
+}
+
+/** The text between tags with the replacements made (attributes and tag names untouched). */
+export function replaceText(s: string, rep: ExportOptions['replace']): string {
+  if (!rep.length) return s;
+  const list = rep.filter(r => r.from).map(r => ({ from: esc(r.from), to: esc(r.to) })).sort((a, b) => b.from.length - a.from.length);
+  return s.replace(/>([^<]+)</g, (_m, txt: string) => `>${list.reduce((acc, r) => acc.split(r.from).join(r.to), txt)}<`);
+}
+
+/** The area the recording shows: every drawing and dialog card, clipped to what showed, with a margin. */
+export function boundsOf(rec: Recording): [number, number, number, number] {
+  // the whole page was recorded: the whole window
+  if (rec.frames.some(f => f.layers[0]?.blocks.length || f.layers[0]?.fixed?.length)) return [0, 0, rec.width, rec.height];
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (r: [number, number, number, number]) => { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); };
+  const clamp = (r: [number, number, number, number]): [number, number, number, number] => { const a = Math.max(0, r[0]), b = Math.max(0, r[1]); return [a, b, Math.min(rec.width, r[0] + r[2]) - a, Math.min(rec.height, r[1] + r[3]) - b]; };
+  for (const f of rec.frames) f.layers.forEach((l, li) => {
+    for (const s of l.svgs) add(s.clip ?? clamp([s.x, s.y, s.w, s.h]));
+    if (li > 0) for (const p of l.panels.slice(1, 2)) add(p.clip ?? clamp([p.x, p.y, p.w, p.h]));
+  });
+  if (!Number.isFinite(x0)) return [0, 0, rec.width, rec.height];
+  const M = 8;
+  x0 = Math.max(0, x0 - M); y0 = Math.max(0, y0 - M); x1 = Math.min(rec.width, x1 + M); y1 = Math.min(rec.height, y1 + M);
+  return [Math.round(x0), Math.round(y0), Math.round(x1 - x0), Math.round(y1 - y0)];
+}
+
+/** A rectangle of the screen's proportions holding `r`, kept inside the bounds. */
+function fitRect(r: [number, number, number, number], b: [number, number, number, number]): [number, number, number, number] {
+  const ar = b[2] / b[3];
+  let [x, y, w, h] = r;
+  if (w / h > ar) { const nh = w / ar; y -= (nh - h) / 2; h = nh; } else { const nw = h * ar; x -= (nw - w) / 2; w = nw; }
+  if (w >= b[2] || h >= b[3]) return [...b];
+  x = Math.min(Math.max(x, b[0]), b[0] + b[2] - w); y = Math.min(Math.max(y, b[1]), b[1] + b[3] - h);
+  return [x, y, w, h];
+}
+
+/** Zooms on the clicks inside the recorded area: clicks close in time share one, the area holding them all. */
+export function autoZooms(rec: Recording, level = ZOOM_LEVEL_DEFAULT): Zoom[] {
+  const b = boundsOf(rec);
+  const inside = rec.clicks.filter(c => c.x >= b[0] && c.x <= b[0] + b[2] && c.y >= b[1] && c.y <= b[1] + b[3]);
+  const groups: (typeof inside)[] = [];
+  for (const c of inside) {
+    const g = groups[groups.length - 1];
+    if (g && c.t - g[g.length - 1].t < ZOOM_GROUP_MS) g.push(c); else groups.push([c]);
+  }
+  const w = b[2] / level, h = b[3] / level, m = 60;
+  return groups.map(g => {
+    const xs = g.map(c => c.x), ys = g.map(c => c.y);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const rw = Math.max(w, Math.max(...xs) - Math.min(...xs) + 2 * m), rh = Math.max(h, Math.max(...ys) - Math.min(...ys) + 2 * m);
+    return { start: g[0].t, end: g[g.length - 1].t + ZOOM_HOLD_MS, rect: fitRect([cx - rw / 2, cy - rh / 2, rw, rh], b), source: 'auto' as const };
+  });
+}
+
+/** The pointer's path, in played time: still stretches kept still, moves smoothed (simplified, then through a Catmull-Rom curve). */
+function pointerPath(rec: Recording, map: (t: number) => number, smooth: boolean): { t: number; x: number; y: number }[] {
+  const pts = rec.pointer.map(p => ({ t: map(p.t), x: p.x, y: p.y }));
+  if (!smooth || pts.length < 3) return pts;
+  // runs of movement: a gap in the samples means the pointer stood still
+  const runs: (typeof pts)[] = [];
+  for (const p of pts) { const r = runs[runs.length - 1]; if (r && p.t - r[r.length - 1].t < 150) r.push(p); else runs.push([p]); }
+  const out: typeof pts = [];
+  for (const run of runs) {
+    // Ramer–Douglas–Peucker on the positions (2.5 px)
+    const keep = new Array(run.length).fill(false); keep[0] = keep[run.length - 1] = true;
+    const rdp = (a: number, b: number) => {
+      let best = -1, dmax = 2.5;
+      const dx = run[b].x - run[a].x, dy = run[b].y - run[a].y, len = Math.hypot(dx, dy) || 1;
+      for (let i = a + 1; i < b; i++) { const d = Math.abs(dy * run[i].x - dx * run[i].y + run[b].x * run[a].y - run[b].y * run[a].x) / len; if (d > dmax) { dmax = d; best = i; } }
+      if (best >= 0) { keep[best] = true; rdp(a, best); rdp(best, b); }
+    };
+    if (run.length > 2) rdp(0, run.length - 1);
+    const k = run.filter((_, i) => keep[i]);
+    if (out.length) out.push({ ...out[out.length - 1], t: k[0].t - 1 }); // still until this run starts
+    for (let i = 0; i < k.length - 1; i++) {
+      const p0 = k[Math.max(0, i - 1)], p1 = k[i], p2 = k[i + 1], p3 = k[Math.min(k.length - 1, i + 2)];
+      const steps = Math.max(1, Math.round((p2.t - p1.t) / 50));
+      for (let s = 0; s < steps; s++) {
+        const u = s / steps, u2 = u * u, u3 = u2 * u;
+        const cr = (a: number, b: number, c: number, d: number) => 0.5 * (2 * b + (-a + c) * u + (2 * a - 5 * b + 4 * c - d) * u2 + (-a + 3 * b - 3 * c + d) * u3);
+        out.push({ t: p1.t + (p2.t - p1.t) * u, x: cr(p0.x, p1.x, p2.x, p3.x), y: cr(p0.y, p1.y, p2.y, p3.y) });
+      }
+    }
+    out.push(k[k.length - 1]);
+  }
+  return out;
+}
+
+export interface Exported { svg: string; css: string; hasHtml: boolean; duration: number; frames: number; bytes: number; bounds: [number, number, number, number]; chapters: { t: number; name: string }[];
+  /** the times the HTML page stops at (played time, ms), sorted */
+  stops: number[] }
+
+export function recordingToSvg(rec: Recording, opts: ExportOptions): Exported {
+  return build(rec, opts, false) as Exported;
+}
+
+/**
+ * The recording for the HTML player: the same scene, but nothing in it is a CSS animation. The player (playerHtml)
+ * reads `timeline` and shows, hides and moves the elements itself, only when they change; the pointer, the clicks and
+ * the camera are layers of the page above the scene, so moving them does not redraw it.
+ */
+export function recordingToPlayer(rec: Recording, opts: ExportOptions): PlayerExport {
+  return build(rec, opts, true) as PlayerExport;
+}
+
+/** What the player runs (times in played ms, positions in the view's coordinates). */
+export interface Timeline {
+  W: number; H: number; D: number; loop: boolean;
+  /** window classes: the stretches during which their elements show */
+  wins: Record<string, [number, number][]>;
+  /** move classes: the position of their elements from each time on */
+  moves: Record<string, [number, number, number][]>;
+  /** the camera: the area shown from each time on ([x, y, w, h] in view coordinates, null = all), eased between */
+  cam: [number, [number, number, number, number] | null][];
+  ptr: [number, number, number][]; ptrScale: number;
+  clicks: [number, number, number][];
+  fades: [string, number, number][];
+  /**
+   * The dialogs' HTML, as changes: each place a block of a dialog takes is one box, filled with its successive
+   * contents. `pieces`: every tag (with the text after it) met, once; `contents`: a content as its pieces, its style
+   * first; `boxes`: per box, from which time on each content shows. A dialog in which one number changes keeps all
+   * its other pieces: only the new number is new.
+   */
+  html?: { pieces: string[]; contents: number[][]; boxes: [number, number][][] };
+}
+export interface PlayerExport extends Omit<Exported, 'svg'> { scene: string; screen: string; timeline: Timeline }
+
+/** The translation-free form of each chunk, kept with the recording: the editor rebuilds its export at every edit. */
+const canonCache = new WeakMap<Recording, Map<number, Canon | null>>();
+const canonsOf = (rec: Recording) => { let m = canonCache.get(rec); if (!m) { m = new Map(); canonCache.set(rec, m); } return m; };
+
+function build(rec: Recording, opts: ExportOptions, player: boolean): Exported | PlayerExport {
+  const map = timeMap(rec, opts.time);
+  const end = map(rec.duration);
+  const D = Math.max(1, end + (opts.loop ? END_HOLD_MS : 0));
+  const B = boundsOf(rec);
+  const [x0, y0, W, H] = B;
+  const iter = opts.loop ? 'infinite' : '1';
+  const tl: Timeline = { W: 0, H: 0, D, loop: opts.loop, wins: {}, moves: {}, cam: [], ptr: [], ptrScale: opts.pointer.scale, clicks: [], fades: [] };
+  const css: string[] = [
+    player ? '.fr{visibility:hidden}' : `.fr{visibility:hidden;animation:${D}ms step-end ${iter} forwards}`,
+    player ? '' : `.a{animation-duration:${D}ms;animation-iteration-count:${iter};animation-fill-mode:forwards}`,
+    // what a clip, mask, gradient or pattern holds is used, not drawn: it must stay visible whatever hides the group
+    // around it (an invisible clip path clips everything away)
+    'clipPath,clipPath *,mask *,pattern *,marker *,linearGradient *,radialGradient *,filter *{visibility:visible!important}',
+  ];
+
+  // frames shown for some time once the pauses are cut, with their window
+  const shown = rec.frames.map((f, i) => ({ f, i, a: map(f.t), b: i + 1 < rec.frames.length ? map(rec.frames[i + 1].t) : Infinity })).filter(x => x.b > x.a);
+  // the first image is on from the very start (the first frame is taken a few ms in): a page stopped at its start shows
+  // it, not the empty stage
+  if (shown.length) shown[0].a = 0;
+  const order = new Map(shown.map((x, k) => [x.i, k]));
+  // a class showing an element during a set of frames (runs of consecutive shown frames), one per distinct set
+  const winClass = new Map<string, string>();
+  const win = (frames: number[]): string => {
+    const key = frames.join(',');
+    let c = winClass.get(key);
+    if (!c) {
+      c = `w${winClass.size}`;
+      let kf = '0%{visibility:hidden}', k = 0;
+      const runs: [number, number][] = [];
+      while (k < frames.length) {
+        let e = k;
+        while (e + 1 < frames.length && order.get(frames[e + 1]) === order.get(frames[e])! + 1) e++;
+        const a = shown[order.get(frames[k])!].a, z = shown[order.get(frames[e])!].b;
+        kf += `${pct(a, D)}{visibility:visible}${z === Infinity ? '' : `${pct(z, D)}{visibility:hidden}`}`;
+        runs.push([Math.round(a), z === Infinity ? Math.round(D) + 1 : Math.round(z)]);
+        k = e + 1;
+      }
+      if (player) tl.wins[c] = runs; else css.push(`@keyframes ${c}{${kf}}.${c}{animation-name:${c}}`);
+      winClass.set(key, c);
+    }
+    return c;
+  };
+  /** A step-end animation through per-frame positions; null when the position never changes. */
+  let nMoves = 0;
+  const moveClass = (pos: { i: number; x: number; y: number }[]): string | null => {
+    if (pos.every(q => q.x === pos[0].x && q.y === pos[0].y)) return null;
+    const id = `m${nMoves++}`;
+    if (player) { tl.moves[id] = pos.map(q => [Math.round(shown[order.get(q.i)!].a), q.x, q.y]); return id; }
+    css.push(`@keyframes ${id}{${pos.map(q => `${pct(shown[order.get(q.i)!].a, D)}{transform:translate(${n1(q.x)}px,${n1(q.y)}px)}`).join('')}}.${id}{animation-name:${id};animation-timing-function:step-end}`);
+    return id;
+  };
+
+  const clips = new Map<string, string>();
+  const clipId = (c: [number, number, number, number]) => { const k = c.join(','); if (!clips.has(k)) clips.set(k, `k${clips.size}`); return clips.get(k)!; };
+  const clipped = (c: [number, number, number, number] | null | undefined, inner: string) => (c ? `<g clip-path="url(#${clipId(c)})">${inner}</g>` : inner);
+  const panel = (p: Layer['panels'][number]) => clipped(p.clip, `<rect x="${p.x}" y="${p.y}" width="${p.w}" height="${p.h}" rx="${p.radius}" fill="${p.fill}"${p.stroke ? ` stroke="${p.stroke}" stroke-width="${p.strokeWidth}"` : ''}/>`);
+
+  /**
+   * The drawings, written once: every SVG seen in one place (size, view box, style, clip) is one slot, moved to where
+   * it is in each frame; inside, the elements of every frame are merged into one tree, an element with the same
+   * content (or a group with the same tag) at the same rank kept once, shown during the frames that hold it. A
+   * drawing that does not change is thus written once for the whole recording, and a change adds only what changed.
+   */
+  // An element that only moved (the same drawing at another place: a chevron following the view, a group whose own
+  // translate changed) joins the node of its first place: written once, moved by the timeline (see svgShift.ts).
+  interface TreeNode { chunk: number; open?: string; frames: number[]; kids: TreeNode[][]; canon?: string; pos?: { i: number; x: number; y: number }[] }
+  const canon = canonsOf(rec);
+  // A definition (a clip path, a mask, a gradient…) is used where it is referenced, never drawn where it stands: moving
+  // it by a transform around it does nothing, so what holds one is never treated as moved (the copy would stay at the
+  // first place: a track's clip left at the top of the plot hides the track).
+  const DEF_TAGS = 'clipPath|mask|pattern|marker|linearGradient|radialGradient|filter|symbol';
+  const DEF_IN = new RegExp(`<(?:${DEF_TAGS})\\b`);
+  const DEF_HOLDER = new RegExp(`^<(?:defs|${DEF_TAGS})\\b`);
+  const canonOf = (id: number): Canon | null => {
+    let v = canon.get(id);
+    if (v === undefined) {
+      const c = rec.chunks[id];
+      v = 'leaf' in c ? (DEF_IN.test(c.leaf) ? null : shiftCanon(c.leaf)) : DEF_HOLDER.test(c.open) ? null : shiftCanon(c.open, true);
+      canon.set(id, v);
+    }
+    return v;
+  };
+  const insert = (alts: TreeNode[][], pos: number, id: number, frame: number, inDef = false) => {
+    const c = rec.chunks[id];
+    const list = (alts[pos] ??= []);
+    let node = list.find(n => ('leaf' in c ? n.chunk === id : n.open === c.open));
+    const cn = inDef ? null : canonOf(id);
+    if (!node && cn) node = list.find(n => n.canon === cn.key && n.frames[n.frames.length - 1] !== frame);
+    if (!node) { node = { chunk: id, open: 'leaf' in c ? undefined : c.open, frames: [], kids: [], canon: cn?.key, pos: cn ? [] : undefined }; list.push(node); }
+    if (node.frames[node.frames.length - 1] !== frame) { node.frames.push(frame); if (node.pos && cn) node.pos.push({ i: frame, x: cn.x, y: cn.y }); }
+    if (!('leaf' in c)) c.kids.forEach((k, j) => insert(node!.kids, j, k, frame, inDef || DEF_HOLDER.test(c.open)));
+  };
+  /**
+   * The definitions a chunk holds, by id: the page keeps an id while what it defines changes (a track's clip follows
+   * the track when a panel above it grows). Two versions in one file would leave the first serving every frame, so a
+   * drawing whose definition changes gets one copy per version, each with its own id (see `Versions`).
+   */
+  const DEF_RE = new RegExp(`<(${DEF_TAGS})\\b[^>]*?\\sid="([^"]+)"[^>]*?(?:\\/>|>[\\s\\S]*?<\\/\\1>)`, 'g');
+  const DEF_OPEN = new RegExp(`^<(?:${DEF_TAGS})\\b[^>]*?\\sid="([^"]+)"`);
+  const textMemo = new Map<number, string>();
+  const fullText = (id: number): string => {
+    let t = textMemo.get(id);
+    if (t == null) { const c = rec.chunks[id]; t = 'leaf' in c ? c.leaf : `${c.open}${c.kids.map(fullText).join('')}${c.close}`; textMemo.set(id, t); }
+    return t;
+  };
+  const defsMemo = new Map<number, Map<string, string>>();
+  const defsOf = (id: number): Map<string, string> => {
+    let m = defsMemo.get(id);
+    if (m) return m;
+    const c = rec.chunks[id];
+    m = new Map();
+    if ('leaf' in c) { if (DEF_IN.test(c.leaf)) for (const x of c.leaf.matchAll(DEF_RE)) if (!m.has(x[2])) m.set(x[2], x[0]); }
+    else {
+      const o = DEF_OPEN.exec(c.open);
+      if (o) m.set(o[1], fullText(id));
+      else for (const k of c.kids) for (const [a, t] of defsOf(k)) if (!m.has(a)) m.set(a, t);
+    }
+    defsMemo.set(id, m);
+    return m;
+  };
+  /** The ids of a drawing defined differently across its frames: for each, the version each frame has. */
+  interface Versions { ids: Set<string>; of: Map<string, Map<number, number>>; texts: Map<string, string[]> }
+  const versionsOf = (perFrame: Map<number, number[]>): Versions | null => {
+    const texts = new Map<string, string[]>(), of = new Map<string, Map<number, number>>();
+    for (const [f, kids] of perFrame) {
+      const seen = new Set<string>();
+      for (const k of kids) for (const [id, t] of defsOf(k)) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const list = texts.get(id) ?? []; if (!texts.has(id)) texts.set(id, list);
+        let v = list.indexOf(t); if (v < 0) { v = list.length; list.push(t); }
+        let m = of.get(id); if (!m) { m = new Map(); of.set(id, m); }
+        m.set(f, v);
+      }
+    }
+    const ids = new Set([...texts].filter(([, l]) => l.length > 1).map(([id]) => id));
+    return ids.size ? { ids, of, texts } : null;
+  };
+  const reEsc = (id: string) => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emit = (n: TreeNode, parentFrames: number, ver: Versions | null = null): string => {
+    const c = rec.chunks[n.chunk];
+    const own = n.frames.length !== parentFrames;
+    const mv = n.pos && n.canon != null ? moveClass(n.pos) : null;
+    let head = replaceText(mv ? n.canon! : 'leaf' in c ? c.leaf : n.open!, opts.replace);
+    let refs: string[] = [];
+    if (ver) {
+      // a definition with versions is written apart (one per version, own ids): left out here
+      const o = 'leaf' in c ? null : DEF_OPEN.exec(head);
+      if (o && ver.ids.has(o[1])) return '';
+      if ('leaf' in c && DEF_IN.test(head)) head = head.replace(DEF_RE, (m, _t, id: string) => (ver.ids.has(id) ? '' : m));
+      refs = [...ver.ids].filter(id => head.includes(`#${id}`));
+    }
+    const kids = () => n.kids.map(list => list.map(k => emit(k, n.frames.length, ver)).join('')).join('');
+    const body = (h: string, k: string) => {
+      const b = 'leaf' in c ? h : `${h}${k}${c.close}`;
+      return mv ? `<g class="a ${mv}">${b}</g>` : b;
+    };
+    if (!refs.length) { const inner = body(head, 'leaf' in c ? '' : kids()); return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner; }
+    // what refers to one: a copy per version, each shown in the frames that had that version and pointing at it
+    const groups = new Map<string, number[]>();
+    for (const f of n.frames) { const key = refs.map(id => ver!.of.get(id)?.get(f) ?? 0).join(','); const g = groups.get(key); if (g) g.push(f); else groups.set(key, [f]); }
+    const k = 'leaf' in c ? '' : kids();
+    const pointed = (key: string) => {
+      const vs = key.split(',');
+      return refs.reduce((h, id, j) => h.replace(new RegExp(`(url\\(\\s*['"]?#|href="#)${reEsc(id)}(?=['")\\s"])`, 'g'), `$1${id}__v${vs[j]}`), head);
+    };
+    if (groups.size === 1) { const [key] = groups.keys(); const inner = body(pointed(key), k); return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner; }
+    return [...groups].map(([key, fr]) => `<g class="fr ${win(fr)}">${body(pointed(key), k)}</g>`).join('');
+  };
+  /** The versions of the definitions, each under its own id, for a drawing's <defs>. */
+  const versionDefs = (ver: Versions | null): string => {
+    if (!ver) return '';
+    const out: string[] = [];
+    for (const id of ver.ids) ver.texts.get(id)!.forEach((t, v) => out.push(replaceText(t, opts.replace).replace(new RegExp(`(\\sid=")${reEsc(id)}"`), `$1${id}__v${v}"`)));
+    return `<defs>${out.join('')}</defs>`;
+  };
+
+  // the dialogs' HTML for the player: every tag (with its text) once, a content as its pieces (see Timeline.html)
+  const html: NonNullable<Timeline['html']> = { pieces: [], contents: [], boxes: [] };
+  const pieceIds = new Map<string, number>(), contentIds = new Map<number, number>(), contentKeys = new Map<string, number>();
+  const piece = (t: string) => { let k = pieceIds.get(t); if (k == null) { k = html.pieces.length; html.pieces.push(t); pieceIds.set(t, k); } return k; };
+  const contentOf = (id: number): number => {
+    let c = contentIds.get(id);
+    if (c != null) return c;
+    const h = rec.html[id];
+    const ids = [piece(h.style), ...(replaceText(h.html, opts.replace).match(/<[^>]*>[^<]*|[^<]+/g) ?? []).map(piece)];
+    const key = ids.join(',');
+    c = contentKeys.get(key);
+    if (c == null) { c = html.contents.length; html.contents.push(ids); contentKeys.set(key, c); }
+    contentIds.set(id, c);
+    return c;
+  };
+
+  let nSlots = 0;
+  // layer by layer: the page, then each dialog (its backdrop and card, its HTML, its drawings)
+  const nLayers = Math.max(1, ...shown.map(x => x.f.layers.length));
+  const body: string[] = [];
+  let nBlocks = 0;
+  for (let L = 0; L < nLayers; L++) {
+    const here = shown.filter(x => x.f.layers[L]);
+    const part: string[] = [];
+    // the stacking levels of this layer (see zKey), lowest first: at each level its backgrounds, its HTML, its drawings
+    const zs = new Set<string>(['']);
+    for (const { f } of here) { const l = f.layers[L]; for (const it of [...l.panels, ...l.blocks, ...l.svgs]) zs.add(it.z ?? ''); }
+    const levels = [...zs].sort();
+    const zIs = (z: string) => (it: { z?: string }) => (it.z ?? '') === z;
+    // the HTML blocks: each placement once, shown while a frame holds it; the page's (or the dialog card's) blocks
+    // move with its origin, the fixed ones stay on the screen
+    const blockSet = (pick: (l: Layer) => Layer['blocks'] | undefined): string[] => {
+      const windows = new Map<string, { b: Layer['blocks'][number]; frames: number[] }>();
+      for (const { f, i } of here) for (const b of pick(f.layers[L]) ?? []) {
+        const k = `${b.id}|${b.x}|${b.y}|${b.w}|${b.h}|${b.clip?.join(',') ?? ''}`;
+        if (!windows.has(k)) windows.set(k, { b, frames: [] });
+        windows.get(k)!.frames.push(i);
+      }
+      const blocks: string[] = [];
+      if (player) {
+        // one box per place (and size, and clip), filled by the player with the content of the moment
+        const boxes = new Map<string, { b: Layer['blocks'][number]; frames: number[]; seq: [number, number][] }>();
+        for (const { f, i } of here) {
+          const seen = new Map<string, number>();
+          for (const b of pick(f.layers[L]) ?? []) {
+            const base = `${b.x}|${b.y}|${b.w}|${b.h}|${b.clip?.join(',') ?? ''}`;
+            const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
+            const k = `${base}#${nth}`;
+            if (!boxes.has(k)) boxes.set(k, { b, frames: [], seq: [] });
+            const box = boxes.get(k)!, c = contentOf(b.id);
+            box.frames.push(i);
+            if (box.seq[box.seq.length - 1]?.[1] !== c) box.seq.push([Math.round(shown[order.get(i)!].a), c]);
+          }
+        }
+        for (const { b, frames, seq } of boxes.values()) {
+          nBlocks++;
+          const n = html.boxes.length; html.boxes.push(seq);
+          blocks.push(clipped(b.clip, `<foreignObject class="fr ${win(frames)}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" data-rec-box="${n}" style="width:${b.w}px;height:${b.h}px;overflow:hidden"></div></foreignObject>`));
+        }
+        return blocks;
+      }
+      for (const { b, frames } of windows.values()) {
+        nBlocks++;
+        const h = rec.html[b.id];
+        blocks.push(clipped(b.clip, `<foreignObject class="fr ${win(frames)}" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}"><div xmlns="http://www.w3.org/1999/xhtml" style="${esc(h.style)};width:${b.w}px;height:${b.h}px;overflow:hidden">${replaceText(h.html, opts.replace)}</div></foreignObject>`));
+      }
+      return blocks;
+    };
+    let originMove: string | null | undefined;
+    for (const z of levels) {
+      // backgrounds: each distinct set once
+      const panelSets = new Map<string, { ps: Layer['panels']; frames: number[] }>();
+      for (const { f, i } of here) { const ps = f.layers[L].panels.filter(zIs(z)); if (!ps.length) continue; const k = JSON.stringify(ps); if (!panelSets.has(k)) panelSets.set(k, { ps, frames: [] }); panelSets.get(k)!.frames.push(i); }
+      for (const { ps, frames } of panelSets.values()) part.push(`<g class="fr ${win(frames)}">${ps.map(panel).join('')}</g>`);
+      const moving = blockSet(l => l.blocks.filter(zIs(z)));
+      if (moving.length) {
+        if (originMove === undefined) originMove = moveClass(here.map(({ f, i }) => ({ i, x: f.layers[L].origin[0], y: f.layers[L].origin[1] })));
+        const o = here[0].f.layers[L].origin;
+        part.push(originMove ? `<g class="a ${originMove}">${moving.join('\n')}</g>` : `<g transform="translate(${o[0]} ${o[1]})">${moving.join('\n')}</g>`);
+      }
+      // the drawings, slot by slot
+      const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][]; perFrame: Map<number, number[]> }>();
+      for (const { f, i } of here) {
+        const seen = new Map<string, number>();
+        for (const sv of f.layers[L].svgs.filter(zIs(z))) {
+          const base = `${sv.w}|${sv.h}|${sv.viewBox}|${sv.par}|${sv.style}|${sv.clip ? sv.clip.map((v, k) => v - (k === 0 ? sv.x : k === 1 ? sv.y : 0)).join(',') : ''}`;
+          // two copies of one drawing in a frame are two slots
+          const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
+          const key = `${base}#${nth}`;
+          let slot = slots.get(key);
+          if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [], perFrame: new Map() }; slots.set(key, slot); }
+          slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y }); slot.perFrame.set(i, sv.kids);
+          sv.kids.forEach((k, j) => insert(slot!.kids, j, k, i));
+        }
+      }
+      for (const { s: sv, frames, pos, kids, perFrame } of slots.values()) {
+        // the ids a drawing defines (clip paths, gradients, patterns) are its own: the page reuses one id while its
+        // geometry changes (a clip that moves when a track is added), and the first in the file would serve them all
+        const sfx = `_s${nSlots++}`;
+        const ver = versionsOf(perFrame);
+        const inner = (versionDefs(ver) + kids.map(list => list.map(k => emit(k, frames.length, ver)).join('')).join(''))
+          .replace(/\sid="([^"]+)"/g, ` id="$1${sfx}"`)
+          .replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, `url(#$2${sfx})`)
+          .replace(/(\s(?:xlink:)?href)="#([^"]+)"/g, `$1="#$2${sfx}"`);
+        const el = `<svg width="${sv.w}" height="${sv.h}"${sv.viewBox ? ` viewBox="${sv.viewBox}"` : ''}${sv.par ? ` preserveAspectRatio="${sv.par}"` : ''} style="${esc(sv.style)}">${inner}</svg>`;
+        // the clip moves with the drawing: it is given relative to the drawing's place
+        const rel: [number, number, number, number] | null = sv.clip ? [sv.clip[0] - sv.x, sv.clip[1] - sv.y, sv.clip[2], sv.clip[3]] : null;
+        const mv = moveClass(pos);
+        const placed = mv ? `<g class="a ${mv}">${clipped(rel, el)}</g>` : `<g transform="translate(${sv.x} ${sv.y})">${clipped(rel, el)}</g>`;
+        part.push(`<g class="fr ${win(frames)}">${placed}</g>`);
+      }
+    }
+    // fixed and sticky elements of the page, lowest level first
+    const fixedLevels = [...new Set(here.flatMap(({ f }) => (f.layers[L].fixed ?? []).map(b => b.z ?? '')))].sort();
+    for (const z of fixedLevels) part.push(...blockSet(l => l.fixed?.filter(zIs(z))));
+    body.push(`<g clip-path="url(#${clipId([0, 0, rec.width, rec.height])})">${part.join('\n')}</g>`);
+  }
+
+  // the pointer and the clicks
+  let pointer = '';
+  if (opts.pointer.show && rec.pointer.length && player) tl.ptr = pointerPath(rec, map, opts.pointer.smooth).map(p => [Math.round(p.t), Math.round(p.x - x0), Math.round(p.y - y0)]);
+  else if (opts.pointer.show && rec.pointer.length) {
+    const path = pointerPath(rec, map, opts.pointer.smooth);
+    const kf = path.map(p => `${pct(p.t, D)}{transform:translate(${Math.round(p.x)}px,${Math.round(p.y)}px)}`);
+    css.push(`@keyframes ptr{0%{transform:translate(${Math.round(path[0].x)}px,${Math.round(path[0].y)}px)}${kf.join('')}}#ptr{animation-name:ptr;animation-timing-function:linear}`);
+    pointer = `<g id="ptr" class="a"><path transform="scale(${opts.pointer.scale})" d="M0 0 L0 16 L4.5 12.2 L7.6 19 L10.2 17.8 L7.2 11.2 L13 11.2 Z" fill="#111827" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/></g>`;
+  }
+  if (player && opts.pointer.clicks) tl.clicks = rec.clicks.map(c => [Math.round(map(c.t)), Math.round(c.x - x0), Math.round(c.y - y0)]);
+  const clickEls = !opts.pointer.clicks || player ? '' : rec.clicks.map((c, i) => {
+    const a = map(c.t), b = a + CLICK_MS;
+    css.push(`@keyframes ck${i}{0%,${pct(a, D)}{opacity:0;transform:scale(.3)}${pct(a + 40, D)}{opacity:.9;transform:scale(.5)}${pct(b, D)},100%{opacity:0;transform:scale(1.6)}}#ck${i}{animation-name:ck${i};animation-timing-function:ease-out}`);
+    return `<circle id="ck${i}" class="a" cx="${Math.round(c.x)}" cy="${Math.round(c.y)}" r="${14 * opts.pointer.scale}" fill="none" stroke="#0f766e" stroke-width="3" style="opacity:0;transform-box:fill-box;transform-origin:center"/>`;
+  }).join('');
+
+  // the camera: eased zooms on the chosen areas and back
+  const zooms = [...opts.zooms].sort((a, b) => a.start - b.start);
+  if (zooms.length) {
+    const tf = (r: [number, number, number, number] | null) => {
+      if (!r) return 'transform:translate(0px,0px) scale(1)';
+      const s = W / r[2];
+      return `transform:translate(${n1(-s * (r[0] - x0))}px,${n1(-s * (r[1] - y0))}px) scale(${s.toFixed(4)})`;
+    };
+    const kfs: { t: number; r: [number, number, number, number] | null }[] = [{ t: 0, r: null }];
+    let last: [number, number, number, number] | null = null;
+    zooms.forEach((z, i) => {
+      const rect = fitRect(z.rect, B);
+      const prevT = kfs[kfs.length - 1].t;
+      const s = map(z.start), a = Math.max(prevT, s - ZOOM_IN_MS), b = Math.max(s, a + 200);
+      kfs.push({ t: a, r: last }, { t: b, r: rect });
+      const e = Math.max(map(z.end), b), next = zooms[i + 1];
+      if (next && map(next.start) - ZOOM_IN_MS <= e + ZOOM_OUT_MS) { kfs.push({ t: e, r: rect }); last = rect; }
+      else { kfs.push({ t: e, r: rect }, { t: e + ZOOM_OUT_MS, r: null }); last = null; }
+    });
+    if (player) tl.cam = kfs.map(k => [Math.round(k.t), k.r && [k.r[0] - x0, k.r[1] - y0, k.r[2], k.r[3]]]);
+    else css.push(`@keyframes cam{${kfs.map(k => `${pct(k.t, D)}{${tf(k.r)};animation-timing-function:${EASE}}`).join('')}}#cam{animation-name:cam;transform-box:view-box;transform-origin:0 0}`);
+  }
+
+  const cap = renderCaptions(opts.captions.map(c => ({ ...c, text: replaceText(`>${c.text}<`, opts.replace).slice(1, -1) })), opts.chapters, map, D, { x0, y0, W, H }, rec.fontFamily, player ? tl.fades : undefined);
+  css.push(...cap.css);
+  const chapters = opts.chapters.map(c => ({ t: map(c.t), name: c.name })).sort((a, b) => a.t - b.t);
+  // the stops: a caption's once it has faded in (shown whole), a chapter's at its mark (its card is in by then)
+  const at = opts.stopAt ?? STOP_AT_DEFAULT, inFull = CAPTION_FADE_MS + 50;
+  const stopTimes = [
+    ...(at.start ? [0] : []),
+    ...(at.chapters ? chapters.map(c => c.t) : []),
+    ...opts.captions.filter(c => at.captions || (at.titles && c.kind === 'title')).map(c => map(c.start) + inFull),
+    ...(opts.stops ?? []).map(s => map(s.t)),
+  ].map(t => Math.max(0, Math.round(t))).filter(t => t < D).sort((a, b) => a - b);
+  const stops = stopTimes.filter((t, i) => i === 0 || t - stopTimes[i - 1] > 60);
+
+  const clipDefs = [...clips].map(([k, id]) => { const [x, y, w, h] = k.split(','); return `<clipPath id="${id}"><rect x="${x}" y="${y}" width="${w}" height="${h}"/></clipPath>`; }).join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" font-family="${esc(rec.fontFamily)}">
+<title>${esc(opts.title)}</title>
+<style>${rec.fonts?.length ? `/* Inter 5.3: Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter). SIL Open Font License 1.1 (https://openfontlicense.org). */\n${rec.fonts.join('\n')}` : ''}
+${css.join('\n')}</style>
+<defs>${clipDefs}</defs>
+<rect width="${W}" height="${H}" fill="${rec.background}"/>
+<g id="cam" class="a"><g transform="translate(${-x0} ${-y0})">
+${body.join('\n')}
+${cap.content}
+${clickEls}${pointer}
+</g></g>
+${player ? '' : cap.screen}
+</svg>`;
+
+  // the page's CSS rules the HTML blocks use
+  let pageCss = '';
+  if (nBlocks) {
+    const classes = new Set<string>();
+    for (const h of rec.html) for (const m of h.html.matchAll(/\sclass="([^"]*)"/g)) for (const c of m[1].split(/\s+/)) if (c) classes.add(c.replace(/&amp;/g, '&'));
+    pageCss = rec.css.filter(r => r.classes.every(c => classes.has(c))).map(r => r.text).join('\n');
+  }
+  const meta = { css: pageCss, hasHtml: nBlocks > 0, duration: D, frames: shown.length, bounds: B, chapters, stops };
+  if (player) {
+    tl.W = W; tl.H = H;
+    if (html.boxes.length) tl.html = html;
+    const screen = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" font-family="${esc(rec.fontFamily)}">${cap.screen}</svg>`;
+    return { ...meta, scene: svg, screen, timeline: tl, bytes: utf8Length(svg) + utf8Length(screen) + utf8Length(pageCss) + JSON.stringify(tl).length };
+  }
+  return { ...meta, svg, bytes: utf8Length(svg) + utf8Length(pageCss) };
+}
+
+/**
+ * The HTML page of a recording: the scene, the camera, the pointer and the captions, run by a small player that only
+ * touches what changes, when it changes (an element shown or hidden, a block moved), and moves the pointer, the click
+ * rings and the camera as layers of their own, so the scene is not redrawn for them. Play / pause, a time bar with the
+ * chapters marked, the chapter list; with "pause at chapters" the playback stops at each chapter, for a talk: → /
+ * PageDown (a presentation clicker) goes on, or jumps to the next chapter while playing; ← / PageUp goes back to the
+ * start of the chapter (the one before when at its start). Space toggles play / pause. `bare`: the drawing alone,
+ * filling the window, still at the start until recPlayer.play() (the video export).
+ */
+export function playerHtml(out: PlayerExport, title: string, extra: { bare?: boolean; project?: string; packed?: { scene: string; project?: string } } = {}): string {
+  const tl = out.timeline, D = Math.round(out.duration);
+  const ch = extra.bare ? [] : out.chapters.filter(c => c.t >= 0 && c.t < D).map(c => ({ t: Math.round(c.t), name: c.name }));
+  // the video plays straight through: no stop
+  const st = extra.bare ? [] : (out.stops ?? []).filter(t => t >= 0 && t < D);
+  const json = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
+  const bar = extra.bare ? 0 : ch.length || st.length ? 118 : 80;
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(title)}</title>
+${out.css ? `<style>${out.css.replace(/<\/style/gi, '<\\/style')}</style>` : ''}
+<style>
+body{margin:0;background:${extra.bare ? '#fff' : '#f4f6f8'};font:13px 'Inter Viewer',Inter,system-ui,-apple-system,'Segoe UI',sans-serif;color:#1f2937${extra.bare ? ';overflow:hidden' : ''}}
+.rec-wrap{max-width:100%;padding:${extra.bare ? '0' : '16px'};box-sizing:border-box}
+.rec-stage{background:#fff;${extra.bare ? '' : 'border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.12);'}overflow:hidden}
+.rec-view{position:relative;overflow:hidden;margin:0 auto;aspect-ratio:${tl.W}/${tl.H};width:min(100%,calc((100vh - ${bar}px) * ${tl.W} / ${tl.H}))}
+#camv{position:absolute;inset:0;transform-origin:0 0}
+#camv>svg,.rec-screen{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+.rec-screen{pointer-events:none}
+#ptr{position:absolute;left:0;top:0;will-change:transform;pointer-events:none}
+#ptr svg{display:block;overflow:visible}
+.rec-click{position:absolute;left:0;top:0;box-sizing:border-box;border:3px solid #0f766e;border-radius:50%;opacity:0;pointer-events:none}
+.rec-bar{display:flex;align-items:center;gap:10px;margin-top:10px}
+.rec-bar button{width:34px;height:30px;border-radius:8px;border:1px solid #d3dbe5;background:#fff;cursor:pointer;font-size:14px}
+.rec-track{position:relative;flex:1;display:flex;align-items:center}
+.rec-track input{width:100%;accent-color:#0f766e;margin:0}
+.rec-tick{position:absolute;top:-7px;width:2px;height:8px;background:#0f766e;border-radius:1px;pointer-events:none}
+.rec-stop{position:absolute;top:9px;width:7px;height:7px;margin-left:-3.5px;background:#d97706;transform:rotate(45deg);border-radius:1px;pointer-events:none}
+.rec-time{font-variant-numeric:tabular-nums;color:#5b6b7e;min-width:90px;text-align:right}
+.rec-ch{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+.rec-ch button{border:1px solid #d3dbe5;background:#fff;border-radius:999px;padding:3px 10px;font:inherit;font-size:12px;cursor:pointer;color:#334155}
+.rec-ch button.on{background:#0f766e;border-color:#0f766e;color:#fff}
+.rec-ch label{margin-left:auto;color:#5b6b7e;font-size:12px;display:flex;align-items:center;gap:4px}
+</style></head><body><div class="rec-wrap">
+<div class="rec-stage" id="stage"><div class="rec-view" id="view">
+<div id="camv">${extra.packed ? '' : out.scene}<div id="clicks"></div><div id="ptr"></div></div>
+<div class="rec-screen">${out.screen}</div>
+</div></div>
+${extra.bare ? '' : `<div class="rec-bar"><button id="play" title="Play / pause (space)">❚❚</button><div class="rec-track" id="track"><input id="seek" type="range" min="0" max="${D}" step="10" value="0"></div><span class="rec-time" id="time"></span></div>
+${ch.length || st.length ? `<div class="rec-ch" id="chapters"><label title="Stop at each stop (◆ on the time bar${ch.length ? ', the chapters among them' : ''}); → or PageDown goes on, ← or PageUp goes back"><input type="checkbox" id="pauseAt" checked> pause at stops</label></div>` : ''}`}
+</div>
+${extra.packed ? `<script type="application/octet-stream" id="rec-packed">${extra.packed.scene}</script>` : `<script type="application/json" id="rec-timeline">${json(tl)}</script>`}
+<script>
+(function(){
+  var camv=document.getElementById('camv');
+  // a page saved compressed: the scene and its timeline are unpacked first (deflate, in the browser)
+  var packed=document.getElementById('rec-packed');
+  if(packed&&typeof DecompressionStream==='undefined'){
+    // a browser too old to unpack it: say so, and how to get a page it can read
+    camv.insertAdjacentHTML('afterbegin','<p style="padding:24px;font:15px/1.5 sans-serif">This recording is saved compressed, and this browser cannot unpack it (it needs Chrome or Edge 103, Firefox 113, Safari 16.4 or later). Open it in a recent browser, or ask for a copy exported with \u201ccompressed page\u201d unticked, which opens in older browsers too.</p>');
+  }else if(packed){
+    var b=atob(packed.textContent.trim()),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);
+    new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text().then(function(t){
+      var v=JSON.parse(t);camv.insertAdjacentHTML('afterbegin',v[0]);packed.remove();start(v[1]);
+    }).catch(function(e){camv.insertAdjacentHTML('afterbegin','<p style="padding:24px">This recording could not be unpacked by this browser ('+e+'). Open it in a recent Chrome, Edge, Firefox or Safari.</p>');});
+  } else start(JSON.parse(document.getElementById('rec-timeline').textContent));
+  function start(T){
+  var D=T.D, CH=${json(ch)}, ST=${json(st)}, BARE=${extra.bare ? 'true' : 'false'};
+  var view=document.getElementById('view'), ptr=document.getElementById('ptr'), clickBox=document.getElementById('clicks');
+  var list=function(c){return Array.prototype.slice.call(document.getElementsByClassName(c));};
+  // what the timeline drives, looked up once
+  var wins=[], moves=[], fades=[], clicks=[], boxes=[];
+  // each element's own display, put back when it shows again (a dialog's block may be flex)
+  for(var c in T.wins){var we=list(c);wins.push({els:we,ds:we.map(function(el){return el.style.display;}),runs:T.wins[c],on:null});}
+  for(var m in T.moves) moves.push({els:list(m),pts:T.moves[m],k:-2});
+  // the dialogs' boxes, filled with the content of the moment (its pieces joined) when it changes
+  var H=T.html;
+  if(H)Array.prototype.forEach.call(document.querySelectorAll('[data-rec-box]'),function(el){boxes.push({el:el,seq:H.boxes[+el.getAttribute('data-rec-box')],base:el.getAttribute('style'),k:-2});});
+  T.fades.forEach(function(f){var el=document.getElementById(f[0]);if(el)fades.push({el:el,a:f[1],b:f[2],o:-1});});
+  var NS='http://www.w3.org/2000/svg', sc=T.ptrScale||1;
+  if(T.ptr.length){ptr.innerHTML='<svg width="'+(14*sc)+'" height="'+(20*sc)+'" viewBox="0 0 14 20"><path d="M0 0 L0 16 L4.5 12.2 L7.6 19 L10.2 17.8 L7.2 11.2 L13 11.2 Z" fill="#111827" stroke="#ffffff" stroke-width="1.3" stroke-linejoin="round"/></svg>';}
+  T.clicks.forEach(function(k){var d=document.createElement('div');d.className='rec-click';clickBox.appendChild(d);clicks.push({el:d,t:k[0],x:k[1],y:k[2],on:false});});
+  var ease=function(p){return p<.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;};
+  var at=function(runs,t){for(var i=0;i<runs.length;i++)if(t>=runs[i][0]&&t<runs[i][1])return true;return false;};
+  var camAt=function(t){
+    var K=T.cam, full=[0,0,T.W,T.H];
+    if(!K.length)return full;
+    var r=function(x){return x||full;};
+    if(t<=K[0][0])return r(K[0][1]);
+    for(var i=0;i+1<K.length;i++){var a=K[i],b=K[i+1];if(t<b[0]){var p=b[0]>a[0]?ease((t-a[0])/(b[0]-a[0])):1,ra=r(a[1]),rb=r(b[1]);return [ra[0]+(rb[0]-ra[0])*p,ra[1]+(rb[1]-ra[1])*p,ra[2]+(rb[2]-ra[2])*p,ra[3]+(rb[3]-ra[3])*p];}}
+    return r(K[K.length-1][1]);
+  };
+  var ptrAt=function(t){var P=T.ptr;if(!P.length)return null;if(t<=P[0][0])return P[0];var lo=0,hi=P.length-1;if(t>=P[hi][0])return P[hi];while(hi-lo>1){var md=(lo+hi)>>1;if(P[md][0]<=t)lo=md;else hi=md;}var a=P[lo],b=P[hi],p=(t-a[0])/((b[0]-a[0])||1);return [t,a[1]+(b[1]-a[1])*p,a[2]+(b[2]-a[2])*p];};
+  var camNow=[0,0,T.W,T.H], lastCam='', still=0;
+  var render=function(t){
+    var i,j;
+    // a drawing off screen is taken out of the page (display:none), not only hidden: hidden, it would still be laid out
+    // and walked at every repaint, and a long recording holds tens of thousands of them (20 fps against 60 on one)
+    for(i=0;i<wins.length;i++){var w=wins[i],on=at(w.runs,t);if(on!==w.on){w.on=on;for(j=0;j<w.els.length;j++){var el=w.els[j];if(on){el.style.display=w.ds[j];el.style.visibility='visible';}else el.style.display='none';}}}
+    for(i=0;i<boxes.length;i++){var bx=boxes[i],S=bx.seq,kb=0;for(j=1;j<S.length&&S[j][0]<=t;j++)kb=j;if(kb!==bx.k){bx.k=kb;var ids=H.contents[S[kb][1]],a=[];for(j=1;j<ids.length;j++)a.push(H.pieces[ids[j]]);bx.el.setAttribute('style',H.pieces[ids[0]]+';'+bx.base);bx.el.innerHTML=a.join('');}}
+    for(i=0;i<moves.length;i++){var mv=moves[i],P=mv.pts,k=-1;for(j=0;j<P.length&&P[j][0]<=t;j++)k=j;if(k<0)k=0;if(k!==mv.k){mv.k=k;for(j=0;j<mv.els.length;j++)mv.els[j].style.transform='translate('+P[k][1]+'px,'+P[k][2]+'px)';}}
+    for(i=0;i<fades.length;i++){var f=fades[i],F=${CAPTION_FADE_MS},o=t<f.a||t>f.b+F?0:t<f.a+F?(t-f.a)/F:t<=f.b?1:1-(t-f.b)/F;o=Math.round(o*100)/100;if(o!==f.o){f.o=o;f.el.style.opacity=o;}}
+    var fx=view.clientWidth/T.W;
+    // the camera: a layer of its own while it moves, drawn sharp again once it stops
+    camNow=camAt(t);var s=T.W/camNow[2],key=camNow.map(function(v){return v.toFixed(2);}).join(',')+fx;
+    if(key!==lastCam){lastCam=key;still=0;camv.style.willChange='transform';camv.style.transform='translate('+(-camNow[0]*s*fx)+'px,'+(-camNow[1]*s*fx)+'px) scale('+s+')';}
+    else if(++still===20)camv.style.willChange='auto';
+    var q=ptrAt(t);if(q)ptr.style.transform='translate('+(q[1]*fx)+'px,'+(q[2]*fx)+'px) scale('+fx+')';
+    for(i=0;i<clicks.length;i++){var ck=clicks[i],p=(t-ck.t)/${CLICK_MS};if(p>=0&&p<=1){var sz=28*sc*fx,sc2=.5+1.1*p;ck.el.style.width=ck.el.style.height=sz+'px';ck.el.style.transform='translate('+(ck.x*fx-sz/2)+'px,'+(ck.y*fx-sz/2)+'px) scale('+sc2+')';ck.el.style.opacity=(p<.07?p/.07:1-p)*.9;ck.on=true;}else if(ck.on){ck.on=false;ck.el.style.opacity=0;}}
+  };
+  ptr.style.transformOrigin='0 0';
+  // the clock
+  // a stop at the start: the page opens still on its first image (play, space or → starts it)
+  var cur=0, paused=BARE||ST[0]===0, t0=0, last=0, dragging=false;
+  var now=function(){return performance.now();};
+  var time=function(){return paused?cur:Math.min(D,now()-t0);};
+  var set=function(ms){cur=Math.max(0,Math.min(D,ms));t0=now()-cur;last=cur;render(cur);};
+  var play=BARE?null:document.getElementById('play'), seek=document.getElementById('seek'), timeEl=document.getElementById('time');
+  var setPaused=function(p){if(p){cur=time();paused=true;}else{if(cur>=D)cur=0;t0=now()-cur;paused=false;}if(play)play.textContent=paused?'▶':'❚❚';};
+  var toggle=function(){setPaused(!paused);};
+  var pauseAt=function(){var b=document.getElementById('pauseAt');return !!(b&&b.checked);};
+  var chList=document.getElementById('chapters'), chBtns=[];
+  CH.forEach(function(c,i){
+    var b=document.createElement('button');b.textContent=(i+1)+'. '+c.name;b.onclick=function(){setPaused(pauseAt());set(c.t);};
+    chList.insertBefore(b,chList.lastElementChild);chBtns.push(b);
+    var k=document.createElement('div');k.className='rec-tick';k.style.left='calc('+(c.t/D*100)+'% - 1px)';k.title=c.name;document.getElementById('track').appendChild(k);
+  });
+  ST.forEach(function(t){if(t>0){var k=document.createElement('div');k.className='rec-stop';k.style.left=(t/D*100)+'%';document.getElementById('track').appendChild(k);}});
+  var chapterAt=function(t){var k=-1;CH.forEach(function(c,i){if(c.t<=t+1)k=i;});return k;};
+  // → : on from a stop; while playing, the next stop or chapter
+  var marks=ST.concat(CH.map(function(c){return c.t;})).sort(function(a,b){return a-b;});
+  var next=function(){var t=time();if(paused){setPaused(false);return;}for(var i=0;i<marks.length;i++)if(marks[i]>t+50){if(pauseAt())setPaused(true);set(marks[i]);return;}};
+  var prev=function(){var t=time(),k=chapterAt(t);if(k<0){setPaused(true);set(0);return;}if(t-CH[k].t<1000&&k>0)k--;setPaused(true);set(CH[k].t);};
+  /** a point of the window (client coordinates) in the view's coordinates, under the current camera */
+  var toView=function(x,y){var r=view.getBoundingClientRect(),u=(x-r.left)/r.width,v=(y-r.top)/r.height;return [camNow[0]+u*camNow[2],camNow[1]+v*camNow[3]];};
+  window.recPlayer={pause:function(){setPaused(true);},play:function(){if(BARE){set(0);}setPaused(false);},seek:function(ms){set(ms);},time:time,paused:function(){return paused;},duration:D,chapters:CH,stops:ST,toView:toView};
+  if(play)play.textContent=paused?'▶':'❚❚';
+  if(play)play.onclick=toggle;
+  if(!BARE)document.addEventListener('keydown',function(e){
+    if(e.code==='Space'){e.preventDefault();toggle();}
+    else if(e.key==='ArrowRight'||e.key==='PageDown'){e.preventDefault();next();}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();prev();}
+  });
+  if(seek){seek.oninput=function(){dragging=true;set(Number(seek.value));};seek.onchange=function(){dragging=false;};}
+  set(0);
+  (function tick(){
+    if(!paused){
+      var t=now()-t0;
+      if(t>=D){if(T.loop){t=t%D;t0=now()-t;if(ST[0]===0&&pauseAt()){t=0;cur=0;paused=true;if(play)play.textContent='▶';}}else{t=D;cur=D;setPaused(true);}}
+      // stop at a stop crossed while playing
+      if(!dragging&&pauseAt()&&t>=last){for(var i=0;i<ST.length;i++){if(ST[i]>0&&ST[i]>last&&ST[i]<=t){setPaused(true);t=ST[i];cur=t;break;}}}
+      last=t;render(t);
+    } else render(cur);
+    if(seek&&!dragging)seek.value=String(Math.round(time()));
+    if(timeEl){var f=function(ms){var s=Math.max(0,ms)/1000;return Math.floor(s/60)+':'+('0'+Math.floor(s%60)).slice(-2);};timeEl.textContent=f(time())+' / '+f(D);}
+    var k=chapterAt(time());chBtns.forEach(function(b,i){b.className=i===k?'on':'';});
+    requestAnimationFrame(tick);
+  })();
+  }
+})();
+</script>${extra.packed?.project ? `\n<script type="application/octet-stream" id="${PROJECT_SCRIPT_ID}" data-packed="deflate-raw">${extra.packed.project}</script>` : extra.project ? `\n<script type="application/json" id="${PROJECT_SCRIPT_ID}">${extra.project.replace(/</g, '\\u003c')}</script>` : ''}</body></html>`;
+}
+
+/** Bytes compressed with raw deflate (the browser's CompressionStream), as base64. */
+export async function deflateBase64(text: string): Promise<string> {
+  const buf = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, Array.from(buf.subarray(i, i + 0x8000)));
+  return btoa(bin);
+}
+/** The inverse of deflateBase64. */
+export async function inflateBase64(b64: string): Promise<string> {
+  const bin = atob(b64.trim()), u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+}
+
+/**
+ * The page as saved: the scene and its timeline compressed inside it (about a fifth of their size, unpacked by the
+ * page when it opens), and the recording to edit it again, compressed too.
+ */
+export async function packedPlayerHtml(out: PlayerExport, title: string, project?: string): Promise<string> {
+  const scene = await deflateBase64(JSON.stringify([out.scene, out.timeline]));
+  return playerHtml(out, title, { packed: { scene, project: project ? await deflateBase64(project) : undefined } });
+}
+
+/** The size of a string in UTF-8, without copying it. */
+export function utf8Length(s: string): number {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); if (c > 0x7f) { n += c > 0x7ff ? (c >= 0xd800 && c <= 0xdbff ? (i++, 2) : 2) : 1; } }
+  return n;
+}
+
+/** The id of the script that carries a recording and its edits inside an exported page, to edit it again. */
+export const PROJECT_SCRIPT_ID = 'sashimi-recording-project';

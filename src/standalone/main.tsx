@@ -7,6 +7,9 @@
 import '../plugins';   // registered file kinds (fileKinds.ts), before anything asks which files it reads
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import SvBrowserDialog from '../components/sashimi/SvBrowserDialog';
+import { svLoadersFor } from './svLoaders';
+import RecorderHost, { type RecorderHandle } from '../components/recorder/RecorderHost';
 import SashimiViewer, { DEFAULT_VIEWER_SETTINGS, type ViewerSettings, type ViewerState } from '../components/SashimiViewer';
 import { readsWindowOf } from '../components/sashimi/datasource';
 import { buildSession, defaultSessionName, matchSession, parseSession, viewerSettingsOf, type SessionFile } from './session';
@@ -23,8 +26,10 @@ import { attachVariantWorker } from './variantClient';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
-import { describeLink, parseLink, variantOfInterest } from './link';
+import { describeLink, parseLink, variantOfInterest, parseSvLink, parsePageLink } from './link';
+import { cgh } from '../components/sashimi/cghStore';
 import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
+import ContactLink from '../components/ContactLink';
 import { GeneSuggest } from '../components/sashimi/GeneSuggest';
 import { rememberGene } from './geneSuggest';
 import '../index.css';
@@ -44,6 +49,10 @@ if (DEV) {
 
 /** Request carried by the URL (deep link from another tool), read once at start-up. */
 const LINK = parseLink(window.location.hash, window.location.search);
+/** a link to the SV browser (#sv=DEL 20:399240-599326): the page opens on it */
+const SV_LINK = parseSvLink(window.location.hash, window.location.search);
+/** a link straight to the SV browser (#sv) or its array-CGH page (#cgh) */
+const PAGE_LINK = parsePageLink(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 /** The data an exported page carries (null for the normal viewer). */
@@ -250,6 +259,29 @@ function App() {
     attachVariantWorker(dsRef.current);
   }
   const ds = dsRef.current;
+  /** the screen recorder (Export menu) */
+  const recorder = useRef<RecorderHandle>(null);
+  const [recording, setRecording] = useState(false);
+  /** the SV browser (a rearrangement typed as HGVS or ISCN) and the gene loaders it uses */
+  const [svBrowser, setSvBrowser] = useState(!!SV_LINK || !!PAGE_LINK);
+  /** the search the SV browser opens with (a link), and a key to open it afresh when another link comes */
+  const [svInit, setSvInit] = useState<{ text: string; build?: GenomeBuild; key: number } | null>(() => (SV_LINK ? { ...SV_LINK, key: 0 } : null));
+  // a link pasted in the address bar while the page is open
+  useEffect(() => {
+    const onHash = () => {
+      // #sv or #cgh typed in the address bar: the page opens (the array-CGH page through the SV browser)
+      const pg = parsePageLink(window.location.hash, window.location.search);
+      if (pg) { setSvBrowser(true); if (pg === 'cgh') cgh.setOpen(true); }
+      const l = parseSvLink(window.location.hash, window.location.search); if (l && (!svInit || l.text !== svInit.text || (l.build ?? '') !== (svInit.build ?? ''))) { setSvInit({ ...l, key: Date.now() }); setSvBrowser(true); } };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, [svInit]);
+  const svLoaders = useMemo(() => ({
+    getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
+    getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
+    getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
+    getPopulationSvs: ds.getPopulationSvs ? (c: string, a: number, b: number) => ds.getPopulationSvs!(c, a, b) : undefined,
+  }), [ds]);
 
   /** The tabs with the active one's state refreshed from the viewer (label and region follow where the user went). */
   const snapshot = useCallback((tabs: ViewTab[]): ViewTab[] => {
@@ -1125,6 +1157,10 @@ function App() {
                     <MenuItem icon="file" label={busy ? 'Export HTML…' : 'Export HTML'} disabled={busy || !opened || pageIsUnbuilt()} onClick={() => { close(); setExportDialog({ window: 'margin', readsCap: 'shown' }); }}
                       hint="This viewer with the data of every view embedded: opens anywhere, without the alignment files"
                       title={pageIsUnbuilt() ? 'The export needs the built viewer (sashimi-viewer.html), not the development page.' : 'Download a copy of this viewer with the data of every registered view embedded (coverage, junctions, retention counts of each window, gene models, options and groups, and the reads of the views whose reads track is on). Anyone can open it in a browser without the alignment files and switch between the views, zoom and pan inside them.'} />
+                    <MenuItem icon="video" label={recording ? 'Stop the recording' : 'Record the screen'} onClick={() => { close(); if (recording) recorder.current?.stop(); else recorder.current?.start(); }}
+                      hint={recording ? 'Then edit and save it' : 'After a 3-2-1 countdown: the drawings and dialogs as vectors, for a presentation (HTML page, SVG or video)'} />
+                    <MenuItem icon="edit" label="Edit a recording…" disabled={recording} onClick={() => { close(); recorder.current?.openFile(); }}
+                      hint="Open an HTML page saved editable, to change it" />
                     <MenuItem icon="image" label={views.length > 1 ? `SVG · ${views.length} views` : 'SVG'} disabled={busy || !views.length} onClick={() => { close(); void exportAllSvg(); }}
                       hint="Every view on one page, stacked under their titles (vector)"
                       title="Save every registered view on one SVG page, stacked under their titles (vector, publication-ready). Each tab is shown in turn while its plot is captured; the current view comes back at the end. The ⋯ menu of the plot saves the current view alone." />
@@ -1150,6 +1186,10 @@ function App() {
               </div>
             )}
             <div className="flex flex-wrap items-center gap-1.5" title="Variants of interest: each is drawn on every view (a panel under the transcript with its label, guide lines through the tracks) and can be jumped to from the viewer's Known variants menu. Saved with the session and the exported page.">
+              <button onClick={() => setSvBrowser(true)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
+                title="SV browser: type a structural variant as HGVS (NC_000020.11:g.[…del;…inv;…del]) or as the ISCN sequence form, and see the genes of the rearranged chromosome">
+                🧬 SV browser
+              </button>
               <Popover width={420} title="Add a variant of interest, drawn on every view"
                 buttonClass="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border border-bar-line bg-bar-ctrl text-bar-text hover:bg-bar-line whitespace-nowrap"
                 button={<><Icon name="marker" size={14} />Known variants{knownVars.length ? ` · ${knownVars.length}` : ''}<Icon name="plus" size={12} className="text-bar-muted" /></>}>
@@ -1251,6 +1291,8 @@ function App() {
             initialSettings={viewerInit} onStateChange={s => { viewerStateRef.current = s; pendingSettingsRef.current = undefined; }} />
         </div></div>
       )}
+      <RecorderHost ref={recorder} names={samples.map(x => x.name)} onRecording={setRecording} />
+      {svBrowser && <SvBrowserDialog key={svInit?.key ?? 'sv'} build={build} loaders={svLoaders} loadersFor={svLoadersFor} initial={svInit ?? undefined} initialPage={PAGE_LINK === 'cgh' ? 'cgh' : undefined} onClose={() => { setSvBrowser(false); setSvInit(null); }} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
@@ -1346,6 +1388,8 @@ function App() {
         <span>Sashimi viewer {VERSION}</span>
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
+        <span>·</span>
+        <ContactLink email="benjamin.cogne@chu-nantes.fr" subject="Sashimi viewer" up className="hover:text-accent-700" />
         <span>·</span>
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-accent-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>

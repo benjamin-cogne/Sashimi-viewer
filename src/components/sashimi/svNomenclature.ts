@@ -1,0 +1,497 @@
+/**
+ * Nomenclature of a rebuilt structural variant, and the reverse: the rearrangement a typed description implies.
+ *
+ * HGVS (the variant, on the reference): following the HGVS recommendations' complex (HGVS/ISCN) page, a rearranged
+ * chromosome is described in the allele form, its changes listed from pter to qter on reference positions
+ * (`NC_000002.12:g.[32310435_32310710del;32310711_171827243inv;insG]` for an inversion with a deletion at one
+ * breakpoint); a tandem copy is a `dup`, any other copy or moved piece an insertion (`g.234_235ins123_234inv`), and a
+ * chromosome end replaced by another chromosome a `delins[NC_…:g.…_qter]`. Positions are the best ones the reads give,
+ * not shifted by the 3′ rule: their uncertainty goes along as "±N bp", outside the description.
+ *
+ * ISCN 2024 (McGowan-Jordan, Hastings & Moore eds., Karger 2024), sequencing (`seq`), in its two formats (§4.7):
+ * - karyotype format: the bands, then the HGVS description on the NC_ accession after a space (§4.7 i–ii), e.g.
+ *   `seq[GRCh38] del(12)(q22q22) NC_000012.12:g.93201112_95156540del`. The short system for a single deletion,
+ *   duplication or inversion (both breakpoints given, even within one band, §4.4.4d; the one nearer pter first,
+ *   §5.5.10a); otherwise the detailed system, the derivative from pter to qter with → between bands, :: at each
+ *   break and reunion, the chromosome number before the bands when several chromosomes take part (§5.4.2.2);
+ *   several abnormalities separated by commas.
+ * - microarray format: the copy number of each stretch gained or lost, e.g. `seq[GRCh38] 12q22(93,201,112_95,156,540)×1`:
+ *   the band once when both ends lie in it (§4.4.4d), positions with commas (§4.4.5d), no pter / qter (§4.7.2a),
+ *   sex chromosomes first, then autosomes in order (§4.4.5f), abnormalities separated by commas.
+ * The junction line (`chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_qter`) is the
+ * viewer's own: the derivative's stretches from pter to qter, which the SV browser reads back. It is not an ISCN form.
+ *
+ * Every description is a draft: the viewer says so next to it.
+ */
+import type { SvJunction, SvReconstruction, SvSegment, SvPiece } from './svModel';
+import { ncAccession, chromOfAccession } from './knownVariants';
+import { revComp } from './svJoint';
+
+export interface Cytoband { start: number; end: number; name: string; stain: string }
+export interface SvNomenclature {
+  /** one HGVS description per rearranged chromosome */
+  hgvs: string[];
+  /** ISCN 2024 karyotype format (bands, then the HGVS description when one chromosome is rearranged); null without bands */
+  iscn: string | null;
+  /** ISCN 2024 microarray format: the stretches gained or lost and their copy number; null when none or without bands */
+  iscnArr: string | null;
+  /** the viewer's junction line per derivative (not an ISCN form; the SV browser reads it back) */
+  iscnSeq: string[];
+  /** "±5–45 bp" over the breakpoints described */
+  uncertainty: string;
+}
+export const NOMENCLATURE_WARNING = 'Automated draft: check before any clinical report.';
+/** the versions followed, to state in a report (ISCN 2024 §4.2a) */
+export const NOMENCLATURE_VERSIONS = 'HGVS nomenclature (varnomen.hgvs.org)';
+
+const num = (c: string) => c.replace(/^chr/i, '');
+const comma = (n: number) => n.toLocaleString('en-US');
+
+/** A piece of sequence on a derivative: 0-based half-open, `pter`/`qter` when it reaches the chromosome end. */
+interface Span { chrom: string; start: number; end: number; reversed: boolean; pter: boolean; qter: boolean }
+const spanOf = (p: SvPiece): Span => ({ chrom: p.seg.chrom, start: p.seg.start, end: p.seg.end, reversed: p.reversed, pter: p.seg.first && p.seg.i === 0, qter: p.seg.last });
+
+/** `10489766_10783340` (1-based) with pter / qter at the chromosome ends. */
+const range = (s: { start: number; end: number; pter?: boolean; qter?: boolean }, sep = (n: number) => String(n)) =>
+  `${s.pter ? 'pter' : sep(s.start + 1)}_${s.qter ? 'qter' : sep(s.end)}`;
+
+/**
+ * The HGVS description of one rebuilt chromosome. The pieces kept forward in the reference order form the backbone
+ * (longest such run); what lies between two backbone pieces on the reference and on the derivative gives the change:
+ * nothing there → del; the same segments, some reversed in place → del / inv; a forward repeat of what precedes →
+ * dup; anything else → ins (between two backbone pieces) or delins (replacing reference segments).
+ */
+/**
+ * The bases a junction's joint inserts between two pieces of a derivative, as HGVS writes inserted content: the bases
+ * along the derivative, or the stretch they copy (`43249001_43249028`, `inv` when copied from the other strand); null
+ * when the joint inserts none or was not rebuilt. The joint was read from its breakend A to B: a derivative that
+ * crosses the junction the other way takes it reverse-complemented.
+ */
+function jointIns(prev: SvPiece, p: SvPiece, own: string, build: string): string | null {
+  const j = p.via && p.via !== 'ref' ? p.via : null;
+  const jt = j?.joint;
+  if (!j || !jt?.inserted) return null;
+  const exitPos = prev.reversed ? prev.seg.start : prev.seg.end, exitSide = prev.reversed ? 'head' : 'tail';
+  const forward = j.a.side === exitSide && Math.abs(j.a.pos - exitPos) <= 50 && num(j.a.chrom) === num(prev.seg.chrom);
+  const t = jt.templated;
+  if (t) {
+    const strand = forward ? t.strand : t.strand === '+' ? '-' : '+';
+    const acc = num(t.chrom) === num(own) ? '' : `${ncAccession(build, t.chrom) ?? t.chrom}:g.`;
+    return `${acc}${t.start + 1}_${t.end}${strand === '-' ? 'inv' : ''}`;
+  }
+  return forward ? jt.inserted : revComp(jt.inserted);
+}
+
+function hgvsOf(der: SvReconstruction['ders'][number], segs: SvSegment[], build: string): string | null {
+  const own = der.chrom;
+  const acc = ncAccession(build, own) ?? own;
+  const chromSegs = segs.filter(s => s.chrom === own);
+  const pieces = der.pieces;
+  // backbone: longest increasing run (by segment index) of forward, first-visit pieces of this chromosome
+  const cand = pieces.map((p, k) => ({ p, k })).filter(x => x.p.seg.chrom === own && !x.p.reversed && x.p.copy === 0);
+  const best: number[] = cand.map(() => 1), prev: number[] = cand.map(() => -1);
+  for (let i = 0; i < cand.length; i++) for (let j = 0; j < i; j++) if (cand[j].p.seg.i < cand[i].p.seg.i && best[j] + 1 > best[i]) { best[i] = best[j] + 1; prev[i] = j; }
+  let end = best.indexOf(Math.max(...best));
+  const bb: { p: SvPiece; k: number }[] = [];
+  while (end >= 0) { bb.unshift(cand[end]); end = prev[end]; }
+  if (!bb.length || bb[0].p.seg.i !== 0) return null;
+  const ops: string[] = [];
+  // inserted content, with the bases the joints insert before, between and after its pieces
+  const content = (run: SvPiece[], left: SvPiece, right: SvPiece | null): string => {
+    const items: string[] = [];
+    run.forEach((p, k) => {
+      const before = jointIns(k ? run[k - 1] : left, p, own, build);
+      if (before) items.push(before);
+      const s = spanOf(p);
+      items.push(`${s.chrom === own ? '' : `${ncAccession(build, s.chrom) ?? s.chrom}:g.`}${range(s)}${s.reversed ? 'inv' : ''}`);
+    });
+    const after = right ? jointIns(run[run.length - 1], right, own, build) : null;
+    if (after) items.push(after);
+    return items.length === 1 && run[0].seg.chrom === own ? items[0] : `[${items.join(';')}]`;
+  };
+  /** an insertion of a joint's bases at a boundary of the reference (0-based: between bases `at` and `at + 1`, 1-based) */
+  const insAt = (at: number, what: string) => `${at}_${at + 1}ins${what}`;
+  const gapOps = (left: SvPiece, right: SvPiece | null, run: SvPiece[]) => {
+    const gap = chromSegs.filter(s => s.i > left.seg.i && (right ? s.i < right.seg.i : true));
+    if (!run.length) {
+      // a deletion; with bases inserted at its joint, a deletion-insertion
+      const ins = right ? jointIns(left, right, own, build) : null;
+      if (gap.length) ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}${ins ? `delins${ins}` : 'del'}`);
+      else if (ins) ops.push(insAt(left.seg.end, ins));
+      return;
+    }
+    const inGap = new Set(gap.map(s => s.id));
+    // the same segments as the gap, some reversed in place
+    if (right && run.every(p => p.seg.chrom === own && inGap.has(p.seg.id)) && new Set(run.map(p => p.seg.id)).size === run.length) {
+      const blocks: SvPiece[][] = [];
+      for (const p of run) {
+        const b = blocks[blocks.length - 1], last = b?.[b.length - 1];
+        if (last && last.reversed === p.reversed && p.seg.i === last.seg.i + (p.reversed ? -1 : 1)) b.push(p); else blocks.push([p]);
+      }
+      const lo = (b: SvPiece[]) => Math.min(...b.map(p => p.seg.i)), hi = (b: SvPiece[]) => Math.max(...b.map(p => p.seg.i));
+      if (blocks.every((b, k) => !k || lo(b) > hi(blocks[k - 1]))) {
+        const kept = new Map<number, 'inv' | 'keep'>();
+        for (const b of blocks) for (const p of b) kept.set(p.seg.id, p.reversed && b.length >= 1 ? 'inv' : 'keep');
+        // the bases inserted at the joints of the run, at the reference boundary each joint sits on: after a piece kept
+        // forward, its end; else before the next piece kept forward, its start
+        const joints: { at: number; what: string }[] = [];
+        const seq = [left, ...run, right];
+        for (let q = 1; q < seq.length; q++) {
+          const what = jointIns(seq[q - 1], seq[q], own, build);
+          if (!what) continue;
+          const prev = seq[q - 1], next = seq[q];
+          joints.push({ at: !prev.reversed ? prev.seg.end : !next.reversed ? next.seg.start : prev.seg.start, what });
+        }
+        const out: { at: number; op: string }[] = joints.map(x => ({ at: x.at, op: insAt(x.at, x.what) }));
+        let k = 0;
+        while (k < gap.length) {
+          const what = kept.get(gap[k].id) ?? 'del';
+          let e = k;
+          if (what === 'inv') { const b = blocks.find(bl => bl.some(p => p.seg.id === gap[k].id))!; e = k + b.length - 1; }
+          else while (e + 1 < gap.length && (kept.get(gap[e + 1].id) ?? 'del') === what) e++;
+          if (what !== 'keep') out.push({ at: gap[k].start + 0.5, op: `${range({ start: gap[k].start, end: gap[e].end })}${what}` });
+          k = e + 1;
+        }
+        ops.push(...out.sort((x, y) => x.at - y.at).map(x => x.op));
+        return;
+      }
+    }
+    // a forward repeat of the segments just before: tandem duplication
+    if (!gap.length && run.every(p => p.seg.chrom === own && !p.reversed) && run.every((p, k) => !k || p.seg.i === run[k - 1].seg.i + 1) && run[run.length - 1].seg.i === left.seg.i) {
+      const copy = range({ start: run[0].seg.start, end: run[run.length - 1].seg.end });
+      // bases inserted between the two copies: a dup cannot carry them, the second copy is written as inserted
+      const between = jointIns(left, run[0], own, build);
+      ops.push(between ? insAt(left.seg.end, `[${between};${copy}]`) : `${copy}dup`);
+      return;
+    }
+    if (!gap.length) { ops.push(insAt(left.seg.end, content(run, left, right))); return; }
+    ops.push(`${range({ start: gap[0].start, end: gap[gap.length - 1].end, qter: !right })}delins${content(run, left, right)}`);
+  };
+  for (let k = 0; k < bb.length; k++) {
+    const left = bb[k].p, right = bb[k + 1]?.p ?? null;
+    const run = pieces.slice(bb[k].k + 1, right ? bb[k + 1].k : pieces.length);
+    gapOps(left, right, run);
+  }
+  if (!ops.length) return null;
+  return `${acc}:g.${ops.length === 1 ? ops[0] : `[${ops.join(';')}]`}`;
+}
+
+const bandAt = (bands: Cytoband[] | undefined, pos: number): string | null => bands?.find(b => pos >= b.start && pos < b.end)?.name ?? null;
+const centromere = (bands: Cytoband[] | undefined): number | null => {
+  const acen = bands?.filter(b => b.stain === 'acen') ?? [];
+  return acen.length ? acen[0].end : null;
+};
+
+/** ISCN of the rebuilt chromosomes: a short form for a single del / dup / inv, else the detailed form. */
+function iscnOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | undefined, build: string): { band: string | null; seq: string[] } {
+  const ders = rec.ders.filter(d => d.rearranged);
+  const chroms = [...new Set(ders.flatMap(d => d.pieces.map(p => p.seg.chrom)))];
+  const many = chroms.length > 1;
+  const seq: string[] = [];
+  const bandForms: string[] = [];
+  const derSpans: { name: string; spans: Span[] }[] = [];
+  let allBands = true;
+  for (const d of ders) {
+    const spans = d.pieces.map(spanOf);
+    // merge pieces contiguous on the reference
+    const merged: Span[] = [];
+    for (const s of spans) {
+      const m = merged[merged.length - 1];
+      if (m && m.chrom === s.chrom && !m.reversed && !s.reversed && m.end === s.start) { m.end = s.end; m.qter = s.qter; }
+      else if (m && m.chrom === s.chrom && m.reversed && s.reversed && s.end === m.start) { m.start = s.start; m.pter = s.pter; }
+      else merged.push({ ...s });
+    }
+    seq.push(merged.map(s => {
+      const cen = centromere(bandsOf(s.chrom));
+      const a = s.pter ? 'pter' : comma(s.start + 1), b = s.qter ? 'qter' : comma(s.end);
+      const mid = cen != null && cen > (s.pter ? 0 : s.start) && (s.qter || cen < s.end) ? '_cen' : '';
+      return `chr${num(s.chrom)}:g.${a}${mid}_${b}${s.reversed ? 'inv' : ''}`;
+    }).join('::'));
+    // the derivative is named after the chromosome giving its centromere and read from the end replacing the short arm
+    // (ISCN 2024 §5.4.2.2d–e): the piece holding a centromere goes forward
+    const hasCen = (s: Span) => { const c = centromere(bandsOf(s.chrom)); return c != null && (s.pter ? 0 : s.start) < c && (s.qter ? Infinity : s.end) > c; };
+    const cenPiece = merged.find(hasCen);
+    const oriented = cenPiece?.reversed ? [...merged].reverse().map(s => ({ ...s, reversed: !s.reversed })) : merged;
+    const name = cenPiece ? cenPiece.chrom : d.chrom;
+    derSpans.push({ name, spans: oriented });
+    const bandName = (s: Span, which: 'from' | 'to'): string => {
+      const atStart = (which === 'from') !== s.reversed;
+      if (atStart && s.pter) return `${many ? num(s.chrom) : ''}pter`;
+      if (!atStart && s.qter) return `${many ? num(s.chrom) : ''}qter`;
+      const b = bandAt(bandsOf(s.chrom), atStart ? s.start : Math.max(s.start, s.end - 1));
+      if (!b) allBands = false;
+      return `${many ? num(s.chrom) : ''}${b ?? '?'}`;
+    };
+    bandForms.push(`der(${num(name)})(${oriented.map(s => `${bandName(s, 'from')}→${bandName(s, 'to')}`).join('::')})`);
+  }
+  // a balanced reciprocal translocation (two derivatives, each its own chromosome's centric piece and the other's end):
+  // the short system t(A;B)(bA;bB), the sex chromosome or the lowest number first (§5.5.18.1)
+  if (derSpans.length === 2 && chroms.length === 2 && !arrOf(rec, bandsOf, build, 'het')) {
+    const brk: Record<string, string | null> = {};
+    const ok = derSpans.every(({ name, spans }) => {
+      if (spans.length !== 2 || spans[0].chrom === spans[1].chrom || !spans.some(x => x.chrom === name)) return false;
+      if (!spans.every(x => x.pter || x.qter)) return false;
+      const own = spans.find(x => x.chrom === name)!;
+      brk[name] = bandAt(bandsOf(name), own.pter ? own.end - 1 : own.start);
+      return true;
+    }) && new Set(derSpans.map(x => x.name)).size === 2 && Object.values(brk).every(Boolean);
+    if (ok) {
+      const order = (c: string) => { const n = num(c).toUpperCase(); return n === 'X' ? -2 : n === 'Y' ? -1 : Number(n) || 99; };
+      const cs = derSpans.map(x => x.name).sort((a, b) => order(a) - order(b));
+      return { band: `seq[${build}] t(${cs.map(num).join(';')})(${cs.map(c => brk[c]).join(';')})`, seq };
+    }
+  }
+  // one rearranged chromosome: its HGVS description follows the bands (karyotype format, §4.7)
+  const hg = rec.ders.filter(d => d.rearranged);
+  const h = hg.length === 1 && !many ? hgvsOf(hg[0], rec.segs, build) : null;
+  const withHgvs = (band: string) => `seq[${build}] ${band}${h ? ` ${h}` : ''}`;
+  // a single deletion, duplication or inversion in one chromosome: the short system
+  if (h) {
+    const m = h.match(/:g\.(\d+|pter)_(\d+|qter)(del|dup|inv)$/);
+    const bands = bandsOf(hg[0].chrom);
+    if (m && bands) {
+      const a = m[1] === 'pter' ? null : bandAt(bands, +m[1] - 1), b = m[2] === 'qter' ? null : bandAt(bands, +m[2] - 1);
+      if ((a || m[1] === 'pter') && (b || m[2] === 'qter')) {
+        const terminal = m[1] === 'pter' || m[2] === 'qter';
+        return { band: withHgvs(`${m[3]}(${num(hg[0].chrom)})(${terminal ? (a ?? b) : `${a}${b}`})`), seq };
+      }
+    }
+  }
+  return { band: allBands && bandForms.length ? withHgvs(bandForms.join(',')) : null, seq };
+}
+
+/**
+ * ISCN 2024 microarray format of the copy-number changes: each segment's copies, from the homologues left intact and
+ * the copies of it the rearranged chromosomes carry (heterozygous: one homologue per rearranged chromosome replaced;
+ * homozygous: both); runs of contiguous segments with the same copy number other than 2 are listed.
+ */
+function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | undefined, build: string, zygosity: 'het' | 'hom'): string | null {
+  const ders = rec.ders.filter(d => d.rearranged);
+  if (!ders.length) return null;
+  const count = new Map<number, number>();
+  for (const d of ders) for (const p of d.pieces) count.set(p.seg.id, (count.get(p.seg.id) ?? 0) + 1);
+  const derOn = (c: string) => ders.filter(d => d.chrom === c).length;
+  const k = zygosity === 'hom' ? 2 : 1;
+  const items: { chrom: string; start: number; end: number; cn: number; pter: boolean; qter: boolean }[] = [];
+  for (const c of rec.chrs) {
+    const kept = Math.max(0, 2 - k * derOn(c));
+    for (const sg of rec.byChr[c] ?? []) {
+      const cn = kept + k * (count.get(sg.id) ?? 0);
+      const last = items[items.length - 1];
+      const pter = sg.first && sg.i === 0, qter = sg.last;
+      if (last && last.chrom === c && last.cn === cn && last.end === sg.start) { last.end = sg.end; last.qter = qter; }
+      else items.push({ chrom: c, start: sg.start, end: sg.end, cn, pter, qter });
+    }
+  }
+  const changed = items.filter(x => x.cn !== 2);
+  if (!changed.length) return null;
+  const order = (c: string) => { const n = num(c).toUpperCase(); return n === 'X' ? -2 : n === 'Y' ? -1 : Number(n) || 99; };
+  const parts: string[] = [];
+  for (const x of [...changed].sort((a, b) => order(a.chrom) - order(b.chrom) || a.start - b.start)) {
+    const bands = bandsOf(x.chrom);
+    if (!bands) return null;
+    // no pter / qter in this format (§4.7.2a): the chromosome's first and last bases
+    const len = Math.max(...bands.map(b => b.end));
+    const a = x.pter ? 0 : x.start, b = x.qter ? len : x.end;
+    const b1 = bandAt(bands, a), b2 = bandAt(bands, b - 1);
+    if (!b1 || !b2) return null;
+    parts.push(`${num(x.chrom)}${b1}${b2 !== b1 ? b2 : ''}(${comma(a + 1)}_${comma(b)})×${x.cn}`);
+  }
+  return `seq[${build}] ${parts.join(',')}`;
+}
+
+export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (chrom: string) => Cytoband[] | undefined = () => undefined, zygosity: 'het' | 'hom' = 'het'): SvNomenclature {
+  const hgvs = rec.ders.filter(d => d.rearranged).map(d => hgvsOf(d, rec.segs, build)).filter((x): x is string => !!x);
+  const { band, seq } = iscnOf(rec, bandsOf, build);
+  const errs = Object.values(rec.bpError ?? {});
+  const lo = errs.length ? Math.min(...errs) : 0, hi = errs.length ? Math.max(...errs) : 0;
+  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity), iscnSeq: seq, uncertainty: !errs.length || hi === 0 ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
+}
+
+// ======================== Reading a description ========================
+
+export interface ParsedSv {
+  chrom: string; junctions: SvJunction[]; window: { start: number; end: number }; notes: string[]; rec: SvReconstruction;
+  /** the same derivative over another window (the gene browser widens it) */
+  rebuild: (w: { start: number; end: number }) => SvReconstruction;
+}
+
+const CHROM_RE = /^(?:(NC_\d+)(?:\.\d+)?|chr([0-9XYM]+)|([0-9XYM]{1,2}))$/i;
+function chromOf(ref: string): string | null {
+  const m = ref.trim().match(CHROM_RE);
+  if (!m) return null;
+  if (m[1]) { const c = chromOfAccession(m[1].toUpperCase()); return c ? `chr${c}` : null; }
+  return `chr${(m[2] ?? m[3]).toUpperCase()}`;
+}
+
+/**
+ * The rearrangement a description implies, as junctions on one chromosome, rebuilt as the cartoon rebuilds picked
+ * arcs. Reads HGVS genomic descriptions (`NC_…:g.` or `chrN:g.`: del, dup, inv, ins, delins, the allele form
+ * `[…;…]`, pter / qter, uncertain positions `(a_b)` taken at their middle) and the sequence form of ISCN
+ * (`chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::chr20:g.10,808,806_qter`, after an optional
+ * `seq[GRCh38]`).
+ */
+export function parseSv(text: string, build: string, chromLen: (chrom: string) => number | null): ParsedSv {
+  const notes: string[] = [];
+  let typed = text.trim().replace(/^seq\[[^\]]*\]\s*/i, '');
+  // ISCN 2024 karyotype format: the bands, then the HGVS description after a space: the HGVS description is read
+  const kar = typed.match(/^(?:del|dup|inv|ins|der|t)\([^)]*\)\([^)]*\)\s+(\S+:g\..+)$/i);
+  if (kar) typed = kar[1];
+  // ISCN 2024 microarray format, one stretch: 20p12.2(10,489,766_10,783,340)×1 → a deletion (×0, ×1) or a duplication (×3…)
+  const arr = typed.replace(/\s+/g, '').match(/^(\d{1,2}|X|Y)[pq][\d.]+(?:[pq][\d.]+)?\(([\d,]+)_([\d,]+)\)[×x](\d+)$/i);
+  if (arr) {
+    const cn = +arr[4];
+    if (cn === 2) throw new Error('Two copies: no change to draw.');
+    typed = `chr${arr[1].toUpperCase()}:g.${arr[2].replace(/,/g, '')}_${arr[3].replace(/,/g, '')}${cn < 2 ? 'del' : 'dup'}`;
+    if (cn > 3) notes.push(`×${cn}: drawn as one extra copy in tandem`);
+  }
+  const raw = typed.replace(/\s+/g, '').replace(/,/g, '');
+  if (!raw) throw new Error('Type an HGVS or ISCN description.');
+  if (/^[a-z]+\(\w+(;\w+)?\)\(/i.test(raw) || /->|→/.test(raw)) throw new Error('Band-level ISCN gives no positions: type the HGVS description, or the ISCN sequence form (chr20:g.pter_10,489,765::chr20:g.10,783,341_10,807,815inv::…).');
+  const lenOf = (c: string) => { const l = chromLen(c); if (!l) throw new Error(`Unknown chromosome ${c} on ${build}.`); return l; };
+  // a position: number, pter, qter, cen (dropped), or (a_b) taken at its middle
+  const pos = (s: string, c: string): number => {
+    if (/^pter$/i.test(s)) return 0;
+    if (/^qter$/i.test(s)) return lenOf(c);
+    const u = s.match(/^\((\d+|\?)_(\d+|\?)\)$/);
+    if (u) {
+      const a = u[1] === '?' ? NaN : +u[1], b = u[2] === '?' ? NaN : +u[2];
+      const v = Number.isFinite(a) && Number.isFinite(b) ? Math.round((a + b) / 2) : Number.isFinite(a) ? a : b;
+      if (!Number.isFinite(v)) throw new Error(`Position ${s} is unknown on both sides.`);
+      notes.push(`${s} taken at ${comma(v)}`);
+      return v;
+    }
+    if (!/^\d+$/.test(s)) throw new Error(`Cannot read the position "${s}".`);
+    return +s;
+  };
+  /** `a_b` (1-based inclusive) → 0-based half-open, `cen` ignored. */
+  const rng = (s: string, c: string): [number, number] => {
+    const parts = s.split('_').filter(x => !/^cen$/i.test(x));
+    // uncertain positions contain "_" inside parentheses: rejoin them
+    const toks: string[] = [];
+    for (const p of parts) { const last = toks[toks.length - 1]; if (last && last.startsWith('(') && !last.endsWith(')')) toks[toks.length - 1] = `${last}_${p}`; else toks.push(p); }
+    if (toks.length === 1) { const x = pos(toks[0], c); return [/^pter$/i.test(toks[0]) ? 0 : x - 1, /^qter$/i.test(toks[0]) ? x : x]; }
+    if (toks.length !== 2) throw new Error(`Cannot read the range "${s}".`);
+    const a = pos(toks[0], c), b = pos(toks[1], c);
+    return [/^pter$/i.test(toks[0]) ? 0 : a - 1, b];
+  };
+  // inserted content: x_y, x_yinv, NC_…:g.x_y(inv), a literal sequence (not drawn), N[12]
+  const contentOf = (s: string, c: string): Span[] => {
+    const items = s.startsWith('[') && s.endsWith(']') ? splitTop(s.slice(1, -1)) : [s];
+    const out: Span[] = [];
+    for (const it of items) {
+      const m = it.match(/^(?:([^:]+):g\.)?(.+?)(inv)?$/);
+      const ic = m?.[1] ? chromOf(m[1]) : c;
+      if (!m || !ic) throw new Error(`Cannot read "${it}".`);
+      if (/^[ACGTN]+$|^N\[\d+\]$/i.test(m[2]) && !m[3]) { notes.push(`inserted bases ${it} not drawn`); continue; }
+      const [a, b] = rng(m[2], ic);
+      out.push({ chrom: ic, start: a, end: b, reversed: !!m[3], pter: a === 0, qter: b === lenOf(ic) });
+    }
+    return out;
+  };
+
+  let pieces: Span[];
+  let chrom: string;
+  if (raw.includes('::')) {
+    // ISCN sequence form: the derivative from pter to qter
+    const parts = raw.split('::');
+    pieces = parts.map(p => {
+      const m = p.match(/^(?:der\(\w+\))?([^:]+):g\.(.+?)(inv)?$/);
+      const c = m ? chromOf(m[1]) : null;
+      if (!m || !c) throw new Error(`Cannot read "${p}".`);
+      const [a, b] = rng(m[2], c);
+      return { chrom: c, start: a, end: b, reversed: !!m[3], pter: a === 0, qter: b === lenOf(c) };
+    });
+    chrom = pieces[0].chrom;
+  } else {
+    const m = raw.match(/^([^:]+):g\.(.+)$/);
+    if (!m) throw new Error('Expected NC_…:g.… or chrN:g.… (HGVS), or the ISCN sequence form chrN:g.…::chrN:g.…');
+    const c = chromOf(m[1]);
+    if (!c) throw new Error(`Unknown reference "${m[1]}".`);
+    chrom = c;
+    const body = m[2];
+    const ops = body.startsWith('[') && body.endsWith(']') ? splitTop(body.slice(1, -1)) : [body];
+    type Op = { a: number; b: number; kind: 'del' | 'dup' | 'inv' | 'ins' | 'delins'; content: Span[] };
+    const parsed: Op[] = ops.map(o => {
+      const mm = o.match(/^(.+?)(delins|del|dup|inv|ins)(.*)$/);
+      if (!mm) throw new Error(`Cannot read "${o}": expected del, dup, inv, ins or delins (substitutions are not structural).`);
+      const kind = mm[2] as Op['kind'];
+      const [a, b] = rng(mm[1], c);
+      if ((kind === 'ins' || kind === 'delins') && !mm[3]) throw new Error(`"${o}": the inserted sequence is missing.`);
+      if (kind !== 'ins' && kind !== 'delins' && mm[3]) throw new Error(`Cannot read "${o}".`);
+      return { a, b, kind, content: kind === 'ins' || kind === 'delins' ? contentOf(mm[3], c) : [] };
+    }).sort((x, y) => x.a - y.a);
+    const L = lenOf(c);
+    pieces = [];
+    let cur = 0;
+    const ref = (s: number, e: number) => { if (e > s) pieces.push({ chrom: c, start: s, end: e, reversed: false, pter: s === 0, qter: e === L }); };
+    for (const o of parsed) {
+      if (o.a < cur) throw new Error('The changes overlap: describe each stretch of the reference once.');
+      if (o.kind === 'ins') { ref(cur, o.a + 1); pieces.push(...o.content); cur = o.a + 1; continue; }
+      ref(cur, o.a);
+      if (o.kind === 'inv') pieces.push({ chrom: c, start: o.a, end: o.b, reversed: true, pter: o.a === 0, qter: o.b === L });
+      else if (o.kind === 'dup') { ref(o.a, o.b); ref(o.a, o.b); }
+      else if (o.kind === 'delins') pieces.push(...o.content);
+      cur = o.b;
+    }
+    ref(cur, L);
+  }
+  // junctions between pieces not contiguous on the reference
+  const junctions: SvJunction[] = [];
+  /** the junction that joins piece k to the one before */
+  const joins: (SvJunction | null)[] = pieces.map(() => null);
+  for (let k = 0; k + 1 < pieces.length; k++) {
+    const p = pieces[k], q = pieces[k + 1];
+    if (p.chrom === q.chrom && !p.reversed && !q.reversed && p.end === q.start) continue;
+    if (p.chrom === q.chrom && p.reversed && q.reversed && q.end === p.start) continue;
+    const a = p.reversed ? { chrom: p.chrom, pos: p.start, side: 'head' as const } : { chrom: p.chrom, pos: p.end, side: 'tail' as const };
+    const b = q.reversed ? { chrom: q.chrom, pos: q.end, side: 'tail' as const } : { chrom: q.chrom, pos: q.start, side: 'head' as const };
+    const kind: SvJunction['kind'] = a.chrom !== b.chrom ? 'translocation' : a.side === b.side ? 'inversion' : (a.side === 'tail' ? b.pos > a.pos : a.pos > b.pos) ? 'deletion' : 'duplication';
+    junctions.push({ id: `J${junctions.length + 1}`, a, b, reads: 1, kind, evidence: 'typed', precision: 0 });
+    joins[k + 1] = junctions[junctions.length - 1];
+  }
+  if (!junctions.length) throw new Error('This description changes no structure.');
+  if (junctions.some(j => j.kind === 'translocation')) throw new Error('Translocations are not drawn yet: the browser shows one chromosome.');
+  const bps = junctions.flatMap(j => [j.a.pos, j.b.pos]);
+  const L = lenOf(chrom);
+  const lo = Math.min(...bps), hi = Math.max(...bps), pad = Math.max(5000, Math.round((hi - lo) * 0.1));
+  const window = { start: Math.max(0, lo - pad), end: Math.min(L, hi + pad) };
+  const rebuild = (w: { start: number; end: number }) => recFromPieces(pieces, joins, junctions, chrom, w);
+  const rec = rebuild(window);
+  return { chrom, junctions, window, notes, rec, rebuild };
+}
+
+/** The rebuilt chromosome of known pieces: segments cut wherever a piece starts or ends inside the window. */
+function recFromPieces(pieces: Span[], joins: (SvJunction | null)[], junctions: SvJunction[], chrom: string, window: { start: number; end: number }): SvReconstruction {
+  const cuts = [...new Set(pieces.flatMap(p => [p.start, p.end]))].filter(x => x > window.start && x < window.end).sort((x, y) => x - y);
+  const bounds = [window.start, ...cuts, window.end];
+  const segs: SvSegment[] = bounds.slice(0, -1).map((b, i) => ({ id: i, chrom, letter: i < 26 ? String.fromCharCode(65 + i) : `S${i + 1}`, start: b, end: bounds[i + 1], first: i === 0, last: i === bounds.length - 2, i }));
+  const visits = new Map<number, number>();
+  const derPieces: SvPiece[] = [];
+  pieces.forEach((p, k) => {
+    const a = Math.max(p.start, window.start), b = Math.min(p.end, window.end);
+    const inside = segs.filter(x => x.start >= a && x.end <= b);
+    (p.reversed ? [...inside].reverse() : inside).forEach((seg, n) => {
+      const copy = visits.get(seg.id) ?? 0; visits.set(seg.id, copy + 1);
+      derPieces.push({ seg, reversed: p.reversed, copy, via: !derPieces.length ? null : n === 0 && joins[k] ? joins[k]! : 'ref' });
+    });
+  });
+  return {
+    segs, byChr: { [chrom]: segs }, chrs: [chrom],
+    ders: [{ chrom, name: `der(${num(chrom)})`, pieces: derPieces, ends: '', rearranged: true }],
+    lost: segs.filter(x => !visits.has(x.id)), warnings: [], junctions, merged: [], choice: [], options: [], unplaced: [], bpError: {},
+  };
+}
+
+/** Splits `a;[b;c];d` at the top-level semicolons. */
+function splitTop(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '[') depth++;
+    if (ch === ']') depth--;
+    if (ch === ';' && depth === 0) { out.push(cur); cur = ''; } else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}

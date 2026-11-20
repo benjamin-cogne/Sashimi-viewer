@@ -81,6 +81,16 @@ a bookmark to the run folder.
   and reads can be grouped by haplotype. Split reads are joined on one row, clipped sequences shown on a click, and
   the consensus of a clip cluster is ready for BLAT.
 - Structural hints: deletions inside reads, split reads, discordant pairs, soft-clip clusters, duplicated stretches.
+- **SV browser**: a rearrangement rebuilt from the picked arcs, or typed (HGVS, ISCN, `DEL 20:399240-599326`), drawn
+  with its genes; a small variant (under 50 bp, `chr2:g.60461323del`, or on a transcript, `NM_022893.4:c.1592del`,
+  placed on the genome by VariantValidator, else Ensembl's Variant Recoder) is marked on the reference with each ClinVar variant around it, (LOEUF, ClinGen dosage, PanelApp mode of inheritance and diseases) over DGV Gold population CNVs,
+  AChro-Puce recurrent CNVs and ClinVar pathogenic / likely pathogenic SVs and SNVs.
+- **Array-CGH**, a page under the SV browser: the interval tables of CytoGenomics, BED or zip files (one patient each),
+  one tab per patient or all in one table, filtered on a minimum number of probes (3 by default). Each call with its
+  RefSeq genes (GRCh37), PanelApp green genes and modes of inheritance, ClinGen HI / TS and LOEUF, a review priority
+  (HIGH / MODERATE / LOW, from listed rules), a classification, its CNV-Hub page, and drawn in the browser when clicked;
+  the table is exported back with its Classification column. Implemented by Wallid Deb (CHU Nantes,
+  [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr)).
 - **CpG methylation** of long reads (ONT, PacBio; MM / ML tags) in a panel under the coverage. A 5mC ribbon splits
   into HP1 / HP2 where both haplotagged copies are read (≥ 3 calls per CpG each, the minor ≥ 25 %, within one phase
   set) and joins elsewhere. The panel also shows the haplotypes' difference, the allele-specific stretches and the CpG
@@ -96,7 +106,8 @@ a bookmark to the run folder.
 - **Sessions** (JSON, files by name or run folder). The **HTML export** carries each view's coverage, junctions
   and filters, plus its reads, methylation and phasing when they are shown, for readers without the BAM files.
 - **Deep links** from another tool: `#variant=NC_000017.11:g.43094464G>A&label=BRCA1`. Other parameters are
-  `locus`, `pad`, `gene`, `build` and `reads=1`.
+  `locus`, `pad`, `gene`, `build` and `reads=1`. `#sv=DEL%2020:399240-599326` opens the SV browser on a rearrangement (or coordinates,
+  a chromosome, a gene); `#sv` opens the SV browser, `#cgh` its Array-CGH page.
 
 [Full manual](docs/manual.md) ·
 [Methods and validation](docs/algorithms.md) ·
@@ -123,8 +134,11 @@ Requirements and the layout of the sources are in the [manual](docs/manual.md#bu
 
 ## Cite
 
-Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.2, 2026.
+Cogné B. *Sashimi viewer: in-browser Sashimi plots from BAM/CRAM files.* Version 1.3, 2026.
 https://github.com/benjamin-cogne/Sashimi-viewer — see [`CITATION.cff`](CITATION.cff).
+
+Contact: Benjamin Cogné (CHU Nantes), [benjamin.cogne@chu-nantes.fr](mailto:benjamin.cogne@chu-nantes.fr). Array-CGH page: Wallid Deb
+(CHU Nantes), [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).
 
 ## Licence
 
