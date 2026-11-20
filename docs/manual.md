@@ -215,8 +215,13 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
 **Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **? Quick guide**, in the page's bar, walks through it in seven steps
-with screenshots (Esc or × closes it, not the page). **Add samples**, or drop files on the page: interval tables
+Esc to go back; the samples stay while the tab is open). **Examples ▾** (on the empty page and in the frame's bar) adds
+invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
+(22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
+EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,
+in the page's bar, is an interactive tour on these examples (added if missing): each of its 16 steps outlines a part of
+the page and says what to do (pick the examples, Analyse, open More filters, click a call...); doing it moves the tour
+on, **Next** does it for you, **Back**, ← → as well; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,

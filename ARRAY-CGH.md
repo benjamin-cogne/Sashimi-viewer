@@ -7,7 +7,8 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 
 ## What the page does
 
-- **Quick guide.** *? Quick guide* in the page's bar: seven steps, one annotated screenshot each (`CghGuide.tsx`, images in `src/assets/cgh-guide/`, synthetic data, remade by `node docs/cgh-demo/make-guide-shots.cjs`).
+- **Examples.** *Examples ▾* (empty page and frame bar, as the SV browser offers its examples) adds three invented patients (`cghExamples.ts`, CytoGenomics text, GRCh37) through the normal import question: 22q11.2 LCR22A-D deletion (HIGH), 1q21.1 distal BP3-BP4 duplication (AChro-Puce PIEV, ClinGen TS 2 region: MODERATE), terminal 16q24.3 loss breaking in ANKRD11 intron 4 + terminal 9p24.3 gain (der() hint, ANKRD11 5′ part cut, HIGH). Coordinates checked on UCSC hg19 (ncbiRefSeqCurated, ClinGen tracks). Public build: never real data there.
+- **Quick guide.** *? Quick guide* in the page's bar: an interactive tour of 16 steps on the examples (`CghGuide.tsx`): an outline on the target and a popover beside it (kept on screen, following scroll); a step moves on when the user does what it asks, *Next* does it for them; Esc / *Skip tour* ends it (the store's `help` keeps Esc from closing the page). Targets found by `data-cgh-*` attributes. The former screenshot guide (`src/assets/cgh-guide/`, `docs/cgh-demo/`) is removed.
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names, only when the header row looks like one);
@@ -58,6 +59,8 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `cghTopo.ts` | terminal / arm / chromosome labels, rearrangement hints |
 | `cghLabBenign.ts` | the laboratory's benign list |
 | `cghExons.ts` | exons cut and reading frame |
+| `cghExamples.ts` | built-in invented example patients |
+| `CghGuide.tsx` | the interactive tour (*? Quick guide*) |
 
 Also new: this file, `ARRAY-CGH.md`.
 

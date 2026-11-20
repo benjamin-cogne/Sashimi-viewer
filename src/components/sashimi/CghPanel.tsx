@@ -11,6 +11,7 @@ import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
 import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
+import { CGH_EXAMPLES, loadExamples } from './cghExamples';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
 import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
@@ -32,6 +33,25 @@ function CghAddButton({ compact }: { compact?: boolean }) {
       <input data-cgh-input type="file" multiple accept={CGH_ACCEPT} className="hidden"
         onChange={e => { const fs = e.target.files; if (fs?.length) void cgh.add(fs); e.target.value = ''; }} />
     </label>
+  );
+}
+
+/** "Examples ▾": invented patients (cghExamples.ts) added through the import question, as the SV browser offers its examples */
+export function CghExamplesMenu({ compact }: { compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const pick = (id: string) => { setOpen(false); void loadExamples(id); };
+  return (
+    <Popover width={330} open={open} onOpenChange={setOpen} label="Examples" title="Invented patients (GRCh37) to try the page: added beside any patient loaded, × on a tab takes one off"
+      buttonClass={`inline-flex items-center gap-1.5 rounded-[6px] border font-medium whitespace-nowrap bg-white border-slate-200 text-slate-700 hover:border-accent-300 hover:bg-accent-50 ${compact ? 'h-[26px] px-2 text-xs rounded-lg' : 'h-[34px] px-3 text-[12.5px]'}`}
+      button={<>Examples ▾</>}>
+      <div className="text-xs p-1" data-cgh-examples>
+        <div className="text-[10.5px] text-slate-500 mb-1">Invented patients, GRCh37 (no real data)</div>
+        {CGH_EXAMPLES.map(x => <button key={x.id} data-cgh-example={x.id} onClick={() => pick(x.id)} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50">
+          <span className="text-accent-700 font-medium">{x.name}</span> <span className="text-slate-700">{x.label}</span>
+          <span className="block text-[10.5px] text-slate-500">{x.hint}</span></button>)}
+        <button data-cgh-example="all" onClick={() => pick('all')} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50 text-accent-700 font-semibold border-t border-slate-100 mt-0.5">All three</button>
+      </div>
+    </Popover>
   );
 }
 
@@ -112,7 +132,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
-      <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
+      <div data-cgh-question className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
           <div className="text-[11px] text-slate-500 mt-0.5">Calls with fewer probes, or smaller, than this are not analysed: neither listed nor annotated (both can be changed in the list afterwards).</div>
@@ -153,7 +173,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
           <button onClick={() => cgh.cancel()} className="h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50">Cancel</button>
-          {samples.length > 0 && <button autoFocus onClick={() => cgh.accept(n, sexes, kb)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
+          {samples.length > 0 && <button data-cgh-analyse autoFocus onClick={() => cgh.accept(n, sexes, kb)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
         </div>
       </div>
     </div>
@@ -279,10 +299,11 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         </div>
         <span className="ml-auto self-center flex flex-wrap items-center justify-end gap-x-2 gap-y-1 py-1">
           <CghAddButton compact />
+          <CghExamplesMenu compact />
           <LabBenignButton />
           <span className="text-[11px] text-slate-500" title="The build the interval table states (Genome hg19); the calls are drawn on it">{filesBuilds.join(', ')}{listed.some(e => !e.f.build) ? ' (no build in a file: GRCh37 assumed)' : ''}</span>
 {exportFiles.length > 1
-            ? <Popover width={340} title={EXPORT_TITLE} label="Export classified tables"
+            ? <span data-cgh-export-btn><Popover width={340} title={EXPORT_TITLE} label="Export classified tables"
                 buttonClass={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
                 button={<><Icon name="download" size={13} />Export classified tables{listedDirty ? ' •' : ''} ▾</>}>
                 <div className="text-xs" data-cgh-export>
@@ -296,14 +317,14 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                     <button className="h-[24px] px-2 rounded bg-accent-600 text-white font-semibold hover:bg-accent-700" title="Each file in turn, a moment apart; the browser may ask to allow several downloads" onClick={exportAll}>export all ({exportFiles.length})</button>
                   </div>
                 </div>
-              </Popover>
-            : <button onClick={() => exportFiles[0] && exportOne(exportFiles[0])} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+              </Popover></span>
+            : <button data-cgh-export-btn onClick={() => exportFiles[0] && exportOne(exportFiles[0])} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
                 title={EXPORT_TITLE}>
                 <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>}
         </span>
       </div>
       <div className="pt-2" />
-      <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs">
+      <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs" data-cgh-filters>
         {listed.length === 1 && <SexSelect value={s.sex[listed[0].x.key] ?? null} onChange={v => cgh.setSex(listed[0].x.key, v)} />}
         <span className="[&>span]:!h-[26px] [&>span]:!rounded-lg [&>span]:!text-xs"><Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" /></span>
         <Segmented size="sm" label="Type" title="Losses, gains or both" value={f.kind} onChange={v => cgh.setFilter({ kind: v })}
@@ -342,7 +363,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className="w-full text-[11.5px] border-collapse">
-          <thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
+          <thead data-cgh-thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
             <tr className="border-b border-slate-200">
               {!s.sample && samples.length > 1 && <th className="px-1.5 py-0.5 font-medium">Sample</th>}
               <th className="px-1.5 py-0.5 font-medium">Band{rc('bands')}</th><th className="px-1.5 py-0.5 font-medium">Position (GRCh37)</th>
@@ -374,7 +395,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
               const hub = cnvHubUrl(c, fl.build ?? 'GRCh37');
               const v = views.get(c.id)!;
               return [
-                <tr key={c.id} data-cgh-row data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
+                <tr key={c.id} data-cgh-row data-cgh-call={c.id} data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''}`}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
@@ -388,8 +409,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   : <><GenesCell c={c} v={v} />
                   <PanelCell v={v} />
                   <DosageCell c={c} v={v} />
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><PriorityBadge v={v} /></td></>}
-                  <td className="px-1.5 py-0.5 whitespace-nowrap sticky right-[72px] z-[1] bg-inherit shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]" onClick={e => e.stopPropagation()}>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap" data-cgh-priority><PriorityBadge v={v} /></td></>}
+                  <td data-cgh-class className="px-1.5 py-0.5 whitespace-nowrap sticky right-[72px] z-[1] bg-inherit shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]" onClick={e => e.stopPropagation()}>
                     <select value={inList ? cls : ''} aria-label={`Classification of ${c.chrom}:${c.start}-${c.end}`} style={{ borderLeftColor: inList ? col ?? '#d3dbe5' : '#d3dbe5' }}
                       title={!inList && cls ? `The file says “${cls}”: kept in the export unless a class is chosen` : 'The class written in the export'}
                       onChange={e => cgh.setClass(c, e.target.value)}
@@ -552,7 +573,7 @@ function LabBenignButton() {
   };
   return (
     <span className="inline-flex items-center gap-1">
-      <label className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 cursor-pointer whitespace-nowrap hover:border-slate-300 hover:bg-slate-50"
+      <label data-cgh-lab className="inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 cursor-pointer whitespace-nowrap hover:border-slate-300 hover:bg-slate-50"
         title={"The laboratory's list of benign CNVs: a BED (chrom, start 0-based, end, optional name that may say del / dup / loss / gain; without it the entry applies to both types). A call sharing " + Math.round(LAB_COVER * 100) + " % of itself with an entry of its type is marked and can be suggested as Benign.\nA laboratory reference, not patient data: kept in this browser for the next sessions."}>
         <Icon name="upload" size={13} />Lab benign CNVs (BED)…
         <input data-lab-input type="file" accept=".bed,.txt,.tsv,text/plain" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void load(f); e.target.value = ''; }} />
@@ -569,7 +590,7 @@ function LabBenignButton() {
 function TopoTag({ c, v, hints }: { c: CghCnv; v: View; hints: string[] | undefined }) {
   const t = v.ann?.topo, w = topoLabel(t);
   if (!w) return null;
-  return <span className="ml-1 inline-flex items-center rounded border border-slate-300 px-1 text-[9.5px] font-medium text-slate-500" title={[...topoWords(t, c.chrom), ...(hints ?? [])].join('\n')}>{w}{hints?.length ? ' ⚠' : ''}</span>;
+  return <span data-cgh-topo className="ml-1 inline-flex items-center rounded border border-slate-300 px-1 text-[9.5px] font-medium text-slate-500" title={[...topoWords(t, c.chrom), ...(hints ?? [])].join('\n')}>{w}{hints?.length ? ' ⚠' : ''}</span>;
 }
 function DosageCell({ c, v }: { c: CghCnv; v: View }) {
   if (!v.ann || v.ann.state === 'loading') return <td className="px-1.5 py-0.5 text-slate-400">…</td>;
@@ -616,7 +637,7 @@ function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, on
       {lab && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Lab benign list</span> <span className="text-violet-800">{labText(lab)}</span> <span className="text-slate-500">· a suggestion: the class is yours to give</span></div>}
       {(topoWords(v.ann.topo, c.chrom).length > 0 || hints.length > 0) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Position</span> {topoWords(v.ann.topo, c.chrom).join(' · ')}{hints.map(h => <div key={h} className="text-violet-800">{h}</div>)}</div>}
       <div className="grid gap-x-6 gap-y-1 grid-cols-1 min-[1100px]:grid-cols-2">
-        <div>
+        <div data-cgh-reasons>
           <div className="font-semibold text-slate-900">Priority: <span style={{ color: LEVEL_STYLE[v.score.level].color }}>{LEVEL_STYLE[v.score.level].label}</span> <span className="font-normal text-slate-500">(a proposal for the review, not a class)</span></div>
           {v.score.reasons.length ? v.score.reasons.map(r => <div key={r.id}>{dot(r.level)}{r.text}</div>) : <div className="text-slate-500">No protein-coding gene in the call.</div>}
           {v.waiting > 0 && <div className="text-slate-500">PanelApp: {v.waiting} gene{v.waiting > 1 ? 's' : ''} still asked…</div>}
@@ -636,7 +657,7 @@ function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, on
           <div className="font-semibold text-slate-900">ClinGen dosage regions</div>
           {regionsScored(c, v.ann.regions).map(r => <div key={r.id}>{r.label} <span className="text-slate-500">({r.id})</span>: HI <b>{r.hi ?? '–'}</b>, TS <b>{r.ts ?? '–'}</b> <span className="text-slate-500">({Math.round(r.covered * 100)} % of the region in the call)</span></div>)}
         </div>}
-        {v.ann.achro.length > 0 && <div>
+        {v.ann.achro.length > 0 && <div data-cgh-achro>
           <div className="font-semibold text-slate-900">AChro-Puce</div>
           {v.ann.achro.map(a => <div key={a.id}>{a.name}: <b>{a.cls.join(' / ')}</b> <span className="text-slate-500">({a.how})</span></div>)}
         </div>}
@@ -648,7 +669,7 @@ function CnvDetail({ c, v, onRetry, lab, hints, sex, series, note, focusNote, on
           <th className="px-1.5 py-0.5 font-medium">LOEUF (pLI)</th><th className="px-1.5 py-0.5 font-medium">PanelApp</th><th className="px-1.5 py-0.5 font-medium">Diseases (PanelApp)</th>
         </tr></thead>
         <tbody>{shownGenes.map(x => (
-          <tr key={x.g.symbol} className="border-b border-slate-100">
+          <tr key={x.g.symbol} data-cgh-gene={x.g.symbol} className="border-b border-slate-100">
             <td className="px-1.5 py-0.5"><i className="font-semibold">{x.g.symbol}</i> <span className="text-slate-400">{x.g.tx}</span></td>
             <td className="px-1.5 py-0.5">{v.ann!.source === 'file' ? <span className="text-amber-700" title="RefSeq could not be read: the file names the gene, its extent is not known here">from the file</span> : <InCall g={x.g} />}</td>
             <td className="px-1.5 py-0.5 font-semibold" style={{ color: x.hi === 3 ? '#b91c1c' : x.hi === 2 ? '#c2410c' : undefined }}>{dosageText(x.hi)}</td>
