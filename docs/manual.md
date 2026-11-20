@@ -219,9 +219,9 @@ Esc to go back; the samples stay while the tab is open). **Examples ▾** (on th
 invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
 (22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
 EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,
-in the page's bar, is an interactive tour on these examples (added if missing): each of its 16 steps outlines a part of
-the page and says what to do (pick the examples, Analyse, open More filters, click a call...); doing it moves the tour
-on, **Next** does it for you, **Back**, ← → as well; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
+in the page's bar, is an interactive tour on these examples (added if missing): each of its 15 steps outlines a part of
+the page and explains it, and the tour does the actions itself (loads the examples, Analyse, opens More filters and the
+calls it talks about): only **Next** to click; **Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
