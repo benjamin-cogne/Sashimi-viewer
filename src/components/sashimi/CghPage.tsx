@@ -14,7 +14,7 @@ import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 import ContactLink from '../ContactLink';
-import { useClinGenTrack } from './CghClinGenTrack';
+import { useCnvRegionTracks } from './PanelAppCnvTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
@@ -61,7 +61,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   // the ClinGen track folded by default: HI 3 / TS 3 regions only, the recurrent list and its LCRs on demand
-  const track = useClinGenTrack(drawn?.build ?? 'GRCh37');
+  const cnvTracks = useCnvRegionTracks(drawn?.build ?? 'GRCh37');
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
     try { setDrawn(drawOf(c, f)); setError(null); } catch (e) { setError(`${c.chrom}:${c.start}-${c.end}: ${(e as Error).message}`); }
@@ -114,7 +114,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
             </div>
             <div className="[&>div:first-child]:mt-2">
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
-                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />
+                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTracks={cnvTracks} />
             </div>
           </div>
         )}

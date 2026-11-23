@@ -1,5 +1,5 @@
 /**
- * The "ClinGen CNV regions" track (SvGenomeBrowser's optional `extraTrack`), the same in every browser: the SV browser,
+ * The "ClinGen CNV regions" track (one of SvGenomeBrowser's `extraTracks`, off by default: PanelAppCnvTrack's useCnvRegionTracks), the same in every browser: the SV browser,
  * the SV cartoon's and the array-CGH page's (useClinGenTrack):
  * HI 3 / TS 3 dosage regions, the recurrent CNV list's regions and its breakpoint / LCR segments, from embedded data.
  */
