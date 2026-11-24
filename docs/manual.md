@@ -225,8 +225,13 @@ calls it talks about): only **Next** to click; **Back**, ← → as well; the bo
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
-one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
-already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
+one patient each: the interval tables and BED files inside are found by their content and read (one nested zip level; a file
+already added is not added twice), the patient named by the table's Record Name, else by the zip. The other files of an
+automated export (images, XML, QC tables…) are left aside, said in one line of the question (*ignored: n other files*);
+a table whose columns are not recognised is only asked about when the zip holds no table read by itself. The probes' log
+ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
+memory with the zip's patient, for a probe view to come (nothing drawn yet); dropped alone, the file goes with the loaded
+sample of that name, else the question says it was not matched. The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
 with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
@@ -243,6 +248,7 @@ A table whose columns are not recognised (a CSV with `;` or `,`, French headers,
 Files read (also inside zips):
 
 - **Text tables** (`.txt`, `.tsv`, `.csv`, a CytoGenomics `.xls` that is text): tab, `;` or `,`; UTF-8 with or without BOM, UTF-16 LE / BE (BOM, or recognised by its NUL bytes), else Windows-1252; CR LF, LF or CR alone; blank lines, trailing delimiters, quoted fields holding delimiters or line breaks.
+- **CytoGenomics interval-based report** (*IntervalBasedReport*, often named `.xls` but tab-separated text; or an `.xlsx`), read without the mapping dialog: `Key: value` header lines (`Genome: hg19` gives GRCh37, `hg38` GRCh38), the header `AberrationNo, Chr, Cytoband, Start, Stop, #Probes, Amplification, Gain, Loss, Deletion, pval, Gene Names`, then a line holding a sample's name before its calls (several samples possible; else the sample of `Array Design Info`). Each call's log ratio is the non-zero one of the four columns (the largest in absolute value if several), its type the column's (Amplification / Gain: gain; Loss / Deletion: loss), else the sign; the p-value is shown in the call's line above the browser. No copy number is given: no ISCN is written. Exported as it came, with Classification and Comment columns added.
 - **`.xlsx`**: the first worksheet (shared and inline strings, numbers), read as a table; exported as tab-separated text (`.classified.txt`), never as `.xlsx`. An Excel 97-2003 binary `.xls` is refused: save it as `.xlsx`, `.csv` or tab-separated text.
 - **BED**: `chr1`, `1`, `CHR1`, `Chr1`, `23` / `24` for X / Y; a 4th column saying the type (a BED of three columns is refused with that reason).
 - **SV / CNV VCF** (`.vcf`, `.vcf.gz`): SVTYPE DEL / DUP / CNV (or ALT `<DEL>`, `<DUP>`, `<CNn>`) with END or SVLEN; the copy number from the first sample's CN; BND / INV / INS skipped and counted, records the sample does not carry (GT 0/0) skipped; the first sample read (a note when there are more); the build from `##reference` / `##contig`; no probe count, as for a BED. Exported with the class and the note in INFO (`CGH_CLASS`, `CGH_NOTE`, percent-encoded), read back on the next load.

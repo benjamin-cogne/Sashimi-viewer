@@ -13,7 +13,9 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names, only when the header row looks like one);
   - `.xlsx` (first sheet), BED, SV VCF (`.vcf`, `.vcf.gz`);
-  - zips holding any of these (one patient each).
+  - CytoGenomics' automated interval-based report (`IntervalBasedReport.xls`, tab-separated text despite its name, or `.xlsx`), recognised by its header (`AberrationNo`, `Chr`, `Start`, `Stop`, `#Probes`, `Amplification` / `Gain` / `Loss` / `Deletion`) and read without the mapping dialog (`parseAberrations` in `cghIntervals.ts`): one log ratio from the four columns (the non-zero one, the largest |value| if several), the type from the column (else the sign), `pval` (`CghCnv.pval`), genes, the build from `Genome:`, the sample from its name line (else `Array Design Info`); copies null (no ISCN written, mosaic from the log ratio); exported as it came plus Classification / Comment columns;
+  - zips holding any of these (one patient each): tables found by content, the other files of an automated export left aside and listed in one note (*ignored: n other files*); a table needing the mapping is asked only when the zip holds no table read by itself;
+  - probes' log ratios (`CGH_Log_Ratio.txt`, `cghProbes.ts`): kept as bytes with the zip's patient (alone: with the loaded sample of the `Normalized log ratio(<name>)` header, else a note *not matched*), read on first `cgh.probes(sampleKey)` into `Uint32Array` start / end and `Float32Array` log ratios per chromosome (NaN kept); `cgh.hasProbes`. Nothing drawn yet.
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
 - **Import question.** Minimum number of probes (3) and minimum size (log slider: any, 10 kb to 5 Mb, or a value typed in
   bp / kb / Mb, also in the filter bar); the 200 largest calls annotated by
@@ -65,6 +67,7 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `cghLabBenign.ts` | the laboratory's benign list |
 | `cghExons.ts` | exons cut and reading frame |
 | `cghExamples.ts` | built-in invented example patients |
+| `cghProbes.ts` | probes' log ratios (`CGH_Log_Ratio.txt`): detection, lazy reading into typed arrays |
 | `CghGuide.tsx` | the interactive tour (*? Quick guide*) |
 | `CghClinGenTrack.tsx` | the *ClinGen CNV regions* track (`clinGenTrack(build)`) and the detail's recurrent-CNV lines |
 | `cghRecurrent.ts` | ClinGen regions on a chromosome, AChro-Puce PIEV tags, a call's recurrent matches and LCR ends |

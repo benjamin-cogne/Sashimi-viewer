@@ -5,10 +5,11 @@
  */
 import { useSyncExternalStore } from 'react';
 import { unzipSync } from 'fflate';
-import { parseCghFile, leafOf, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
+import { parseCghFile, aberrationHeader, leafOf, toClass, type CghFile, type CghCnv, type CghSex } from './cghIntervals';
 import { NeedsMapping, findMap, splitRecords, type MapSpec } from './cghMapping';
 import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from './cghFormats';
 import { isVcf, parseVcf } from './cghVcf';
+import { parseProbes, probeSampleOf, type CghProbes } from './cghProbes';
 import { seriesOf } from './cghSeries';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
@@ -98,10 +99,13 @@ const TABLE = /\.(txt|tsv|csv|xlsx?|bed|vcf)(\.gz)?$/i;
 /** the file pickers' list (kept in step with what `add` reads) */
 export const CGH_ACCEPT = '.txt,.tsv,.csv,.bed,.xls,.xlsx,.vcf,.gz,.zip,text/plain,application/zip';
 /** what the pickers take, in words (the page's help and the buttons' tooltips) */
-export const CGH_FILES_TEXT = 'the interval table of each patient exported by CytoGenomics (.txt), any other table of calls (.txt, .tsv, .csv, .xlsx: its columns are asked when not recognised; a position in one cell such as chr1:72523846-72667555 or an ISCN is read), BED files, SV / CNV VCF files (.vcf, .vcf.gz: DEL, DUP, CNV), or zip files of them (one patient per zip). Text in UTF-8, UTF-16 or Windows-1252; an old binary .xls must be saved as .xlsx, .csv or tab-separated text first';
+export const CGH_FILES_TEXT = 'the interval table of each patient exported by CytoGenomics (.txt, or its automated IntervalBasedReport .xls), any other table of calls (.txt, .tsv, .csv, .xlsx: its columns are asked when not recognised; a position in one cell such as chr1:72523846-72667555 or an ISCN is read), BED files, SV / CNV VCF files (.vcf, .vcf.gz: DEL, DUP, CNV), or zip files of them (one patient per zip). Text in UTF-8, UTF-16 or Windows-1252; an old binary .xls must be saved as .xlsx, .csv or tab-separated text first';
 /** a file's text read with the mapping remembered for its header when there is one, else by its header's names */
 function readTable(text: string, name: string, fallback?: string): CghFile {
-  const hit = findMap(splitRecords(text));
+  const recs = splitRecords(text);
+  // CytoGenomics' interval-based report is read by its own layout, never by a remembered mapping
+  if (aberrationHeader(recs) >= 0) return parseCghFile(text, name, fallback);
+  const hit = findMap(recs);
   if (hit) { try { return { ...parseCghFile(text, name, fallback, { ...hit.spec, opts: { ...hit.spec.opts, headerRow: hit.row } }), remembered: true }; } catch { /* the remembered columns do not fit: by names */ } }
   return parseCghFile(text, name, fallback);
 }
@@ -120,17 +124,17 @@ function readBytes(bytes: Uint8Array, name: string, fallback?: string): ReadOne 
   } catch (x) { if (x instanceof NeedsMapping) return { toMap: { name, text, fallback } }; throw x; }
 }
 /** the tables of a zip, and of the zips inside it (one level): macOS's resource files left out, the other files counted */
-function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; bytes: Uint8Array }[]; skipped: number } {
-  let skipped = 0;
+function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; bytes: Uint8Array }[]; skipped: string[] } {
+  const skipped: string[] = [];
   const files = unzipSync(data, { filter: f => {
     if (f.name.endsWith('/') || /(^|\/)__MACOSX\/|(^|\/)\._/.test(f.name)) return false;
     const keep = (TABLE.test(f.name) || (depth === 0 && /\.zip$/i.test(f.name))) && f.originalSize < 200e6;
-    if (!keep) skipped++;
+    if (!keep) skipped.push(f.name);
     return keep;
   } });
   const entries: { path: string; bytes: Uint8Array }[] = [];
   for (const [path, bytes] of Object.entries(files)) {
-    if (/\.zip$/i.test(path)) { const inner = zipEntries(bytes, depth + 1); skipped += inner.skipped; entries.push(...inner.entries.map(e => ({ path: `${path} › ${e.path}`, bytes: e.bytes }))); }
+    if (/\.zip$/i.test(path)) { const inner = zipEntries(bytes, depth + 1); skipped.push(...inner.skipped); entries.push(...inner.entries.map(e => ({ path: `${path} › ${e.path}`, bytes: e.bytes }))); }
     else entries.push({ path, bytes });
   }
   return { entries, skipped };
@@ -138,6 +142,14 @@ function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; byt
 
 /** a patient's classes or notes changed / exported: the patients still to export, and whether any is */
 const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]: true as const }; return { dirtyKeys, dirty: true }; };
+/**
+ * The probes' log ratios of each patient (CGH_Log_Ratio.txt), by sample key: the file's bytes until first asked, then
+ * read once into typed arrays. Kept out of the state (no redraw; nothing drawn from them yet), in this tab only.
+ */
+const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, CghProbes | null>();
+const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); } };
+/** a few names of the files left aside in a zip */
+const someNames = (names: string[]) => names.map(n => leafOf(n)).slice(0, 4).join(', ') + (names.length > 4 ? ', …' : '');
 const exportedOf = (keys: string[]) => { const dirtyKeys = { ...state.dirtyKeys }; for (const k of keys) delete dirtyKeys[k]; return { dirtyKeys, dirty: Object.keys(dirtyKeys).length > 0 }; };
 
 export const cgh = {
@@ -150,11 +162,26 @@ export const cgh = {
   /** a patient's calls under the minimums listed, or hidden again */
   setRevealed(key: string, on: boolean) { const revealed = { ...state.revealed }; if (on) revealed[key] = true; else delete revealed[key]; set({ revealed }); },
   setModes(m: Record<string, GeneModes | 'loading' | 'error'>) { set({ modes: { ...state.modes, ...m } }); },
+  /** whether a patient has its probes' log ratios (CGH_Log_Ratio.txt) */
+  hasProbes: (sampleKey: string) => probeBytes.has(sampleKey) || !!probeRead.get(sampleKey),
+  /** a patient's probes' log ratios, read on first use (null: none, or not readable) */
+  probes(sampleKey: string): CghProbes | null {
+    if (!probeRead.has(sampleKey)) {
+      const b = probeBytes.get(sampleKey); if (!b) return null;
+      let p: CghProbes | null = null;
+      try { p = parseProbes(b); } catch { /* not readable */ }
+      probeRead.set(sampleKey, p); probeBytes.delete(sampleKey);
+    }
+    return probeRead.get(sampleKey) ?? null;
+  },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [], notes: string[] = [], toMap: CghState['toMap'] = [];
     const seen = new Set([...state.files, ...(state.pending?.files ?? [])].map(f => f.lines.join('\n')));
     const take = (f: CghFile) => { const k = f.lines.join('\n'); if (seen.has(k)) { notes.push(`${f.name}: already added`); return; } seen.add(k); files.push(f); };
+    // probe log-ratio files given alone (or in a zip without a table): matched to a sample by name after the loop
+    const loose: { name: string; sample: string; bytes: Uint8Array }[] = [];
+    const keep = (keys: string[], bytes: Uint8Array) => { for (const k of keys) { probeBytes.set(k, bytes); probeRead.delete(k); } };
     for (const f of Array.from(list)) {
       try {
         const buf = new Uint8Array(await f.arrayBuffer());
@@ -162,23 +189,48 @@ export const cgh = {
           // one patient per zip: its interval tables (a .txt must be one: other text files are skipped), its BED files
           const { entries, skipped } = zipEntries(buf);
           const patient = f.name.replace(/\.zip$/i, '');
-          let n = 0, other = skipped, asked = 0;
+          // the tables are found by their content; the other files (images, XML, QC tables…) are left aside, counted
+          const other = [...skipped], asks: CghState['toMap'] = [], read: CghFile[] = [], probesIn: { name: string; sample: string; bytes: Uint8Array }[] = [];
           for (const e of entries) {
+            const path = `${f.name} › ${e.path}`;
             try {
-              const r = readBytes(e.bytes, `${f.name} › ${e.path}`, patient);
-              if ('toMap' in r) { toMap.push(r.toMap); asked++; continue; }
-              if (r.file.format === 'bed' && !/\.bed$/i.test(e.path)) { other++; continue; }
-              take(r.file); n++;
+              const raw = isGzip(e.bytes) ? gunzip(e.bytes) : e.bytes;
+              const ps = probeSampleOf(raw);
+              if (ps != null) { probesIn.push({ name: path, sample: ps, bytes: raw }); continue; }
+              const r = readBytes(raw, path, patient);
+              if ('toMap' in r) { asks.push(r.toMap); continue; }
+              if (r.file.format === 'bed' && !/\.bed$/i.test(e.path)) { other.push(e.path); continue; }
+              read.push(r.file); take(r.file);
               if (r.note) notes.push(r.note);
-            } catch (x) { if ((x as Error).message === OLE_MESSAGE) errors.push(`${f.name} › ${e.path}: ${OLE_MESSAGE}`); else other++; }
+            } catch (x) { if ((x as Error).message === OLE_MESSAGE) errors.push(`${path}: ${OLE_MESSAGE}`); else other.push(e.path); }
           }
-          if (!n && !asked) errors.push(`${f.name}: no interval table or BED inside (${entries.length + skipped} file${entries.length + skipped > 1 ? 's' : ''})`);
-          else if (other) notes.push(`${f.name}: ${n} table${n > 1 ? 's' : ''} read, ${other} other file${other > 1 ? 's' : ''} skipped`);
+          const n = read.length;
+          // a table whose columns are not recognised is asked only when the zip holds no table read by itself
+          if (n) other.push(...asks.map(a => a.name)); else toMap.push(...asks);
+          // one patient per zip: its probe log ratios go with its sample(s) (by name when several)
+          const ss = read.flatMap(x => x.samples);
+          for (const p of probesIn) {
+            const to = ss.length === 1 ? ss : ss.filter(x => x.name === p.sample);
+            if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${f.name}: probe log ratios (${leafOf(p.name)}) kept for ${to[0].name}`); }
+            else loose.push(p);
+          }
+          const total = entries.length + skipped.length;
+          if (!n && !asks.length && !probesIn.length) errors.push(`${f.name}: no interval table or BED inside (${total} file${total > 1 ? 's' : ''})`);
+          else if (other.length) notes.push(`${f.name}: ${n} table${n !== 1 ? 's' : ''} read; ignored: ${other.length} other file${other.length > 1 ? 's' : ''} (${someNames(other)})`);
         } else {
+          const raw = isGzip(buf) ? gunzip(buf) : buf, ps = probeSampleOf(raw);
+          if (ps != null) { loose.push({ name: f.name, sample: ps, bytes: raw }); continue; }
           const r = readBytes(buf, f.name);
           if ('toMap' in r) toMap.push(r.toMap); else { take(r.file); if (r.note) notes.push(r.note); }
         }
       } catch (e) { errors.push(`${f.name}: ${(e as Error).message.replace(`${f.name}: `, '')}`); }
+    }
+    // a probe log-ratio file alone: the sample(s) of that name, loaded, waiting or read now
+    const all = [...state.files, ...(state.pending?.files ?? []), ...files].flatMap(x => x.samples);
+    for (const p of loose) {
+      const to = all.filter(x => x.name === p.sample);
+      if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${leafOf(p.name)}: probe log ratios kept for ${p.sample}`); }
+      else notes.push(`${leafOf(p.name)}: probe log ratios of "${p.sample}" not matched to a loaded sample (not kept)`);
     }
     // files dropped while the question is open join it
     const p = state.pending, next = { files: [...(p?.files ?? []), ...files], errors: [...(p?.errors ?? []), ...errors], notes: [...(p?.notes ?? []), ...notes] };
@@ -207,7 +259,7 @@ export const cgh = {
     const files = [...state.files, ...p.files];
     set({ files, pending: null, filter, sex, sample: p.files[0]?.samples[0]?.key ?? state.sample });
   },
-  cancel() { set({ pending: null }); },
+  cancel() { dropProbes(state.pending?.files.flatMap(f => f.samples.map(x => x.key)) ?? []); set({ pending: null }); },
   setLab(lab: LabBenign | null) { set({ lab, labStored: storeLab(lab), filter: lab ? state.filter : { ...state.filter, lab: 'any' } }); },
   setFilter(patch: Partial<CghFilter>) {
     const filter = { ...state.filter, ...patch };
@@ -223,6 +275,7 @@ export const cgh = {
   remove(sampleKey: string) {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);
     const left = files.flatMap(f => f.samples);
+    dropProbes([sampleKey]);
     set({ files, sample: state.sample === sampleKey ? left[0]?.key ?? null : state.sample, ...exportedOf([sampleKey]) });
   },
   /** these patients' classes and notes written to a file */

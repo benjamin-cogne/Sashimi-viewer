@@ -48,6 +48,8 @@ export interface CghCnv {
   note: string;
   /** the file's line of this call (0-based), for the export */
   line: number;
+  /** the call's p-value, when the file gives one (CytoGenomics' interval-based report) */
+  pval?: number | null;
 }
 export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[];
   /** the sex a header line gives (Gender, Sex), else null */
@@ -68,7 +70,7 @@ export interface CghFile {
   headerLine: number | null; commentCol: number | null;
   samples: CghSample[];
   warnings: string[];
-  /** the delimiter (tab for the software's own export), and the columns this file was read with (null for a BED) */
+  /** the delimiter (tab for the software's own export), and the columns this file was read with (null for a BED and an interval-based report) */
   delim: string; spec: MapSpec | null;
   /** the zip's patient name, to read the file again with other columns */
   fallback?: string;
@@ -133,7 +135,9 @@ export function parseCghFile(text: string, fileName: string, fallbackSample?: st
   const leaf = leafOf(fileName);
   const base = fallbackSample ?? leaf.replace(/\.(txt|tsv|csv|bed|xlsx?)$/i, '');
   let f: Omit<CghFile, 'saveAs'>;
-  if (spec) f = parseInterval(lines, id, fileName, base, eol, spec);
+  const ab = spec ? -1 : aberrationHeader(lines);
+  if (ab >= 0) f = parseAberrations(lines, id, fileName, base, eol, ab);
+  else if (spec) f = parseInterval(lines, id, fileName, base, eol, spec);
   else {
     const hi = lines.findIndex(l => { const c = l.split('\t').map(norm); return c.includes('chromosome') && c.includes('start') && (c.includes('stop') || c.includes('end')); });
     try {
@@ -228,6 +232,80 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   if (swapped) warnings.push(`${count(swapped, 'row')} with start after end: the two swapped`);
   if (!samples.size) throw new Error(`${fileName}: no call could be read (an interval table needs Chromosome, Start, Stop, or a position in one column, and a Type, a copy number, an ISCN or a log ratio).`);
   return { id, name: fileName, format: 'interval', build: cghBuild(buildText) ?? iscnBuild ?? opts.build, buildText, meta, lines, eol, classCol: c.cls >= 0 ? c.cls : null, classSuffix: suffixYes > suffixNo ? ';;' : '', headerLine: hi >= 0 ? hi : null, commentCol: c.note >= 0 ? c.note : null, samples: [...samples.values()], warnings, delim: d, spec, skipped, firstSkip };
+}
+
+/** the four columns of CytoGenomics' interval-based report holding a call's log ratio, and the type each one says */
+const ABERR_COLS: [string, CghKind][] = [['amplification', 'gain'], ['gain', 'gain'], ['loss', 'loss'], ['deletion', 'loss']];
+/**
+ * The header line of CytoGenomics' automated interval-based report (IntervalBasedReport, often named .xls although it is
+ * tab-separated text): AberrationNo, Chr, Start, Stop, #Probes and Amplification / Gain / Loss / Deletion; -1 when none.
+ */
+export function aberrationHeader(lines: string[]): number {
+  for (let i = 0; i < Math.min(lines.length, 300); i++) {
+    if (!/aberrationno/i.test(lines[i])) continue;
+    const c = lines[i].split('\t').map(norm);
+    if (['aberrationno', 'chr', 'start', 'stop', 'probes'].every(k => c.includes(k)) && ABERR_COLS.some(([k]) => c.includes(k))) return i;
+  }
+  return -1;
+}
+/**
+ * The interval-based report: `Key: value` header lines (Genome: hg19, Array Design Info: sample[design]…), the table's
+ * header, then for each sample a line holding only its name and its calls, each with its log ratio in ONE of
+ * Amplification / Gain / Loss / Deletion (the others 0): the non-zero one (the largest in absolute value if several),
+ * the type from its column (Amplification / Gain: gain; Loss / Deletion: loss), else from its sign. No copy number.
+ */
+function parseAberrations(lines: string[], id: string, fileName: string, base: string, eol: string, hi: number): Omit<CghFile, 'saveAs'> {
+  const meta: [string, string][] = [];
+  for (const l of lines.slice(0, hi)) {
+    const m = l.match(/^\s*([^:\t]+?)\s*(?::|\t)\s*(.*)$/);
+    if (m) meta.push([m[1].trim(), m[2].replace(/\t+/g, ' ').trim()]);
+  }
+  const metaOf = (re: RegExp) => meta.find(([k]) => re.test(k))?.[1] || null;
+  const buildText = metaOf(/^genome$/i);
+  // Array Design Info: 26X0001[012345_20200101]: the sample before its design
+  const design = metaOf(/^array design info$/i)?.match(/^\s*([^[\],;]+?)\s*\[/)?.[1] ?? null;
+  const head = lines[hi].split('\t').map(norm), col = (k: string) => head.indexOf(k);
+  const cChr = col('chr'), cBand = col('cytoband'), cStart = col('start'), cStop = col('stop'), cProbes = col('probes'), cP = col('pval'), cGenes = head.findIndex(h => h === 'genenames' || h === 'genename' || h === 'genes');
+  const lrCols = ABERR_COLS.map(([k, kind]) => ({ i: col(k), kind, name: k[0].toUpperCase() + k.slice(1) })).filter(x => x.i >= 0);
+  const warnings: string[] = [], samples = new Map<string, CghSample>(), declared = new Map<string, number>();
+  let skipped = 0, firstSkip: string | null = null, mito = 0, current: string | null = null;
+  const skip = (why: string) => { skipped++; firstSkip ??= why; };
+  for (let i = hi + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || /^number of calls/i.test(l)) continue;
+    const f = l.split('\t'), filled = f.filter(x => x.trim());
+    if (filled.length === 1) {
+      // the footer's count per sample (26X0001 =12), else the name of the sample whose calls follow
+      const foot = l.match(/^\s*([^\t=]+?)\s*=\s*(\d+)\s*$/);
+      if (foot) declared.set(foot[1], +foot[2]); else current = filled[0].trim();
+      continue;
+    }
+    const chrom = cghChrom(f[cChr] ?? ''), start = parsePos(f[cStart]), end = parsePos(f[cStop]);
+    if (chrom === 'chrM') { mito++; skip(`line ${i + 1}: chrM`); continue; }
+    if (!chrom || start == null || end == null || end < start) { skip(`line ${i + 1}: not a position (${l.slice(0, 40)})`); warnings.push(`line ${i + 1} not read: ${l.slice(0, 60)}`); continue; }
+    let best: (typeof lrCols)[number] | null = null, lr: number | null = null;
+    for (const x of lrCols) { const v = parseNum(f[x.i]); if (v != null && v !== 0 && (lr == null || Math.abs(v) > Math.abs(lr))) { lr = v; best = x; } }
+    const kind = best?.kind ?? (lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
+    if (!kind) { skip(`line ${i + 1}: no log ratio in Amplification / Gain / Loss / Deletion`); warnings.push(`line ${i + 1}: no log ratio, not read`); continue; }
+    const name = current ?? design ?? base;
+    let s = samples.get(name);
+    if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex: sexOf(metaOf(/^(gender|sex|sexe)$/i)) }; samples.set(name, s); }
+    s.cnvs.push({
+      id: `${id}:${i}`, sample: name, sampleKey: s.key, chrom, start, end,
+      cytoband: cBand >= 0 ? (f[cBand] ?? '').trim() : '',
+      genes: cGenes >= 0 ? (f[cGenes] ?? '').split(/[,;]/).map(g => g.trim()).filter(Boolean) : [],
+      sizeKb: (end - start) / 1000, kind, typeText: best?.name ?? (kind === 'loss' ? 'Loss' : 'Gain'),
+      probes: cProbes >= 0 ? parseNum(f[cProbes]) : null, logRatio: lr, iscn: null, copies: null, copiesHi: null, amp: false,
+      suppressed: false, classification: '', classRest: '', note: '', line: i, pval: cP >= 0 ? parseNum(f[cP]) : null,
+    });
+  }
+  for (const s of samples.values()) {
+    s.declaredCalls = declared.get(s.name) ?? null;
+    if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
+  }
+  if (mito) warnings.push(`${count(mito, 'call')} on chrM skipped`);
+  if (!samples.size) throw new Error(`${fileName}: an interval-based report with no call that could be read.`);
+  return { id, name: fileName, format: 'interval', build: cghBuild(buildText), buildText, meta, lines, eol, classCol: null, classSuffix: '', headerLine: hi, commentCol: null, samples: [...samples.values()], warnings, delim: '\t', spec: null, skipped, firstSkip };
 }
 
 /** A BED: chrom, start (0-based), end, then an optional name telling the type (del, dup, loss, gain, x1, x3…). */
