@@ -50,6 +50,8 @@ export interface CghCnv {
   line: number;
   /** the call's p-value, when the file gives one (CytoGenomics' interval-based report) */
   pval?: number | null;
+  /** detected from the probes (cghSegment.ts), not in the file: drawn, never exported */
+  fromProbes?: boolean;
 }
 export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[];
   /** the sex a header line gives (Gender, Sex), else null */

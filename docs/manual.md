@@ -283,6 +283,18 @@ log ratio spread: the standard deviation of the differences between consecutive 
 patient in the import question and beside the call (Agilent guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3
 poor). The probe file is read on first use (61,000 probes: about a tenth of a second).
 
+**Probe calls.** A second opinion beside the file's calls, for each patient with probes: copy-number events detected
+from the probes themselves, by circular binary segmentation (Olshen et al., *Biostatistics* 2004) with a fixed
+threshold instead of permutations (about half a second for 61,000 probes, in the background). A segment is an event
+when it holds at least 3 probes and its mean log ratio is at least ±0.25; adjacent segments of one direction are merged
+(a lone stray probe does not cut a gain in two). chrY is read only for a patient said male (its PAR probes are the chrX
+ones). Under the filters, *Probe calls* gives per patient *▸ n not in the file*: the events no file call matches (same
+type, reciprocal overlap ≥ 50 %), listed in grey italics *from probes* with position, size, probes, mean log ratio and
+the copies estimated from it; a click draws one like a call (probe panel and browser). Each file call is marked
+*probes: seen* or *not seen*. *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
+low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
+panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
+
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
 patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients

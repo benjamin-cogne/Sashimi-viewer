@@ -11,6 +11,7 @@ import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from 
 import { isVcf, parseVcf } from './cghVcf';
 import { parseProbes, probeSampleOf, type CghProbes } from './cghProbes';
 import { seriesOf } from './cghSeries';
+import { detect, SEG_DEFAULTS, type ProbeCalls, type ProbeEvent, type SegOpts } from './cghSegment';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
@@ -69,6 +70,12 @@ export interface CghState {
   revealed: Record<string, true>;
   /** the quick guide is open (Esc closes it, not the page) */
   help: boolean;
+  /** the settings of the probe calls (cghSegment.ts), kept in localStorage */
+  probeOpts: SegOpts;
+  /** events detected from each patient's probes, by sample key (computed in the background, for these settings and sex) */
+  probeCalls: Record<string, ProbeCalls & { key: string }>;
+  /** the patients whose probe calls not in the file are listed */
+  probeOpen: Record<string, true>;
 }
 
 const FILTER_KEY = 'sashimi.cghFilter';
@@ -79,12 +86,14 @@ export const CGH_MAX_ANNOTATED = 200;
 export const largestFirst = <T extends { sizeKb: number }>(cs: T[]) => cs.slice().sort((a, b) => b.sizeKb - a.sizeKb);
 /** a call is analysed (listed and annotated) when it has enough probes (a BED's calls have no count) and is large enough */
 export const isAnalysed = (c: CghCnv, minProbes: number, minKb: number) => (c.probes == null || c.probes >= minProbes) && c.sizeKb >= minKb;
+const PROBE_OPTS_KEY = 'sashimi.cghProbeCalls';
+const loadProbeOpts = (): SegOpts => { try { return { ...SEG_DEFAULTS, ...(JSON.parse(localStorage.getItem(PROBE_OPTS_KEY) ?? 'null') as Partial<SegOpts> | null) }; } catch { return SEG_DEFAULTS; } };
 const loadFilter = (): CghFilter => {
   const d: CghFilter = { minProbes: CGH_MIN_PROBES_DEFAULT, kind: 'all', minKb: 0, classed: 'all', hideSuppressed: true, query: '', sort: 'position', series: 'any', seriesN: 1, lab: 'any' };
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeOpen: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -148,6 +157,21 @@ const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]
  */
 const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, CghProbes | null>();
 const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); } };
+/** what a patient's probe calls depend on: the settings and the sex (chrY read for a male only) */
+const callsKey = (k: string) => `${state.sex[k] ?? ''}|${state.probeOpts.minProbes}|${state.probeOpts.minLr}|${state.probeOpts.t}`;
+let callsQueue: string[] = [];
+/** one patient a tick (about half a second each for 60k probes), so the page stays usable while they are computed */
+function nextCalls() {
+  const k = callsQueue.shift(); if (k == null) return;
+  const pr = cgh.probes(k), key = callsKey(k);
+  if (pr && state.probeCalls[k]?.key !== key) set({ probeCalls: { ...state.probeCalls, [k]: { ...detect(pr, state.probeOpts, state.sex[k] === 'male'), key } } });
+  if (callsQueue.length) setTimeout(nextCalls, 0);
+}
+/** a probe-only event as a call, to be drawn like one (never in a file, never exported) */
+export const probeCnv = (e: ProbeEvent, sampleKey: string, sample: string): CghCnv => ({
+  id: `probe|${sampleKey}|${e.chrom}:${e.start}-${e.end}`, sample, sampleKey, chrom: e.chrom, start: e.start, end: e.end, cytoband: '', genes: [],
+  sizeKb: (e.end - e.start + 1) / 1000, kind: e.kind, typeText: 'from probes', probes: e.n, logRatio: e.mean, iscn: null, copies: null, copiesHi: null,
+  amp: false, suppressed: false, classification: '', classRest: '', note: '', line: -1, fromProbes: true });
 /** a few names of the files left aside in a zip */
 const someNames = (names: string[]) => names.map(n => leafOf(n)).slice(0, 4).join(', ') + (names.length > 4 ? ', …' : '');
 const exportedOf = (keys: string[]) => { const dirtyKeys = { ...state.dirtyKeys }; for (const k of keys) delete dirtyKeys[k]; return { dirtyKeys, dirty: Object.keys(dirtyKeys).length > 0 }; };
@@ -174,6 +198,20 @@ export const cgh = {
     }
     return probeRead.get(sampleKey) ?? null;
   },
+  /** the probe calls of these patients, computed in the background when missing or out of date */
+  runProbeCalls(keys: string[]) {
+    const todo = keys.filter(k => cgh.hasProbes(k) && state.probeCalls[k]?.key !== callsKey(k) && !callsQueue.includes(k));
+    if (!todo.length) return;
+    const idle = !callsQueue.length; callsQueue.push(...todo); if (idle) setTimeout(nextCalls, 0);
+  },
+  /** the current probe calls of a patient (null: none yet, or out of date) */
+  probeCallsOf: (k: string): ProbeCalls | null => (state.probeCalls[k]?.key === callsKey(k) ? state.probeCalls[k] : null),
+  setProbeOpts(patch: Partial<SegOpts>) {
+    const probeOpts = { ...state.probeOpts, ...patch };
+    try { localStorage.setItem(PROBE_OPTS_KEY, JSON.stringify(probeOpts)); } catch { /* storage blocked */ }
+    set({ probeOpts });
+  },
+  setProbeOpen(key: string, on: boolean) { const probeOpen = { ...state.probeOpen }; if (on) probeOpen[key] = true; else delete probeOpen[key]; set({ probeOpen }); },
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [], notes: string[] = [], toMap: CghState['toMap'] = [];
@@ -276,7 +314,8 @@ export const cgh = {
     const files = state.files.map(f => ({ ...f, samples: f.samples.filter(s => s.key !== sampleKey) })).filter(f => f.samples.length);
     const left = files.flatMap(f => f.samples);
     dropProbes([sampleKey]);
-    set({ files, sample: state.sample === sampleKey ? left[0]?.key ?? null : state.sample, ...exportedOf([sampleKey]) });
+    const probeCalls = { ...state.probeCalls }; delete probeCalls[sampleKey];
+    set({ files, probeCalls, sample: state.sample === sampleKey ? left[0]?.key ?? null : state.sample, ...exportedOf([sampleKey]) });
   },
   /** these patients' classes and notes written to a file */
   exported(keys: string[]) { set(exportedOf(keys)); },

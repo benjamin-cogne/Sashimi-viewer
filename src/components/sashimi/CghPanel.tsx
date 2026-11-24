@@ -19,6 +19,7 @@ import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import { CghRecurrentDetail } from './CghClinGenTrack';
+import { ProbeCallsBar, ProbeSeenTag } from './CghProbeCalls';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
@@ -219,6 +220,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   // each call's genes and priority, recomputed when an answer comes, not at each keystroke (viewOf reads ann, modes, sex)
   const views = useMemo(() => new Map(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs)).map(c => [c.id, viewOf(s, c)])), [s.files, s.ann, s.modes, s.sex]); // eslint-disable-line react-hooks/exhaustive-deps
   const hints = useMemo(() => rearrangementHints(s), [s.files, s.ann]); // eslint-disable-line react-hooks/exhaustive-deps
+  // each patient's probe calls, in the background (about half a second per 60k probes)
+  useEffect(() => { cgh.runProbeCalls(s.files.flatMap(fl => fl.samples.map(x => x.key))); }, [s.files, s.probeOpts, s.sex]);
   if (!s.files.length) return null;
   const samples = s.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const listed = s.sample ? samples.filter(e => e.x.key === s.sample) : samples;
@@ -364,6 +367,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           {notAnn.length > 0 && <span data-cgh-notann> · {notAnn.length} not annotated · <button className="text-accent-700 hover:underline font-medium" onClick={() => annotateNow(notAnn)}
             title={`Annotate the listed calls not annotated yet (up to ${CGH_MAX_ANNOTATED} a click, the largest first)`}>annotate them</button></span>}</span>
       </div>
+      <ProbeCallsBar listed={listed} shown={s.shown} onShow={onShow} />
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className="w-full text-[11.5px] border-collapse">
@@ -406,7 +410,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} <EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} />{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} />{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}<ProbeSeenTag c={c} /></td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     <button className="px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" onClick={() => annotateNow([c])} title="Annotate this call (genes, PanelApp, ClinGen, gnomAD, DGV Gold)">annotate</button></td></>

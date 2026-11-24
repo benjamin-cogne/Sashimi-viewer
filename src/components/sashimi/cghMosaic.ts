@@ -18,7 +18,7 @@ function computeMosaicism(lr: number, event: 'del' | 'dup', chrom: 'autosome' | 
 }
 
 /** pseudo-autosomal regions, GRCh37 (1-based inclusive) */
-const PAR: Record<string, [number, number][]> = {
+export const PAR: Record<string, [number, number][]> = {
   chrX: [[60001, 2699520], [154931044, 155260560]],
   chrY: [[10001, 2649520], [59034050, 59363566]],
 };

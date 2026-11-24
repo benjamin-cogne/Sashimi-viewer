@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { cgh } from './cghStore';
 import type { CghCnv } from './cghIntervals';
 import { lowerBound, meanIn, type CghProbeChrom } from './cghProbes';
+import type { ProbeSeg } from './cghSegment';
 
 const H = 190, L = 34, R = 8, T = 8, B = 20, CLIP = 2, THR = 0.2, MIN_SPAN = 20_000;
 const BTN = 'h-[22px] min-w-[24px] px-1.5 rounded border border-slate-200 bg-white text-[11px] text-slate-700 hover:border-accent-300 hover:bg-accent-50';
@@ -40,7 +41,8 @@ function runningMedian(v: number[], k: number): number[] {
   return out;
 }
 
-export function CghProbePanel({ c, chromLen }: { c: CghCnv; chromLen: number }) {
+/** `segs`: the chromosome's segments from the probe calls (cghSegment.ts), drawn as a thin purple line */
+export function CghProbePanel({ c, chromLen, segs }: { c: CghCnv; chromLen: number; segs?: ProbeSeg[] }) {
   // read on first view (61k probes: some tens of ms), then kept
   const p = useMemo(() => cgh.probes(c.sampleKey)?.byChrom.get(c.chrom) ?? null, [c.sampleKey, c.chrom]);
   const [win, setWin] = useState<[number, number]>(() => around(c));
@@ -100,9 +102,15 @@ export function CghProbePanel({ c, chromLen }: { c: CghCnv; chromLen: number }) 
     g.stroke();
     const m = fileMean ?? probeMean.mean;
     if (m != null && b > a) { g.strokeStyle = '#ea580c'; g.lineWidth = 3; g.beginPath(); g.moveTo(a, yOf(m)); g.lineTo(b, yOf(m)); g.stroke(); }
+    // the segments' means on top (over the median and the call's mean): a step where the probe calls cut
+    if (segs) {
+      g.strokeStyle = '#a21caf'; g.lineWidth = 1.5; g.beginPath();
+      for (const sg of segs) { if (sg.end < from || sg.start > to) continue; const y = yOf(sg.mean); g.moveTo(Math.max(L, xOf(sg.start)), y); g.lineTo(Math.min(w - R, xOf(sg.end)), y); }
+      g.stroke();
+    }
     g.restore();
     cv.current?.setAttribute('data-drawn', String(inside));
-  }, [w, p, from, to, idx, med, c.start, c.end, fileMean, probeMean.mean]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [w, p, from, to, idx, med, c.start, c.end, fileMean, probeMean.mean, segs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!p) return <div className="mx-5 mt-2 text-[11px] text-slate-500">Log ratio (probes): no probe on {c.chrom} in this patient's probe file.</div>;
   /** a window kept on the chromosome, at least MIN_SPAN wide */
@@ -135,8 +143,8 @@ export function CghProbePanel({ c, chromLen }: { c: CghCnv; chromLen: number }) 
         <label className="inline-flex items-center gap-1" title="Moving median over this many probes (dark blue line)">median of
           <select value={k} onChange={e => setK(Number(e.target.value))} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
         <span className="text-slate-500" title="The call's mean log ratio as the file gives it (orange segment), and the mean of the probes it spans">
-          call: {fileMean != null ? <>file <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>
-        <span className="text-slate-400">· own window (not synced with the browser) · dashed: ±0.2 · clipped at ±2</span>
+          call: {fileMean != null ? <>{c.fromProbes ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>
+        <span className="text-slate-400">· own window (not synced with the browser) · dashed: ±0.2 · clipped at ±2{segs ? <> · <span className="text-fuchsia-700">purple</span>: probe-call segments</> : ''}</span>
       </div>
       <div ref={box} className="relative mt-1 select-none" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
         <canvas ref={cv} style={{ width: '100%', height: H, display: 'block' }} />
