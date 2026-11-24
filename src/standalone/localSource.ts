@@ -195,7 +195,7 @@ const haplotag = (get: (tag: string) => unknown): { hp?: number; ps?: number; pc
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
-/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
+/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence (split reads' too) so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
 /** Widest insertion checked as a tandem copy (the reference read around the window grows by as much). */
@@ -221,7 +221,9 @@ const BAM_VIEW: RecordView<any> = {
   hap: r => haplotag(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(r.CIGAR)) || bigInsertion(r.CIGAR)));
+    // split reads (SA tag) too: their bases are the signature of the junction they cross, and a read whose clipped part
+    // was aligned elsewhere at MAPQ 0 is rescued as a clipped read (alignments.ts rescueClipEnds)
+    const withSeq = !light || (structural && (bigClip(r.CIGAR) || bigInsertion(r.CIGAR)));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -251,7 +253,7 @@ const CRAM_VIEW: RecordView<any> = {
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(cigar)) || bigInsertion(cigar)));
+    const withSeq = !light || (structural && (bigClip(cigar) || bigInsertion(cigar)));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
