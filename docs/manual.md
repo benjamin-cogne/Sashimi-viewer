@@ -275,11 +275,13 @@ and in the call's detail, with the expected and observed values in a tooltip. No
 
 **Log ratio (probes).** When the patient's `CGH_Log_Ratio.txt` came with the calls, the call clicked shows, above the
 browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
-log ratio clipped at ±2 with lines at 0, ±0.25, ±1 and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
+log ratio over ±1 by default (*log ratio* ±0.5 / ±1 / ±2, ⊖ further out to ±8, ⊕ back in: one setting for this panel,
+the whole genome and the chromosome view, kept in the browser; a probe beyond the range is a small triangle at the edge;
+the colours stay at ±0.2) with guide lines and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
 probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside). The window
 opens centred on the call with half its size on each side (at least 100 kb), as does the browser below, both centred
-again at each call clicked; its own buttons (⊖ ⊕ ← →, *whole chromosome*, *call*: back to that view) are not synced with
-the browser's. Hovering a dot gives the probe's name, position and log ratio; hovering the call's shading away from the
+again at each call clicked; its own buttons (⊖ ⊕ ← →, a slider along the chromosome, a drag of the plot, Ctrl / ⌘ +
+wheel to zoom, *whole chromosome*, *call*: back to that view) are not synced with the browser's. Hovering a dot gives the probe's name, position and log ratio; hovering the call's shading away from the
 dots, the call's characteristics (sample, position, size, type, probes, mean log ratio, copies, class, priority; *from
 probes* for a probe call). The **DLRS** (derivative
 log ratio spread: the standard deviation of the differences between consecutive probes, divided by √2) is given per
@@ -299,12 +301,17 @@ low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments a
 panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
 
 **Whole genome.** Under the table, where the call's window stands, the *Whole genome* panel shows one patient (the tab's;
-in *All patients* a patient list in the panel): chromosomes 1-22, X, Y side by side, widths from their GRCh37 lengths,
-every probe drawn as one mark per pixel cell (same colours as the probe panel, clipped at ±2, lines at 0, ±0.25, ±1), the
-median of each pixel column as a dark blue line; above, the patient's calls listed by the filters (loss red, gain blue)
-and its probe calls (purple). A male's X and Y lie near −1: not normalised. A click on a chromosome opens it in the panel
-(all its probes, a moving median of 15, ← → for the neighbours, *whole genome* back); there, a click on a call bar opens
-the call as its row does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
+in *All patients* a patient list in the panel): chromosomes 1-22, X, Y, sizes from their GRCh37 lengths, every probe
+drawn as one mark per pixel cell (same colours as the probe panel, the log-ratio range of the probe panel, a probe beyond
+it a triangle at the edge), the median of each pixel line as a dark blue line, the patient's calls listed by the filters
+(loss red, gain blue) and its probe calls (purple) as bars. *horizontal*: the chromosomes side by side, the bars above.
+*vertical* (as CytoGenomics' genome view): one column per chromosome, position going down from pter, heights from the
+lengths, log ratio across (−range left, + right), the bars beside each column; one row, or two when the panel is narrower
+than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a chromosome
+opens it in the panel, always horizontal and drawn as the call's probe panel is (the same code: every probe as a dot, the
+moving median of 3 / 7 / 15, the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
+the plot; ← → beside the name for the neighbours, *whole genome* back; a click on a call bar opens the call as its row
+does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
 without a probe file shows its calls only. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
 opened again, it folds the call's window into a strip *▸ Call — …* in turn (one of the two at a time). The page's ⓘ panel
 describes the methods (DLRS, probe calls, estimated copies, mosaic, this view) under *Probes*.

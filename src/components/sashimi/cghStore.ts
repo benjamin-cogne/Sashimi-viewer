@@ -76,7 +76,18 @@ export interface CghState {
   probeCalls: Record<string, ProbeCalls & { key: string }>;
   /** the patients whose probe calls not in the file are listed */
   probeOpen: Record<string, true>;
+  /** how the probes are drawn (kept in localStorage): the whole genome's layout, the log-ratio range ±scale (shared by the genome, chromosome and probe panels) */
+  view: CghView;
 }
+export interface CghView { layout: 'horizontal' | 'vertical'; scale: number }
+/** the log-ratio ranges (±): presets ±0.5, ±1 (default), ±2; ⊖ goes further out */
+export const LR_SCALES = [0.5, 1, 2, 3, 4, 6, 8];
+export const LR_PRESETS = [0.5, 1, 2];
+const VIEW_KEY = 'sashimi.cghView';
+const loadView = (): CghView => {
+  const d: CghView = { layout: 'horizontal', scale: 1 };
+  try { const v = { ...d, ...(JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as Partial<CghView> | null) }; return { layout: v.layout === 'vertical' ? 'vertical' : 'horizontal', scale: LR_SCALES.includes(v.scale) ? v.scale : 1 }; } catch { return d; }
+};
 
 const FILTER_KEY = 'sashimi.cghFilter';
 export const CGH_MIN_PROBES_DEFAULT = 3;
@@ -93,7 +104,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeOpen: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeOpen: {}, view: loadView() };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -210,6 +221,11 @@ export const cgh = {
     const probeOpts = { ...state.probeOpts, ...patch };
     try { localStorage.setItem(PROBE_OPTS_KEY, JSON.stringify(probeOpts)); } catch { /* storage blocked */ }
     set({ probeOpts });
+  },
+  setView(patch: Partial<CghView>) {
+    const view = { ...state.view, ...patch };
+    try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch { /* storage blocked */ }
+    set({ view });
   },
   setProbeOpen(key: string, on: boolean) { const probeOpen = { ...state.probeOpen }; if (on) probeOpen[key] = true; else delete probeOpen[key]; set({ probeOpen }); },
   /** read the files picked; they wait for the minimum number of probes */
