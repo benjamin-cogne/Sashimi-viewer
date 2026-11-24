@@ -20,11 +20,8 @@ import { DLRS_TIP, dlrsWord } from './cghProbes';
 import { estCopies, estTip } from './cghMosaic';
 import { CghGenomePanel } from './CghGenome';
 import { callMargin } from './CghProbePanel';
+import { CallIscnText, iscnOfCall } from './CghIscnView';
 
-/** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
-const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
-  ? `arr[${build}] ${c.chrom.replace(/^chr/, '')}${band.replace(/\s+/g, '').replace(/-/, '')}(${c.start}_${c.end})${c.copies != null ? `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}` : 'amp'}`
-  : null);
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
@@ -86,8 +83,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const c = drawn && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
   // a male's chrX and chrY: one copy, the call on it (no other homologue)
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
-  const band = c ? bandOfCall(c, s.ann[c.id]) : '', iscn = c && drawn ? iscnOf(c, drawn.build, band) : null;
-  // the probes of the call's patient (read on first view) and its copy number estimated from the log ratio (never an ISCN)
+  const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
+  // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
   const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey]) : null;
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
@@ -121,10 +118,10 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
               <span className="text-sm font-bold">{c.sample}</span>
               {!iscn && band && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{band.replace(/\s+/g, '')}</span>}
               {iscn
-                ? <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN written from the band (the file\'s, else the cytogenetic bands), the positions and the copies of the file (it gives no ISCN)'}>{iscn}</span>
+                ? <span title="ISCN 2024 (chapter 8, microarray) written from the band (the file's, else the cytogenetic bands), the positions and the copy number (the file's, else from the log ratio), with the mosaic fraction when the log ratio says mosaic; the file's own ISCN beside when it differs"><CallIscnText i={isc!} /></span>
                 : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">{c.fromProbes ? <i>({c.kind}, from probes: not in the file, not exported)</i> : `(${c.kind}, no ISCN in the file)`}</span></span>}
               <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes != null ? `${c.probes} probes` : 'probes not given'}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
-              {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>estimated {est.text}</span>}
+              {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>copies {est.text}</span>}
               {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>
             {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} segs={cgh.probeCallsOf(c.sampleKey)?.segs.get(c.chrom)} />}

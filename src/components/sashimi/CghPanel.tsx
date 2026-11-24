@@ -20,6 +20,7 @@ import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import { CghRecurrentDetail } from './CghClinGenTrack';
 import { ProbeCallsBar, ProbeMethods } from './CghProbeCalls';
+import { CallIscnText, PatientIscn, iscnOfCall, iscnTip } from './CghIscnView';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
@@ -274,7 +275,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const exportFiles = [...new Set(listed.map(e => e.f))];
   /** one file written back; a file holds every sample it was read with: all of them are marked exported, only once its download is triggered */
   const exportOne = (fl: CghFile) => {
-    const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c));
+    const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c), c => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
     a.download = fl.saveAs;
@@ -369,6 +370,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
             title={`Annotate the listed calls not annotated yet (up to ${CGH_MAX_ANNOTATED} a click, the largest first)`}>annotate them</button></span>}</span>
       </div>
       <ProbeCallsBar listed={listed} shown={s.shown} onShow={onShow} />
+      {(() => { const one = s.sample ? s.files.flatMap(fl => fl.samples.map(x => ({ x, fl }))).find(y => y.x.key === s.sample) : null; return one ? <PatientIscn x={one.x} build={one.fl.build ?? 'GRCh37'} /> : null; })()}
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
         <table className={`text-[11.5px] border-collapse ${cols.fixed ? '[&_td]:overflow-hidden [&_td]:text-ellipsis' : 'w-full'}`} style={cols.tableStyle([...(!s.sample && samples.length > 1 ? ['sample'] : []), 'band', 'pos', 'size', 'type', 'probes', 'logr', ...(samples.length > 1 ? ['series'] : []), 'genes', 'panelapp', 'dosage', 'priority', 'class', 'links'])} data-cgh-table>
@@ -405,13 +407,13 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
               const hub = cnvHubUrl(c, fl.build ?? 'GRCh37');
               const v = views.get(c.id)!;
               return [
-                <tr key={c.id} data-cgh-row data-cgh-call={c.id} data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${c.iscn ?? ''}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
+                <tr key={c.id} data-cgh-row data-cgh-call={c.id} data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${iscnTip(iscnOfCall(s, c, fl.build ?? 'GRCh37'))}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''}`}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} <EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
@@ -516,10 +518,10 @@ function MosaicTag({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
   if (!m?.ok || m.f >= MOSAIC_TAG_BELOW) return null;
   return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-slate-300 bg-white text-slate-600 leading-[15px] align-middle" title="Fraction of cells estimated from the mean log ratio (AChro-Puce calculator, July 2025): indicative, see the call's detail">mosaic ~{Math.round(m.f * 100)}%</span>;
 }
-/** the copy number of the table's Type cell: the file's, else estimated from the log ratio (x1?, tooltip), else the type */
+/** the copy number of the table's Type cell: the file's, else the one from the log ratio (tooltip), else the type */
 function EstCn({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
   const e = estCopies(c, sex);
-  return e ? <span title={estTip(e, c.logRatio!)} data-cgh-est>x{e.n}{e.text.includes('+') ? '+' : ''}?</span> : <>{copyText(c)}</>;
+  return e ? <span title={estTip(e, c.logRatio!)} data-cgh-est>x{e.n}{e.text.includes('+') ? '+' : ''}</span> : <>{copyText(c)}</>;
 }
 /** the call's detail line: expected and observed log ratio, and the fraction of cells it gives */
 function MosaicLine({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
@@ -529,7 +531,7 @@ function MosaicLine({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
   return <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Log ratio</span>{' '}
     {m.ok ? <>observed <b>{c.logRatio!.toFixed(2)}</b>, expected for a one-copy {c.kind}: <b>{Number.isFinite(m.expected) ? `${m.expected > 0 ? '+' : ''}${m.expected.toFixed(2)}` : 'not finite'}</b> · cells carrying it: <b>{pc(m.f)}</b></>
       : <>observed <b>{c.logRatio!.toFixed(2)}</b> · fraction of cells: <span className="text-amber-700">sex needed (chrX / chrY outside the PARs)</span></>}
-    {e && <span title={estTip(e, c.logRatio!)}> · <b>estimated {e.text}</b></span>}
+    {e && <span title={estTip(e, c.logRatio!)}> · copies <b>{e.text}</b></span>}
     <span className="text-slate-500"> · indicative (AChro-Puce calculator, July 2025): no biological variability</span></div>;
 }
 const seriesTip = (i: SeriesInfo) => i.hits.length ? i.hits.map(h => `${h.name}: ${Math.round(h.pct * 100)} % overlap`).join('\n') : 'No other patient has this call';
@@ -641,7 +643,8 @@ function CnvDetail({ c, v, build, onRetry, lab, hints, sex, series, note, focusN
     onKeyDown={e => e.stopPropagation()} aria-label="Note on this call"
     className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
   const seen = series && series.others > 0 ? <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Series</span> {series.hits.length ? <>found in {series.hits.length} of {series.others} other patient{series.others > 1 ? 's' : ''}: {series.hits.map(h => `${h.name} (${Math.round(h.pct * 100)} %)`).join(', ')}</> : <>in none of the {series.others} other patient{series.others > 1 ? 's' : ''}</>}<span className="text-slate-500"> · same type, reciprocal overlap ≥ {Math.round(SERIES_OVERLAP * 100)} %</span></div> : null;
-  const mosaic = <>{seen}<MosaicLine c={c} sex={sex} /></>;
+  const iscn = iscnOfCall(useCgh(), c, build);
+  const mosaic = <>{seen}{(iscn.text || iscn.file) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">ISCN</span> <CallIscnText i={iscn} /></div>}<MosaicLine c={c} sex={sex} /></>;
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
   const ann = v.ann, key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position

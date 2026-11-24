@@ -79,14 +79,15 @@ export interface CghState {
   /** how the probes are drawn (kept in localStorage): the whole genome's layout, the log-ratio range ±scale (shared by the genome, chromosome and probe panels) */
   view: CghView;
 }
-export interface CghView { layout: 'horizontal' | 'vertical'; scale: number }
+/** `iscnClasses`: the classes whose calls make the patient's ISCN */
+export interface CghView { layout: 'horizontal' | 'vertical'; scale: number; iscnClasses: string[] }
 /** the log-ratio ranges (±): presets ±0.5, ±1 (default), ±2; ⊖ goes further out */
 export const LR_SCALES = [0.5, 1, 2, 3, 4, 6, 8];
 export const LR_PRESETS = [0.5, 1, 2];
 const VIEW_KEY = 'sashimi.cghView';
 const loadView = (): CghView => {
-  const d: CghView = { layout: 'horizontal', scale: 1 };
-  try { const v = { ...d, ...(JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as Partial<CghView> | null) }; return { layout: v.layout === 'vertical' ? 'vertical' : 'horizontal', scale: LR_SCALES.includes(v.scale) ? v.scale : 1 }; } catch { return d; }
+  const d: CghView = { layout: 'horizontal', scale: 1, iscnClasses: ['Pathogenic', 'Likely pathogenic', 'Uncertain significance'] };
+  try { const v = { ...d, ...(JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as Partial<CghView> | null) }; return { layout: v.layout === 'vertical' ? 'vertical' : 'horizontal', scale: LR_SCALES.includes(v.scale) ? v.scale : 1, iscnClasses: Array.isArray(v.iscnClasses) ? v.iscnClasses.filter(x => typeof x === 'string') : d.iscnClasses }; } catch { return d; }
 };
 
 const FILTER_KEY = 'sashimi.cghFilter';

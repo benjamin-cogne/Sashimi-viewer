@@ -270,10 +270,25 @@ fraction of cells is estimated from the mean log ratio with the AChro-Puce calcu
 estimated fraction. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
 
-**Estimated copy number.** A call with a log ratio but no copy number (the interval-based report) gets one estimated:
-the n whose expected log2(n / 2) is nearest (x0 taken at −2, x1 −1, x3 +0.58, x4 +1; a male's X and a Y: normal 1,
-so x0 or x2), shown as *x1?* in the table's Type cell and *estimated x1* (or *x1 (or mosaic ~63%)*) above the browser
-and in the call's detail, with the expected and observed values in a tooltip. No ISCN is written from an estimate.
+**Copy number from the log ratio.** A call with a log ratio but no copy number (the interval-based report) gets one
+from it: the n whose expected log2(n / 2) is nearest (x0 taken at −2, x1 −1, x3 +0.58, x4 +1; a loss is x0 below −1.5,
+a gain x4 from +0.79; a male's X and a Y: normal 1, so x0 or x2), written as any copy number (*del x1* in the table's
+Type cell, *copies x1* above the browser and in the call's detail, and in the ISCN). A one-copy change carried by fewer
+than 80 % of cells by the AChro-Puce estimate (an autosomal loss above −0.74, a gain below +0.49) is shown *mosaic ~n%*,
+its ISCN with the fraction in brackets; that is the only uncertainty shown.
+
+**ISCN.** Each call's array ISCN follows ISCN 2024 (chapter 8, microarray): `arr[GRCh37] 22q11.21(18,894,835_21,505,417)x1`,
+bands from pter to qter (one band written once), positions with thousands commas, the copy number (the file's, else from
+the log ratio), a mosaic fraction in brackets (`x1[0.48]`), a whole chromosome as `(21)x3`. It stands on the call's card
+above the browser and in its detail (each with *copy*), and in the row's tooltip; when the file gives its own ISCN and
+it differs (positions, bands, copies, mosaic), the file's is shown beside it, marked *differs*. A patient's tab has a
+**Patient ISCN** line (*copy*): its calls of the chosen classes (*from* P / LP / VUS by default, also PIEV, LB, B; kept in
+the browser) joined by commas, chromosomes 1-22, X, Y then position; with none, *no abnormal call selected* (the normal-
+result form is not written). Inheritance (dn, mat, pat) is not written.
+
+**Disclaimer.** Copy numbers are inferred from the log ratio with the thresholds stated. All numbers, calls and
+nomenclature must be checked in the dedicated analysis software; the authors cannot be held responsible for any
+misinterpretation of these data.
 
 **Log ratio (probes).** When the patient's `CGH_Log_Ratio.txt` came with the calls, the call clicked shows, above the
 browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
@@ -316,7 +331,7 @@ the plot; ← → beside the name for the neighbours, *whole genome* back; a cli
 does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
 without a probe file shows its calls only. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
 opened again, it folds the call's window into a strip *▸ Call — …* in turn (one of the two at a time). The page's ⓘ panel
-describes the methods (DLRS, probe calls, estimated copies, mosaic, this view) under *Probes*.
+describes the methods (DLRS, probe calls, copy number, mosaic, ISCN, this view, the disclaimer) under *Probes*.
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
@@ -389,8 +404,7 @@ clinGenHaplo / clinGenTriplo and the ClinGen FTP BED files, read 2026-11-20): no
 the dosage regions live. A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
 homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
-array ISCN on one line (the file's; written from the band and the copy number when the file gives both but no ISCN,
-else the positions alone: no copy number is assumed). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
+array ISCN on one line (see *ISCN* above; the positions alone when there is no band). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
 significance, Likely pathogenic, Pathogenic, PIEV, Male Reference, Female Reference, NS (non significant: recurring
 technical artifact / atypical log ratio); a class already written in the file is read into that list when its words are
 recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin féminin*…). The **✎** of a row opens a
@@ -398,7 +412,8 @@ recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin f�
 (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
 carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
 each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
-after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
+after the last column when the table has none; a BED gets both as two last columns), plus an ISCN column when the
+file has none (a CytoGenomics interval table keeps its own; a VCF: INFO `CGH_ISCN`); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
 With several files in the tab, the button opens a list: one **export** per file (one download, its patients marked exported) and **export all**, one file after another a moment apart, each marked as its download starts (the browser may ask to allow several downloads).
 

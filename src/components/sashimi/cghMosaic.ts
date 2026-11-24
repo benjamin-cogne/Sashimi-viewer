@@ -46,8 +46,8 @@ export function mosaicOf(c: CghCnv, sex: CghSex | undefined): Mosaic | null {
 export interface EstCopies { n: number; expected: number; hemi: boolean; mosaic: number | null; text: string }
 /**
  * A copy number estimated from the log ratio, for a call whose file gives none (an interval-based report): the n whose
- * log2(n / normal) is nearest (x0 taken at -2, x1 -1, x3 +0.58, x4 +1…; a male's X / Y: normal 1). Shown as estimated,
- * never written into an ISCN. `mosaic`: the fraction of cells (AChro-Puce) when a one-copy change is below 80 %.
+ * log2(n / normal) is nearest (x0 taken at -2, x1 -1, x3 +0.58, x4 +1…; a male's X / Y: normal 1), written as any copy
+ * number (also in the ISCN). `mosaic`: the fraction of cells (AChro-Puce) when a one-copy change is below 80 %.
  */
 export function estCopies(c: CghCnv, sex: CghSex | undefined): EstCopies | null {
   if (c.logRatio == null || c.logRatio === 0 || c.copies != null || c.amp || c.iscn) return null;
@@ -59,7 +59,7 @@ export function estCopies(c: CghCnv, sex: CghSex | undefined): EstCopies | null 
   const m = Math.abs(n - base) === 1 ? mosaicOf(c, sex) : null;
   const mosaic = m?.ok && m.f < MOSAIC_TAG_BELOW ? m.f : null;
   const top = c.kind === 'gain' && n === base + 4 ? '+' : '';
-  return { n, expected: exp(n), hemi, mosaic, text: `x${n}${top}${mosaic != null ? ` (or mosaic ~${Math.round(mosaic * 100)}%)` : ''}` };
+  return { n, expected: exp(n), hemi, mosaic, text: `x${n}${top}${mosaic != null ? ` mosaic ~${Math.round(mosaic * 100)}%` : ''}` };
 }
 /** the tooltip of an estimate */
-export const estTip = (e: EstCopies, lr: number) => `Estimated from the log ratio ${lr.toFixed(2)} (the file gives no copy number): nearest expected log2(n/${e.hemi ? 1 : 2}) is ${e.expected.toFixed(2)} for x${e.n}${e.mosaic != null ? `; or a one-copy change in ~${Math.round(e.mosaic * 100)} % of cells (AChro-Puce)` : ''}. Not written into an ISCN.`;
+export const estTip = (e: EstCopies, lr: number) => `Copy number from the log ratio ${lr.toFixed(2)} (the file gives none): nearest expected log2(n/${e.hemi ? 1 : 2}) is ${e.expected.toFixed(2)} for x${e.n}${e.mosaic != null ? `; a one-copy change in ~${Math.round(e.mosaic * 100)} % of cells (AChro-Puce: mosaic below 80 %)` : ''}.`;
