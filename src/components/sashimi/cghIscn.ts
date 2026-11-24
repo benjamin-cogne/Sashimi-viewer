@@ -14,6 +14,15 @@ const ORDER = [...Array.from({ length: 22 }, (_, i) => String(i + 1)), 'X', 'Y']
 const num = (n: number) => n.toLocaleString('en-US');
 const chr = (c: CghCnv) => c.chrom.replace(/^chr/i, '');
 
+/** the band of a call from the cytogenetic bands (UCSC cytoBand, 0-based half-open), at their finest resolution:
+ * `q11.23`, or `q11.21 - q11.23` (the band at the start first, so pter to qter); undefined when a position has none */
+export function bandSpan(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
+  const at = (pos: number) => bands.find(b => b.start <= pos && pos < b.end)?.name;
+  const a = at(s0), z = at(Math.max(s0, e0 - 1));
+  return !a || !z ? undefined : a === z ? a : `${a} - ${z}`;
+}
+/** the band written in a call's ISCN: the one read from the cytogenetic bands (sub-band precision), else the file's */
+export const iscnBandOf = (c: CghCnv, ucscBand: string | undefined) => ucscBand || c.cytoband || '';
 /** the bands of a call as ISCN writes them: `q11.21q11.23` (first at the start), a single band once; '' when none */
 export function iscnBands(band: string): string {
   const b = band.replace(/\s+/g, '').match(/[pq]\d+(?:\.\d+)?|cen/g);

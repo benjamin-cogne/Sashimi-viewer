@@ -3,10 +3,14 @@
  * of the visible window (black within ±0.2, red above, green below), a moving median, the call shaded with its mean log
  * ratio. Its own window (zoom / pan buttons, slider, drag, Ctrl / ⌘ + wheel): the SV browser's window is internal to it,
  * so the two are not synced. Without a call (`at`), the same drawing is the whole genome panel's chromosome view, with the
- * chromosome's call bars above (`calls`, a click opens one through `onCall`).
+ * chromosome's call bars above (`calls`, a click opens one through `onCall`). Under the plot, the chromosome's ideogram
+ * (`getBands`: the cytogenetic bands of the build, drawn with the SV browser's stains) with the window boxed; a click or a
+ * drag on it moves the window.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { cgh, useCgh } from './cghStore';
+import { STAIN } from './SvGenomeBrowser';
+import type { Cytoband } from './svNomenclature';
 import { callLines, CghTip, clipMark, lrAxis, lrLabel, LrScale, BTN } from './CghGenome';
 import type { CghCnv } from './cghIntervals';
 import { lowerBound, meanIn, type CghProbeChrom } from './cghProbes';
@@ -46,7 +50,7 @@ function runningMedian(v: number[], k: number): number[] {
 
 /** `segs`: the chromosome's segments from the probe calls (cghSegment.ts), drawn as a thin purple line */
 type Bar = { x: number; y: number; w: number; h: number; c: CghCnv };
-export function CghProbePanel({ c, at, chromLen, segs, calls, onCall }: { c?: CghCnv; at?: { sampleKey: string; chrom: string }; chromLen: number; segs?: ProbeSeg[]; calls?: CghCnv[]; onCall?: (c: CghCnv) => void }) {
+export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }: { c?: CghCnv; at?: { sampleKey: string; chrom: string }; chromLen: number; segs?: ProbeSeg[]; calls?: CghCnv[]; onCall?: (c: CghCnv) => void; getBands?: (chrom: string) => Promise<Cytoband[]> }) {
   const sk = c?.sampleKey ?? at?.sampleKey ?? '', chrom = c?.chrom ?? at?.chrom ?? '';
   // call bars above the plot: file calls (loss red, gain blue), then probe calls (purple)
   const T = calls ? T0 + 22 : T0, H = H0 + T - T0;
@@ -61,6 +65,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall }: { c?: Cg
   const [barTip, setBarTip] = useState<{ x: number; y: number; c: CghCnv } | null>(null);
   const s = useCgh(), CLIP = s.view.scale;
   const box = useRef<HTMLDivElement>(null), cv = useRef<HTMLCanvasElement>(null);
+  const bands = useBands(getBands, chrom);
   useEffect(() => {
     const el = box.current; if (!el) return;
     const ro = new ResizeObserver(() => setW(el.clientWidth)); ro.observe(el); setW(el.clientWidth);
@@ -221,6 +226,55 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall }: { c?: Cg
         {callTip && c && <CghTip x={callTip.x} y={callTip.y} w={w} title={`${c.sample} · ${c.fromProbes ? 'probe call (from probes)' : 'call'}`} lines={callLines(s, c)} />}
         {hover && <div className="absolute pointer-events-none rounded-full border-2 border-slate-900" style={{ left: hover.x - 4, top: hover.y - 4, width: 8, height: 8 }} />}
       </div>
+      {bands && w > 0 && <Ideogram bands={bands} chrom={chrom} len={len} w={w} from={from} to={to} onGo={(a, b) => go(a, b)} />}
     </div>
+  );
+}
+
+/** the chromosome's cytogenetic bands, read once per chromosome (the loader caches them); undefined until read or when they cannot be */
+function useBands(get: ((chrom: string) => Promise<Cytoband[]>) | undefined, chrom: string) {
+  const [got, setGot] = useState<{ chrom: string; bands: Cytoband[] } | null>(null);
+  const ref = useRef(get); ref.current = get;
+  useEffect(() => {
+    let alive = true;
+    ref.current?.(chrom).then(b => { if (alive && b.length) setGot({ chrom, bands: b }); }).catch(() => { /* no ideogram */ });
+    return () => { alive = false; };
+  }, [chrom]);
+  return got?.chrom === chrom ? got.bands : undefined;
+}
+
+const IY = 11, IH = 12;
+/** the ideogram under the plot, drawn as the SV browser's (stains, centromere triangles, band names where they fit), the
+ * window boxed; a click centres the window there, a drag moves it */
+function Ideogram({ bands, chrom, len, w, from, to, onGo }: { bands: Cytoband[]; chrom: string; len: number; w: number; from: number; to: number; onGo: (a: number, b: number) => void }) {
+  const PW = w - L - R, ix = (bp: number) => L + (bp / len) * PW, span = to - from;
+  const drag = useRef<{ x: number; from: number } | null>(null);
+  const bpAt = (e: React.PointerEvent) => ((e.clientX - e.currentTarget.getBoundingClientRect().left - L) / PW) * len;
+  const a = ix(from), b = Math.max(a + 3, ix(to)), clip = `cgh-ideo-${chrom}`;
+  const cen = bands.filter(x => x.stain === 'acen');
+  return (
+    <svg width={w} height={IY + IH + 3} className="block cursor-pointer select-none" data-cgh-ideogram aria-label={`${chrom} ideogram: click or drag to move the window`}
+      onPointerDown={e => {
+        const bp = bpAt(e), inside = bp >= from && bp <= to;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, from: inside ? from : bp - span / 2 };
+        if (!inside) onGo(bp - span / 2, bp + span / 2);
+      }}
+      onPointerMove={e => { const d = drag.current; if (!d || !(e.buttons & 1)) return; const sh = ((e.clientX - d.x) / PW) * len; onGo(d.from + sh, d.from + sh + span); }}
+      onPointerUp={() => { drag.current = null; }}>
+      <title>{`${chrom}: cytogenetic bands (UCSC), the window boxed. Click or drag to move it.`}</title>
+      <defs><clipPath id={clip}><rect x={L} y={IY} width={PW} height={IH} rx={IH / 2} /></clipPath></defs>
+      <text x={L - 4} y={IY + IH - 2} fontSize={9} textAnchor="end" fill="#64748b">{chrom.replace(/^chr/, '')}</text>
+      <g clipPath={`url(#${clip})`}>
+        <rect x={L} y={IY} width={PW} height={IH} fill={STAIN.gneg} />
+        {bands.map(x => x.stain === 'acen'
+          ? <path key={x.name + x.start} d={x.name.startsWith('p') ? `M${ix(x.start)},${IY} L${ix(x.end)},${IY + IH / 2} L${ix(x.start)},${IY + IH} Z` : `M${ix(x.end)},${IY} L${ix(x.start)},${IY + IH / 2} L${ix(x.end)},${IY + IH} Z`} fill={STAIN.acen} />
+          : <rect key={x.name + x.start} x={ix(x.start)} y={IY} width={Math.max(0.5, ix(x.end) - ix(x.start))} height={IH} fill={STAIN[x.stain] ?? STAIN.gneg} />)}
+      </g>
+      <rect x={L} y={IY} width={PW} height={IH} rx={IH / 2} fill="none" stroke="#94a3b8" strokeWidth={0.8} />
+      {cen.length > 0 && <text x={ix((cen[0].start + cen[cen.length - 1].end) / 2)} y={IY - 2} fontSize={8} textAnchor="middle" fill="#be123c">cen</text>}
+      {bands.filter(x => x.stain !== 'acen' && ix(x.end) - ix(x.start) > x.name.length * 4.6 + 6).map(x => <text key={`n${x.name}${x.start}`} x={(ix(x.start) + ix(x.end)) / 2} y={IY - 2} fontSize={8} textAnchor="middle" fill="#94a3b8">{x.name}</text>)}
+      <rect x={a} y={IY - 1.5} width={b - a} height={IH + 3} fill="rgba(37, 99, 235, 0.12)" stroke="#2563eb" strokeWidth={1.5} rx={2} data-cgh-ideo-window />
+    </svg>
   );
 }

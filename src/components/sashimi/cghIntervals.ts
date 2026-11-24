@@ -13,6 +13,9 @@
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
+/** a position with thousands commas; a call's size from kb (2.61 Mb, 450 kb, 12.5 kb, 800 bp): shared by the page's parts */
+export const fmtBp = (n: number) => Math.round(n).toLocaleString('en-US');
+export const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : kb >= 1 ? `${kb.toFixed(kb >= 100 ? 0 : 1)} kb` : `${Math.round(kb * 1000)} bp`);
 export type CghKind = 'loss' | 'gain';
 export type CghSex = 'male' | 'female';
 /** a sex as a header line may write it (Gender / Sex: Male, F, Femme…) */

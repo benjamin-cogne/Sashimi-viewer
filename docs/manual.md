@@ -278,7 +278,8 @@ than 80 % of cells by the AChro-Puce estimate (an autosomal loss above −0.74, 
 its ISCN with the fraction in brackets; that is the only uncertainty shown.
 
 **ISCN.** Each call's array ISCN follows ISCN 2024 (chapter 8, microarray): `arr[GRCh37] 22q11.21(18,894,835_21,505,417)x1`,
-bands from pter to qter (one band written once), positions with thousands commas, the copy number (the file's, else from
+bands from pter to qter (one band written once) at the finest resolution of the build's cytogenetic bands (UCSC, e.g.
+`7q11.23` where the file says `7q11`; the file's band only when the bands cannot be read or the call is not annotated), positions with thousands commas, the copy number (the file's, else from
 the log ratio), a mosaic fraction in brackets (`x1[0.48]`), a whole chromosome as `(21)x3`. It stands on the call's card
 above the browser and in its detail (each with *copy*), and in the row's tooltip; when the file gives its own ISCN and
 it differs (positions, bands, copies, mosaic), the file's is shown beside it, marked *differs*. A patient's tab has a
@@ -327,11 +328,17 @@ lengths, log ratio across (−range left, + right), the bars beside each column;
 than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a chromosome
 opens it in the panel, always horizontal and drawn as the call's probe panel is (the same code: every probe as a dot, the
 moving median of 3 / 7 / 15, the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
-the plot; ← → beside the name for the neighbours, *whole genome* back; a click on a call bar opens the call as its row
+the plot and the chromosome's **ideogram** under it (the SV browser's bands and colours, band names where they fit, the
+centromere marked *cen*, the window boxed: a click or a drag on it moves the window; the call's probe panel has one too);
+← → beside the name for the neighbours, *whole genome* back; a click on a call bar opens the call as its row
 does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
-without a probe file shows its calls only. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
+without a probe file (an interval table, a BED, a VCF, the examples) gets a short panel instead: its listed calls as
+bars over the chromosomes drawn to scale, a click on a bar opening the call; no log-ratio axis, range or layout, no
+chromosome view. Without a probe file there is also no probe panel, no *Probe calls* line and no DLRS; a table column the
+files leave empty (*Probes*, *Log R* for a BED) and the minimum of probes, when no file gives a count, are not shown. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
 opened again, it folds the call's window into a strip *▸ Call — …* in turn (one of the two at a time). The page's ⓘ panel
-describes the methods (DLRS, probe calls, copy number, mosaic, ISCN, this view, the disclaimer) under *Probes*.
+describes the methods (DLRS, probe calls, copy number, mosaic, ISCN, this view, the disclaimer) under *Methods*,
+saying, when no probe file is loaded, that the probe methods do not apply.
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other

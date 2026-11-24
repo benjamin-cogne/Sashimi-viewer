@@ -1,6 +1,6 @@
 // Unit checks of the array ISCN (cghIscn.ts) and the export's ISCN column, on invented calls.
 // Run: npx esbuild scripts/cgh-iscn-check.ts --bundle --platform=node --outfile=/tmp/cgh-iscn-check.cjs && node /tmp/cgh-iscn-check.cjs
-import { callIscn, patientIscn, iscnBands } from '../src/components/sashimi/cghIscn';
+import { callIscn, patientIscn, iscnBands, bandSpan, iscnBandOf } from '../src/components/sashimi/cghIscn';
 import { exportCghFile } from '../src/components/sashimi/cghIntervals';
 const base = { id: 'x', sample: 'S', sampleKey: 'S', cytoband: '', genes: [], sizeKb: 1, typeText: '', probes: 10, iscn: null, copies: null, copiesHi: null, amp: false, suppressed: false, classification: '', classRest: '', note: '', line: 0 };
 const mk = (o: any) => ({ ...base, ...o });
@@ -40,4 +40,15 @@ const e1 = exportCghFile(mkFile('Chr\tStart\tStop', 'chr22\t18894835\t21505417',
 eq('export adds ISCN', e1, 'Chr\tStart\tStop\tClassification\tComment\tISCN\nchr22\t18894835\t21505417\tPathogenic\t\tISCNX');
 const e2 = exportCghFile(mkFile('Chr\tStart\tStop\tISCN', 'chr22\t18894835\t21505417\tarr', f1), () => 'Pathogenic', () => '', () => 'ISCNX');
 eq('export keeps ISCN', e2, 'Chr\tStart\tStop\tISCN\tClassification\tComment\nchr22\t18894835\t21505417\tarr\tPathogenic\t');
+// the band at sub-band precision from the cytogenetic bands (invented bands, 0-based half-open), the file's as the fallback
+const bands7 = [['p11.1', 57.0, 58.0], ['q11.1', 58.0, 61.7], ['q11.21', 61.7, 67.0], ['q11.22', 67.0, 72.2], ['q11.23', 72.2, 77.5], ['q21.11', 77.5, 86.4]].map(([name, a, z]) => ({ name: name as string, start: (a as number) * 1e6, end: (z as number) * 1e6 }));
+const w = mk({ chrom: 'chr7', start: 72700001, end: 74100000, kind: 'loss', copies: 1, cytoband: 'q11' });
+eq('band from cytobands', iscnBandOf(w, bandSpan(bands7, w.start - 1, w.end)), 'q11.23');
+eq('ISCN sub-band, single once', callIscn(w, 'GRCh37', iscnBandOf(w, bandSpan(bands7, w.start - 1, w.end)), undefined).text, 'arr[GRCh37] 7q11.23(72,700,001_74,100,000)x1');
+const w2 = mk({ chrom: 'chr7', start: 65000000, end: 74100000, kind: 'gain', copies: 3, cytoband: 'q11' });
+eq('ISCN two sub-bands pter to qter', callIscn(w2, 'GRCh37', iscnBandOf(w2, bandSpan(bands7, w2.start - 1, w2.end)), undefined).text, 'arr[GRCh37] 7q11.21q11.23(65,000,000_74,100,000)x3');
+const w3 = mk({ chrom: 'chr7', start: 57500000, end: 62000000, kind: 'gain', copies: 3, cytoband: 'p11 - q11' });
+eq('ISCN across the centromere', callIscn(w3, 'GRCh37', iscnBandOf(w3, bandSpan(bands7, w3.start - 1, w3.end)), undefined).text, 'arr[GRCh37] 7p11.1q11.21(57,500,000_62,000,000)x3');
+eq('fallback: no cytobands, the file band', callIscn(w, 'GRCh37', iscnBandOf(w, undefined), undefined).text, 'arr[GRCh37] 7q11(72,700,001_74,100,000)x1');
+eq('outside the bands: the file band', iscnBandOf(w, bandSpan(bands7, 200e6, 201e6)), 'q11');
 console.log(bad ? `${bad} FAILED` : 'all passed');

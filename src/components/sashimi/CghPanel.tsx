@@ -14,7 +14,7 @@ import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
 import { CGH_EXAMPLES, loadExamples } from './cghExamples';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
-import { CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
+import { fmtBp as fmt, sizeText, CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
@@ -24,8 +24,6 @@ import { CallIscnText, PatientIscn, iscnOfCall, iscnTip } from './CghIscnView';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
-const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
-const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : kb >= 1 ? `${kb.toFixed(kb >= 100 ? 0 : 1)} kb` : `${Math.round(kb * 1000)} bp`);
 const KIND = { loss: { color: '#dc2626', bg: '#fee2e2', word: 'del' }, gain: { color: '#2563eb', bg: '#dbeafe', word: 'dup' } } as const;
 
 /** "＋ Add samples": the files picked (several at once), read in the page. */
@@ -133,16 +131,18 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   const [sexes, setSexes] = useState<Record<string, CghSex | null>>(() => Object.fromEntries(p.files.flatMap(f => f.samples.map(x => [x.key, x.sex]))));
   const samples = p.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const noCount = p.files.some(f => f.format !== 'interval' || f.warnings.some(w => /no #Probes/.test(w)));
+  // no file of the question gives a probe count (BED, VCF): no minimum to ask
+  const counted = samples.some(({ x }) => x.cnvs.some(c => c.probes != null));
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
       <div data-cgh-question className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
-          <div className="text-[11px] text-slate-500 mt-0.5">Calls with fewer probes, or smaller, than this are not analysed: neither listed nor annotated (both can be changed in the list afterwards).</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">{counted ? 'Calls with fewer probes, or smaller, than this are not analysed: neither listed nor annotated (both can be changed in the list afterwards).' : 'Calls smaller than this are not analysed: neither listed nor annotated (can be changed in the list afterwards). The file gives no probe count: no minimum of probes.'}</div>
         </div>
         <div className="px-4 py-3 space-y-3">
-          {samples.length > 0 && <div className="flex items-center gap-2">
+          {counted && <div className="flex items-center gap-2">
             <span className="font-semibold">Minimum number of probes</span>
             <Stepper value={n} onChange={setN} min={1} max={500} title="Calls with fewer probes are not analysed" ariaLabel="Minimum number of probes" />
             {n !== CGH_MIN_PROBES_DEFAULT && <button className="text-accent-700 hover:underline" onClick={() => setN(CGH_MIN_PROBES_DEFAULT)}>back to {CGH_MIN_PROBES_DEFAULT}</button>}
@@ -169,7 +169,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
           </table>}
           {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x }) => { const d = cgh.probes(x.key)?.dlrs;
             return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : ' (not readable)'}</div>; })}
-          {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
+          {noCount && counted && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
             <button className="text-accent-700 hover:underline" onClick={() => cgh.remap(f)}>{f.remembered ? '(change…)' : 'columns…'}</button></div>)}
@@ -253,6 +253,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const notAnn = rows.filter(({ c }) => !s.ann[c.id] && !auto.has(c.id)).map(({ c }) => c);
   const minWords = `fewer than ${s.filter.minProbes} probe${s.filter.minProbes > 1 ? 's' : ''}${s.filter.minKb ? ` or smaller than ${sizeWord(s.filter.minKb)}` : ''}`;
   const anySuppressed = all.some(({ c }) => c.suppressed);
+  // a column the files leave empty (a BED: no probe count, no log ratio) is not shown
+  const hasProbeCol = all.some(({ c }) => c.probes != null), hasLrCol = all.some(({ c }) => c.logRatio != null);
   // per column, each listed patient's calls (PanelApp: genes) to ask again; the control is hidden when none failed
   const retryOf = (col: RetryCol): RetryGroup[] => listed.map(({ x }) => {
     const cs = rows.filter(r => r.c.sampleKey === x.key).map(r => r.c), src = RETRY_SRC[col];
@@ -335,7 +337,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <div className="pt-2" />
       <div className="px-5 pb-2 flex flex-wrap items-center gap-2 text-xs" data-cgh-filters>
         {listed.length === 1 && <SexSelect value={s.sex[listed[0].x.key] ?? null} onChange={v => cgh.setSex(listed[0].x.key, v)} />}
-        <span className="[&>span]:!h-[26px] [&>span]:!rounded-lg [&>span]:!text-xs"><Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" /></span>
+        {hasProbeCol && <span className="[&>span]:!h-[26px] [&>span]:!rounded-lg [&>span]:!text-xs"><Stepper value={f.minProbes} onChange={v => cgh.setFilter({ minProbes: v })} min={1} max={500} label="probes ≥" title="Calls with fewer probes are not analysed (3 by default)" ariaLabel="Minimum number of probes" /></span>}
         <Segmented size="sm" label="Type" title="Losses, gains or both" value={f.kind} onChange={v => cgh.setFilter({ kind: v })}
           options={[{ value: 'all', label: 'all', hint: 'Losses and gains' }, { value: 'loss', label: 'losses', hint: 'Deletions only' }, { value: 'gain', label: 'gains', hint: 'Gains and amplifications only' }]} />
         <SizeSlider value={f.minKb} onChange={v => cgh.setFilter({ minKb: v })} />
@@ -373,14 +375,14 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       {(() => { const one = s.sample ? s.files.flatMap(fl => fl.samples.map(x => ({ x, fl }))).find(y => y.x.key === s.sample) : null; return one ? <PatientIscn x={one.x} build={one.fl.build ?? 'GRCh37'} /> : null; })()}
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
-        <table className={`text-[11.5px] border-collapse ${cols.fixed ? '[&_td]:overflow-hidden [&_td]:text-ellipsis' : 'w-full'}`} style={cols.tableStyle([...(!s.sample && samples.length > 1 ? ['sample'] : []), 'band', 'pos', 'size', 'type', 'probes', 'logr', ...(samples.length > 1 ? ['series'] : []), 'genes', 'panelapp', 'dosage', 'priority', 'class', 'links'])} data-cgh-table>
+        <table className={`text-[11.5px] border-collapse ${cols.fixed ? '[&_td]:overflow-hidden [&_td]:text-ellipsis' : 'w-full'}`} style={cols.tableStyle([...(!s.sample && samples.length > 1 ? ['sample'] : []), 'band', 'pos', 'size', 'type', ...(hasProbeCol ? ['probes'] : []), ...(hasLrCol ? ['logr'] : []), ...(samples.length > 1 ? ['series'] : []), 'genes', 'panelapp', 'dosage', 'priority', 'class', 'links'])} data-cgh-table>
           <thead data-cgh-thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
             <tr className="border-b border-slate-200">
               {!s.sample && samples.length > 1 && <th {...cols.th('sample')} className="relative px-1.5 py-0.5 font-medium">Sample{cols.grip('sample')}</th>}
               <th {...cols.th('band')} className="relative px-1.5 py-0.5 font-medium">Band{rc('bands')}{cols.grip('band')}</th><th {...cols.th('pos')} className="relative px-1.5 py-0.5 font-medium">Position (GRCh37){cols.grip('pos')}</th>
               <th {...cols.th('size')} className="relative px-1.5 py-0.5 font-medium text-right">Size{cols.grip('size')}</th><th {...cols.th('type')} className="relative px-1.5 py-0.5 font-medium">Type{rc('dgv')}{cols.grip('type')}</th>
-              <th {...cols.th('probes')} className="relative px-1.5 py-0.5 font-medium text-right" title="Number of probes of the call">Probes{cols.grip('probes')}</th>
-              <th {...cols.th('logr')} className="relative px-1.5 py-0.5 font-medium text-right" title="Mean log ratio of the call (the file's); a mosaic estimate beside it">Log R{cols.grip('logr')}</th>
+              {hasProbeCol && <th {...cols.th('probes')} className="relative px-1.5 py-0.5 font-medium text-right" title="Number of probes of the call">Probes{cols.grip('probes')}</th>}
+              {hasLrCol && <th {...cols.th('logr')} className="relative px-1.5 py-0.5 font-medium text-right" title="Mean log ratio of the call (the file's); a mosaic estimate beside it">Log R{cols.grip('logr')}</th>}
               {samples.length > 1 && <th {...cols.th('series')} className="relative px-1.5 py-0.5 font-medium text-right" title={`Recurrence in the loaded series: other patients with a call of the same type on the same chromosome (reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %) / other patients loaded. Every call counts, those under the minimums too.`}>Series{cols.grip('series')}</th>}
               <th {...cols.th('genes')} className="relative px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes{rc('genes')}{cols.grip('genes')}</th>
               <th {...cols.th('panelapp')} className="relative px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp{rc('panelapp')}{cols.grip('panelapp')}</th>
@@ -412,10 +414,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}{low && !hasProbeCol && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
+                  {hasProbeCol && <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>}
+                  {hasLrCol && <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>}
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     <button className="px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" onClick={() => annotateNow([c])} title="Annotate this call (genes, PanelApp, ClinGen, gnomAD, DGV Gold)">annotate</button></td></>
@@ -454,7 +456,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column; a VCF in INFO; an .xlsx as tab-separated text).
-        <ProbeMethods />
+        <ProbeMethods probes={samples.some(({ x }) => cgh.hasProbes(x.key))} />
         <PriorityRules />
       </details>
     </div>

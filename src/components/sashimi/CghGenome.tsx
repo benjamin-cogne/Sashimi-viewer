@@ -1,24 +1,28 @@
 /**
  * The *Whole genome* panel of the array-CGH page: one patient's probes (CGH_Log_Ratio.txt) over chromosomes 1-22, X, Y
  * side by side, with its calls as bars above; a chromosome clicked opens it in the same panel, a call bar clicked there
- * opens the call. It stands where the call window does: expanded while no call is open, a strip once one is.
+ * opens the call. It stands where the call window does: expanded while no call is open, a strip once one is. A patient
+ * without a probe file: its calls only, as bars over the chromosomes drawn to scale (no log-ratio axis, no chromosome view).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { cgh, useCgh, classOf, passes, probeCnv, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
-import type { CghCnv, CghFile } from './cghIntervals';
+import { fmtBp as fmt, sizeText, type CghCnv, type CghFile } from './cghIntervals';
 import { lowerBound } from './cghProbes';
 import { chromLength } from '../../standalone/assembly';
 import { estCopies } from './cghMosaic';
 import { viewOf } from './cghAnnotate';
 import { CghProbePanel } from './CghProbePanel';
 import { LEVEL_STYLE } from './cghScore';
+import type { SvGeneLoaders } from './SvGenomeBrowser';
+import type { GenomeBuild } from '../../standalone/ensembl';
 
 const CHROMS = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY'];
 const L = 34, R = 8, PT = 24, PH = 170, PB = PT + PH, HH = PB + 18, THR = 0.2, GAP = 2;
 /** vertical layout: a row's label band, its tallest column (chr1), the axis labels under it; the call bars beside each column */
 const VT = 16, VB = 16, VBARS = 12;
+/** calls only (no probe file): the bars, the chromosomes as blocks under them, their names */
+const CT = 18, CB = 26, CH = 42;
 export const BTN = 'h-[22px] min-w-[24px] px-1.5 rounded border border-slate-200 bg-white text-[11px] text-slate-700 hover:border-accent-300 hover:bg-accent-50 disabled:opacity-40 disabled:pointer-events-none';
-const fmt = (n: number) => n.toLocaleString('en-US');
 /** a chromosome's plot: its position axis p0 → p1 (x, or y going down in the vertical layout), its log-ratio axis q0 → q1
  * (y from +S down to −S; vertical: x from −S to +S) */
 type Seg = { ch: string; to: number; vert: boolean; p0: number; p1: number; q0: number; q1: number };
@@ -54,10 +58,9 @@ export function LrScale() {
 
 /** a call's characteristics, for the hover tips (here and in the probe panel) */
 export function callLines(s: CghState, c: CghCnv): string[] {
-  const size = c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`;
   const est = c.copies == null ? estCopies(c, s.sex[c.sampleKey]) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
   return [
-    `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${size} · ${c.kind}`,
+    `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${sizeText(c.sizeKb)} · ${c.kind}`,
     `${c.probes ?? '?'} probes${c.logRatio != null ? ` · mean log ratio ${c.logRatio.toFixed(2)}` : ''}`,
     c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
     c.fromProbes ? 'from probes: not in the file, not exported' : `class: ${classOf(s, c).trim() || 'none'} · priority: ${lv ? LEVEL_STYLE[lv].label : 'not read yet'}`,
@@ -73,19 +76,20 @@ export function CghTip({ x, y, w, title, lines }: { x: number; y: number; w: num
 /** the median of a few values (sorted in place) */
 const median = (v: number[]) => { v.sort((a, b) => a - b); const h = v.length >> 1; return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
 
-export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onToggle: () => void; onOpen: (c: CghCnv, f: CghFile) => void }) {
+export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: boolean; onToggle: () => void; onOpen: (c: CghCnv, f: CghFile) => void; loadersFor: (b: GenomeBuild) => Pick<SvGeneLoaders, 'getCytobands'> }) {
   const s = useCgh();
   const all = useMemo(() => s.files.flatMap(f => f.samples.map(x => ({ x, f }))), [s.files]);
   const [pick, setPick] = useState<string | null>(null);
   // the active tab's patient; in All patients, the one picked here
   const cur = all.find(a => a.x.key === s.sample) ?? all.find(a => a.x.key === pick) ?? all[0];
   const key = cur?.x.key ?? '', build = cur?.f.build ?? 'GRCh37';
-  const [chrom, setChrom] = useState<string | null>(null);
+  const probesOk = !!key && cgh.hasProbes(key);
+  const [chromSel, setChrom] = useState<string | null>(null), chrom = probesOk ? chromSel : null;
   const [w, setW] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number; title: string; lines: string[]; dot?: [number, number] } | null>(null);
   const box = useRef<HTMLDivElement>(null), base = useRef<HTMLCanvasElement>(null), top = useRef<HTMLCanvasElement>(null), bars = useRef<Bar[]>([]);
-  const S = s.view.scale, vert = s.view.layout === 'vertical' && !chrom;
-  const chromPanel = !!chrom && open && !!key && cgh.hasProbes(key);
+  const S = s.view.scale, vert = s.view.layout === 'vertical' && !chrom && probesOk;
+  const chromPanel = !!chrom && open;
   useEffect(() => {
     const el = box.current; if (!el) return;
     const ro = new ResizeObserver(() => setW(el.clientWidth)); ro.observe(el); setW(el.clientWidth);
@@ -116,8 +120,9 @@ export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onTo
     }
     const tot = lens.reduce((a, b) => a + b, 0), k = (w - L - R - GAP * (CHROMS.length - 1)) / tot;
     let x = L;
-    return { H: HH, rows: 1, segs: CHROMS.map((ch, i) => { const sg = { ch, to: lens[i], vert: false, p0: x, p1: x + lens[i] * k, q0: PT, q1: PB }; x = sg.p1 + GAP; return sg; }) };
-  }, [w, chrom, build, vert]);
+    const [q0, q1] = probesOk ? [PT, PB] : [CT, CB];
+    return { H: probesOk ? HH : CH, rows: 1, segs: CHROMS.map((ch, i) => { const sg = { ch, to: lens[i], vert: false, p0: x, p1: x + lens[i] * k, q0, q1 }; x = sg.p1 + GAP; return sg; }) };
+  }, [w, chrom, build, vert, probesOk]);
   const calls = cur ? cur.x.cnvs.filter(c => passes(s, c)) : [];
   const events = cur ? (cgh.probeCallsOf(key)?.events ?? []).map(e => probeCnv(e, key, cur.x.name)) : [];
 
@@ -128,6 +133,16 @@ export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onTo
     el.width = Math.round(w * dpr); el.height = Math.round(H * dpr);
     const g = el.getContext('2d')!; g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, H);
     g.font = '10px Inter, ui-sans-serif, system-ui, sans-serif'; g.textBaseline = 'middle';
+    if (!probesOk) {
+      // calls only: the chromosomes as blocks, their names under them
+      g.textAlign = 'center';
+      for (const sg of segs) {
+        g.fillStyle = '#e2e8f0'; g.fillRect(sg.p0, CT, sg.p1 - sg.p0, CB - CT);
+        g.fillStyle = '#64748b'; g.fillText(sg.ch.slice(3), (sg.p0 + sg.p1) / 2, CB + 8);
+      }
+      el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', '0');
+      return;
+    }
     const ax = lrAxis(S);
     if (vert) {
       g.textAlign = 'center';
@@ -197,9 +212,9 @@ export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onTo
       }
       g.strokeStyle = '#1e3a8a'; g.lineWidth = vert ? 1 : 1.2;
       for (const pts of med) { g.beginPath(); pts.forEach(([x, y], j) => (j ? g.lineTo(x, y) : g.moveTo(x, y))); g.stroke(); }
-    } else { g.fillStyle = '#64748b'; g.textAlign = 'center'; g.fillText('No probe file for this patient: its calls only', w / 2, vert ? H / 2 : PT + PH / 2 - 14); }
+    }
     el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', String(n)); el.setAttribute('data-clipped', String(clipped));
-  }, [w, segs, H, pr, open, S]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [w, segs, H, pr, open, S, probesOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the calls: file calls (loss red, gain blue) and probe calls (purple), cheap, redrawn with the state
   const barKey = `${calls.map(c => c.id).join()}|${events.length}|${s.shown}`;
@@ -254,7 +269,7 @@ export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onTo
   const onClick = (e: React.MouseEvent) => {
     const rc = e.currentTarget.getBoundingClientRect(), x = e.clientX - rc.left, y = e.clientY - rc.top;
     const b = barAt(x, y);
-    if (chrom) { if (b) { cgh.setShown(b.c.id); onOpen(b.c, cur.f); } return; }
+    if (chrom || !probesOk) { if (b) { cgh.setShown(b.c.id); onOpen(b.c, cur.f); } return; }
     const sg = segAt(x, y); if (sg) { setChrom(sg.ch); setHover(null); }
   };
   const step = (d: number) => setChrom(c => CHROMS[(CHROMS.indexOf(c!) + d + CHROMS.length) % CHROMS.length]);
@@ -271,12 +286,13 @@ export function CghGenomePanel({ open, onToggle, onOpen }: { open: boolean; onTo
           <button className={BTN} onClick={() => step(-1)} title="Previous chromosome" aria-label="Previous chromosome">←</button>
           <span className="font-semibold text-slate-900 text-xs">{chrom}</span>
           <button className={BTN} onClick={() => step(1)} title="Next chromosome" aria-label="Next chromosome">→</button></span>}
-        {!chrom && <span className="inline-flex rounded border border-slate-200 overflow-hidden" role="group" aria-label="Layout" data-cgh-layout title="Chromosomes side by side (position across), or as columns (position down from pter, log ratio across); kept as a setting. A chromosome's own view stays horizontal.">
+        {!chrom && probesOk && <span className="inline-flex rounded border border-slate-200 overflow-hidden" role="group" aria-label="Layout" data-cgh-layout title="Chromosomes side by side (position across), or as columns (position down from pter, log ratio across); kept as a setting. A chromosome's own view stays horizontal.">
           {(['horizontal', 'vertical'] as const).map(v => <button key={v} onClick={() => cgh.setView({ layout: v })} aria-pressed={lay === v} className={`h-[22px] px-1.5 text-[11px] ${lay === v ? 'bg-accent-50 text-accent-700 font-semibold' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{v}</button>)}</span>}
-        {!(chromPanel && pr) && <LrScale />}
-        <span className="text-slate-400">· {chrom ? 'click a call bar: open it' : vert ? 'click a chromosome: its probes · position down from pter, log ratio across' : 'click a chromosome: its probes'} · dots black within ±0.2, red above, green below · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> (calls listed), <span className="text-fuchsia-700">probe calls</span> · {chromPanel && pr ? 'every probe, as in the call\'s probe panel' : `clipped at ±${S} (▲▼ beyond)`}{male ? ' · male: X and Y near −1 (one copy, not normalised)' : ''}</span>
+        {probesOk && !(chromPanel && pr) && <LrScale />}
+        {!probesOk ? <span className="text-slate-400" data-cgh-calls-only>· no probe file for this patient: its calls (as listed) on the chromosomes, to scale · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> · click a bar: open the call</span>
+        : <span className="text-slate-400">· {chrom ? 'click a call bar: open it' : vert ? 'click a chromosome: its probes · position down from pter, log ratio across' : 'click a chromosome: its probes'} · dots black within ±0.2, red above, green below · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> (calls listed), <span className="text-fuchsia-700">probe calls</span> · {chromPanel && pr ? 'every probe, as in the call\'s probe panel' : `clipped at ±${S} (▲▼ beyond)`}{male ? ' · male: X and Y near −1 (one copy, not normalised)' : ''}</span>}
       </div>
-      {chromPanel && pr ? <CghProbePanel key={`${key}|${chrom}`} at={{ sampleKey: key, chrom }} chromLen={chromLength(build, chrom) ?? 0} segs={cgh.probeCallsOf(key)?.segs.get(chrom)}
+      {chromPanel && pr ? <CghProbePanel key={`${key}|${chrom}`} at={{ sampleKey: key, chrom }} chromLen={chromLength(build, chrom) ?? 0} segs={cgh.probeCallsOf(key)?.segs.get(chrom)} getBands={loadersFor(build).getCytobands}
         calls={[...calls, ...events].filter(c => c.chrom === chrom)} onCall={c => { cgh.setShown(c.id); onOpen(c, cur.f); }} />
       : <div ref={box} className="relative mt-1 mx-1 select-none cursor-pointer" onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onClick}>
         <canvas ref={base} style={{ width: '100%', height: H, display: 'block' }} data-cgh-genome-probes data-layout={vert ? 'vertical' : 'horizontal'} />

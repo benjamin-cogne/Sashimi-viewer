@@ -2,15 +2,14 @@
 import { useState } from 'react';
 import { cgh, useCgh, classOf, type CghState } from './cghStore';
 import type { CghCnv, CghSample } from './cghIntervals';
-import { bandOfCall } from './cghAnnotate';
-import { callIscn, patientIscn, type CallIscn } from './cghIscn';
+import { callIscn, patientIscn, iscnBandOf, type CallIscn } from './cghIscn';
 
 const ISCN_OFFERED = ['Pathogenic', 'Likely pathogenic', 'Uncertain significance', 'PIEV', 'Likely benign', 'Benign'];
 const SHORT: Record<string, string> = { Pathogenic: 'P', 'Likely pathogenic': 'LP', 'Uncertain significance': 'VUS', PIEV: 'PIEV', 'Likely benign': 'LB', Benign: 'B' };
 
-/** a call's ISCN from the state (band: the file's, else the cytogenetic bands read; whole chromosome from the topology) */
+/** a call's ISCN from the state (band: the cytogenetic bands read, at sub-band precision, else the file's; whole chromosome from the topology) */
 export const iscnOfCall = (s: CghState, c: CghCnv, build: string): CallIscn =>
-  callIscn(c, build, bandOfCall(c, s.ann[c.id]), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr');
+  callIscn(c, build, iscnBandOf(c, s.ann[c.id]?.band), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr');
 
 /** the tooltip lines of a call's ISCN (ours, the file's when it differs) */
 export const iscnTip = (i: CallIscn) => [i.text ?? i.file ?? '', i.differs ? `file: ${i.file} (differs)` : ''].filter(Boolean).join('\n');

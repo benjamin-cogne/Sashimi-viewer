@@ -7,10 +7,8 @@ import { cgh, useCgh, probeCnv } from './cghStore';
 import { agrees, SENSITIVITY, SEG_DEFAULTS, type ProbeCalls, type Sensitivity } from './cghSegment';
 import { estCopies, estTip } from './cghMosaic';
 import { Stepper, Popover } from './controls';
-import type { CghCnv, CghFile, CghSample } from './cghIntervals';
+import { fmtBp as fmt, sizeText, type CghCnv, type CghFile, type CghSample } from './cghIntervals';
 
-const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
-const sizeText = (kb: number) => (kb >= 1000 ? `${(kb / 1000).toFixed(2)} Mb` : kb >= 1 ? `${kb.toFixed(kb >= 100 ? 0 : 1)} kb` : `${Math.round(kb * 1000)} bp`);
 const sensOf = (t: number): Sensitivity => (t <= SENSITIVITY.high ? 'high' : t >= SENSITIVITY.low ? 'low' : 'normal');
 const HOW = 'Circular binary segmentation of the probes (Olshen et al. 2004) with a fixed threshold, the segments called by their probes and mean log ratio, adjacent ones of one direction merged; chrY only for a patient said male. A second opinion beside the file\'s calls.';
 
@@ -93,9 +91,10 @@ export function ProbeCallsBar({ listed, shown, onShow }: { listed: { x: CghSampl
 }
 
 /** the methods of what is read from the probes, in the page's ⓘ panel (written from cghProbes / cghSegment / cghMosaic / CghGenome) */
-export function ProbeMethods() {
+export function ProbeMethods({ probes }: { probes: boolean }) {
   return <div className="mt-1.5" data-cgh-probe-methods>
-    <div className="font-semibold text-slate-700">Probes (CGH_Log_Ratio.txt)</div>
+    <div className="font-semibold text-slate-700">Methods: copy number, ISCN{probes ? ', and what is read from the probes (CGH_Log_Ratio.txt)' : ''}</div>
+    {!probes && <div className="italic">No probe file loaded: the probe plots, DLRS and probe calls below apply only when a CGH_Log_Ratio.txt is added with a patient's table.</div>}
     <div><b>DLRS</b> (derivative log ratio spread), per patient: the standard deviation of the differences between the log ratios of consecutive probes (sorted by position, within each chromosome, every chromosome of the file including X and Y, chrM left out), divided by √2; probes without a value skipped; no outlier removed (events and waves raise it a little). Under 10 differences: not given. Words from Agilent's guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3 poor.</div>
     <div><b>Probe calls</b>, per patient and chromosome, probes without a value skipped: circular binary segmentation (Olshen AB et al., Biostatistics 2004;5:557-72). The arc whose mean differs most from the rest of the stretch, Z = (S<sub>j</sub> − S<sub>i</sub> − k·T/n)·√(n / (k(n − k))) / σ, cuts it when |Z| ≥ t, and each piece is cut again; a fixed threshold t, without the permutation test (sensitivity high / normal / low: t = 6 / 8 / 10). σ, the noise per probe, taken once per patient: the median absolute difference between consecutive probes × 1.4826 / √2 (robust to the events). A segment is a gain (loss) when its mean log ratio is ≥ +threshold (≤ −threshold; 0.25 by default); a segment of fewer than the minimum probes (3 by default) lying between two of one direction takes that direction; neighbouring segments of one direction are merged (mean weighted by probes); kept when the merged mean still passes the threshold and it has at least the minimum probes. chrY: its pseudo-autosomal probes left out (the chrX PAR ones again), the rest read only for a patient said male (cross-hybridisation in a female). A probe call is <i>not in the file</i> when no file call of the same chromosome and type overlaps it reciprocally by ≥ 50 % (the overlap over the longer of the two; a chrY PAR call compared as its chrX twin); those are listed, never exported. The file's calls carry no mark (they are made from these same probes).</div>
     <div><b>Copy number</b>, when the file gives none: the n whose log2(n / 2) is nearest the call's mean log ratio (x0 taken as −2, so a loss is x0 below −1.5, else x1; a gain x3 up to +0.79, x4 up to +1.16…; a male's X outside the PARs and chrY: log2(n / 1)). <b>Mosaic</b>: for a one-copy change, the fraction of cells from the AChro-Puce calculator (loss 2 − 2·2<sup>LR</sup>, gain 2·2<sup>LR</sup> − 2; one-copy X / Y of a male 1 − 2<sup>LR</sup> and 2<sup>LR</sup> − 1); below 80 % the call is shown <i>mosaic ~n%</i> (an autosomal loss above −0.74, a gain below +0.49), else as a whole x1 / x3.</div>

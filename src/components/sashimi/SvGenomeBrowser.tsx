@@ -74,7 +74,7 @@ const CLIN_EFFECT_WORD = { lof: 'loss of function', missense: 'missense', infram
 const C = { text: '#1f2937', muted: '#5b6b7e', faint: '#8796a8', grid: '#e3e8ee', line: '#d3dbe5', lost: '#dc2626', accent: '#0f766e', fusion5: '#7c3aed', fusion3: '#a855f7' };
 const CONF = { 3: { label: 'Green', color: '#16a34a', bg: '#dcfce7' }, 2: { label: 'Amber', color: '#d97706', bg: '#fef3c7' }, 1: { label: 'Red', color: '#dc2626', bg: '#fee2e2' } } as const;
 /** cytogenetic band stains (UCSC gieStain) */
-const STAIN: Record<string, string> = { gneg: '#f8fafc', gpos25: '#d6dde6', gpos33: '#cbd3de', gpos50: '#a9b5c4', gpos66: '#8f9db0', gpos75: '#768699', gpos100: '#4b5869', gvar: '#c7d0f0', stalk: '#e2e8f0', acen: '#f08080' };
+export const STAIN: Record<string, string> = { gneg: '#f8fafc', gpos25: '#d6dde6', gpos33: '#cbd3de', gpos50: '#a9b5c4', gpos66: '#8f9db0', gpos75: '#768699', gpos100: '#4b5869', gvar: '#c7d0f0', stalk: '#e2e8f0', acen: '#f08080' };
 const fmt = (n: number) => Math.round(n).toLocaleString('en-US');
 const widths = new Map<string, number>();
 let measureCtx: CanvasRenderingContext2D | null | undefined;

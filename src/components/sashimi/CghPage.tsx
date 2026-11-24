@@ -15,11 +15,10 @@ import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 import { clinGenTrack } from './CghClinGenTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
-import { CghProbePanel } from './CghProbePanel';
+import { CghProbePanel, callMargin } from './CghProbePanel';
 import { DLRS_TIP, dlrsWord } from './cghProbes';
 import { estCopies, estTip } from './cghMosaic';
 import { CghGenomePanel } from './CghGenome';
-import { callMargin } from './CghProbePanel';
 import { CallIscnText, iscnOfCall } from './CghIscnView';
 
 
@@ -109,7 +108,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
         )}
         <CghFrame onShow={show} dropping={over} loadersFor={loadersFor} />
         {error && <div className="mx-4 mt-2 text-[12px] text-red-700">{error}</div>}
-        {s.files.length > 0 && <CghGenomePanel open={genome} onToggle={() => setGenome(g => !g)} onOpen={show} />}
+        {s.files.length > 0 && <CghGenomePanel open={genome} onToggle={() => setGenome(g => !g)} onOpen={show} loadersFor={loadersFor} />}
         {genome && drawn && rec && full && c && <button onClick={() => setGenome(false)} data-cgh-call-strip className="mx-4 mt-3 block w-[calc(100%-2rem)] text-left px-5 py-1.5 bg-white border border-slate-200 rounded-xl shadow-sm text-xs font-semibold text-slate-800 hover:border-accent-300"
           title="Show the call window again (folds the whole genome)">▸ Call — {c.sample} · {c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} ({c.kind})</button>}
         {!genome && drawn && rec && full && c && (
@@ -118,13 +117,13 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
               <span className="text-sm font-bold">{c.sample}</span>
               {!iscn && band && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{band.replace(/\s+/g, '')}</span>}
               {iscn
-                ? <span title="ISCN 2024 (chapter 8, microarray) written from the band (the file's, else the cytogenetic bands), the positions and the copy number (the file's, else from the log ratio), with the mosaic fraction when the log ratio says mosaic; the file's own ISCN beside when it differs"><CallIscnText i={isc!} /></span>
+                ? <span title="ISCN 2024 (chapter 8, microarray) written from the band (the cytogenetic bands at sub-band precision, else the file's), the positions and the copy number (the file's, else from the log ratio), with the mosaic fraction when the log ratio says mosaic; the file's own ISCN beside when it differs"><CallIscnText i={isc!} /></span>
                 : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">{c.fromProbes ? <i>({c.kind}, from probes: not in the file, not exported)</i> : `(${c.kind}, no ISCN in the file)`}</span></span>}
-              <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes != null ? `${c.probes} probes` : 'probes not given'}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
+              <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} {c.probes != null ? ` · ${c.probes} probes` : ''}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
               {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>copies {est.text}</span>}
               {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>
-            {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} segs={cgh.probeCallsOf(c.sampleKey)?.segs.get(c.chrom)} />}
+            {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} segs={cgh.probeCallsOf(c.sampleKey)?.segs.get(c.chrom)} getBands={full.getCytobands} />}
             <div className="[&>div:first-child]:mt-2">
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
                 zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />
