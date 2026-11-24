@@ -160,13 +160,20 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   const meta: [string, string][] = [];
   for (const l of lines.slice(0, Math.max(0, hi))) {
     const [k, ...v] = sp(l);
-    if (k?.trim()) meta.push([k.trim().replace(/:$/, ''), v.join(' ').trim()]);
+    // `Key: value` in one cell (a CSV's header lines) as well as Key, value
+    const kv = !v.join('').trim() && k?.match(/^\s*([^:]+?)\s*:\s*(.+)$/);
+    if (kv) meta.push([kv[1], kv[2].trim()]);
+    else if (k?.trim()) meta.push([k.trim().replace(/:$/, ''), v.join(' ').trim()]);
   }
   const metaOf = (re: RegExp) => meta.find(([k]) => re.test(k))?.[1] || null;
   const buildText = metaOf(/^genome$/i);
   const record = metaOf(/^record name$/i);
   const warnings: string[] = [];
-  let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, iscnBuild: GenomeBuild | null = null;
+  let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, untyped = 0, normal = 0, iscnBuild: GenomeBuild | null = null;
+  // the log-ratio columns (one, or gain / loss ones): each with the type its name says (Gain, Loss…), else the sign's
+  const head = hi >= 0 ? sp(lines[hi]) : [];
+  const lrCols = [c.lr, ...(spec.lrMore ?? [])].filter((j, k, a) => j >= 0 && a.indexOf(j) === k).map(j => { const h = head[j] ?? ''; return { j, kind: /del|loss|perte/i.test(h) && /dup|gain|amp/i.test(h) ? null : kindOfText(h), name: h.trim() }; });
+  const sex = sexOf(meta.find(([k]) => /^(gender|sex|sexe)$/i.test(k))?.[1]);
   const skip = (why: string) => { skipped++; firstSkip ??= why; };
   if (c.probes < 0) warnings.push('no #Probes column: the minimum number of probes cannot be applied');
   // stored mappings from before the one-cell position have no `pos`
@@ -199,23 +206,30 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     const typeText = c.type >= 0 ? (f[c.type] ?? '').trim() : '';
     let cn = iscnCopies(iscn);
     if (cn.copies == null && !cn.amp) { const n = c.copies >= 0 ? copiesOf(f[c.copies]) : null; if (n != null) cn = { copies: n, copiesHi: null, amp: false }; }
-    const lr = c.lr >= 0 ? nn(f[c.lr]) : null;
+    // the non-zero one (the largest in absolute value if several), as in the interval-based report
+    let lr: number | null = null, lrBy: (typeof lrCols)[number] | null = null;
+    for (const x of lrCols) { const v = nn(f[x.j]); if (v != null && (lr == null || Math.abs(v) > Math.abs(lr))) { lr = v; lrBy = x; } }
     const choice = typeText ? opts.typeMap[typeText.toLowerCase()] ?? (opts.ignoreOtherTypes && !kindOfText(typeText) && !isLohText(typeText) ? 'ignore' : undefined) : undefined;
     if (choice === 'ignore') { ignored++; skip(`line ${i + 1}: type "${typeText}" ignored`); continue; }
     if (!choice && isLohText(typeText)) { loh++; skip(`line ${i + 1}: copy-neutral (${typeText})`); continue; }
-    const kind = choice ?? kindOfText(typeText) ?? (cn.amp ? 'gain' : cn.copies != null ? (cn.copies < 2 ? 'loss' : 'gain') : lr != null ? (lr < 0 ? 'loss' : 'gain') : null);
-    if (!kind) { skip(`line ${i + 1}: no type, copy number or log ratio`); warnings.push(`line ${i + 1}: no type, copy number or log ratio, not read`); continue; }
+    // no type: the copy number against the normal one (a male's X, and a Y, have one), else the log ratio's sign (0: none)
+    const cn2 = chrom === 'chrY' || (chrom === 'chrX' && sex === 'male') ? 1 : 2;
+    const byCn = cn.amp ? 'gain' : cn.copies != null ? (cn.copies < cn2 ? 'loss' : cn.copies > cn2 ? 'gain' : 'normal') : null;
+    const kindRaw = choice ?? kindOfText(typeText) ?? byCn ?? (lr ? lrBy?.kind ?? (lr < 0 ? 'loss' : 'gain') : null);
+    if (kindRaw === 'normal') { normal++; skip(`line ${i + 1}: copy number ${cn.copies}, the normal one`); continue; }
+    if (!kindRaw) { untyped++; skip(`line ${i + 1}: no type, copy number or non-zero log ratio`); continue; }
+    const kind: CghKind = kindRaw;
     const cell = c.cls >= 0 ? (f[c.cls] ?? '') : '';
     if (cell.trim()) { if (cell.includes(';;')) suffixYes++; else suffixNo++; }
     const name = (c.sample >= 0 && f[c.sample]?.trim()) || record || base;
     let s = samples.get(name);
-    if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex: sexOf(metaOf(/^(gender|sex|sexe)$/i)) }; samples.set(name, s); }
+    if (!s) { s = { key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex }; samples.set(name, s); }
     const size = c.size >= 0 ? nn(f[c.size]) : null;
     s.cnvs.push({
       id: `${id}:${i}`, sample: name, sampleKey: s.key, chrom, start, end,
       cytoband: c.band >= 0 ? (f[c.band] ?? '').trim() : '',
       genes: c.genes >= 0 ? (f[c.genes] ?? '').split(/[,;]/).map(g => g.trim()).filter(Boolean) : [],
-      sizeKb: size != null ? size * SIZE_MULT[opts.sizeUnit] : (end - start) / 1000, kind, typeText: typeText || (kind === 'loss' ? 'Deletion' : 'Gain'),
+      sizeKb: size != null ? size * SIZE_MULT[opts.sizeUnit] : (end - start) / 1000, kind, typeText: typeText || (lrBy?.kind && lr ? lrBy.name : kind === 'loss' ? 'Deletion' : 'Gain'),
       probes: c.probes >= 0 ? nn(f[c.probes]) : null, logRatio: lr, iscn, ...cn,
       suppressed: c.sup >= 0 && /^(true|yes|1)$/i.test((f[c.sup] ?? '').trim()),
       ...splitClass(cell), note: c.note >= 0 ? (f[c.note] ?? '').trim() : '', line: i,
@@ -226,6 +240,8 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     // the footer counts the calls the software made; a different count is said, not corrected
     if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
   }
+  if (untyped) warnings.push(`${count(untyped, 'row')} skipped: no type could be deduced (no type, no copy number, log ratio 0 or missing)`);
+  if (normal) warnings.push(`${count(normal, 'row')} skipped: copy number normal (2; 1 on a male's X or a Y)`);
   if (ignored) warnings.push(`${count(ignored, 'row')} ignored by their type`);
   if (loh) warnings.push(`${count(loh, 'LOH / ROH row')} skipped (copy-neutral)`);
   if (mito) warnings.push(`${count(mito, 'call')} on chrM skipped`);

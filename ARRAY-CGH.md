@@ -13,6 +13,11 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names, only when the header row looks like one);
   - `.xlsx` (first sheet), BED, SV VCF (`.vcf`, `.vcf.gz`);
+  - the mapping dialog also asks, besides chromosome / start / end (or one region column), for a type column, OR one or
+    several log-ratio columns (`MapSpec.lrMore`: gain / loss columns merged as the non-zero one, typed by a column name
+    saying gain / loss, else the sign), OR a copy-number column, and names what is missing; with no type: copy number
+    (< 2 loss, > 2 gain; 1 normal on a male's X and on Y), else the log ratio's sign; rows with neither skipped, counted
+    in the question; specs saved before `lrMore` load as before;
   - CytoGenomics' automated interval-based report (`IntervalBasedReport.xls`, tab-separated text despite its name, or `.xlsx`), recognised by its header (`AberrationNo`, `Chr`, `Start`, `Stop`, `#Probes`, `Amplification` / `Gain` / `Loss` / `Deletion`) and read without the mapping dialog (`parseAberrations` in `cghIntervals.ts`): one log ratio from the four columns (the non-zero one, the largest |value| if several), the type from the column (else the sign), `pval` (`CghCnv.pval`), genes, the build from `Genome:`, the sample from its name line (else `Array Design Info`); copies null (no ISCN written, mosaic from the log ratio); exported as it came plus Classification / Comment columns;
   - zips holding any of these (one patient each): tables found by content, the other files of an automated export left aside and listed in one note (*ignored: n other files*); a table needing the mapping is asked only when the zip holds no table read by itself;
   - probes' log ratios (`CGH_Log_Ratio.txt`, `cghProbes.ts`): kept as bytes with the zip's patient (alone: with the loaded sample of the `Normalized log ratio(<name>)` header, else a note *not matched*), read on first `cgh.probes(sampleKey)` into `Uint32Array` start / end and `Float32Array` log ratios per chromosome (NaN kept); `cgh.hasProbes`. Nothing drawn yet.

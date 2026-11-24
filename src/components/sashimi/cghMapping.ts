@@ -27,7 +27,9 @@ export interface MapOpts {
   /** a Type value neither recognised nor in typeMap is ignored (the mapping dialog's default), else read from the copy number / log ratio */
   ignoreOtherTypes?: boolean;
 }
-export interface MapSpec { cols: ColMap; opts: MapOpts }
+/** `lrMore`: further log-ratio columns (gain / loss ones, as Amplification / Gain / Loss / Deletion), merged with `lr`: the
+ * non-zero value; absent in mappings saved before it */
+export interface MapSpec { cols: ColMap; opts: MapOpts; lrMore?: number[] }
 /** thrown by the automatic reading when a table looks delimited but its columns are not recognised */
 export class NeedsMapping extends Error {}
 
@@ -191,6 +193,19 @@ export function guessCols(header: string[], rows: string[][] = []): ColMap {
     if (j != null) take('type', j);
   }
   return cols;
+}
+/** log-ratio columns besides `cols.lr`: unused columns named like one (log ratio, gain, loss, amplification, deletion)
+ * holding numbers; the first goes to `cols.lr` when it has none */
+export function guessLrMore(header: string[], rows: string[][], cols: ColMap): { cols: ColMap; lrMore: number[] } {
+  const used = new Set(FIELDS.map(f => cols[f]).filter(i => i >= 0)), more: number[] = [], sample = rows.slice(0, 30);
+  const numeric = (j: number) => { const v = sample.map(r => (r[j] ?? '').trim()).filter(Boolean); return v.length > 0 && v.filter(isNum).length / v.length >= 0.8; };
+  header.forEach((h, j) => {
+    const n = norm(h);
+    if (!used.has(j) && /^(amplification|gain|loss|deletion|dup|del)|logratio|log2|^l2r|^lr/.test(n) && numeric(j)) more.push(j);
+  });
+  const c = { ...cols };
+  if (c.lr < 0 && more.length) c.lr = more.shift()!;
+  return { cols: c, lrMore: more };
 }
 /** the columns of an interval table as the software exports it: by exact name (the header already normalised) */
 export function autoCols(head: string[]): ColMap {
