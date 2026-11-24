@@ -7233,7 +7233,7 @@ export default function SashimiViewer({
               title={`Autoscale: the coverage height follows the window, so that the sample tracks (arcs, coverage and their strips) fit in it with a margin (a tenth of the window), never taller than the default ${COVERAGE_H_DEFAULT} px; the gene model and the other annotations stay above them, the reads tracks below. It follows the window's size, the samples shown and the arcs in view, a moment after the view stops moving. When the tracks do not fit over ${COVERAGE_H_MIN} px, each sample's name goes inside its track (its reads and make-primary chips are then left out: untick Autoscale to get them back), then the arcs are lowered with the coverage. Changing the height by hand turns it off; unticking it brings back the height from before (${coverageAuto ? manualCoverageH.current : coverageH} px).`} />
           </Section>
           <Section><Popover width={340} title="Which alignments are counted, in coverage, arcs and the reads track"
-            button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
+            button={<><Icon name="filter" size={14} />Filters{(minMapq > 0 || showSecondary || !!minReadLength) && <span className="text-[10.5px] font-bold leading-4 px-1.5 rounded-full bg-accent-600 text-white">{(minMapq > 0 ? 1 : 0) + (showSecondary ? 1 : 0) + (minReadLength ? 1 : 0)}</span>}<Icon name="chev" size={13} className="text-slate-400" /></>}>
             <div className="px-2.5 py-2">
               <span className="block text-[12.5px] font-semibold text-slate-900">Minimum MAPQ</span>
               <span className="block text-[11.5px] text-slate-500 leading-snug mt-px mb-1.5">Alignments placed with a lower mapping quality are left out. ≥ 10 keeps the unique reads of STAR and HISAT2; bwa and minimap2 score 0–60.</span>
@@ -7250,6 +7250,11 @@ export default function SashimiViewer({
             <SwitchRow on={showSecondary} onChange={setShowSecondary} label="Secondary alignments"
               hint="The other placements of multi-mapped reads (flag 0x100), as IGV shows them. Most aligners give them a low MAPQ, so a threshold above leaves many out. The window is read again."
               title={`Count the secondary alignments too (flag 0x100: the other placements of a multi-mapped read, NH ≥ 2), in coverage, junction arcs, variant sites and the reads track, as IGV does by default. A variant in a paralogue or a pseudogene can then show at both copies. Off: primary and supplementary records only. The minimum MAPQ above applies to them as to the others: STAR gives them the read's multi-mapping MAPQ (3, 1 or 0), minimap2 and bwa 0, so any threshold of 1 or more leaves most out. Reads placed with MAPQ under ${LOW_MAPQ} are drawn hollow either way. The window is read again.`} />
+            <div className="px-2.5 py-2 border-t border-slate-100">
+              <span className="block text-[12.5px] font-semibold text-slate-900">Minimum read length</span>
+              <span className="block text-[11.5px] text-slate-500 leading-snug mt-px mb-1.5">Reads track (raw reads): only the reads at least this long, as sequenced (aligned, inserted and clipped bases). Empty: every read. Coverage, arcs and the variant scan keep every read.</span>
+              <MinLengthField value={minReadLength} onChange={setMinReadLength} />
+            </div>
             <div className="flex items-center gap-2 mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">
               <span className="w-[22px] h-[9px] rounded-sm border border-slate-400 bg-white shrink-0" aria-hidden="true" />
               <span className="flex-1">Reads placed with MAPQ under {LOW_MAPQ} are drawn hollow</span>
@@ -7333,7 +7338,6 @@ export default function SashimiViewer({
             )}
             <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
               title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: RNA-seq, genomic DNA and long reads (ONT, PacBio) alike. A rarer change (an RNA-editing site edited in a few reads, a subclonal variant) then shows only with Min VAF lowered, or with Consensus off. Off: every mismatch and indel of every read." />
-            {!collapseReads && <MinLengthField value={minReadLength} onChange={setMinReadLength} />}
             <span className="flex flex-wrap items-center gap-2 ml-auto">
               <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
                 title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
