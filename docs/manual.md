@@ -277,8 +277,11 @@ and in the call's detail, with the expected and observed values in a tooltip. No
 browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
 log ratio clipped at ±2 with lines at 0, ±0.25, ±1 and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
 probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside). The window
-starts at the call ± its size (at least ± 250 kb) and has its own buttons (⊖ ⊕ ← →, *whole chromosome*, *call*): it is
-not synced with the browser's. Hovering a dot gives the probe's name, position and log ratio. The **DLRS** (derivative
+opens centred on the call with half its size on each side (at least 100 kb), as does the browser below, both centred
+again at each call clicked; its own buttons (⊖ ⊕ ← →, *whole chromosome*, *call*: back to that view) are not synced with
+the browser's. Hovering a dot gives the probe's name, position and log ratio; hovering the call's shading away from the
+dots, the call's characteristics (sample, position, size, type, probes, mean log ratio, copies, class, priority; *from
+probes* for a probe call). The **DLRS** (derivative
 log ratio spread: the standard deviation of the differences between consecutive probes, divided by √2) is given per
 patient in the import question and beside the call (Agilent guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3
 poor). The probe file is read on first use (61,000 probes: about a tenth of a second).
@@ -294,6 +297,17 @@ the copies estimated from it; a click draws one like a call (probe panel and bro
 *probes: seen* or *not seen*. *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
 low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
 panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
+
+**Whole genome.** Under the table, where the call's window stands, the *Whole genome* panel shows one patient (the tab's;
+in *All patients* a patient list in the panel): chromosomes 1-22, X, Y side by side, widths from their GRCh37 lengths,
+every probe drawn as one mark per pixel cell (same colours as the probe panel, clipped at ±2, lines at 0, ±0.25, ±1), the
+median of each pixel column as a dark blue line; above, the patient's calls listed by the filters (loss red, gain blue)
+and its probe calls (purple). A male's X and Y lie near −1: not normalised. A click on a chromosome opens it in the panel
+(all its probes, a moving median of 15, ← → for the neighbours, *whole genome* back); there, a click on a call bar opens
+the call as its row does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
+without a probe file shows its calls only. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
+opened again, it folds the call's window into a strip *▸ Call — …* in turn (one of the two at a time). The page's ⓘ panel
+describes the methods (DLRS, probe calls, estimated copies, mosaic, this view) under *Probes*.
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other

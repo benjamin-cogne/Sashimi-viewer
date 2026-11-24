@@ -18,6 +18,8 @@ import { CghGuide, CghGuideButton } from './CghGuide';
 import { CghProbePanel } from './CghProbePanel';
 import { DLRS_TIP, dlrsWord } from './cghProbes';
 import { estCopies, estTip } from './cghMosaic';
+import { CghGenomePanel } from './CghGenome';
+import { callMargin } from './CghProbePanel';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
 const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
@@ -29,8 +31,12 @@ type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 type Drawn = { cnv: CghCnv; build: GenomeBuild; parsed: ParsedSv };
 /** a call as the SV browser reads it: DEL / DUP over its positions, on its file's build (GRCh37 when it states none) */
 function drawOf(c: CghCnv, f: CghFile): Drawn {
-  const b: GenomeBuild = f.build ?? 'GRCh37';
-  return { cnv: c, build: b, parsed: parseSv(`${c.chrom}:g.${c.start}_${c.end}${c.kind === 'loss' ? 'del' : 'dup'}`, b, ch => chromLength(b, ch)) };
+  const b: GenomeBuild = f.build ?? 'GRCh37', len = chromLength(b, c.chrom) ?? c.end * 2;
+  const parsed = parseSv(`${c.chrom}:g.${c.start}_${c.end}${c.kind === 'loss' ? 'del' : 'dup'}`, b, () => len);
+  // centred on the call with M = max(50 % of its size, 100 kb) each side: the browser pads its window by 12 % more, so m + 0.12 (size + 2m) = M
+  const size = c.end - c.start, m = Math.max(0, (callMargin(c) - 0.12 * size) / 1.24);
+  const win = { start: Math.max(0, Math.round(c.start - m)), end: Math.min(len, Math.round(c.end + m)) };
+  return { cnv: c, build: b, parsed: { ...parsed, window: win, rec: parsed.rebuild(win) } };
 }
 /** the browser redrawn only when its own props change, not at each answer of the annotations */
 const Browser = memo(SvGenomeBrowser);
@@ -60,6 +66,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
     const c = f?.samples.flatMap(x => x.cnvs).find(x => x.id === id);
     try { return c && f ? drawOf(c, f) : null; } catch { return null; }
   });
+  // the whole genome stands where the call window does: open while no call is, folded to a strip once one is (and the other way round)
+  const [genome, setGenome] = useState(() => !drawn);
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   // the ClinGen track folded by default: HI 3 / TS 3 regions only, the recurrent list and its LCRs on demand
@@ -67,6 +75,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const track = useMemo(() => clinGenTrack(drawn?.build ?? 'GRCh37', recOpen, () => setRecOpen(o => !o)), [drawn?.build, recOpen]);
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
+    setGenome(false);
     try { setDrawn(drawOf(c, f)); setError(null); } catch (e) { setError(`${c.chrom}:${c.start}-${c.end}: ${(e as Error).message}`); }
   };
   const loaders = useMemo(() => (drawn ? loadersFor(drawn.build) : null), [drawn?.build, loadersFor]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -103,7 +112,10 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
         )}
         <CghFrame onShow={show} dropping={over} loadersFor={loadersFor} />
         {error && <div className="mx-4 mt-2 text-[12px] text-red-700">{error}</div>}
-        {drawn && rec && full && c && (
+        {s.files.length > 0 && <CghGenomePanel open={genome} onToggle={() => setGenome(g => !g)} onOpen={show} />}
+        {genome && drawn && rec && full && c && <button onClick={() => setGenome(false)} data-cgh-call-strip className="mx-4 mt-3 block w-[calc(100%-2rem)] text-left px-5 py-1.5 bg-white border border-slate-200 rounded-xl shadow-sm text-xs font-semibold text-slate-800 hover:border-accent-300"
+          title="Show the call window again (folds the whole genome)">▸ Call — {c.sample} · {c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} ({c.kind})</button>}
+        {!genome && drawn && rec && full && c && (
           <div data-cgh-browser className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden">
             <div className="px-5 pt-2 flex flex-wrap items-baseline gap-x-2 text-xs">
               <span className="text-sm font-bold">{c.sample}</span>

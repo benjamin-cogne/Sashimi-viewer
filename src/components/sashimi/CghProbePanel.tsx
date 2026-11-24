@@ -4,7 +4,8 @@
  * ratio. Its own window (zoom / pan buttons): the SV browser's window is internal to it, so the two are not synced.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cgh } from './cghStore';
+import { cgh, useCgh } from './cghStore';
+import { callLines, CghTip } from './CghGenome';
 import type { CghCnv } from './cghIntervals';
 import { lowerBound, meanIn, type CghProbeChrom } from './cghProbes';
 import type { ProbeSeg } from './cghSegment';
@@ -13,8 +14,9 @@ const H = 190, L = 34, R = 8, T = 8, B = 20, CLIP = 2, THR = 0.2, MIN_SPAN = 20_
 const BTN = 'h-[22px] min-w-[24px] px-1.5 rounded border border-slate-200 bg-white text-[11px] text-slate-700 hover:border-accent-300 hover:bg-accent-50';
 const fmtPos = (bp: number, step: number) => (step >= 1e6 ? `${(bp / 1e6).toFixed(0)} Mb` : step >= 1e5 ? `${(bp / 1e6).toFixed(1)} Mb` : step >= 1e4 ? `${(bp / 1e6).toFixed(2)} Mb` : `${(bp / 1e3).toFixed(0)} kb`);
 
-/** the default window: the call ± its own size, at least ± 250 kb */
-const around = (c: CghCnv): [number, number] => { const pad = Math.max(c.end - c.start, 250_000); return [Math.max(0, c.start - pad), c.end + pad]; };
+/** the margin each side of a call: half its size, at least 100 kb (this panel and the browser below open on it) */
+export const callMargin = (c: CghCnv) => Math.max((c.end - c.start) / 2, 100_000);
+const around = (c: CghCnv): [number, number] => { const pad = callMargin(c); return [Math.max(0, c.start - pad), c.end + pad]; };
 
 /** the non-NaN probes of [from, to], with k/2 more on each side for the median's edges */
 function visible(p: CghProbeChrom, from: number, to: number, k: number) {
@@ -49,6 +51,8 @@ export function CghProbePanel({ c, chromLen, segs }: { c: CghCnv; chromLen: numb
   const [k, setK] = useState(7);
   const [w, setW] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number; i: number } | null>(null);
+  const [callTip, setCallTip] = useState<{ x: number; y: number } | null>(null);
+  const s = useCgh();
   const box = useRef<HTMLDivElement>(null), cv = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const el = box.current; if (!el) return;
@@ -117,15 +121,20 @@ export function CghProbePanel({ c, chromLen, segs }: { c: CghCnv; chromLen: numb
   const go = (a: number, b: number) => { let s = Math.max(MIN_SPAN, b - a); s = Math.min(s, len); let x = Math.max(0, Math.min(len - s, (a + b) / 2 - s / 2)); x = Math.round(x); setWin([x, x + Math.round(s)]); };
   const mid = (from + to) / 2;
   const onMove = (e: React.MouseEvent) => {
-    const rc = e.currentTarget.getBoundingClientRect(), x = e.clientX - rc.left;
-    if (x < L || x > w - R || !idx.length) { setHover(null); return; }
-    const bp = from + ((x - L) / (w - L - R)) * span;
-    // the nearest probe on the screen, among the visible ones (sorted)
-    let lo = 0, hi = idx.length - 1;
-    while (lo < hi) { const m = (lo + hi) >> 1; if (p.start[idx[m]] < bp) lo = m + 1; else hi = m; }
-    const best = [lo - 1, lo].filter(j => j >= 0 && j < idx.length).sort((u, v) => Math.abs(p.start[idx[u]] - bp) - Math.abs(p.start[idx[v]] - bp))[0];
-    const i = idx[best], px = xOf((p.start[i] + p.end[i]) / 2);
-    setHover(Math.abs(px - x) <= 8 ? { x: px, y: yOf(p.lr[i]), i } : null);
+    const rc = e.currentTarget.getBoundingClientRect(), x = e.clientX - rc.left, y = e.clientY - rc.top;
+    setHover(null); setCallTip(null);
+    if (x < L || x > w - R || y < T || y > H - B) return;
+    // the nearest probe within 8 px (those of ± 8 px across); else, inside the call's shading, the call's tip
+    const bpx = span / (w - L - R), bp = from + (x - L) * bpx;
+    let lo = 0, hi = idx.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (p.start[idx[m]] < bp - 8 * bpx) lo = m + 1; else hi = m; }
+    let best = -1, bd = 64;
+    for (let j = lo; j < idx.length && p.start[idx[j]] <= bp + 8 * bpx; j++) {
+      const i = idx[j], dx = xOf((p.start[i] + p.end[i]) / 2) - x, dy = yOf(p.lr[i]) - y;
+      if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = i; }
+    }
+    if (best >= 0) setHover({ x: xOf((p.start[best] + p.end[best]) / 2), y: yOf(p.lr[best]), i: best });
+    else if (x >= xOf(c.start) && x <= Math.max(xOf(c.start) + 2, xOf(c.end))) setCallTip({ x, y });
   };
   return (
     <div className="mx-5 mt-2" data-cgh-probes>
@@ -138,7 +147,7 @@ export function CghProbePanel({ c, chromLen, segs }: { c: CghCnv; chromLen: numb
           <button className={BTN} title="Left by half the window" aria-label="Pan left" onClick={() => go(from - span / 2, to - span / 2)}>←</button>
           <button className={BTN} title="Right by half the window" aria-label="Pan right" onClick={() => go(from + span / 2, to + span / 2)}>→</button>
           <button className={BTN} onClick={() => setWin([0, len])}>whole chromosome</button>
-          <button className={BTN} title="Back to the call ± its size (at least ± 250 kb)" onClick={() => setWin(around(c))}>call</button>
+          <button className={BTN} title="Back to the call, centred, ± half its size (at least ± 100 kb)" onClick={() => setWin(around(c))}>call</button>
         </span>
         <label className="inline-flex items-center gap-1" title="Moving median over this many probes (dark blue line)">median of
           <select value={k} onChange={e => setK(Number(e.target.value))} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
@@ -146,13 +155,14 @@ export function CghProbePanel({ c, chromLen, segs }: { c: CghCnv; chromLen: numb
           call: {fileMean != null ? <>{c.fromProbes ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>
         <span className="text-slate-400">· own window (not synced with the browser) · dashed: ±0.2 · clipped at ±2{segs ? <> · <span className="text-fuchsia-700">purple</span>: probe-call segments</> : ''}</span>
       </div>
-      <div ref={box} className="relative mt-1 select-none" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+      <div ref={box} className="relative mt-1 select-none" onMouseMove={onMove} onMouseLeave={() => { setHover(null); setCallTip(null); }} data-cgh-probe-plot>
         <canvas ref={cv} style={{ width: '100%', height: H, display: 'block' }} />
         {hover && <div className="absolute z-10 pointer-events-none rounded border border-slate-300 bg-white/95 shadow px-1.5 py-0.5 text-[10.5px] text-slate-800 whitespace-nowrap"
           style={{ left: Math.min(hover.x + 8, Math.max(0, w - 210)), top: Math.max(0, Math.min(hover.y - 30, H - 44)) }} data-cgh-probe-tip>
           <div className="font-semibold">{p.name[hover.i] || 'probe'}</div>
           <div className="tabular-nums">{c.chrom}:{p.start[hover.i].toLocaleString('en-US')}-{p.end[hover.i].toLocaleString('en-US')} · log ratio <b>{p.lr[hover.i].toFixed(3)}</b></div>
         </div>}
+        {callTip && <CghTip x={callTip.x} y={callTip.y} w={w} title={`${c.sample} · ${c.fromProbes ? 'probe call (from probes)' : 'call'}`} lines={callLines(s, c)} />}
         {hover && <div className="absolute pointer-events-none rounded-full border-2 border-slate-900" style={{ left: hover.x - 4, top: hover.y - 4, width: 8, height: 8 }} />}
       </div>
     </div>
