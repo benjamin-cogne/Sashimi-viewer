@@ -86,6 +86,8 @@ export interface RealignedClip {
   target: number; strand: '+' | '-'; matched: number;
   /** the arc it joined */
   arc: { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' };
+  /** placed near the other end of a discordant-pair arc (alignments.ts placeClipNear), not anywhere in the window */
+  guided?: boolean;
 }
 /** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
 export interface ElsewhereLink {

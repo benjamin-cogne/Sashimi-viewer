@@ -275,6 +275,19 @@ async function svgToPng(svg: SVGSVGElement, scale = 2): Promise<Blob> {
   }
 }
 
+/** Depth either side of a breakpoint, for its step (copy-number evidence): the stretch on each side, and the gap next to it left out. */
+const DEPTH_STEP_BP = 2000, DEPTH_STEP_GAP_BP = 100;
+/** Median depth over [a, b) of a track's coverage runs (each base counted), null when the runs do not reach it. */
+function medianDepthOf(cov: { start: number; end: number; depth: number }[], a: number, b: number): number | null {
+  const parts: [number, number][] = [];
+  let total = 0;
+  for (const r of cov) { const s = Math.max(a, r.start), e = Math.min(b, r.end); if (e > s) { parts.push([r.depth, e - s]); total += e - s; } }
+  if (total < (b - a) / 2) return null;
+  parts.sort((x, y) => x[0] - y[0]);
+  let acc = 0;
+  for (const [d, n] of parts) { acc += n; if (acc >= total / 2) return d; }
+  return null;
+}
 interface FetchWindow { chrom: string; start: number; end: number; minMapq: number; /** secondary alignments counted / drawn too */ secondary?: boolean; /** only the reads this long counted / drawn (bp, 0 every read) */ minLen?: number; /** split by transcript strand too */ strands?: boolean }
 
 interface TrackData {
@@ -6583,6 +6596,21 @@ export default function SashimiViewer({
         note: `Split reads: primary alignments here whose supplementary part (SA tag) lies on ${e.chrom}, counted where they leave or enter this chromosome; the far position is the one most of them reach. Each end is named after the exon boundary within ${FUSION_SNAP_BP} bp of the genes there (the far genes looked up from the UCSC / Ensembl APIs), and the partner whose end is a splice donor comes first (5′). Evidence, not a call: a translocation, or a chimera of the library preparation; check that both partners' ends are splice sites and that the comparison samples do not carry it.`,
       };
     }
+    /**
+     * The depth either side of each end of a structural arc, per DNA sample: the median over DEPTH_STEP_BP on each side
+     * (the DEPTH_STEP_GAP_BP next to the end left out, where reads are clipped). A step at a breakpoint is copy-number
+     * evidence of its own: a loss or a gain begins or ends there, whatever the split reads say.
+     */
+    const depthSteps = (j: { start: number; end: number }): PopTable[] => {
+      const rows = displayTracks.filter(t => isDnaTrack(t) && t.coverage.length).map(t => {
+        const at = (p: number) => { const l = medianDepthOf(t.coverage, p - DEPTH_STEP_GAP_BP - DEPTH_STEP_BP, p - DEPTH_STEP_GAP_BP), r = medianDepthOf(t.coverage, p + DEPTH_STEP_GAP_BP, p + DEPTH_STEP_GAP_BP + DEPTH_STEP_BP); return { l, r }; };
+        const a = at(j.start), b = at(j.end);
+        const txt = (x: { l: number | null; r: number | null }) => (x.l == null || x.r == null ? '—' : `${Math.round(x.l)}× → ${Math.round(x.r)}×`);
+        const step = (x: { l: number | null; r: number | null }) => (x.l == null || x.r == null || !Math.max(x.l, x.r) ? '' : x.r < 0.75 * x.l ? 'drop' : x.r > 1.3 * x.l ? 'rise' : 'level');
+        return [t.sampleName, txt(a), step(a) || '—', txt(b), step(b) || '—'];
+      });
+      return rows.length ? [{ caption: `Depth either side of each end (median of ${formatBp(DEPTH_STEP_BP)}, ${DEPTH_STEP_GAP_BP} bp next to it left out)`, head: ['sample', `at ${(j.start + 1).toLocaleString('en-US')}`, 'step', `at ${j.end.toLocaleString('en-US')}`, 'step'], rows }] : [];
+    };
     if (popover.kind === 'structural') {
       const { j, sv } = popover;
       const rows = displayTracks.filter(t => t.structural).map(t => {
@@ -6590,10 +6618,11 @@ export default function SashimiViewer({
         // the same event in another sample: its breakpoints within the merge tolerance, not to the base
         const mine = sv === 'discordant' ? findPairEvent(list, j as DiscordantArc) : findSvEvent(list, j);
         const at = mine ?? j;
-        const placed = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end).reduce((n, x) => n + x.count, 0);
+        const placedList = (t.structural!.realigned ?? []).filter(x => x.arc.kind === sv && x.arc.start === at.start && x.arc.end === at.end);
+        const placed = placedList.reduce((n, x) => n + x.count, 0), guided = placedList.filter(x => x.guided).reduce((n, x) => n + x.count, 0);
         const resc = (t.structural!.rescued ?? []).filter(x => x.kind === sv && ((x.start === at.start && x.end === at.end) || (!x.own && findSvEvent([x], j))));
         const own = resc.filter(x => x.own).reduce((n, x) => n + x.count, 0), borrowed = resc.filter(x => !x.own).reduce((n, x) => n + x.count, 0);
-        return [t.sampleName, mine ? mine.count.toLocaleString('en-US') : '0', placed ? placed.toLocaleString('en-US') : '0', own ? own.toLocaleString('en-US') : borrowed ? `${borrowed.toLocaleString('en-US')} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString('en-US')} bp` : '—'];
+        return [t.sampleName, mine ? mine.count.toLocaleString('en-US') : '0', placed ? `${placed.toLocaleString('en-US')}${guided ? ` (${guided.toLocaleString('en-US')} looked for near the pairs' other end)` : ''}` : '0', own ? own.toLocaleString('en-US') : borrowed ? `${borrowed.toLocaleString('en-US')} (no arc: no aligned read of this sample crosses it)` : '0', t.structural!.insertMedian != null ? `${t.structural!.insertMedian.toLocaleString('en-US')} bp` : '—'];
       });
       const size = j.end - j.start;
       // a fusion junction of an RNA track: its partners, the reading frame across it and the fused protein there
@@ -6619,7 +6648,7 @@ export default function SashimiViewer({
         subtitle: sv === 'discordant' ? `${formatBp(size)} between the breakpoints the pairs point to` : `${formatBp(size)}${svEvidenceText(j as SvArc, '').replace(/\n/g, ' · ')}`,
         cartoon: null,
         hgvs: sv === 'deletion' || sv === 'split' ? [`${currentChrom}:g.${j.start + 1}_${j.end}del (from the read alignments; breakpoints to confirm)`] : sv === 'duplication' ? [`${currentChrom}:g.${j.start + 1}_${j.end}dup (tandem, from the read alignments; breakpoints to confirm)`] : sv === 'inversion' ? [`${currentChrom}:g.${j.start + 1}_${j.end}inv (from the read alignments; its two junctions merged when their breakpoints are within the tolerance)`] : [],
-        tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }],
+        tables: [{ head: ['sample', 'supporting reads', 'of which placed by realignment', 'of which rescued at this breakpoint', 'median insert'], rows }, ...depthSteps(j)],
         strip: null,
         note: 'Evidence from the alignments, not a call: deletions come from CIGAR D runs of 50 bp or more and from deletion-type split reads; arcs of one kind whose breakpoints lie within 5 % of the event length (20–100 bp) are merged into one event, whose reads are counted once (samples are matched the same way); split reads from the chain of every part of a read (primary and supplementary alignments, SA tag) ordered along the read, each read counted once, the type from where the read continues; discordant pairs by orientation: mates facing each other more than five times the window median apart (at least 1 kb: deletion-type), facing away (← →, at least 300 bp and twice the median apart: duplication-type) or on one strand (inversion-type), each pair counted once, also when its other mate lies beyond the window; the pairs are grouped in 500 bp bins (neighbouring bins of one class joined) and the arc drawn where their reads place the breakpoints: the outermost reads of the pairs of a duplication, the innermost of a deletion, the median of an inversion (within an insert size of the true breakpoint). Counts on sampled windows are scaled estimates. Open the reads track to check the breakpoints.',
       };

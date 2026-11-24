@@ -393,6 +393,38 @@ export function placeClip(consensus: string, side: 'left' | 'right', ref: { star
   return { start: ref.start + fwdStart, end: ref.start + fwdStart + check, strand: h.strand, matched: check };
 }
 
+/** How far from a discordant arc's end a clip cluster may lie, and its partner be looked for around the other end (or three median inserts, if more). */
+export const PAIR_GUIDE_BP = 1500;
+/** Bases of a clipped consensus matched in a pair-guided placement (next to the breakpoint), and the fewest. */
+const GUIDED_PROBE_BP = 40, GUIDED_MIN_BP = 15;
+/**
+ * Places a clipped consensus within [lo, hi) of the reference only, on one strand: its GUIDED_PROBE_BP bases next to
+ * the breakpoint (fewer when the clip is shorter, GUIDED_MIN_BP at least) at the offset with the fewest mismatches (N
+ * matches anything), at most one per 10 bases, and with no second offset within two mismatches of it. Same answer as
+ * placeClip: the forward-strand interval matched, the strand, the length.
+ */
+export function placeClipNear(consensus: string, side: 'left' | 'right', ref: { start: number; seq: string }, lo: number, hi: number, strand: '+' | '-'): { start: number; end: number; strand: '+' | '-'; matched: number } | null {
+  const seq = consensus.replace(/N+$/, '').replace(/^N+/, '');
+  const n = Math.min(seq.length, GUIDED_PROBE_BP);
+  if (n < GUIDED_MIN_BP) return null;
+  const probe = side === 'right' ? seq.slice(0, n) : seq.slice(seq.length - n);
+  if ((probe.match(/N/g)?.length ?? 0) > n / 4) return null;
+  const a = Math.max(ref.start, lo), b = Math.min(ref.start + ref.seq.length, hi);
+  if (b - a < n) return null;
+  const fwd = ref.seq.substring(a - ref.start, b - ref.start).toUpperCase();
+  const text = strand === '+' ? fwd : reverseComplement(fwd);
+  const allowed = Math.floor(n / 10);
+  let best = -1, bestM = Infinity, second = Infinity;
+  for (let at = 0; at + n <= text.length; at++) {
+    let m = 0;
+    for (let k = 0; k < n && m <= bestM + 2 && m <= allowed + 2; k++) if (probe[k] !== 'N' && probe[k] !== text[at + k]) m++;
+    if (m < bestM) { second = bestM; bestM = m; best = at; } else if (m < second) second = m;
+  }
+  if (best < 0 || bestM > allowed || second <= bestM + 2) return null;
+  const fwdStart = strand === '+' ? best : text.length - (best + n);
+  return { start: a + fwdStart, end: a + fwdStart + n, strand, matched: n };
+}
+
 /** True when some read of the scan is soft-clipped by 20 bases or more without an SA tag and carries its sequence: the window is worth a reference for realignment. */
 export function hasRealignableClips(reads: RawRead[]): boolean {
   return reads.some(r => !r.sa && r.seq && parseCigar(r.cigar).some(([len, op]) => op === 'S' && len >= SV_MIN_CLIP));
@@ -452,11 +484,19 @@ const refSlice = (ref: { start: number; seq: string }, from: number, len: number
   if (from < ref.start || from + len > ref.start + ref.seq.length || len <= 0) return null;
   return ref.seq.substring(from - ref.start, from - ref.start + len);
 };
-/** A clipped sequence against the reference bases it should equal: no mismatch under 20 bases, one per 20 above. */
-const clipMatches = (clip: string, target: string | null): boolean => {
+/** Bases of a clip judged against the partner: those next to the breakpoint, where the read is clean and the junction is. */
+export const CLIP_JUDGED_BP = 30;
+/**
+ * A clipped sequence against the reference bases it should equal, judged on its CLIP_JUDGED_BP bases next to the
+ * breakpoint (the first ones of a right clip, the last ones of a left clip): no mismatch under 15 of them, one per 15
+ * above. Its far end is the read's own end, where errors gather (a 3′ tail with 4 errors failed a whole-clip match),
+ * and may run past a short templated insertion.
+ */
+const clipMatches = (clip: string, target: string | null, side: 'left' | 'right'): boolean => {
   if (!target || target.length !== clip.length) return false;
+  const n = Math.min(clip.length, CLIP_JUDGED_BP), off = side === 'right' ? 0 : clip.length - n;
   let mism = 0;
-  for (let k = 0; k < clip.length; k++) if (clip[k] !== target[k]) { mism++; if (mism > Math.floor(clip.length / 20)) return false; }
+  for (let k = off; k < off + n; k++) if (clip[k] !== target[k]) { mism++; if (mism > Math.floor(n / 15)) return false; }
   return true;
 };
 /**
@@ -519,7 +559,7 @@ export function rescueClipEnds(ends: ClipEnd[], breakpoints: Breakpoint[], ref: 
     }
     if (!ref) continue;
     if (e.seq.length < (near.length > 1 ? RESCUE_MIN_CLIP_MULTI : RESCUE_MIN_CLIP)) continue;
-    const hits = near.filter(x => clipMatches(e.seq, expectedClip(x.b, x.atStart, e.pos, e.side, e.seq.length, ref)));
+    const hits = near.filter(x => clipMatches(e.seq, expectedClip(x.b, x.atStart, e.pos, e.side, e.seq.length, ref), e.side));
     if (hits.length === 1) bump(hits[0].b, e);
   }
   return out;
@@ -755,6 +795,30 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
     segs.sort((a, b) => a.qs - b.qs);
     for (let i = 0; i + 1 < segs.length; i++) breakpoint(segs[i], segs[i + 1], 1, 'split', r.name);
   }
+  // the pairs of one event fall in neighbouring bins (their insert sizes vary): bins of one class within one bin of the
+  // strongest at both ends join it, one arc per event
+  const discordant: DiscordantArc[] = (Object.keys(discKind) as (keyof typeof discKind)[]).flatMap(kind => {
+    const bins = [...discKind[kind].values()].sort((a, b) => b.count - a.count || a.start - b.start);
+    const out: DiscordantArc[] = [], used = new Set<SvMember>();
+    for (const x of bins) {
+      if (used.has(x)) continue;
+      const arc: DiscordantArc = { start: x.start, end: x.end, count: 0, kind };
+      const ests: [number, number][] = [];
+      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) {
+        used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end);
+        ests.push(...(pairEnds.get(y) ?? []));
+      }
+      // the arc at the breakpoints the pairs point to: the outermost reads of a duplication's pairs, the innermost of a
+      // deletion's (the breakpoint lies beyond them, within an insert size), the median of an inversion's
+      if (ests.length) {
+        const as = ests.map(e => e[0]).sort((p, q) => p - q), bs = ests.map(e => e[1]).sort((p, q) => p - q);
+        const [s0, e0] = kind === 'duplication' ? [as[0], bs[bs.length - 1]] : kind === 'deletion' ? [as[as.length - 1], bs[0]] : [as[as.length >> 1], bs[bs.length >> 1]];
+        if (e0 > s0) { arc.start = s0; arc.end = e0; }
+      }
+      out.push(arc);
+    }
+    return out;
+  }).sort((a, b) => a.start - b.start || a.end - b.end);
   // clip clusters placed by realignment of their clipped consensus: the cluster becomes a breakpoint like a split read's
   const realigned: RealignedClip[] = [];
   const placedKeys = new Set<string>();
@@ -773,6 +837,34 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
       const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count, 'clip') : breakpoint(placed, anchor, c.count, 'clip');
       if (!arc) continue;
       realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc });
+      placedKeys.add(key);
+      clips.delete(key);
+    }
+    // the clusters left, guided by the discordant pairs: a cluster near an end of a pair arc is looked for only around
+    // the arc's other end, on the strand the pairs' class asks (inversion: the other strand). There a 20-mer that
+    // occurs elsewhere in the window (a clip ending in a repeat) is still unique, and shorter seeds do
+    const pairArcs = discordant.filter(a => a.count >= SV_MIN_SUPPORT);
+    const near = Math.max(PAIR_GUIDE_BP, 3 * (median ?? 0));
+    for (const [key, c] of [...clips]) {
+      const seqs = clipSeqs.get(key);
+      if (!seqs || c.count * rate < SV_MIN_SUPPORT) continue;
+      const cons = clipConsensus(seqs, c.side).seq;
+      let best: { hit: NonNullable<ReturnType<typeof placeClipNear>>; d: number } | null = null, clash = false;
+      for (const a of pairArcs) for (const [here, there] of [[a.start, a.end], [a.end, a.start]] as const) {
+        const d = Math.abs(c.pos - here);
+        if (d > near) continue;
+        const hit = placeClipNear(cons, c.side, refWin, there - near, there + near, a.kind === 'inversion' ? '-' : '+');
+        if (!hit) continue;
+        if (best && (best.hit.start !== hit.start || best.hit.strand !== hit.strand)) clash = true;
+        if (!best || d < best.d) best = { hit, d };
+      }
+      if (!best || clash) continue;
+      const { hit } = best, L = hit.matched;
+      const anchor: Segment = c.side === 'right' ? { chrom, start: c.pos - 1, end: c.pos, rev: false, qs: 0, qe: 1 } : { chrom, start: c.pos, end: c.pos + 1, rev: false, qs: L, qe: L + 1 };
+      const placed: Segment = { chrom, start: hit.start, end: hit.end, rev: hit.strand === '-', qs: c.side === 'right' ? 1 : 0, qe: c.side === 'right' ? 1 + L : L };
+      const arc = c.side === 'right' ? breakpoint(anchor, placed, c.count, 'clip') : breakpoint(placed, anchor, c.count, 'clip');
+      if (!arc) continue;
+      realigned.push({ pos: c.pos, side: c.side, count: c.count * rate, hard: (c.hard ?? 0) * rate, target: hit.start, strand: hit.strand, matched: L, arc, guided: true });
       placedKeys.add(key);
       clips.delete(key);
     }
@@ -855,30 +947,6 @@ export function structuralEvidence(reads: RawRead[], chrom: string, start: numbe
   const inversionEvents = family('inversion', [['inversion', invs]]);
   for (const x of realigned) { const ev = eventOf.get(`${x.arc.kind}:${x.arc.start}-${x.arc.end}`); if (ev) x.arc = { start: ev.start, end: ev.end, kind: ev.kind }; }
   for (const x of rescued) { const ev = eventOf.get(`${x.kind}:${x.start}-${x.end}`); if (ev) { x.start = ev.start; x.end = ev.end; x.kind = ev.kind; } }
-  // the pairs of one event fall in neighbouring bins (their insert sizes vary): bins of one class within one bin of the
-  // strongest at both ends join it, one arc per event
-  const discordant: DiscordantArc[] = (Object.keys(discKind) as (keyof typeof discKind)[]).flatMap(kind => {
-    const bins = [...discKind[kind].values()].sort((a, b) => b.count - a.count || a.start - b.start);
-    const out: DiscordantArc[] = [], used = new Set<SvMember>();
-    for (const x of bins) {
-      if (used.has(x)) continue;
-      const arc: DiscordantArc = { start: x.start, end: x.end, count: 0, kind };
-      const ests: [number, number][] = [];
-      for (const y of bins) if (!used.has(y) && Math.abs(y.start - x.start) <= 500 && Math.abs(y.end - x.end) <= 500) {
-        used.add(y); arc.count += y.count * rate; arc.start = Math.min(arc.start, y.start); arc.end = Math.max(arc.end, y.end);
-        ests.push(...(pairEnds.get(y) ?? []));
-      }
-      // the arc at the breakpoints the pairs point to: the outermost reads of a duplication's pairs, the innermost of a
-      // deletion's (the breakpoint lies beyond them, within an insert size), the median of an inversion's
-      if (ests.length) {
-        const as = ests.map(e => e[0]).sort((p, q) => p - q), bs = ests.map(e => e[1]).sort((p, q) => p - q);
-        const [s0, e0] = kind === 'duplication' ? [as[0], bs[bs.length - 1]] : kind === 'deletion' ? [as[as.length - 1], bs[0]] : [as[as.length >> 1], bs[bs.length >> 1]];
-        if (e0 > s0) { arc.start = s0; arc.end = e0; }
-      }
-      out.push(arc);
-    }
-    return out;
-  }).sort((a, b) => a.start - b.start || a.end - b.end);
   return {
     deletions: deletionEvents, splits: [], duplications: duplicationEvents, inversions: inversionEvents, discordant,
     insertions: [...insertions.values()].map(x => ({ ...x, count: x.count * rate })).filter(x => x.count >= SV_MIN_SUPPORT).sort((a, b) => a.pos - b.pos),
