@@ -15,6 +15,9 @@ import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 import { clinGenTrack } from './CghClinGenTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
+import { CghProbePanel } from './CghProbePanel';
+import { DLRS_TIP, dlrsWord } from './cghProbes';
+import { estCopies, estTip } from './cghMosaic';
 
 /** the call's array ISCN: the file's, else written from its band, positions and copies when the file gives both; else null */
 const iscnOf = (c: CghCnv, build: GenomeBuild, band: string): string | null => c.iscn ?? (band && (c.copies != null || c.amp)
@@ -75,6 +78,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   // a male's chrX and chrY: one copy, the call on it (no other homologue)
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', iscn = c && drawn ? iscnOf(c, drawn.build, band) : null;
+  // the probes of the call's patient (read on first view) and its copy number estimated from the log ratio (never an ISCN)
+  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey]) : null;
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!over) setOver(true); }}
@@ -107,7 +112,10 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
                 ? <span className="font-mono text-[12px] text-slate-800" title={c.iscn ? 'ISCN as in the file' : 'ISCN written from the band (the file\'s, else the cytogenetic bands), the positions and the copies of the file (it gives no ISCN)'}>{iscn}</span>
                 : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">({c.kind}, no ISCN in the file)</span></span>}
               <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} · {c.probes != null ? `${c.probes} probes` : 'probes not given'}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
+              {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>estimated {est.text}</span>}
+              {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>
+            {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} />}
             <div className="[&>div:first-child]:mt-2">
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
                 zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />

@@ -230,7 +230,7 @@ already added is not added twice), the patient named by the table's Record Name,
 automated export (images, XML, QC tables…) are left aside, said in one line of the question (*ignored: n other files*);
 a table whose columns are not recognised is only asked about when the zip holds no table read by itself. The probes' log
 ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
-memory with the zip's patient, for a probe view to come (nothing drawn yet); dropped alone, the file goes with the loaded
+memory with the zip's patient (read on first view); dropped alone, the file goes with the loaded
 sample of that name, else the question says it was not matched. The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
@@ -267,6 +267,21 @@ fraction of cells is estimated from the mean log ratio with the AChro-Puce calcu
 *mosaic ~63%* tag shows in the table below 80 %, and the call's detail gives the expected and observed log ratio and the
 estimated fraction. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
+
+**Estimated copy number.** A call with a log ratio but no copy number (the interval-based report) gets one estimated:
+the n whose expected log2(n / 2) is nearest (x0 taken at −2, x1 −1, x3 +0.58, x4 +1; a male's X and a Y: normal 1,
+so x0 or x2), shown as *x1?* in the table's Type cell and *estimated x1* (or *x1 (or mosaic ~63%)*) above the browser
+and in the call's detail, with the expected and observed values in a tooltip. No ISCN is written from an estimate.
+
+**Log ratio (probes).** When the patient's `CGH_Log_Ratio.txt` came with the calls, the call clicked shows, above the
+browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
+log ratio clipped at ±2 with lines at 0, ±0.25, ±1 and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
+probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside). The window
+starts at the call ± its size (at least ± 250 kb) and has its own buttons (⊖ ⊕ ← →, *whole chromosome*, *call*): it is
+not synced with the browser's. Hovering a dot gives the probe's name, position and log ratio. The **DLRS** (derivative
+log ratio spread: the standard deviation of the differences between consecutive probes, divided by √2) is given per
+patient in the import question and beside the call (Agilent guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3
+poor). The probe file is read on first use (61,000 probes: about a tenth of a second).
 
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other

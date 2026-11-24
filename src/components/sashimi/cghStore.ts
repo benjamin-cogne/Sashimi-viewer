@@ -144,7 +144,7 @@ function zipEntries(data: Uint8Array, depth = 0): { entries: { path: string; byt
 const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]: true as const }; return { dirtyKeys, dirty: true }; };
 /**
  * The probes' log ratios of each patient (CGH_Log_Ratio.txt), by sample key: the file's bytes until first asked, then
- * read once into typed arrays. Kept out of the state (no redraw; nothing drawn from them yet), in this tab only.
+ * read once into typed arrays. Kept out of the state (no redraw), in this tab only: drawn by the probe panel, their DLRS in the import question.
  */
 const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, CghProbes | null>();
 const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); } };

@@ -20,7 +20,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
     in the question; specs saved before `lrMore` load as before;
   - CytoGenomics' automated interval-based report (`IntervalBasedReport.xls`, tab-separated text despite its name, or `.xlsx`), recognised by its header (`AberrationNo`, `Chr`, `Start`, `Stop`, `#Probes`, `Amplification` / `Gain` / `Loss` / `Deletion`) and read without the mapping dialog (`parseAberrations` in `cghIntervals.ts`): one log ratio from the four columns (the non-zero one, the largest |value| if several), the type from the column (else the sign), `pval` (`CghCnv.pval`), genes, the build from `Genome:`, the sample from its name line (else `Array Design Info`); copies null (no ISCN written, mosaic from the log ratio); exported as it came plus Classification / Comment columns;
   - zips holding any of these (one patient each): tables found by content, the other files of an automated export left aside and listed in one note (*ignored: n other files*); a table needing the mapping is asked only when the zip holds no table read by itself;
-  - probes' log ratios (`CGH_Log_Ratio.txt`, `cghProbes.ts`): kept as bytes with the zip's patient (alone: with the loaded sample of the `Normalized log ratio(<name>)` header, else a note *not matched*), read on first `cgh.probes(sampleKey)` into `Uint32Array` start / end and `Float32Array` log ratios per chromosome (NaN kept); `cgh.hasProbes`. Nothing drawn yet.
+  - probes' log ratios (`CGH_Log_Ratio.txt`, `cghProbes.ts`): kept as bytes with the zip's patient (alone: with the loaded sample of the `Normalized log ratio(<name>)` header, else a note *not matched*), read on first `cgh.probes(sampleKey)` into `Uint32Array` start / end and `Float32Array` log ratios per chromosome (NaN kept) and probe names; `cgh.hasProbes`; `dlrs` (SD of consecutive differences / √2) in the import question and the call card. **Log ratio (probes)** panel (`CghProbePanel.tsx`) in the call's card above the browser: a canvas of the window's probes (binary search on the sorted starts), colours black / red / green at ±0.2, moving median 3 / 7 / 15, call shaded with its mean, ±0.2 dashed, hover tip; its own zoom / pan (the browser's window is internal to `SvGenomeBrowser`: not synced, that file untouched).
   - Encodings: UTF-8 with or without BOM, UTF-16, Windows-1252. A binary `.xls` is refused with a clear message.
 - **Import question.** Minimum number of probes (3) and minimum size (log slider: any, 10 kb to 5 Mb, or a value typed in
   bp / kb / Mb, also in the filter bar); the 200 largest calls annotated by
@@ -33,7 +33,7 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
   - ClinGen HI / TS of genes and of ISCA regions; gnomAD LOEUF;
   - AChro-Puce recurrent CNVs; DGV Gold (3 relations);
   - exons cut and reading frame; terminal / arm / chromosome labels; rearrangement hints;
-  - mosaic fraction (AChro-Puce formula; no DLRS input); recurrence in the loaded series; the laboratory's benign
+  - mosaic fraction (AChro-Puce formula; no DLRS input); an estimated copy number from the log ratio when the file gives none (`estCopies` in `cghMosaic.ts`: nearest log2(n/2), x0 at −2; male X / Y normal 1), shown as *x1?* / *estimated x1 (or mosaic ~n%)*, never put in an ISCN; recurrence in the loaded series; the laboratory's benign
     list (BED, kept in `localStorage`).
 - **Priority.** HIGH / MODERATE / LOW from listed rules (`cghScore.ts`). It is not a classification. Per Riggs et al. 2020: a ClinGen HI 3 / TS 3 region is HIGH only wholly in the call (2A, share ≥ 0.999), MODERATE at 80-99 % (2B: check the critical region); an HI 3 gene losing only UTR exons (2C-2 / 2D-1) or only its last exon (2D-2 / 2D-3) is MODERATE (`sparing()`, from `CnvExons.cds` and the exon ranks; genes unknown to RefSeq stay HIGH).
 - **Retry.** Failures kept per call and source (`CnvAnn.failed`; PanelApp per gene): *↻ retry (n)* in the column header (per patient; a menu in All patients) and a *retry* per source in the detail re-ask only what failed (`retry()` in `cghAnnotate.ts`); an unexpected error ends the call on what was read.
@@ -72,7 +72,8 @@ Privacy: patient data stay in memory; `localStorage` only holds settings, column
 | `cghLabBenign.ts` | the laboratory's benign list |
 | `cghExons.ts` | exons cut and reading frame |
 | `cghExamples.ts` | built-in invented example patients |
-| `cghProbes.ts` | probes' log ratios (`CGH_Log_Ratio.txt`): detection, lazy reading into typed arrays |
+| `cghProbes.ts` | probes' log ratios (`CGH_Log_Ratio.txt`): detection, lazy reading into typed arrays, DLRS, window search |
+| `CghProbePanel.tsx` | the *Log ratio (probes)* panel above the browser |
 | `CghGuide.tsx` | the interactive tour (*? Quick guide*) |
 | `CghClinGenTrack.tsx` | the *ClinGen CNV regions* track (`clinGenTrack(build)`) and the detail's recurrent-CNV lines |
 | `cghRecurrent.ts` | ClinGen regions on a chromosome, AChro-Puce PIEV tags, a call's recurrent matches and LCR ends |

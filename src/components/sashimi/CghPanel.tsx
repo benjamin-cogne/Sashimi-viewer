@@ -7,7 +7,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { labHits, parseLabBenign, LAB_COVER, type LabHit } from './cghLabBenign';
 import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, duplicateNames, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
-import { mosaicOf, MOSAIC_TAG_BELOW } from './cghMosaic';
+import { mosaicOf, MOSAIC_TAG_BELOW, estCopies, estTip } from './cghMosaic';
+import { DLRS_TIP, dlrsWord } from './cghProbes';
 import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
@@ -164,6 +165,8 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
               </tr>;
             })}</tbody>
           </table>}
+          {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x }) => { const d = cgh.probes(x.key)?.dlrs;
+            return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : ' (not readable)'}</div>; })}
           {noCount && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
@@ -402,7 +405,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} {copyText(c)}</span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} <EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} />{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
@@ -505,14 +508,20 @@ function MosaicTag({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
   if (!m?.ok || m.f >= MOSAIC_TAG_BELOW) return null;
   return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-slate-300 bg-white text-slate-600 leading-[15px] align-middle" title="Fraction of cells estimated from the mean log ratio (AChro-Puce calculator, July 2025): indicative, see the call's detail">mosaic ~{Math.round(m.f * 100)}%</span>;
 }
+/** the copy number of the table's Type cell: the file's, else estimated from the log ratio (x1?, tooltip), else the type */
+function EstCn({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
+  const e = estCopies(c, sex);
+  return e ? <span title={estTip(e, c.logRatio!)} data-cgh-est>x{e.n}{e.text.includes('+') ? '+' : ''}?</span> : <>{copyText(c)}</>;
+}
 /** the call's detail line: expected and observed log ratio, and the fraction of cells it gives */
 function MosaicLine({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
-  const m = mosaicOf(c, sex);
+  const m = mosaicOf(c, sex), e = estCopies(c, sex);
   if (!m) return null;
   const pc = (x: number) => `${Math.round(x * 100)} %`;
   return <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Log ratio</span>{' '}
     {m.ok ? <>observed <b>{c.logRatio!.toFixed(2)}</b>, expected for a one-copy {c.kind}: <b>{Number.isFinite(m.expected) ? `${m.expected > 0 ? '+' : ''}${m.expected.toFixed(2)}` : 'not finite'}</b> · cells carrying it: <b>{pc(m.f)}</b></>
       : <>observed <b>{c.logRatio!.toFixed(2)}</b> · fraction of cells: <span className="text-amber-700">sex needed (chrX / chrY outside the PARs)</span></>}
+    {e && <span title={estTip(e, c.logRatio!)}> · <b>estimated {e.text}</b></span>}
     <span className="text-slate-500"> · indicative (AChro-Puce calculator, July 2025): no biological variability</span></div>;
 }
 const seriesTip = (i: SeriesInfo) => i.hits.length ? i.hits.map(h => `${h.name}: ${Math.round(h.pct * 100)} % overlap`).join('\n') : 'No other patient has this call';
