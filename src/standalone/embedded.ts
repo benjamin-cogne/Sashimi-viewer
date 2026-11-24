@@ -17,6 +17,7 @@ import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { READS_PHASE_CAP, answerReads, supportAndCap, thinFragments } from './readsWindow';
+import { minLengthOf } from './readFilter';
 import { keepFlags, keepFlagsWith, rawOfRead, structuralEvidence } from './alignments';
 import { mapqThreshold } from './coverage';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
@@ -433,11 +434,12 @@ export class EmbeddedDataSource extends LocalDataSource {
     const phased = !collapsed && !support && !!opts?.phase;
     const q = mapqThreshold(minMapq), sec = !!opts?.secondary;
     const inWindow = best.reads.filter(r => r.e > start && r.s < end && (exact || (r.q >= q && keepFlagsWith(r.f, sec))));
-    const { reads, total, mates } = supportAndCap(inWindow, chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support);
+    const minLength = minLengthOf(opts);
+    const { reads, total, mates } = supportAndCap(inWindow, chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support, minLength);
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
     // the phasing exported with the view, for a window within the one it phased and while its thresholds are the
     // reader's (the reads carry their `ph` / `pb`); elsewhere the embedded reads are phased again
-    const stored = phased && exact ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
+    const stored = phased && exact && !minLength ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
     if (stored && (!stored.window || (stored.window.start <= start && stored.window.end >= end)) && stored.minVaf === minVaf && (stored.longReadMinIndel ?? 1) === (opts?.longReadMinIndel ?? 1) && (stored.longReadMinVaf ?? 0.2) === (opts?.longReadMinVaf ?? 0.2))
     {
       // the sites of every read phased, `maxReads` of them drawn, as the live page draws them

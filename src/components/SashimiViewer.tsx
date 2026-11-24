@@ -37,7 +37,7 @@ import type { ArcSupport } from '../standalone/arcSupport';
 import { liftPos, liftRange, type LiftSegment } from '../standalone/liftover';
 import { KNOWN_VARIANT_COLORS, KNOWN_VARIANT_KIND_NAMES, isPointVariant, knownVariantTitle } from './sashimi/knownVariants';
 import { GTEX_DEFAULT_FAVOURITES } from '../standalone/gtex';
-import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton } from './sashimi/controls';
+import { Icon, Segmented, Pill, Stepper, Select, Section, Sep, Bar, Popover, MenuItem, SwitchRow, PickButton, MinLengthField } from './sashimi/controls';
 import { GeneSuggest } from './sashimi/GeneSuggest';
 import { RepeatInspector } from './sashimi/RepeatInspector';
 import { PairPhasePanel, type PairPhaseOrigin, type PairPicked } from './sashimi/PairPhasePanel';
@@ -177,6 +177,8 @@ export interface ViewerSettings {
    * `first` the strand of read 1 of its pair (both mates alike: the fragment's orientation); absent = none
    */
   readsColor?: 'none' | 'strand' | 'first';
+  /** reads track (raw reads): only the reads at least this long, bp, as sequenced (clips included); absent = every read */
+  minReadLength?: number;
   /** secondary alignments (0x100, the other placements of multi-mapped reads) counted in coverage and junctions and drawn among the reads, as IGV does (default off) */
   secondary?: boolean;
   /**
@@ -1316,6 +1318,8 @@ export default function SashimiViewer({
   const [showClipMarks, setShowClipMarks] = useState(init.clipMarks ?? false);
   const [showInserted, setShowInserted] = useState(init.insertedBases ?? false);
   const [readsColor, setReadsColor] = useState<'none' | 'strand' | 'first'>(init.readsColor === 'strand' || init.readsColor === 'first' ? init.readsColor : 'none');
+  /** raw reads at least this long (bp), null: every read (readFilter.ts) */
+  const [minReadLength, setMinReadLength] = useState<number | null>(init.minReadLength && init.minReadLength > 0 ? Math.round(init.minReadLength) : null);
   const [coverageVariants, setCoverageVariants] = useState(init.coverageVariants ?? false);
   const [rnaVariants, setRnaVariants] = useState(init.rnaVariants ?? true);
   const [panelOrder, setPanelOrder] = useState<string[]>(init.panelOrder ?? []);
@@ -1350,11 +1354,11 @@ export default function SashimiViewer({
   /** the tracks as loaded; `tracks` (below) is what is drawn: with the strands shown, a stranded sample's gene strand */
   const [rawTracks, setTracks] = useState<TrackData[]>([]);
   const [runSamples, setRunSamples] = useState<{ id: number; name: string }[]>([]);
-  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; /** collapsed with the strands split, the gene's (ReadsOptions.strands) */ strands?: 'plus' | 'minus'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string };
+  type ReadsEntry = { sampleId: number; fetched: FetchWindow; mode: 'reads' | 'collapsed'; /** collapsed with the strands split, the gene's (ReadsOptions.strands) */ strands?: 'plus' | 'minus'; haplotypes: 2 | 'any'; phaseSource: 'auto' | 'reads'; minSupport: number; minVaf: number; minIndel: number; longVaf: number; data: ReadsResponse; /** the reads carry their CpG calls */ methyl?: boolean; /** the reads carry their haplotype from read-based phasing (`ph`) */ phased?: boolean; /** only the reads supporting this arc (supportKey) */ support?: string; /** only the reads this long (raw reads) */ minLen?: number };
   /** "Show supporting reads" of an arc's panel: the reads tracks hold only the reads supporting it (and their mates) */
   /** `side`: a junction of the gene's strand (sense) or of the opposite one (anti), on the stranded samples (supportFor) */
   const [readsSupport, setReadsSupport] = useState<{ arc: ArcSupport; label: string; side?: 'sense' | 'anti' } | null>(null);
-  const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}:${readsSupport.side ?? ''}` : undefined;
+  const supportKey = readsSupport ? `${readsSupport.arc.kind}:${readsSupport.arc.pairKind ?? ''}:${readsSupport.arc.start}-${readsSupport.arc.end}:${readsSupport.arc.tol}:${readsSupport.side ?? ''}${readsSupport.arc.allele ? `:${readsSupport.arc.allele.kind}${readsSupport.arc.allele.length}${readsSupport.arc.allele.alt}` : ''}` : undefined;
   // Per sample, so that "all samples" keeps one reads track under each coverage track
   const [readsData, setReadsData] = useState<Record<number, ReadsEntry>>({});
   const [readsLoading, setReadsLoading] = useState<Record<number, boolean>>({});
@@ -2341,9 +2345,11 @@ export default function SashimiViewer({
     const wantPhase = mode === 'reads' && readsGroup === 'phase' && !readsSupport;
     // collapsed reads of a stranded sample with the strands shown: each strand collapsed on its own
     const strandsFor = (sid: number) => (mode === 'collapsed' ? senseOf(sid) ?? undefined : undefined);
+    // raw reads only: the collapsed modes fold every read
+    const lenFor = mode === 'reads' ? minReadLength ?? undefined : undefined;
     const stale = readsSampleIds.filter(sid => {
       const cur = readsData[sid];
-      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
+      return !(cur && cur.mode === mode && cur.strands === strandsFor(sid) && cur.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) && cur.minLen === lenFor && cur.minVaf === minVaf && cur.minIndel === minIndelBp && cur.longVaf === longReadMinVafPct && (mode === 'reads' || (cur.minSupport === minJunctionCount && cur.haplotypes === haplotypes && cur.phaseSource === phaseSource)) && covers(cur.fetched, v) && !thin(cur)
         && !(wantMethyl(sid) && !cur.methyl) && !(wantPhase && !cur.phased));
     });
     if (!stale.length) return;
@@ -2357,8 +2363,8 @@ export default function SashimiViewer({
         setReadsLoading(p => ({ ...p, [sid]: true }));
         setReadsError(p => ({ ...p, [sid]: undefined }));
         const sup = mode === 'reads' ? supportFor(sid) : undefined, support = sup?.arc;
-        ds.getReads(sid, want.chrom, want.start, want.end, want.minMapq, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, strands: strandsFor(sid), signal: ctl.signal })
-          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: sup?.key } })); })
+        ds.getReads(sid, want.chrom, want.start, want.end, want.minMapq, support ? READS_SUPPORT_MAX : READS_MAX, mode, minJunctionCount, minVaf, { longReadMinIndel: minIndelBp, longReadMinVaf: longReadMinVafPct / 100, haplotypes, phaseSource, methylation: wantMethyl(sid), phase: wantPhase, secondary: want.secondary, support, minReadLength: lenFor, strands: strandsFor(sid), signal: ctl.signal })
+          .then(data => { if (readsSeq.current.get(sid) === seq) setReadsData(p => ({ ...p, [sid]: { sampleId: sid, fetched: want, mode, strands: strandsFor(sid), haplotypes, phaseSource, minSupport: minJunctionCount, minVaf, minIndel: minIndelBp, longVaf: longReadMinVafPct, data, methyl: wantMethyl(sid), phased: wantPhase, support: sup?.key, minLen: lenFor } })); })
           .catch((err: any) => { if (readsSeq.current.get(sid) === seq && !isAbort(err)) setReadsError(p => ({ ...p, [sid]: err.message })); })
           .finally(() => {
             if (readsAbort.current.get(sid) === ctl) readsAbort.current.delete(sid);
@@ -2367,7 +2373,7 @@ export default function SashimiViewer({
       }
     }, 250);
     return () => clearTimeout(timer);
-  }, [readsSampleIds, viewStart, viewEnd, currentChrom, minMapq, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, supportFor, readsWindow, readsGroup, showSecondary, senseOf]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [readsSampleIds, viewStart, viewEnd, currentChrom, minMapq, readsData, collapseReads, haplotypes, phaseSource, minJunctionCount, minVafPct, minIndelBp, longReadMinVafPct, showMethyl, supportKey, supportFor, readsWindow, readsGroup, showSecondary, senseOf, minReadLength]); // eslint-disable-line react-hooks/exhaustive-deps
   // a filter on the supporting reads of an arc belongs to its chromosome
   useEffect(() => { setReadsSupport(null); }, [currentChrom]);
 
@@ -3206,7 +3212,7 @@ export default function SashimiViewer({
     // The entry answers the window and the options in force; an older one (a request still running, or one that failed)
     // keeps its reads on screen while the new answer comes, but its variant sites are not the window's: none go to the coverage.
     const fresh = !!entry && covers(entry.fetched, { chrom: currentChrom, start: viewStart, end: viewEnd, minMapq, secondary: showSecondary }) &&
-      entry.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) &&
+      entry.support === (mode === 'reads' ? supportFor(sid)?.key : undefined) && entry.minLen === (mode === 'reads' ? minReadLength ?? undefined : undefined) &&
       entry.minVaf === Math.min(1, Math.max(0, minVafPct / 100)) && entry.minIndel === minIndelBp && entry.longVaf === longReadMinVafPct &&
       (mode === 'reads' || (entry.minSupport === minJunctionCount && entry.haplotypes === haplotypes && entry.phaseSource === phaseSource && entry.strands === (senseOf(sid) ?? undefined)));
 
@@ -3215,8 +3221,12 @@ export default function SashimiViewer({
     // tinted and packed after the others, the variant sites counted on the gene's strand only (the other's in the tooltip)
     const sensePick = senseOf(sid);
     const antiOf = sensePick ? (r: AlignedRead) => (plusStrand(r.f) ? 'plus' : 'minus') !== sensePick : null;
-    let sites: VariantSite[] = fresh ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
-    if (antiOf && fresh && mode === 'reads') {
+    // only the supporting reads of an arc or a variant: their allele fractions are not the window's (the variant's own
+    // would read 100 %), so no site goes to the stars or the coverage (the reads still draw their mismatches). A length
+    // floor keeps its sites: called from the reads shown, as the track says
+    const subset = mode === 'reads' && !!entry?.support;
+    let sites: VariantSite[] = fresh && !subset ? (current.sites || []).filter(st => st.pos >= viewStart && st.pos < viewEnd) : [];
+    if (antiOf && fresh && !subset && mode === 'reads') {
       const senseReads = current.reads.filter(r => !antiOf(r)), antiReads = current.reads.filter(antiOf);
       const long = !!current.long_reads, minVaf = Math.min(1, Math.max(0, (long ? longReadMinVafPct : minVafPct) / 100));
       sites = callSites(senseReads, viewStart, viewEnd, ref?.seq ?? null, ref?.start ?? 0, 3, minVaf, 20, long ? minIndelBp : 1);
@@ -3971,6 +3981,8 @@ export default function SashimiViewer({
     const info = (current.supporting && readsSupport
       ? `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} read${current.total === 1 ? '' : 's'} supporting ${readsSupport.label}${current.shown < current.total ? ` (spread evenly over all of them, ${READS_SUPPORT_MAX.toLocaleString('en-US')} at most)` : ''}${current.supporting.mates ? ` + ${current.supporting.mates.toLocaleString('en-US')} mate${current.supporting.mates === 1 ? '' : 's'}` : ''}`
       : `${current.shown.toLocaleString('en-US')} of ${current.total.toLocaleString('en-US')} reads`) +
+      (entry?.minLen ? ` · only reads ≥ ${entry.minLen.toLocaleString('en-US')} bp${subset ? '' : ' (variant sites called from them)'}` : '') +
+      (subset ? ' · no variant site called from these reads' : '') +
       (grouped && !strandSplit ? ` · grouped by ${byPhase ? 'read-based phasing' : 'haplotag'}: ${groupRows.filter(g => g.hp).map(g => `${byPhase ? 'H' : 'HP '}${g.hp} ${g.reads.toLocaleString('en-US')}`).join(', ')}${groupRows.some(g => !g.hp) ? `, ${byPhase ? 'unphased' : 'untagged'} ${groupRows.find(g => !g.hp)!.reads.toLocaleString('en-US')}` : ''}` : '') +
       (strandSplit ? (() => { const a = groupRows.filter(g => g.anti).reduce((n, g) => n + g.reads, 0); return ` · ${a.toLocaleString('en-US')} on the opposite strand (violet, packed last${grouped ? `, grouped by ${byPhase ? 'read-based phasing' : 'haplotag'} within each strand` : ''})`; })() : '') +
       (current.shown < current.total && !current.supporting ? ' (downsampled, zoom in for all)' : '') +
@@ -4009,7 +4021,7 @@ export default function SashimiViewer({
     };
     for (const sid of readsSampleIds) out.set(sid, build(sid));
     return out;
-  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving, psTone]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [showReads, readsSampleIds, collapseReads, readsSupport, haplotypes, phaseSource, readsGroup, readsWindow, senseOf, sampleStrands, readsColor, minJunctionCount, viewStart, viewEnd, tracks, readsData, readsError, readsLoading, scale, plotWidth, currentChrom, tx, axis, junctionContext, reverse, isDnaSample, consensusMode, minIndelBp, showPairs, showClipped, showInserted, openReadPanel, showMethyl, methylThresholds, viewMoving, psTone, minReadLength]); // eslint-disable-line react-hooks/exhaustive-deps
   // Clipped reads of each DNA track rescued at the breakpoints the other DNA tracks show (second-pass style, borrowed
   // breakpoints): asked once per set of candidates, merged into the track's evidence for the panels
   const rescueAsked = useRef(new Map<number, string>());
@@ -6867,6 +6879,14 @@ export default function SashimiViewer({
     setCollapseReads(false);
     setShowReads(true);
   }, [currentChrom]);
+  /** "Show supporting reads" of a variant's panel: the reads tracks hold only the reads carrying its alternate allele (readFilter.ts). */
+  const showVariantSupport = useCallback((st: VariantSite) => {
+    const end = st.kind === 'del' ? st.pos + st.length : st.pos + 1;
+    setReadsSupport({ arc: { kind: 'variant', start: st.pos, end, tol: 0, allele: { kind: st.kind, alt: st.alt, length: st.length } },
+      label: `the variant ${currentChrom}:${(st.pos + 1).toLocaleString('en-US')} ${siteShort(st)}` });
+    setCollapseReads(false);
+    setShowReads(true);
+  }, [currentChrom]);
   /** Back to the primary sample alone. */
   const showPrimaryOnly = useCallback(() => {
     for (const tr of tracksRef.current.slice(1)) removeTrack(tr.sampleId);
@@ -6884,14 +6904,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, minMapq,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, clipMarks: showClipMarks, coverageHeight: (coverageAuto ? manualCoverageH.current : coverageH) === COVERAGE_H_DEFAULT ? undefined : coverageAuto ? manualCoverageH.current : coverageH, coverageAuto: coverageAuto || undefined, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, panelOrder: panelOrder.length ? panelOrder : undefined,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, clipMarks: showClipMarks, coverageHeight: (coverageAuto ? manualCoverageH.current : coverageH) === COVERAGE_H_DEFAULT ? undefined : coverageAuto ? manualCoverageH.current : coverageH, coverageAuto: coverageAuto || undefined, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, minReadLength: minReadLength ?? undefined, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : sampleId > 0 ? [] : undefined,   // none: no file yet
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, showClipMarks, coverageH, coverageAuto, readsWindow, showSecondary, showStrands, readsColor, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, showClipMarks, coverageH, coverageAuto, readsWindow, showSecondary, showStrands, readsColor, minReadLength, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -7313,6 +7333,7 @@ export default function SashimiViewer({
             )}
             <Pill size="sm" on={consensusMode} onChange={setConsensusMode} label="Consensus" icon="consensus"
               title="Draw mismatches and indels only where a variant site is called (at least 3 reads and Min VAF), so sequencing errors do not paint every read: RNA-seq, genomic DNA and long reads (ONT, PacBio) alike. A rarer change (an RNA-editing site edited in a few reads, a subclonal variant) then shows only with Min VAF lowered, or with Consensus off. Off: every mismatch and indel of every read." />
+            {!collapseReads && <MinLengthField value={minReadLength} onChange={setMinReadLength} />}
             <span className="flex flex-wrap items-center gap-2 ml-auto">
               <Stepper label="min VAF" unit="%" value={minVafPct} onChange={v => setMinVafPct(Math.round(v))} min={1} max={100} ariaLabel="Min VAF"
                 title="Minimum alternate-allele fraction for a variant site to be shown (★ in the reads, bar in the variants track of a DNA sample) and used to collapse reads. Sites also need at least 3 alternate reads (every alternate base counts, whatever its quality; the BQ cell tells the share under 20). On a DNA track without a reads track the sites come from the variants chip next to the sample name." />
@@ -7623,6 +7644,13 @@ export default function SashimiViewer({
                   <div className="text-gray-500">{variantPanel.name} · VAF {Math.round(s.vaf * 100)} % · {s.alt_count.toLocaleString('en-US')} of {s.depth.toLocaleString('en-US')} reads ({s.q ? 'variant scan' : 'reads shown'})</div>
                 </div>
                 <button onClick={() => setVariantPanel(null)} className="text-gray-400 hover:text-gray-700 text-base leading-none" title="Close">×</button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-1.5">
+                <button type="button" data-variant-support
+                  className="rounded border border-accent-300 bg-accent-50 px-2 py-0.5 font-semibold text-accent-700 hover:bg-accent-100"
+                  title={`The reads tracks show only the reads carrying this ${s.kind === 'snv' ? 'base (quality ≥ 20, as the site counts them)' : s.kind === 'ins' ? 'insertion (same position and length)' : 'deletion (same position and length)'}, in every sample shown; "✕ all reads" in the track brings every read back`}
+                  onClick={() => { showVariantSupport(s); setVariantPanel(null); }}>Show supporting reads</button>
+                <span className="text-gray-500">{s.alt_count.toLocaleString('en-US')} read{s.alt_count === 1 ? '' : 's'} carry it here</span>
               </div>
               {(() => {
                 const forms = variantCoordinates(s, currentChrom, variantPanel.ref ?? null, variantPanel.insSeq, tx);

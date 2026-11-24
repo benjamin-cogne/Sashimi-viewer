@@ -20,11 +20,16 @@ import type { AlignedRead } from '../components/sashimi/types';
 import { plusStrand } from './coverage';
 import { SPAN_EXON_ANCHOR, SPAN_INTRON_ANCHOR } from './alignments';
 
-export type ArcSupportKind = 'junction' | 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant' | 'retention';
+export type ArcSupportKind = 'junction' | 'deletion' | 'split' | 'duplication' | 'inversion' | 'discordant' | 'retention' | 'variant';
 export interface ArcSupport {
   kind: ArcSupportKind; start: number; end: number;
   /** discordant pairs: their class */
   pairKind?: 'deletion' | 'duplication' | 'inversion';
+  /**
+   * a variant (kind 'variant', `start` its position): the reads carrying its alternate allele (readFilter.ts), without
+   * their mates; `end` is past its last reference base
+   */
+  allele?: { kind: 'snv' | 'ins' | 'del'; alt: string; length: number };
   /** bases either end may be off (0: exact) */
   tol: number;
   /**
@@ -112,6 +117,9 @@ export function supportsArc(r: ArcRead, chrom: string, a: ArcSupport): boolean {
       const through = (lo: number, hi: number) => r.start <= lo && r.end >= hi && !r.gaps.some(([s, e, op]) => op === 'N' && s < hi && e > lo);
       return through(a.start - SPAN_EXON_ANCHOR, a.start + SPAN_INTRON_ANCHOR) || through(a.end - SPAN_INTRON_ANCHOR, a.end + SPAN_EXON_ANCHOR);
     }
+    // a variant needs the read's bases: readFilter.ts supportsAligned / supportsRaw
+    case 'variant':
+      return false;
     case 'junction':
       return r.gaps.some(([s, e, op]) => op === 'N' && near(s, a.start, a.tol) && near(e, a.end, a.tol));
     case 'deletion':

@@ -145,6 +145,36 @@ export function Stepper({ value, onChange, min, max, step = 1, label, unit, titl
   );
 }
 
+/**
+ * The reads' length floor: empty (none) by default; a number of bp applies on Enter or when the field is left (not at
+ * each key, each value would reload the reads), × clears it. Accepts "10k", "1.5 kb".
+ */
+export function MinLengthField({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
+  const [text, setText] = useState(value ? String(value) : '');
+  useEffect(() => { setText(value ? String(value) : ''); }, [value]);
+  const parse = (t: string): number | null | undefined => {
+    const m = t.trim().toLowerCase().replace(/[\s,]/g, '').match(/^(\d+(?:\.\d+)?)(k|kb|bp|b)?$/);
+    if (!t.trim()) return null;
+    if (!m) return undefined;
+    const v = Math.round(parseFloat(m[1]) * (m[2]?.startsWith('k') ? 1000 : 1));
+    return v > 0 ? v : null;
+  };
+  const commit = () => { const v = parse(text); if (v === undefined) setText(value ? String(value) : ''); else if (v !== value) onChange(v); };
+  const bad = parse(text) === undefined;
+  return (
+    <span title="Show only the reads at least this long, in bp, as sequenced (aligned, inserted and clipped bases; introns and deletions are not read bases). Empty: every read. Raw reads only; coverage, junctions and variant counts keep every read. Enter or leave the field to apply; 10k = 10,000 bp."
+      className={`inline-flex items-center h-[30px] border rounded-[6px] bg-white overflow-hidden text-[12.5px] ${value ? 'border-accent-300 bg-accent-50' : 'border-slate-200'}`} data-min-read-length>
+      <span className="pl-2.5 pr-1.5 text-slate-500 text-xs whitespace-nowrap">min length</span>
+      <input type="text" inputMode="numeric" value={text} placeholder="none" aria-label="Minimum read length (bp)"
+        onChange={e => setText(e.target.value)} onBlur={commit} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commit(); (e.target as HTMLInputElement).blur(); } if (e.key === 'Escape') setText(value ? String(value) : ''); }}
+        className={`text-center font-semibold bg-transparent outline-none focus:bg-accent-50 placeholder:font-normal placeholder:text-slate-400 ${bad ? 'text-red-600' : 'text-slate-900'}`}
+        style={{ width: 52 }} />
+      <span className="pr-1.5 text-slate-500 text-xs whitespace-nowrap">bp</span>
+      {value != null && <button type="button" onClick={() => onChange(null)} aria-label="clear the read length filter" title="Every read again" className="w-6 h-full grid place-items-center text-slate-400 hover:text-slate-800 hover:bg-slate-50 border-l border-slate-100">×</button>}
+    </span>
+  );
+}
+
 /** A native select dressed as a pill: the key in grey, the value in ink, a chevron. */
 export function Select({ label, value, onChange, children, title, ariaLabel, dot }: {
   label?: string; value: string | number; onChange: (v: string) => void; children: React.ReactNode; title: string; ariaLabel?: string; dot?: string;

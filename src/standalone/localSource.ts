@@ -17,7 +17,7 @@ import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, 
 import { CoverageState, Layer, mapqThreshold, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylBlocks, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
-import { arcReadFromCigar, supportsArc } from './arcSupport';
+import { addsMates, minLengthOf, rawReadLength, supportsRaw } from './readFilter';
 import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
@@ -266,8 +266,11 @@ interface ScanOptions {
   structural?: boolean; signal?: AbortSignal;
   /** secondary alignments (0x100) kept too */
   secondary?: boolean;
-  /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
-  filter?: (light: RawRead) => boolean;
+  /**
+   * only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling;
+   * `full` decodes the record whole (bases, qualities, CRAM substitutions) for a test that needs them
+   */
+  filter?: (light: RawRead, full: () => RawRead) => boolean;
   /** sample fragments rather than reads: the two mates of a pair are kept or dropped together (see `scan`) */
   pairs?: boolean;
 }
@@ -599,7 +602,7 @@ export class LocalDataSource implements SashimiDataSource {
         seen++;
         if (!keepFlagsWith(view.flags(r), secondary)) continue;
         if (minMapq > 0 && view.mapq(r) < mapqThreshold(minMapq)) continue;
-        if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
+        if (filter && !filter(view.raw(r, true, true, loc.o.refNames), () => view.raw(r, false, true, loc.o.refNames))) continue;
         if (pairs) {
           // a record without a name (a CRAM written without them) is a fragment of its own
           const h = nameHash(view.name(r) || `#${total}`);
@@ -1230,21 +1233,24 @@ export class LocalDataSource implements SashimiDataSource {
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
     // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
     // are sampled as reads, and their mates in the window added afterwards
+    // a length floor and a support filter both apply before the cap (readFilter.ts)
+    const minLength = !collapsed ? minLengthOf(opts) : undefined;
+    const longEnough = (r: RawRead) => !minLength || rawReadLength(r) >= minLength;
     const scanned = await this.scan(sampleId, chrom, start, end, minMapq, cap, false,
-      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
+      { structural: true, signal: opts?.signal, filter: support ? (r, full) => longEnough(r) && supportsRaw(r, ownName, support, full) : minLength ? longEnough : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
     if (support && raw.length > Math.max(1, maxReads)) {
       const want = Math.max(1, maxReads), step = raw.length / want;
       raw = Array.from({ length: want }, (_, i) => raw[Math.floor(i * step)]);
     }
-    if (support) {
+    if (addsMates(support)) {
       // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
       const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
       if (want.size) {
         const extra = await this.scan(sampleId, chrom, start, end, minMapq, Infinity, false,
-          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`), secondary: !!opts?.secondary });
+          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`) && longEnough(r), secondary: !!opts?.secondary });
         mates = extra.kept.length;
         raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);
       }

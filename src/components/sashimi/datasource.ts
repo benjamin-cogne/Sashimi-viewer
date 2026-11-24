@@ -43,6 +43,8 @@ export interface ReadsOptions {
   phase?: boolean;
   /** secondary alignments (0x100) among the reads too */
   secondary?: boolean;
+  /** reads mode: only the reads at least this long, as sequenced (readFilter.ts readLength); absent or 0: every read */
+  minReadLength?: number;
   /**
    * collapsed mode: the reads split by transcript strand, `strands` naming the gene's under the reverse (dUTP) rule (read
    * 2 of a pair mapped on +, or read 1 or a single read mapped on −, is +). The answer is the gene's strand, phased or
