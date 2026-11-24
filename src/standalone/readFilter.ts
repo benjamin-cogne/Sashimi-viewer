@@ -106,4 +106,4 @@ export function supportsRaw(r: RawRead, chrom: string, a: ArcSupport, full?: () 
 export const addsMates = (a: ArcSupport | undefined): boolean => !!a && a.kind !== 'variant';
 
 /** The length floor of a request (undefined: none). */
-export const minLengthOf = (opts?: ReadsOptions): number | undefined => (opts?.minReadLength && opts.minReadLength > 0 ? opts.minReadLength : undefined);
+export const minLengthOf = (opts?: Pick<ReadsOptions, 'minReadLength'>): number | undefined => (opts?.minReadLength && opts.minReadLength > 0 ? opts.minReadLength : undefined);
