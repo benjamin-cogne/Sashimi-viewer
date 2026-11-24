@@ -17,14 +17,6 @@ const HOW = 'Circular binary segmentation of the probes (Olshen et al. 2004) wit
 /** the detected events the file does not call (same type, reciprocal overlap ≥ 50 %) */
 export const extrasOf = (r: ProbeCalls, x: CghSample) => r.events.filter(e => !x.cnvs.some(c => agrees(e, c)));
 
-/** a file call's mark: whether the probe calls see it (only once they are computed) */
-export function ProbeSeenTag({ c }: { c: CghCnv }) {
-  const r = cgh.probeCallsOf(c.sampleKey);
-  if (!r) return null;
-  const seen = r.events.some(e => agrees(e, c));
-  return <span data-cgh-seen={seen ? 'seen' : 'not'} className={`ml-1 text-[9.5px] ${seen ? 'text-slate-400' : 'text-amber-700'}`}
-    title={seen ? 'The probe calls find this call too (same type, reciprocal overlap ≥ 50 %)' : 'The probe calls do not find this call with their settings (often a call of 1-2 probes)'}>probes: {seen ? 'seen' : 'not seen'}</span>;
-}
 
 function Settings() {
   const o = useCgh().probeOpts, sens = sensOf(o.t);
@@ -64,7 +56,7 @@ export function ProbeCallsBar({ listed, shown, onShow }: { listed: { x: CghSampl
             {open ? '▾' : '▸'} {many ? `${x.name}: ` : ''}{n == null ? 'computing…' : `${n} not in the file`}</button>;
         })}
         <Settings />
-        <span className="text-slate-400">· file calls marked <i>probes: seen / not seen</i> · probe calls are never exported</span>
+        <span className="text-slate-400">· probe calls are never exported</span>
       </div>
       {withProbes.filter(({ x }) => s.probeOpen[x.key]).map(({ x, f }) => {
         const r = cgh.probeCallsOf(x.key); if (!r) return null;
@@ -105,7 +97,7 @@ export function ProbeMethods() {
   return <div className="mt-1.5" data-cgh-probe-methods>
     <div className="font-semibold text-slate-700">Probes (CGH_Log_Ratio.txt)</div>
     <div><b>DLRS</b> (derivative log ratio spread), per patient: the standard deviation of the differences between the log ratios of consecutive probes (sorted by position, within each chromosome, every chromosome of the file including X and Y, chrM left out), divided by √2; probes without a value skipped; no outlier removed (events and waves raise it a little). Under 10 differences: not given. Words from Agilent's guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3 poor.</div>
-    <div><b>Probe calls</b>, per patient and chromosome, probes without a value skipped: circular binary segmentation (Olshen AB et al., Biostatistics 2004;5:557-72). The arc whose mean differs most from the rest of the stretch, Z = (S<sub>j</sub> − S<sub>i</sub> − k·T/n)·√(n / (k(n − k))) / σ, cuts it when |Z| ≥ t, and each piece is cut again; a fixed threshold t, without the permutation test (sensitivity high / normal / low: t = 6 / 8 / 10). σ, the noise per probe, taken once per patient: the median absolute difference between consecutive probes × 1.4826 / √2 (robust to the events). A segment is a gain (loss) when its mean log ratio is ≥ +threshold (≤ −threshold; 0.25 by default); a segment of fewer than the minimum probes (3 by default) lying between two of one direction takes that direction; neighbouring segments of one direction are merged (mean weighted by probes); kept when the merged mean still passes the threshold and it has at least the minimum probes. chrY: its pseudo-autosomal probes left out (the chrX PAR ones again), the rest read only for a patient said male (cross-hybridisation in a female). A file call is marked <i>probes: seen</i> when a probe call of the same chromosome and type overlaps it reciprocally by ≥ 50 % (the overlap over the longer of the two; a chrY PAR call compared as its chrX twin), else <i>not seen</i>; probe calls with no such file call are listed as <i>not in the file</i>, never exported.</div>
+    <div><b>Probe calls</b>, per patient and chromosome, probes without a value skipped: circular binary segmentation (Olshen AB et al., Biostatistics 2004;5:557-72). The arc whose mean differs most from the rest of the stretch, Z = (S<sub>j</sub> − S<sub>i</sub> − k·T/n)·√(n / (k(n − k))) / σ, cuts it when |Z| ≥ t, and each piece is cut again; a fixed threshold t, without the permutation test (sensitivity high / normal / low: t = 6 / 8 / 10). σ, the noise per probe, taken once per patient: the median absolute difference between consecutive probes × 1.4826 / √2 (robust to the events). A segment is a gain (loss) when its mean log ratio is ≥ +threshold (≤ −threshold; 0.25 by default); a segment of fewer than the minimum probes (3 by default) lying between two of one direction takes that direction; neighbouring segments of one direction are merged (mean weighted by probes); kept when the merged mean still passes the threshold and it has at least the minimum probes. chrY: its pseudo-autosomal probes left out (the chrX PAR ones again), the rest read only for a patient said male (cross-hybridisation in a female). A probe call is <i>not in the file</i> when no file call of the same chromosome and type overlaps it reciprocally by ≥ 50 % (the overlap over the longer of the two; a chrY PAR call compared as its chrX twin); those are listed, never exported. The file's calls carry no mark (they are made from these same probes).</div>
     <div><b>Estimated copies</b>, when the file gives no copy number: the n whose log2(n / 2) is nearest the call's mean log ratio (x0 taken as −2; a male's X outside the PARs and chrY: log2(n / 1)), shown as estimated, never in an ISCN. <b>Mosaic</b>: for a one-copy change, the fraction of cells from the AChro-Puce calculator (loss 2 − 2·2<sup>LR</sup>, gain 2·2<sup>LR</sup> − 2; one-copy X / Y of a male 1 − 2<sup>LR</sup> and 2<sup>LR</sup> − 1), indicative, shown below 80 %.</div>
     <div><b>Whole genome view</b>: each probe drawn in its pixel cell (one mark per cell and colour, so 61k probes cost no more than the pixels), chromosomes side by side (horizontal) or as columns, position going down from pter and log ratio across (vertical); the dark line is the median of each pixel line. A chromosome opened is drawn as the call's probe panel (every probe, moving median of 3 / 7 / 15). Log-ratio range ±0.5 / ±1 (default) / ±2, further with ⊖, shared by the three views; a probe beyond it is drawn as a triangle at the edge; the colours stay at ±0.2. A male's X and Y may lie near −1 (one copy against a reference of two): not normalised.</div>
   </div>;

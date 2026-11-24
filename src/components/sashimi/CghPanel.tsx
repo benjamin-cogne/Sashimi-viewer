@@ -19,7 +19,7 @@ import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import { CghRecurrentDetail } from './CghClinGenTrack';
-import { ProbeCallsBar, ProbeSeenTag, ProbeMethods } from './CghProbeCalls';
+import { ProbeCallsBar, ProbeMethods } from './CghProbeCalls';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
@@ -210,6 +210,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const retryNow = (cs: CghCnv[], srcs: (CghSource | 'panelapp')[]) => { if (loadersFor) retry(cs.map(c => ({ c, build: buildOf.get(c.id) ?? 'GRCh37' })), srcs, loadersFor); };
   // the call clicked kept in the table's view (the table only, never the page), when it changes
   const tableBox = useRef<HTMLDivElement>(null);
+  const cols = useColWidths(tableBox);
   useEffect(() => {
     const box = tableBox.current, row = box?.querySelector<HTMLElement>('tr[data-shown]');
     if (!box || !row) return;
@@ -370,26 +371,27 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
       <ProbeCallsBar listed={listed} shown={s.shown} onShow={onShow} />
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"
         onKeyDown={e => { if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !/^(SELECT|INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName)) { e.preventDefault(); e.stopPropagation(); show(Math.max(0, Math.min(rows.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)))); } }}>
-        <table className="w-full text-[11.5px] border-collapse">
+        <table className={`text-[11.5px] border-collapse ${cols.fixed ? '[&_td]:overflow-hidden [&_td]:text-ellipsis' : 'w-full'}`} style={cols.tableStyle([...(!s.sample && samples.length > 1 ? ['sample'] : []), 'band', 'pos', 'size', 'type', 'probes', 'logr', ...(samples.length > 1 ? ['series'] : []), 'genes', 'panelapp', 'dosage', 'priority', 'class', 'links'])} data-cgh-table>
           <thead data-cgh-thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
             <tr className="border-b border-slate-200">
-              {!s.sample && samples.length > 1 && <th className="px-1.5 py-0.5 font-medium">Sample</th>}
-              <th className="px-1.5 py-0.5 font-medium">Band{rc('bands')}</th><th className="px-1.5 py-0.5 font-medium">Position (GRCh37)</th>
-              <th className="px-1.5 py-0.5 font-medium text-right">Size</th><th className="px-1.5 py-0.5 font-medium">Type{rc('dgv')}</th>
-              <th className="px-1.5 py-0.5 font-medium text-right" title="#Probes · mean log ratio">Probes · LogR</th>
-              {samples.length > 1 && <th className="px-1.5 py-0.5 font-medium text-right" title={`Recurrence in the loaded series: other patients with a call of the same type on the same chromosome (reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %) / other patients loaded. Every call counts, those under the minimums too.`}>Series</th>}
-              <th className="px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes{rc('genes')}</th>
-              <th className="px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp{rc('panelapp')}</th>
-              <th className="px-1.5 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage{rc('dosage')}</th>
-              <th className="px-1.5 py-0.5 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority</th>
-              <th className="px-1.5 py-0.5 font-medium sticky right-[72px] z-[1] bg-slate-50 shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]">Classification</th><th className="px-1.5 py-0.5 font-medium sticky right-0 z-[1] bg-slate-50 w-[72px] min-w-[72px]">Links</th>
+              {!s.sample && samples.length > 1 && <th {...cols.th('sample')} className="relative px-1.5 py-0.5 font-medium">Sample{cols.grip('sample')}</th>}
+              <th {...cols.th('band')} className="relative px-1.5 py-0.5 font-medium">Band{rc('bands')}{cols.grip('band')}</th><th {...cols.th('pos')} className="relative px-1.5 py-0.5 font-medium">Position (GRCh37){cols.grip('pos')}</th>
+              <th {...cols.th('size')} className="relative px-1.5 py-0.5 font-medium text-right">Size{cols.grip('size')}</th><th {...cols.th('type')} className="relative px-1.5 py-0.5 font-medium">Type{rc('dgv')}{cols.grip('type')}</th>
+              <th {...cols.th('probes')} className="relative px-1.5 py-0.5 font-medium text-right" title="Number of probes of the call">Probes{cols.grip('probes')}</th>
+              <th {...cols.th('logr')} className="relative px-1.5 py-0.5 font-medium text-right" title="Mean log ratio of the call (the file's); a mosaic estimate beside it">Log R{cols.grip('logr')}</th>
+              {samples.length > 1 && <th {...cols.th('series')} className="relative px-1.5 py-0.5 font-medium text-right" title={`Recurrence in the loaded series: other patients with a call of the same type on the same chromosome (reciprocal overlap ≥ ${Math.round(SERIES_OVERLAP * 100)} %) / other patients loaded. Every call counts, those under the minimums too.`}>Series{cols.grip('series')}</th>}
+              <th {...cols.th('genes')} className="relative px-1.5 py-0.5 font-medium" title="RefSeq NM_ genes of the interval (UCSC, the file's build); the file's Gene Name only when they cannot be read">Genes{rc('genes')}{cols.grip('genes')}</th>
+              <th {...cols.th('panelapp')} className="relative px-1.5 py-0.5 font-medium" title={`${PANEL_SOURCE.label}, every panel: the genes by their best rating, green first (with their mode of inheritance), then amber, then red`}>PanelApp{rc('panelapp')}{cols.grip('panelapp')}</th>
+              <th {...cols.th('dosage')} className="relative px-1.5 py-0.5 font-medium" title="ClinGen dosage scores (haploinsufficiency for a loss, triplosensitivity for a gain; 3 sufficient, 2 some evidence) and the lowest gnomAD LOEUF">Dosage{rc('dosage')}{cols.grip('dosage')}</th>
+              <th {...cols.th('priority')} className="relative px-1.5 py-0.5 font-medium" title="A priority for the review from the genes' scores (the rules are listed under the table); not a classification">Priority{cols.grip('priority')}</th>
+              <th {...cols.th('class')} className="px-1.5 py-0.5 font-medium sticky right-[72px] z-[1] bg-slate-50 shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]">Classification</th><th {...cols.th('links')} className="px-1.5 py-0.5 font-medium sticky right-0 z-[1] bg-slate-50 w-[72px] min-w-[72px]">Links</th>
             </tr>
           </thead>
           <tbody>
             {items.map(it => {
               if ('more' in it) {
                 const m = it.more;
-                return <tr key={`more-${m.key}-${m.n}`} data-cgh-more className="border-b border-slate-100 bg-slate-50/60"><td colSpan={13} className="px-2 py-0.5 text-[11px]">
+                return <tr key={`more-${m.key}-${m.n}`} data-cgh-more className="border-b border-slate-100 bg-slate-50/60"><td colSpan={14} className="px-2 py-0.5 text-[11px]">
                   {m.n < 0 ? <button className="text-accent-700 hover:underline" onClick={() => cgh.setRevealed(m.key, false)}>− hide them</button>
                     : m.open ? <span className="text-slate-500">{m.n} call{m.n > 1 ? 's' : ''} of {m.name} under the minimums ({minWords}), annotated on demand</span>
                     : <button className="text-accent-700 hover:underline" title={`List them, and annotate up to ${CGH_MAX_ANNOTATED} (the largest first)`}
@@ -410,7 +412,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word} <EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
-                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{c.logRatio != null && <span className="text-slate-500"> · {c.logRatio.toFixed(2)}</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} />{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}<ProbeSeenTag c={c} /></td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
+                  <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     <button className="px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" onClick={() => annotateNow([c])} title="Annotate this call (genes, PanelApp, ClinGen, gnomAD, DGV Gold)">annotate</button></td></>
@@ -435,10 +438,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                       : <span className="text-slate-300" title="CNV-Hub pages are known for hg19 (GRCh37) only">CNV-Hub</span>}
                   </td>
                 </tr>,
-                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={13} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} build={buildOf.get(c.id) ?? 'GRCh37'} onRetry={srcs => retryNow([c], srcs)} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
+                on && !folded && <tr key={`${c.id}-detail`}><td colSpan={14} className="p-0 border-x-2 border-b-2 border-accent-600"><CnvDetail c={c} v={v} build={buildOf.get(c.id) ?? 'GRCh37'} onRetry={srcs => retryNow([c], srcs)} lab={lab.get(c.id)} hints={hints.get(c.id) ?? []} sex={s.sex[c.sampleKey]} series={series.get(c.id)} note={note} focusNote={noteFocus === c.id} onNoteFocused={() => setNoteFocus(null)} /></td></tr>,
               ];
             })}
-            {!rows.length && <tr><td colSpan={13} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
+            {!rows.length && <tr><td colSpan={14} className="px-3 py-3 text-slate-400">No call passes the filter.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -761,4 +764,37 @@ function InCall({ g }: { g: CnvGene }) {
     c.coding == null ? 'non-coding transcript' : `coding bases in the exons wholly inside: ${c.coding} (${c.coding % 3 === 0 ? 'a multiple of 3' : `${c.coding % 3} past a multiple of 3`})`,
     THEORETICAL].join('\n');
   return <span className={c.severe ? 'text-red-700' : 'text-slate-500'} title={tip}>{c.text}</span>;
+}
+
+/** the calls table's column widths, by column id (only ids and pixels kept, localStorage): automatic until a header
+ * border is dragged; then every column fixed at its width (the others measured at that moment); double-click: automatic again */
+const COLS_KEY = 'sashimi.cghColumns', COL_MIN = 36;
+function useColWidths(box: React.RefObject<HTMLDivElement | null>) {
+  const [widths, setWidths] = useState<Record<string, number> | null>(() => { try { return JSON.parse(localStorage.getItem(COLS_KEY) ?? 'null') as Record<string, number> | null; } catch { return null; } });
+  const save = (v: Record<string, number> | null) => { setWidths(v); try { if (v) localStorage.setItem(COLS_KEY, JSON.stringify(v)); else localStorage.removeItem(COLS_KEY); } catch { /* storage blocked */ } };
+  const ths = () => [...(box.current?.querySelectorAll<HTMLTableCellElement>('thead th[data-col]') ?? [])];
+  // a column not seen when the widths were taken (Sample, Series): 90 px until dragged
+  const fixed = !!widths;
+  const wOf = (id: string) => widths?.[id] ?? (id === 'links' ? 72 : 90);
+  return {
+    fixed,
+    /** `ids`: the columns shown */
+    tableStyle: (ids: string[]) => (fixed ? { tableLayout: 'fixed' as const, width: ids.reduce((a, id) => a + wOf(id), 0), minWidth: '100%' } : undefined),
+    th: (id: string) => ({ 'data-col': id, style: fixed ? { width: wOf(id) } : undefined }),
+    grip: (id: string) => <span aria-hidden data-col-grip={id} title="Drag: column width · double-click: automatic widths" onClick={e => e.stopPropagation()}
+      onDoubleClick={e => { e.stopPropagation(); save(null); }}
+      onPointerDown={e => {
+        e.preventDefault(); e.stopPropagation();
+        const base: Record<string, number> = { ...(widths ?? {}) };
+        for (const t of ths()) if (!widths || !(t.dataset.col! in widths)) base[t.dataset.col!] = Math.round(t.getBoundingClientRect().width);
+        base.links = 72; // the sticky Classification sits 72 px from the right
+        const x0 = e.clientX, w0 = base[id] ?? 90, el = e.currentTarget; el.setPointerCapture(e.pointerId);
+        let cur = base;
+        const move = (ev: PointerEvent) => { cur = { ...base, [id]: Math.max(COL_MIN, Math.round(w0 + ev.clientX - x0)) }; setWidths(cur); };
+        const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); save(cur); };
+        el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+        setWidths(base);
+      }}
+      className="absolute top-0 right-0 h-full w-[5px] cursor-col-resize hover:bg-accent-300/60 active:bg-accent-400/70 select-none touch-none" />,
+  };
 }

@@ -258,9 +258,11 @@ Files read (also inside zips):
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
 Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene (the file's Gene Name or the RefSeq genes read for the call), a band (`16p11`) or a chromosome;
 order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
-copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
-build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
-links staying on the right.
+copy number from the ISCN (x0, x1, x3, amp), probes, mean log ratio (*Log R*, with the mosaic estimate), then what the
+call holds, read on the file's build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls
+sideways, the classification and the links staying on the right. A column's width is set by dragging the right border
+of its header (all columns then keep fixed widths, longer text cut with …); a double-click on a border goes back to
+automatic widths; the widths are kept in the browser (column names and pixels only).
 
 **Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
 fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
@@ -295,8 +297,8 @@ when it holds at least 3 probes and its mean log ratio is at least ±0.25; adjac
 (a lone stray probe does not cut a gain in two). chrY is read only for a patient said male (its PAR probes are the chrX
 ones). Under the filters, *Probe calls* gives per patient *▸ n not in the file*: the events no file call matches (same
 type, reciprocal overlap ≥ 50 %), listed in grey italics *from probes* with position, size, probes, mean log ratio and
-the copies estimated from it; a click draws one like a call (probe panel and browser). Each file call is marked
-*probes: seen* or *not seen*. *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
+the copies estimated from it; a click draws one like a call (probe panel and browser). The file's calls carry no mark
+(they are made from the same probes). *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
 low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
 panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
 
