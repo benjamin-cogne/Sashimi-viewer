@@ -712,7 +712,7 @@ function App() {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' ? 'rna' as const : false;
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary, minReadLength: st.minReadLength,
               // a stranded sample of a view showing the strands keeps them split in the page
               strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
@@ -769,13 +769,13 @@ function App() {
               progress(`${t.label}: reads of ${smp.name}`);
               try {
                 const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, minVaf, {
-                  secondary: !!st.secondary, methylation: !!st.methylation && smp.lib?.type === 'dna',
+                  secondary: !!st.secondary, minReadLength: st.minReadLength, methylation: !!st.methylation && smp.lib?.type === 'dna',
                 });
                 if (phased) {
                   // the reads over the phased window are those the page phases (the same sample of them): the exported page
                   // draws them as the live one, and the export's own reads only past that window
                   const ph = await ds.getReads(smp.id, st.gene.chrom, pw.start, pw.end, st.minMapq, READS_PHASE_CAP, 'reads', 1, minVaf,
-                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
+                    { secondary: !!st.secondary, minReadLength: st.minReadLength, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
                   if (ph.phase) {
                     r.reads = [...r.reads.filter(x => x.e <= pw.start || x.s >= pw.end), ...ph.reads].sort((a, b) => a.s - b.s);
                     (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase, total: ph.total };
@@ -791,7 +791,7 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,

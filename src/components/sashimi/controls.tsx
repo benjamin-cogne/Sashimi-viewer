@@ -162,7 +162,7 @@ export function MinLengthField({ value, onChange }: { value: number | null; onCh
   const commit = () => { const v = parse(text); if (v === undefined) setText(value ? String(value) : ''); else if (v !== value) onChange(v); };
   const bad = parse(text) === undefined;
   return (
-    <span title="Show only the reads at least this long, in bp, as sequenced (aligned, inserted and clipped bases; introns and deletions are not read bases). Empty: every read. Raw reads only; coverage, junctions and variant counts keep every read. Enter or leave the field to apply; 10k = 10,000 bp."
+    <span title="Count and show only the reads at least this long, in bp, as sequenced (aligned, inserted and clipped bases; introns and deletions are not read bases): coverage, junctions, structural arcs, variant sites and the reads track. Empty: every read. Enter or leave the field to apply; 10k = 10,000 bp."
       className={`inline-flex items-center h-[30px] border rounded-[6px] bg-white overflow-hidden text-[12.5px] ${value ? 'border-accent-300 bg-accent-50' : 'border-slate-200'}`} data-min-read-length>
       <span className="pl-2.5 pr-1.5 text-slate-500 text-xs whitespace-nowrap">min length</span>
       <input type="text" inputMode="numeric" value={text} placeholder="none" aria-label="Minimum read length (bp)"

@@ -35,8 +35,8 @@ export function isLongRead(reads: { b: [number, number][]; d: [number, number][]
  */
 export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: number, collapsed: boolean, support: ReadsOptions['support'] | undefined,
   minLength?: number): { reads: AlignedRead[]; total: number; mates: number } {
-  // reads too short for the request are left out first (reads mode): of the window, and as mates
-  let reads = minLength && !collapsed ? all.filter(r => readLength(r) >= minLength) : all;
+  // reads too short for the request are left out first: of the window, and as mates
+  let reads = minLength ? all.filter(r => readLength(r) >= minLength) : all;
   let total = reads.length, mates = 0;
   if (support) {
     let hits = reads.filter(r => supportsAligned(r, chrom, support));

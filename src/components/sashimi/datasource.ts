@@ -43,7 +43,7 @@ export interface ReadsOptions {
   phase?: boolean;
   /** secondary alignments (0x100) among the reads too */
   secondary?: boolean;
-  /** reads mode: only the reads at least this long, as sequenced (readFilter.ts readLength); absent or 0: every read */
+  /** only the reads at least this long, as sequenced (readFilter.ts readLength), raw or collapsed; absent or 0: every read */
   minReadLength?: number;
   /**
    * collapsed mode: the reads split by transcript strand, `strands` naming the gene's under the reverse (dUTP) rule (read
@@ -92,6 +92,8 @@ export interface CoverageOptions {
   structural?: boolean | 'rna';
   /** count secondary alignments (0x100) too, in coverage, junctions and the structural evidence (IGV counts them); default primary and supplementary records only */
   secondary?: boolean;
+  /** count only the reads at least this long, as sequenced (readFilter.ts), in coverage, junctions and the structural evidence; absent or 0: every read */
+  minReadLength?: number;
   /** also split the window by transcript strand (`SampleCoverage.strands`), for a stranded RNA library */
   strands?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */

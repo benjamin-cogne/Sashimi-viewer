@@ -25,6 +25,13 @@ export function readLength(r: AlignedRead): number {
   return n;
 }
 
+/** Length of a record from its packed CIGAR (length << 4 | op, as BAM stores it): M I S H = X. */
+export function opsReadLength(ops: ArrayLike<number>): number {
+  let n = 0;
+  for (let k = 0; k < ops.length; k++) { const op = ops[k] & 15; if (op === 0 || op === 1 || op === 4 || op === 5 || op === 7 || op === 8) n += ops[k] >>> 4; }
+  return n;
+}
+
 /** Length of a record, as sequenced (from its CIGAR: M = X I S H; the sequence may be absent, '*', on secondary records). */
 export function rawReadLength(r: Pick<RawRead, 'cigar' | 'seq'>): number {
   let n = 0;
