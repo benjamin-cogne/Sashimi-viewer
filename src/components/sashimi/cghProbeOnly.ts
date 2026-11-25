@@ -39,7 +39,7 @@ const SENS: Record<number, string> = { 6: 'high', 8: 'normal', 10: 'low' };
 export const optsText = (o: SegOpts) => `CBS, sensitivity ${SENS[o.t] ?? `t ${o.t}`} (t = ${o.t}), probes >= ${o.minProbes}, |mean log ratio| >= ${o.minLr}`;
 
 /** the export: header lines (#), then one row per call */
-export function exportProbeCalls(file: CghFile, o: SegOpts, at: Date, cell: { band: (c: CghCnv) => string; copies: (c: CghCnv) => string; iscn: (c: CghCnv) => string; cls: (c: CghCnv) => string; note: (c: CghCnv) => string }): string {
+export function exportProbeCalls(file: CghFile, o: SegOpts, at: Date, cell: { band: (c: CghCnv) => string; copies: (c: CghCnv) => string; iscn: (c: CghCnv) => string; cls: (c: CghCnv) => string; note: (c: CghCnv) => string; group?: (c: CghCnv) => string }): string {
   const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const out = [
     `# Source probe file: ${leafOf(file.name)}`,
@@ -48,12 +48,13 @@ export function exportProbeCalls(file: CghFile, o: SegOpts, at: Date, cell: { ba
     `# Detection: ${optsText(o)}`,
     `# Date: ${at.toISOString().slice(0, 19).replace('T', ' ')}`,
     `# ${PROBE_ONLY_WARNING}`,
-    ['Chromosome', 'Start', 'Stop', 'Cytoband', 'Size(kb)', 'Type', '#Probes', 'Mean Log Ratio', 'Copies', 'ISCN', 'Classification', 'Comment'].join('\t'),
   ];
-  const cs = file.samples.flatMap(x => x.cnvs), noBand = cs.filter(c => !cell.band(c)).length;
+  const cs = file.samples.flatMap(x => x.cnvs), grp = cell.group && cs.some(c => cell.group!(c)) ? cell.group : undefined;
+  out.push(['Chromosome', 'Start', 'Stop', 'Cytoband', 'Size(kb)', 'Type', '#Probes', 'Mean Log Ratio', 'Copies', 'ISCN', 'Classification', 'Comment', ...(grp ? ['CNV group'] : [])].join('\t'));
+  const noBand = cs.filter(c => !cell.band(c)).length;
   // bands read from UCSC when the page exported: a row left without one is counted
   if (noBand) out.splice(out.length - 1, 0, `# Rows without a cytoband (UCSC cytobands not read): ${noBand}`);
   for (const c of cs) out.push([c.chrom, c.start, c.end, cell.band(c), c.sizeKb.toFixed(2), c.kind === 'loss' ? 'Loss' : 'Gain', c.probes ?? '', c.logRatio?.toFixed(3) ?? '',
-    cell.copies(c), cell.iscn(c), flat(cell.cls(c)), flat(cell.note(c))].join('\t'));
+    cell.copies(c), cell.iscn(c), flat(cell.cls(c)), flat(cell.note(c)), ...(grp ? [flat(grp(c))] : [])].join('\t'));
   return out.join('\n') + '\n';
 }

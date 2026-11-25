@@ -16,6 +16,7 @@ import ProbeWorker from './cghProbeWorker?worker&inline';
 import { isProbeOnly, probeBuildOf, probeOnlyCnvs, probeOnlyFile } from './cghProbeOnly';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
+import { cnvGroups, type CnvGroup } from './cghGroups';
 import type { GeneModes } from '../../standalone/panelapp';
 
 export interface CghFilter {
@@ -86,6 +87,8 @@ export interface CghState {
   probeOpen: Record<string, true>;
   /** how the probes are drawn (kept in localStorage): the whole genome's layout, the log-ratio range ±scale (shared by the genome, chromosome and probe panels) */
   view: CghView;
+  /** the CNV groups split back into their calls (this tab only), by group id */
+  ungrouped: Record<string, true>;
 }
 /** `iscnClasses`: the classes whose calls make the patient's ISCN */
 /** a probe log-ratio file not given with a table read by itself (alone, or in a zip whose table waits for its columns) */
@@ -115,7 +118,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, leaving: false, viewReset: 0, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView() };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, leaving: false, viewReset: 0, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView(), ungrouped: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -517,6 +520,13 @@ export const cgh = {
   },
   setSample(key: string | null) { set({ sample: key }); },
   setClass(cnv: CghCnv, v: string) { set({ classes: { ...state.classes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
+  /** a CNV group's class and note, kept under its id (`grp|…`), never exported as a call's */
+  setGroupClass(g: CnvGroup, v: string) { set({ classes: { ...state.classes, [g.id]: v }, ...touched(g.sampleKey) }); },
+  setGroupNote(g: CnvGroup, v: string) { set({ notes: { ...state.notes, [g.id]: v }, ...touched(g.sampleKey) }); },
+  /** the group's class given to each of its calls (on demand) */
+  applyGroupClass(g: CnvGroup) { const v = state.classes[g.id] ?? ''; const classes = { ...state.classes }; for (const c of g.members) classes[c.id] = v; set({ classes, ...touched(g.sampleKey) }); },
+  /** a group split back into its calls, or made again */
+  setUngrouped(id: string, on: boolean) { const ungrouped = { ...state.ungrouped }; if (on) ungrouped[id] = true; else delete ungrouped[id]; set({ ungrouped }); },
   setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
@@ -563,4 +573,25 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
     if (!hit) return false;
   }
   return true;
+}
+
+/** every patient's CNV groups (cghGroups.ts) among its analysed calls, by sample key; `active`: those not split back */
+let groupMemo: { files: CghFile[]; sex: CghState['sex']; minProbes: number; minKb: number; out: Map<string, CnvGroup[]> } | null = null;
+export function groupsOf(s: CghState): Map<string, CnvGroup[]> {
+  const f = s.filter;
+  if (groupMemo && groupMemo.files === s.files && groupMemo.sex === s.sex && groupMemo.minProbes === f.minProbes && groupMemo.minKb === f.minKb) return groupMemo.out;
+  const out = new Map<string, CnvGroup[]>();
+  for (const fl of s.files) for (const x of fl.samples) {
+    const sex = s.sex[x.key];
+    const gs = cnvGroups(x.cnvs, { build: fl.build ?? 'GRCh37', sex, eligible: c => isAnalysed(c, f.minProbes, f.minKb) && !hiddenBySex(c, sex) && !c.suppressed });
+    if (gs.length) out.set(x.key, gs);
+  }
+  groupMemo = { files: s.files, sex: s.sex, minProbes: f.minProbes, minKb: f.minKb, out };
+  return out;
+}
+/** the groups in force (not split back), and the one each call belongs to */
+export function activeGroups(s: CghState): { list: CnvGroup[]; byCall: Map<string, CnvGroup> } {
+  const list = [...groupsOf(s).values()].flat().filter(g => !s.ungrouped[g.id]), byCall = new Map<string, CnvGroup>();
+  for (const g of list) for (const c of g.members) byCall.set(c.id, g);
+  return { list, byCall };
 }

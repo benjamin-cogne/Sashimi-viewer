@@ -5,7 +5,7 @@
  * without a probe file: its calls only, as bars over the chromosomes drawn to scale (no log-ratio axis, no chromosome view).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cgh, useCgh, classOf, passes, probeCnv, buildOfKey, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
+import { cgh, useCgh, classOf, passes, activeGroups, probeCnv, buildOfKey, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
 import { fmtBp as fmt, sizeText, type CghCnv, type CghFile } from './cghIntervals';
 import { lowerBound } from './cghProbes';
 import { chromLength } from '../../standalone/assembly';
@@ -73,12 +73,14 @@ export function DotsToggle() {
 
 /** a call's characteristics, for the hover tips (here and in the probe panel) */
 export function callLines(s: CghState, c: CghCnv): string[] {
+  const gr = activeGroups(s).byCall.get(c.id);
   const est = c.copies == null ? estCopies(c, s.sex[c.sampleKey], buildOfKey(s, c.sampleKey)) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
   return [
     `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${sizeText(c.sizeKb)} · ${c.kind}`,
     `${c.probes ?? '?'} probes${c.logRatio != null ? ` · mean log ratio ${c.logRatio.toFixed(2)}` : ''}`,
     c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
     c.fromProbes ? 'from probes: not in the file, not exported' : `class: ${classOf(s, c).trim() || 'none'} · priority: ${lv ? LEVEL_STYLE[lv].label : 'not read yet'}`,
+    ...(gr ? [`CNV group ${gr.label}: ${gr.suggestion}`] : []),
   ];
 }
 /** a small tip beside the pointer, kept inside the panel's width */
@@ -253,7 +255,9 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
   }, [w, segs, H, pr, open, S, probesOk, dots]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the calls: file calls (loss red, gain blue) and probe calls (purple), cheap, redrawn with the state
-  const barKey = `${calls.map(c => c.id).join()}|${events.length}|${s.shown}`;
+  // the CNV groups of the patient (not split back) whose calls are drawn: an outline around their bars
+  const groups = activeGroups(s).list.filter(g => g.sampleKey === key && g.members.some(c => calls.includes(c)));
+  const barKey = `${calls.map(c => c.id).join()}|${events.length}|${s.shown}|${groups.map(g => g.id).join()}`;
   useEffect(() => {
     const el = top.current; if (!el || !w || !open) return;
     const dpr = window.devicePixelRatio || 1;
@@ -269,6 +273,13 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
       if (c.id === s.shown) { g.strokeStyle = '#0f172a'; g.lineWidth = 1.5; g.strokeRect(bar.x - 1, bar.y - 1, bar.w + 2, bar.h + 2); }
       out.push(bar);
     }
+    g.strokeStyle = '#7c3aed'; g.lineWidth = 1.5;
+    for (const gr of groups) {
+      const sg = segs.find(x => x.ch === gr.chrom); if (!sg) continue;
+      const a = posOf(sg, gr.start), b = Math.max(a + 2, posOf(sg, gr.end));
+      if (sg.vert) g.strokeRect(sg.q1 + 0.5, a - 2.5, 7, b - a + 5); else g.strokeRect(a - 2.5, 0.75, b - a + 5, 13.5);
+    }
+    el.setAttribute('data-groups', String(groups.length));
     bars.current = out;
   }, [w, segs, H, open, barKey]); // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -225,13 +225,14 @@ invented patients through the import question, beside any patient loaded (× on 
 EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint), each with its
 invented probes' log ratios (a `CGH_Log_Ratio.txt` written when loaded: about 60k probes on GRCh37, noise SD 0.15, the
 calls' probes at their mean log ratio; EXAMPLE-DEL22Q11's probes also carry a small 3p14.2 loss the table does not list,
-a probe call *not in the file*), and EXAMPLE-PROBES-ONLY, a probe file alone (7q11.23 loss, 15q11.2 gain): a
-probes-only patient. *All (four)* adds them together. **? Quick guide**, in the page's bar, is an interactive tour on
-these examples (added if missing). Its 26 steps: input files (interval tables, the automated workflow zip with
+a probe call *not in the file*), EXAMPLE-PROBES-ONLY, a probe file alone (7q11.23 loss, 15q11.2 gain): a
+probes-only patient, and EXAMPLE-MOSAIC-T12 (a mosaic trisomy 12 as 12p and 12q gains with a nested call: a CNV
+group). *All (five)* adds them together. **? Quick guide**, in the page's bar, is an interactive tour on
+these examples (added if missing). Its 27 steps: input files (interval tables, the automated workflow zip with
 `CGH_Log_Ratio.txt`, other probe tables, the column dialog), the examples, the import question (DLRS, minimums, sex),
 patients' tabs, filters, More filters, priority, why this priority, the browser below, the call's ISCN (copy), the
 call's probe panel, the der() hint, a gene cut, a PIEV CNV, classify and note, the patient's ISCN card (classes, normal
-result by sex), the whole genome (layouts, call bars, probe calls in purple), a chromosome (probes, moving median,
+result by sex), a CNV group, the whole genome (layouts, call bars, probe calls in purple), a chromosome (probes, moving median,
 ideogram, zoom and slider), the log-ratio range buttons and *show probes*, the probe calls (*n not in the file*), the
 probes-only patient (banner, `.probe-calls.txt` export), the lab benign list, retry, export, the ⓘ methods (DLRS,
 detection, disclaimer) and Esc. Each step outlines its target, dims the rest of the page and puts its box beside it,
@@ -430,6 +431,18 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
   AD, AR, AD/AR, XLR, XLD), then amber, then red (counted).
 - **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
   gnomAD LOEUF (v2.1.1 on GRCh37).
+- **CNV groups**: when several calls of one patient, all losses or all gains, together cover a whole chromosome arm or
+  a whole chromosome (≥ 90 % of the span carrying probes: the centromere, heterochromatin, the acrocentric p arms and
+  the PARs left out; small gaps between calls tolerated), they are shown as one outlined block: a summary row (the span,
+  the probes and the mean log ratio weighted by probes, calls nested inside a larger one listed but not counted twice,
+  the copies and mosaic fraction, the arms covered, the ISCN such as `arr[GRCh37] (8)x3[0.29]` or an arm by its
+  bands) with a **suggestion** in words (*trisomy 8*, *mosaic trisomy 8 (~29 %)*, *partial monosomy 4p*; on X and Y
+  read against the sex given, a sex mismatch with the reference named: a female's whole-X loss near −0.9 reads
+  *monosomy X (45,X) — or a sex mismatch*, a male's whole-X gain *XXY?*), then its calls as usual rows. The group has
+  its own class and note (**→ calls** gives the class to its calls); a classified group replaces its calls in the
+  patient's ISCN. **ungroup** splits it back for this session (**group** restores it). Sorting and filters keep its
+  calls together; it is shown when one of them passes. The whole genome outlines its bars. The export adds a column
+  *CNV group (Sashimi viewer)* to each call of a group (VCF: INFO `CGH_GROUP`). A suggestion, never a class.
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
   HIGH for exons of a gene with a ClinGen HI score of 3 (the whole gene, its 5′ coding end, or coding exons beyond the

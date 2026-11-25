@@ -13,7 +13,7 @@ import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
 import { CGH_EXAMPLES, loadExamples } from './cghExamples';
-import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
+import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, activeGroups, groupsOf, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
 import { fmtBp as fmt, sizeText, CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
@@ -21,11 +21,17 @@ import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import { CghRecurrentDetail } from './CghClinGenTrack';
 import { ProbeCallsBar, ProbeMethods, ProbeSettings } from './CghProbeCalls';
 import { exportProbeCalls, isProbeOnly, PROBE_ONLY_WARNING } from './cghProbeOnly';
-import { CallIscnText, PatientIscn, iscnOfCall, iscnTip } from './CghIscnView';
+import { CallIscnText, CopyButton, PatientIscn, iscnOfCall, iscnOfGroup, iscnTip } from './CghIscnView';
+import { GROUP_COVER, type CnvGroup } from './cghGroups';
+import { OWN_GROUP_HEADER } from './cghMapping';
 import { bandSpan, callIscn, iscnBandOf } from './cghIscn';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
+/** the outline of a CNV group: its summary row on top, its calls inside */
+const GRP_SIDE = '[&>td:first-child]:border-l-2 [&>td:first-child]:border-l-violet-500 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-violet-500';
+const GRP_TOP = `${GRP_SIDE} [&>td]:border-t-2 [&>td]:border-t-violet-500`;
+const GRP_BOTTOM = '[&>td]:border-b-2 [&>td]:border-b-violet-500';
 const KIND = { loss: { color: '#dc2626', bg: '#fee2e2', word: 'del' }, gain: { color: '#2563eb', bg: '#dbeafe', word: 'dup' } } as const;
 
 /** "＋ Add samples": the files picked (several at once), read in the page. */
@@ -53,7 +59,7 @@ export function CghExamplesMenu({ compact }: { compact?: boolean }) {
         {CGH_EXAMPLES.map(x => <button key={x.id} data-cgh-example={x.id} onClick={() => pick(x.id)} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50">
           <span className="text-accent-700 font-medium">{x.name}</span> <span className="text-slate-700">{x.label}</span>
           <span className="block text-[10.5px] text-slate-500">{x.hint}</span></button>)}
-        <button data-cgh-example="all" onClick={() => pick('all')} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50 text-accent-700 font-semibold border-t border-slate-100 mt-0.5">All (four)</button>
+        <button data-cgh-example="all" onClick={() => pick('all')} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50 text-accent-700 font-semibold border-t border-slate-100 mt-0.5">All (five)</button>
       </div>
     </Popover>
   );
@@ -206,6 +212,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const [noteFocus, setNoteFocus] = useState<string | null>(null);
   /** the detail under the call clicked folded (a second click on its row) */
   const [folded, setFolded] = useState(false);
+  /** the CNV group whose note box is open */
+  const [groupNote, setGroupNote] = useState<string | null>(null);
   // Esc back to the base view: the next call clicked opens with its detail
   useEffect(() => { setFolded(false); setNoteFocus(null); }, [s.viewReset]);
   // the analysed calls of every patient, the CGH_MAX_ANNOTATED largest: their genes (RefSeq), dosage, constraint, PanelApp, AChro-Puce
@@ -247,7 +255,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   // each patient's calls under the minimums (the other filters applied), listed after its own when revealed
   const below = new Map(listed.map(({ x, f }) => [x.key, byRank(x.cnvs.filter(c => isBelow(c) && passes(s, c, true)).map(c => ({ c, f })))]));
   /** a patient's line under its calls: N more under the minimums (to reveal), or hide them */
-  type Item = { row: { c: CghCnv; f: CghFile } } | { more: { key: string; name: string; n: number; open: boolean } };
+  type Row = { c: CghCnv; f: CghFile; grp?: { g: CnvGroup; last: boolean } };
+  type Item = { row: Row } | { more: { key: string; name: string; n: number; open: boolean } } | { group: CnvGroup; f: CghFile } | { regroup: CnvGroup };
   const blockOf = (x: (typeof listed)[number]['x']): Item[] => {
     const b = below.get(x.key) ?? [], open = !!s.revealed[x.key];
     if (!b.length) return [];
@@ -255,9 +264,25 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   };
   // in genomic order the rows stay grouped by patient (each patient's line ends its block); by priority they mix, the lines at the bottom
   const grouped = s.filter.sort === 'position' || listed.length === 1;
-  const items: Item[] = grouped
+  const flatItems: Item[] = grouped
     ? listed.flatMap(({ x, f }) => [...byRank(x.cnvs.filter(c => passes(s, c)).map(c => ({ c, f }))).map(row => ({ row })), ...blockOf(x)])
     : [...byRank(all.filter(({ c }) => passes(s, c))).map(row => ({ row })), ...listed.flatMap(({ x }) => blockOf(x))];
+  // a CNV group: its summary row, then all its calls, where its first call listed comes (it passes the filters when one of them does);
+  // a group split back: a line before its first call to make it again
+  const act = activeGroups(s), split = new Map([...groupsOf(s).values()].flat().filter(g => s.ungrouped[g.id]).flatMap(g => g.members.map(c => [c.id, g] as const)));
+  const done = new Set<string>(), items: Item[] = [];
+  for (const it of flatItems) {
+    if (!('row' in it)) { items.push(it); continue; }
+    const g = act.byCall.get(it.row.c.id), u = split.get(it.row.c.id);
+    if (g) {
+      if (done.has(g.id)) continue;
+      done.add(g.id);
+      items.push({ group: g, f: it.row.f }, ...g.members.map((c, k) => ({ row: { c, f: it.row.f, grp: { g, last: k === g.members.length - 1 } } })));
+      continue;
+    }
+    if (u && !done.has(u.id)) { done.add(u.id); items.push({ regroup: u }); }
+    items.push(it);
+  }
   const rows = items.flatMap(it => ('row' in it ? [it.row] : []));
   const fewProbes = all.filter(({ c }) => isBelow(c)).length;
   // listed and not annotated: past the automatic set (or revealed under the minimums), never asked yet
@@ -266,6 +291,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const anySuppressed = all.some(({ c }) => c.suppressed);
   // a column the files leave empty (a BED: no probe count, no log ratio) is not shown
   const hasProbeCol = all.some(({ c }) => c.probes != null), hasLrCol = all.some(({ c }) => c.logRatio != null);
+  const withSample = !s.sample && samples.length > 1;
+  const nCols = 10 + (withSample ? 1 : 0) + (hasProbeCol ? 1 : 0) + (hasLrCol ? 1 : 0) + (samples.length > 1 ? 1 : 0);
   // per column, each listed patient's calls (PanelApp: genes) to ask again; the control is hidden when none failed
   const retryOf = (col: RetryCol): RetryGroup[] => listed.map(({ x }) => {
     const cs = rows.filter(r => r.c.sampleKey === x.key).map(r => r.c), src = RETRY_SRC[col];
@@ -296,6 +323,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     }
     return m;
   };
+  /** a call's CNV group as exported (a column of its own): label, suggestion, the group's class when given */
+  const groupText = (c: CghCnv) => { const g = act.byCall.get(c.id); if (!g) return ''; const k = (s.classes[g.id] ?? '').trim(); return `${g.label}: ${g.suggestion}${k ? ` [${k}]` : ''}`; };
   const exportOne = async (fl: CghFile) => {
     // a class given here, else the file's own cell as written (not translated into the list's words)
     const iscn = (c: CghCnv) => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '';
@@ -303,8 +332,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     if (isProbeOnly(fl)) {
       const bands = await bandsOf(fl), band = (c: CghCnv) => s.ann[c.id]?.band ?? bands.get(c.id);
       text = exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => band(c) || bandOfCall(c, s.ann[c.id]), copies: c => estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? '',
-        iscn: c => callIscn(c, fl.build ?? 'GRCh37', iscnBandOf(c, band(c)), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr').text ?? '', cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c) });
-    } else text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn);
+        iscn: c => callIscn(c, fl.build ?? 'GRCh37', iscnBandOf(c, band(c)), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr').text ?? '', cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c), group: groupText });
+    } else text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn, groupText);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
     a.download = fl.saveAs;
@@ -316,6 +345,47 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const exportAll = () => exportFiles.forEach((fl, i) => setTimeout(() => void exportOne(fl), i * EXPORT_GAP_MS));
   /** classes or notes of the patients listed not exported yet */
   const listedDirty = listed.some(e => s.dirtyKeys[e.x.key]);
+  /** a CNV group's summary row (its own metrics, suggestion, ISCN, class and note), and its note box when open */
+  const groupRows = (g: CnvGroup, fl: CghFile) => {
+    const build = fl.build ?? 'GRCh37', k = KIND[g.kind], cls = (s.classes[g.id] ?? '').trim(), col = classColor(cls), note = s.notes[g.id] ?? '';
+    const iscn = iscnOfGroup(s, g, build), nested = g.nested.size, memberCls = g.members.map(c => classOf(s, c).trim());
+    const applied = !!cls && memberCls.every(x => x === cls);
+    const sx = s.sex[g.sampleKey];
+    return [
+      <tr key={g.id} data-cgh-group={g.id} className={`bg-violet-50/70 ${GRP_TOP}`}>
+        {withSample && <td className="px-1.5 py-1 text-slate-600 whitespace-nowrap">{g.sample}{sx ? ` ${SEX_MARK[sx]}` : ''}</td>}
+        <td className="px-1.5 py-1 whitespace-nowrap font-semibold text-violet-800" title="CNV group: calls of one direction covering a whole arm or chromosome"><span className="mr-1 px-1 rounded bg-violet-600 text-white text-[9.5px] font-bold align-middle">GROUP</span>{g.chrom.replace(/^chr/, '')}{g.scope === 'chr' ? '' : g.scope}</td>
+        <td className="px-1.5 py-1 font-mono text-[10.5px] text-slate-700 whitespace-nowrap" title="From the first call's start to the last call's end">{g.chrom}:{fmt(g.start)}-{fmt(g.end)}</td>
+        <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title="Span of the group">{sizeText(g.spanKb)}</td>
+        <td className="px-1.5 py-1 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }}
+          title="Copies of the group: the calls' own when they agree, else from its weighted log ratio (nearest log2(n/2)); mosaic fraction by the AChro-Puce formula when a one-copy change is below 80 %">{k.word} {g.copiesText}</span></td>
+        {hasProbeCol && <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title={`Probes of the group${nested ? `, the ${nested} nested call${nested > 1 ? 's' : ''} not counted again` : ''}`}>{g.probes ?? '?'}</td>}
+        {hasLrCol && <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title={`Mean log ratio of the calls weighted by their probes${nested ? ' (nested calls left out)' : ''}`}>{g.logRatio != null ? g.logRatio.toFixed(2) : '–'}</td>}
+        {samples.length > 1 && <td />}
+        <td colSpan={4} className="px-1.5 py-1 text-[11px] text-slate-700 leading-[15px]" data-cgh-group-suggestion><div className="max-w-[460px] min-w-[260px] whitespace-normal">
+          <span className="text-slate-500">Suggests: </span><b className="text-violet-800">{g.suggestion}</b>
+          <span className="text-slate-500"> · {g.label} · {g.arms.map(a => `${a.arm} ${Math.round(a.cover * 100)} %`).join(', ')} covered · {g.members.length} calls{nested ? ` (${nested} nested)` : ''}</span>
+          {iscn.text && <span className="ml-1.5 font-mono text-[11px] text-slate-800" data-cgh-group-iscn>{iscn.text}<CopyButton text={iscn.text} what="the group's ISCN" /></span>}
+        </div></td>
+        <td data-cgh-class className="px-1.5 py-1 whitespace-nowrap sticky right-[72px] z-[1] bg-inherit shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]">
+          <select value={cls} aria-label={`Classification of the CNV group ${g.label}`} style={{ borderLeftColor: col ?? '#d3dbe5' }} title="The group's own class: shown here and in the patient's ISCN (in place of its calls'); its calls keep theirs unless applied"
+            onChange={e => cgh.setGroupClass(g, e.target.value)}
+            className={`h-[22px] w-[128px] pl-1 pr-0.5 rounded border border-slate-200 border-l-[4px] bg-white text-[11px] outline-none cursor-pointer ${cls ? 'font-medium text-slate-800' : 'text-slate-400'}`}>
+            <option value="">— not classified</option>
+            {CGH_CLASSES.map(o => <option key={o.value} value={o.value}>{o.value}</option>)}
+          </select>
+          {cls && !applied && <button onClick={() => cgh.applyGroupClass(g)} data-cgh-group-apply className="ml-1 px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" title={`Give the class ${cls} to each of the ${g.members.length} calls of the group (exported with them)`}>→ calls</button>}
+          <button onClick={() => setGroupNote(x => (x === g.id ? null : g.id))} className={`ml-1 px-1 rounded ${note ? 'text-accent-700 bg-accent-50 font-bold' : 'text-slate-300 hover:text-slate-600'}`}
+            title={note ? `Note: ${note}` : 'A note on the group (kept in the page; exported calls carry the group in their CNV group column)'} aria-label="Group note">✎</button>
+        </td>
+        <td className="px-1.5 py-1 whitespace-nowrap sticky right-0 z-[1] bg-inherit w-[72px] min-w-[72px]">
+          <button onClick={() => cgh.setUngrouped(g.id, true)} data-cgh-ungroup className="text-violet-700 font-medium hover:underline" title="Split the group back into its calls (this session); “group” makes it again">ungroup</button>
+        </td>
+      </tr>,
+      groupNote === g.id && <tr key={`${g.id}-note`} className={`bg-violet-50/70 ${GRP_SIDE}`}><td colSpan={nCols} className="px-2 py-1">
+        <textarea autoFocus value={note} onChange={e => cgh.setGroupNote(g, e.target.value)} rows={1} placeholder="Note on the CNV group" className="w-full max-w-[640px] rounded border border-slate-200 px-1.5 py-0.5 text-[11.5px] outline-none focus:border-accent-300" /></td></tr>,
+    ];
+  };
   const tab = (on: boolean) => `inline-flex items-center gap-1.5 h-8 pl-3 pr-2 -mb-px rounded-t-lg border text-xs whitespace-nowrap ${on ? 'bg-white border-slate-200 border-b-white text-slate-900 font-semibold shadow-[inset_0_2px_0_#0f766e]' : 'bg-slate-50 border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`;
   const filesBuilds = [...new Set(listed.map(e => e.f.build ?? 'GRCh37'))];
   return (
@@ -423,6 +493,13 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           </thead>
           <tbody>
             {items.map(it => {
+              if ('regroup' in it) {
+                const g = it.regroup;
+                return <tr key={`regroup-${g.id}`} data-cgh-regroup={g.id} className="border-b border-slate-100 bg-violet-50/40"><td colSpan={nCols} className="px-2 py-0.5 text-[11px] text-slate-500">
+                  CNV group {g.label}, split into its {g.members.length} calls below ({g.suggestion.split(' — ')[0]}) · <button className="text-violet-700 font-semibold hover:underline" onClick={() => cgh.setUngrouped(g.id, false)} title="Show these calls as one CNV group again">group</button>
+                </td></tr>;
+              }
+              if ('group' in it) return groupRows(it.group, it.f);
               if ('more' in it) {
                 const m = it.more;
                 return <tr key={`more-${m.key}-${m.n}`} data-cgh-more className="border-b border-slate-100 bg-slate-50/60"><td colSpan={14} className="px-2 py-0.5 text-[11px]">
@@ -432,7 +509,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                         onClick={() => { cgh.setRevealed(m.key, true); annotateNow((below.get(m.key) ?? []).map(r => r.c)); }}>+ {m.n} more call{m.n > 1 ? 's' : ''} of {m.name} under the minimums ({minWords})</button>}
                 </td></tr>;
               }
-              const { c, f: fl } = it.row, i = rows.indexOf(it.row);
+              const { c, f: fl, grp } = it.row, i = rows.indexOf(it.row);
               const low = isBelow(c), na = !s.ann[c.id] && !auto.has(c.id);
               const cls = classOf(s, c), col = classColor(cls), on = s.shown === c.id, k = KIND[c.kind];
               const inList = CGH_CLASSES.some(o => o.value === cls), note = noteOf(s, c);
@@ -440,9 +517,9 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
               const v = views.get(c.id)!;
               return [
                 <tr key={c.id} data-cgh-row data-cgh-call={c.id} data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${iscnTip(iscnOfCall(s, c, fl.build ?? 'GRCh37'))}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
-                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''}`}>
+                  className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''} ${grp ? `${GRP_SIDE} ${grp.last ? GRP_BOTTOM : ''}` : ''}`} data-cgh-member={grp?.g.id}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
-                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
+                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{grp && <span className={`mr-1 font-normal ${grp.g.nested.has(c.id) ? 'text-violet-400' : 'text-violet-600'}`} title={grp.g.nested.has(c.id) ? 'Nested in a larger call of the group: not counted in its probes nor weighted in its log ratio' : 'A call of the CNV group above'}>{grp.g.nested.has(c.id) ? '└╴' : '│'}</span>}{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}{low && !hasProbeCol && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} build={fl.build} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
@@ -486,6 +563,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column; a VCF in INFO; an .xlsx as tab-separated text).
+        <div className="mt-1" data-cgh-group-methods><b>CNV groups.</b> A patient's calls of one direction (loss or gain) on one chromosome make a group when, together, they cover ≥ {Math.round(GROUP_COVER * 100)} % of an arm's span carrying array probes (centromere, heterochromatin, acrocentric p arms and PARs left out: UCSC cytobands embedded), or of both arms (a whole chromosome; an acrocentric's q arm); calls under the minimums or suppressed are left out. A call inside a larger one is a nested member: shown, not counted in the probes nor weighted in the mean log ratio (weighted by probes). Copies: the calls' own when they agree, else from the mean log ratio as for a call; the mosaic fraction by the AChro-Puce formula. The suggestion (trisomy, monosomy, partial … of an arm, mosaic with its fraction; for X and Y read against the sex given, a sex mismatch with the reference always named) is a hint, never a class. The group's own class and note stay in the page; its ISCN (<span className="font-mono">(8)x3</span>, an arm by its bands) replaces its calls' in the patient's ISCN when its class is ticked. The export adds a <i>{OWN_GROUP_HEADER}</i> column to the calls of a group (label, suggestion, group class; a VCF: INFO CGH_GROUP, a probe-calls export: a CNV group column); <b>ungroup</b> (this tab only) leaves it out.</div>
         <ProbeMethods probes={samples.some(({ x }) => cgh.hasProbes(x.key))} />
         <PriorityRules />
       </details>

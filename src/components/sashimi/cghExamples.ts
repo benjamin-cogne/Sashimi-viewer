@@ -5,6 +5,8 @@
  *  - EXAMPLE-PIEV-DUP: 1q21.1 distal BP3-BP4 duplication, AChro-Puce PIEV, ClinGen TS 2 region (MODERATE);
  *  - EXAMPLE-DER: terminal 16q24.3 loss breaking in ANKRD11 intron 4 (NM_013275.6, HI 3, KBG syndrome) and terminal
  *    9p24.3 gain: the pattern of a der(16)t(9;16), as the rearrangement hint reads it;
+ *  - EXAMPLE-MOSAIC-T12: a mosaic trisomy 12 reported as two gains (12p, 12q, mean log ratio about +0.25) and a smaller
+ *    gain nested in the 12q one, as some scanners report: one CNV group (cghGroups.ts);
  *  - EXAMPLE-PROBES-ONLY: a probe file alone (no table: a probes-only patient), a 7q11.23 loss and a 15q11.2 BP1-BP2 gain.
  * Each comes with invented probe log ratios (cghExampleProbes.ts, a CGH_Log_Ratio.txt written at load time) matching its
  * calls; EXAMPLE-DEL22Q11's probes also hold a small 3p14.2 loss the table does not list (a probe call *not in the file*).
@@ -40,6 +42,11 @@ export const CGH_EXAMPLES: Example[] = [
   ex('der', 'EXAMPLE-DER', 'terminal 16q loss + 9p gain (der)', 'an unbalanced translocation, a breakpoint inside ANKRD11', 'Female', [
       ['chr9', 204193, 1146312, 'p24.3', 'DOCK8, KANK1, DMRT1, DMRT3, DMRT2', 'Duplication', 41, 0.552],
       ['chr16', 89362118, 90155062, 'q24.3', 'ANKRD11, SPG7, CDK10, FANCA, MC1R, TUBB3', 'Deletion', 63, -0.917],
+    ]),
+  ex('mosaic12', 'EXAMPLE-MOSAIC-T12', 'mosaic trisomy 12 (12p + 12q gains)', 'calls covering a whole chromosome: one CNV group', 'Female', [
+      ['chr12', 191619, 33276154, 'p13.33 - p11.1', 'CCND2, KRAS', 'Duplication', 690, 0.248],
+      ['chr12', 38331421, 133777561, 'q12 - q24.33', 'HMGA2, PTPN11', 'Duplication', 2010, 0.253],
+      ['chr12', 66210345, 66871239, 'q14.3', 'HMGA2', 'Duplication', 14, 0.47],
     ]),
   // probes alone: no table, so its calls are the probe calls (a probes-only patient); the sex is asked
   { id: 'probes', name: 'EXAMPLE-PROBES-ONLY', label: 'probes only: 7q11.23 loss + 15q11.2 gain', hint: 'a CGH_Log_Ratio.txt without its table: calls detected from the probes', text: null,

@@ -1,6 +1,7 @@
 /** The array ISCN shown: a call's (call card, detail, table tooltip) and a patient's line, each with a copy button. */
 import { useState } from 'react';
-import { cgh, useCgh, classOf, type CghState } from './cghStore';
+import { cgh, useCgh, classOf, activeGroups, type CghState } from './cghStore';
+import { groupIscn, type CnvGroup } from './cghGroups';
 import type { CghCnv, CghSample } from './cghIntervals';
 import { callIscn, patientIscn, normalIscn, iscnBandOf, type CallIscn } from './cghIscn';
 
@@ -12,6 +13,8 @@ export const iscnOfCall = (s: CghState, c: CghCnv, build: string): CallIscn =>
   callIscn(c, build, iscnBandOf(c, s.ann[c.id]?.band), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr');
 
 /** the tooltip lines of a call's ISCN (ours, the file's when it differs) */
+/** a CNV group's ISCN (bands as the calls': read, else the file's) */
+export const iscnOfGroup = (s: CghState, g: CnvGroup, build: string): CallIscn => groupIscn(g, build, s.sex[g.sampleKey], c => iscnBandOf(c, s.ann[c.id]?.band));
 export const iscnTip = (i: CallIscn) => [i.text ?? i.file ?? '', i.differs ? `file: ${i.file} (differs)` : ''].filter(Boolean).join('\n');
 
 export function CopyButton({ text, what }: { text: string; what: string }) {
@@ -35,7 +38,11 @@ const FULL: Record<string, string> = { Pathogenic: 'Pathogenic', 'Likely pathoge
 /** a patient's ISCN card (per patient): the calls of the chosen classes, ordered by chromosome then position, else the normal result by sex */
 export function PatientIscn({ x, build }: { x: CghSample; build: string }) {
   const s = useCgh(), want = s.view.iscnClasses;
-  const calls = x.cnvs.filter(c => want.includes(classOf(s, c).trim())).map(c => ({ c, part: iscnOfCall(s, c, build).part }));
+  // a CNV group classified with a class ticked replaces its calls' entries
+  const groups = activeGroups(s).list.filter(g => g.sampleKey === x.key && want.includes((s.classes[g.id] ?? '').trim()));
+  const inGroup = new Set(groups.flatMap(g => g.members.map(c => c.id)));
+  const calls = [...x.cnvs.filter(c => !inGroup.has(c.id) && want.includes(classOf(s, c).trim())).map(c => ({ c, part: iscnOfCall(s, c, build).part })),
+    ...groups.map(g => ({ c: g.as, part: iscnOfGroup(s, g, build).part }))];
   const abn = patientIscn(build, calls), missing = calls.filter(y => !y.part).length;
   const sex = s.sex[x.key], normal = normalIscn(sex), text = abn ?? normal;
   const flip = (v: string) => cgh.setView({ iscnClasses: want.includes(v) ? want.filter(w => w !== v) : [...want, v] });
@@ -49,7 +56,7 @@ export function PatientIscn({ x, build }: { x: CghSample; build: string }) {
       : <span className="text-slate-500">no line</span>}
       {missing > 0 && <span className="ml-2 text-amber-700" title="Calls of these classes without a band or a copy number">{missing} call{missing > 1 ? 's' : ''} left out (no band or copy number)</span>}</div>
     <div className="mt-1" data-cgh-patient-iscn-why>
-      {abn ? <>Built from the calls classified as: {chips}</>
+      {abn ? <>Built from the calls (and CNV groups, in place of their calls) classified as: {chips}</>
         : normal ? <>No call classified as {picked} (the classes ticked): normal result shown for the patient's sex. Classes: {chips}</>
         : <>Set the patient's sex to write the normal result. No call classified as {picked} (the classes ticked). Classes: {chips}</>}
     </div>

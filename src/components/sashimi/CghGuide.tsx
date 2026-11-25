@@ -34,7 +34,7 @@ interface Step {
   /** done by the tour as the step opens: the user only clicks Next */
   enter?: () => void | Promise<void>;
 }
-const DEL = 'EXAMPLE-DEL22Q11', DER = 'EXAMPLE-DER', PIEV = 'EXAMPLE-PIEV-DUP', PO = 'EXAMPLE-PROBES-ONLY';
+const DEL = 'EXAMPLE-DEL22Q11', DER = 'EXAMPLE-DER', PIEV = 'EXAMPLE-PIEV-DUP', PO = 'EXAMPLE-PROBES-ONLY', MOS = 'EXAMPLE-MOSAIC-T12';
 const keyOf = (name: string) => cgh.get().files.flatMap(f => f.samples).find(x => x.name === name)?.key ?? null;
 /** a patient's own tab */
 const tab = (name: string) => { const k = keyOf(name); if (k && cgh.get().sample !== k) cgh.setSample(k); };
@@ -85,6 +85,8 @@ const STEPS: Step[] = [
     body: <>Choose the class in <B>Classification</B>; <B>✎</B> (or the box in the detail) adds a note. Both stay in this tab only.</> },
   { title: "The patient's ISCN", target: () => q('[data-cgh-patient-iscn]'), enter: () => tab(PIEV),
     body: <>A patient's tab shows its <B>ISCN</B> line, built from the calls of the classes ticked (P / LP / VUS by default), with <B>copy</B>. With none, the normal result for the patient's sex: here a male.</> },
+  { title: 'A CNV group', target: () => q('[data-cgh-group]'), enter: () => tab(MOS),
+    body: <>Calls of one direction covering a whole arm or chromosome (here 12p + 12q, with a call nested in 12q) make a <B>CNV group</B>, outlined: its weighted log ratio, probes, copies, ISCN and a <B>suggestion</B> (mosaic trisomy 12), its own class (<B>→ calls</B> gives it to its calls). <B>ungroup</B> splits it back.</> },
   { title: 'The whole genome', target: () => q('[data-cgh-genome]'), enter: async () => { tab(DEL); await genomeOpen(); },
     body: <>Every probe of the patient over chromosomes 1-22, X, Y, the file's calls as red / blue bars above, the probe calls in <B>purple</B>. <B>horizontal</B> / <B>vertical</B> sets the layout.</> },
   { title: 'A chromosome', target: () => q('[data-cgh-chrom-probes]'),

@@ -168,9 +168,12 @@ const SYN: Record<Field, string[]> = {
 /** the name of the ISCN column added by this page at export (read back, it is not the file's own ISCN) */
 export const OWN_ISCN_HEADER = 'ISCN (Sashimi viewer)';
 export const isOwnIscnHeader = (h: string) => /^\s*iscn\s*\(\s*sashimi viewer\s*\)\s*$/i.test(h);
+/** the CNV group column added at export (cghGroups.ts): never guessed, rewritten at the next export */
+export const OWN_GROUP_HEADER = 'CNV group (Sashimi viewer)';
+export const isOwnGroupHeader = (h: string) => /^\s*cnv group\s*\(\s*sashimi viewer\s*\)\s*$/i.test(h);
 export function guessCols(header: string[], rows: string[][] = []): ColMap {
   // the ISCN column this page added at an export is not the file's own: never guessed (it is rewritten at the next export)
-  const h = header.map(norm), cols = noCols(), used = new Set<number>(header.flatMap((x, j) => (isOwnIscnHeader(x) ? [j] : [])));
+  const h = header.map(norm), cols = noCols(), used = new Set<number>(header.flatMap((x, j) => (isOwnIscnHeader(x) || isOwnGroupHeader(x) ? [j] : [])));
   for (const pass of [0, 1]) for (const f of FIELDS) {
     if (cols[f] >= 0) continue;
     for (const s of SYN[f]) {

@@ -12,7 +12,7 @@
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { parOf } from './cghMosaic';
-import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, OWN_ISCN_HEADER, isOwnIscnHeader, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
+import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, OWN_ISCN_HEADER, isOwnIscnHeader, OWN_GROUP_HEADER, isOwnGroupHeader, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
 /** a position with thousands commas; a call's size from kb (2.61 Mb, 450 kb, 12.5 kb, 800 bp): shared by the page's parts */
 export const fmtBp = (n: number) => Math.round(n).toLocaleString('en-US');
@@ -390,11 +390,14 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
  * a BED gets the class, the note and the ISCN as three last columns; a VCF gets them in INFO (CGH_CLASS, CGH_NOTE, CGH_ISCN, percent-encoded).
  * The ISCN column added (`OWN_ISCN_HEADER`, when the file has none) is rewritten at a later export of the file read back.
  */
-export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note, iscnOf?: (cnv: CghCnv) => string): string {
+export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note, iscnOf?: (cnv: CghCnv) => string, groupOf?: (cnv: CghCnv) => string): string {
   const out = file.lines.slice(), d = file.delim, sp = (l: string) => splitDelimited(l, d);
   const flat = (t: string) => t.replace(/[\t\r\n]+/g, ' ').trim();
   const byLine = new Map(file.samples.flatMap(s => s.cnvs).map(c => [c.line, c]));
-  if (file.format === 'vcf') return exportVcf(file, out, byLine, classOf, c => flat(noteOf(c)), iscnOf);
+  // the CNV group column (cghGroups.ts): only when a call of the file is in a group, or the column is there from an earlier export
+  const ownGroup = file.headerLine != null ? sp(out[file.headerLine]).findIndex(isOwnGroupHeader) : -1;
+  if (groupOf && ownGroup < 0 && ![...byLine.values()].some(c => groupOf!(c))) groupOf = undefined;
+  if (file.format === 'vcf') return exportVcf(file, out, byLine, classOf, c => flat(noteOf(c)), iscnOf, groupOf && (c => flat(groupOf!(c))));
   // an interval table: its Classification and Comment columns, added after the last one when missing; an ISCN column
   // only when the file has none (a CytoGenomics interval table keeps its own)
   let classCol = file.classCol, noteCol = file.commentCol, iscnCol: number | null = null;
@@ -402,12 +405,14 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
   const ownIscn = file.headerLine != null ? sp(out[file.headerLine]).findIndex(isOwnIscnHeader) : -1;
   const hasIscn = ownIscn >= 0 || (file.headerLine != null ? sp(out[file.headerLine]).some(x => /^\s*iscn\s*$/i.test(x)) : file.samples.some(x => x.cnvs.some(c => c.iscn)));
   if (iscnOf && ownIscn >= 0) iscnCol = ownIscn;
-  if (file.headerLine != null && (classCol == null || noteCol == null || (iscnOf && !hasIscn))) {
+  let groupCol: number | null = groupOf && ownGroup >= 0 ? ownGroup : null;
+  if (file.headerLine != null && (classCol == null || noteCol == null || (iscnOf && !hasIscn) || (groupOf && groupCol == null))) {
     const h = sp(out[file.headerLine]);
     while (h.length && h[h.length - 1] === '') h.pop();
     if (classCol == null) { classCol = h.length; h.push('Classification'); }
     if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
     if (iscnOf && !hasIscn) { iscnCol = h.length; h.push(OWN_ISCN_HEADER); }
+    if (groupOf && groupCol == null) { groupCol = h.length; h.push(OWN_GROUP_HEADER); }
     out[file.headerLine] = joinDelimited(h, d);
   }
   // a table without a header row: the missing columns after the widest call row (the ISCN too, never over a data cell)
@@ -418,23 +423,25 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
     if (noteCol == null) noteCol = Math.max(w, classCol + 1);
   }
   if (iscnOf && !hasIscn && iscnCol == null && classCol != null && noteCol != null) iscnCol = Math.max(wide(), classCol + 1, noteCol + 1);
+  if (groupOf && groupCol == null && classCol != null && noteCol != null) groupCol = Math.max(wide(), classCol + 1, noteCol + 1, (iscnCol ?? -1) + 1);
   for (const [i, cnv] of byLine) {
     const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
     const cell = cls ? `${cls}${cnv.classRest || file.classSuffix}` : '';
     if (classCol != null && noteCol != null) {
       const f = sp(out[i]);
-      while (f.length <= Math.max(classCol, noteCol, iscnCol ?? 0)) f.push('');
-      f[classCol] = cell; f[noteCol] = note; if (iscnCol != null) f[iscnCol] = iscnOf!(cnv); out[i] = joinDelimited(f, d);
-    } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}${iscnOf && !hasIscn ? `\t${iscnOf(cnv)}` : ''}`;
+      while (f.length <= Math.max(classCol, noteCol, iscnCol ?? 0, groupCol ?? 0)) f.push('');
+      f[classCol] = cell; f[noteCol] = note; if (iscnCol != null) f[iscnCol] = iscnOf!(cnv); if (groupCol != null) f[groupCol] = flat(groupOf!(cnv)); out[i] = joinDelimited(f, d);
+    } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}${iscnOf && !hasIscn ? `\t${iscnOf(cnv)}` : ''}${groupOf ? `\t${flat(groupOf(cnv))}` : ''}`;
   }
   return file.eols?.length === out.length - 1 ? out.map((l, k) => l + (file.eols![k] ?? '')).join('') : out.join(file.eol);
 }
 /** INFO values: no blank, `;`, `=`, `,` or `%` as such */
 export const vcfEncode = (t: string) => t.replace(/[%;=,\s]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);
-function exportVcf(file: CghFile, out: string[], byLine: Map<number, CghCnv>, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string, iscnOf?: (cnv: CghCnv) => string): string {
+function exportVcf(file: CghFile, out: string[], byLine: Map<number, CghCnv>, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string, iscnOf?: (cnv: CghCnv) => string, groupOf?: (cnv: CghCnv) => string): string {
   for (const [i, cnv] of byLine) {
-    const f = out[i].split('\t'), cls = classOf(cnv).trim(), note = noteOf(cnv), iscn = iscnOf?.(cnv) ?? '';
-    const info = (f[7] ?? '').split(';').filter(x => x && x !== '.' && !/^CGH_(CLASS|NOTE|ISCN)=/.test(x));
+    const f = out[i].split('\t'), cls = classOf(cnv).trim(), note = noteOf(cnv), iscn = iscnOf?.(cnv) ?? '', grp = groupOf?.(cnv) ?? '';
+    const info = (f[7] ?? '').split(';').filter(x => x && x !== '.' && !/^CGH_(CLASS|NOTE|ISCN|GROUP)=/.test(x));
+    if (grp) info.push(`CGH_GROUP=${vcfEncode(grp)}`);
     if (cls) info.push(`CGH_CLASS=${vcfEncode(cls)}`);
     if (note) info.push(`CGH_NOTE=${vcfEncode(note)}`);
     if (iscn) info.push(`CGH_ISCN=${vcfEncode(iscn)}`);
@@ -443,7 +450,7 @@ function exportVcf(file: CghFile, out: string[], byLine: Map<number, CghCnv>, cl
     out[i] = f.join('\t');
   }
   const h = out.findIndex(l => l.startsWith('#CHROM'));
-  const add = [['CGH_CLASS', 'Classification given in the array-CGH page'], ['CGH_NOTE', 'Note given in the array-CGH page'], ...(iscnOf ? [['CGH_ISCN', 'Array ISCN (ISCN 2024) written in the array-CGH page']] : [])]
+  const add = [['CGH_CLASS', 'Classification given in the array-CGH page'], ['CGH_NOTE', 'Note given in the array-CGH page'], ...(iscnOf ? [['CGH_ISCN', 'Array ISCN (ISCN 2024) written in the array-CGH page']] : []), ...(groupOf ? [['CGH_GROUP', 'CNV group of the call in the array-CGH page (calls covering a whole arm or chromosome): label, suggestion, class']] : [])]
     .filter(([id]) => !out.some(l => l.startsWith(`##INFO=<ID=${id},`)))
     .map(([id, d]) => `##INFO=<ID=${id},Number=1,Type=String,Description="${d} (percent-encoded)">`);
   if (h >= 0) out.splice(h, 0, ...add);
