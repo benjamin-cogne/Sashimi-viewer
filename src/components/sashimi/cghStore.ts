@@ -89,6 +89,10 @@ export interface CghState {
   view: CghView;
   /** the CNV groups split back into their calls (this tab only), by group id */
   ungrouped: Record<string, true>;
+  /** calls added by hand to a CNV group (this tab only): call id → group id */
+  manual: Record<string, string>;
+  /** the CNV groups folded to their summary row (this tab only), by group id; unfolded by default */
+  collapsed: Record<string, true>;
 }
 /** `iscnClasses`: the classes whose calls make the patient's ISCN */
 /** a probe log-ratio file not given with a table read by itself (alone, or in a zip whose table waits for its columns) */
@@ -118,7 +122,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, leaving: false, viewReset: 0, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView(), ungrouped: {} };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, leaving: false, viewReset: 0, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView(), ungrouped: {}, manual: {}, collapsed: {} };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -527,6 +531,10 @@ export const cgh = {
   applyGroupClass(g: CnvGroup) { const v = state.classes[g.id] ?? ''; const classes = { ...state.classes }; for (const c of g.members) classes[c.id] = v; set({ classes, ...touched(g.sampleKey) }); },
   /** a group split back into its calls, or made again */
   setUngrouped(id: string, on: boolean) { const ungrouped = { ...state.ungrouped }; if (on) ungrouped[id] = true; else delete ungrouped[id]; set({ ungrouped }); },
+  /** a call added by hand to a CNV group (its metrics, suggestion and ISCN recomputed with it), or taken out again (null) */
+  setManual(c: CghCnv, groupId: string | null) { const manual = { ...state.manual }; if (groupId) manual[c.id] = groupId; else delete manual[c.id]; set({ manual }); },
+  /** a CNV group folded to its summary row, or unfolded */
+  setCollapsed(id: string, on: boolean) { const collapsed = { ...state.collapsed }; if (on) collapsed[id] = true; else delete collapsed[id]; set({ collapsed }); },
   setNote(cnv: CghCnv, v: string) { set({ notes: { ...state.notes, [cnv.id]: v }, ...touched(cnv.sampleKey) }); },
   setShown(id: string | null) { set({ shown: id }); },
   setSex(key: string, v: CghSex | null) { const sex = { ...state.sex }; if (v) sex[key] = v; else delete sex[key]; set({ sex }); },
@@ -576,18 +584,18 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
 }
 
 /** every patient's CNV groups (cghGroups.ts) among its analysed calls, by sample key; an arm's span from the patient's probes once read */
-let groupMemo: { files: CghFile[]; sex: CghState['sex']; minProbes: number; minKb: number; gens: string; out: Map<string, CnvGroup[]> } | null = null;
+let groupMemo: { files: CghFile[]; sex: CghState['sex']; manual: CghState['manual']; minProbes: number; minKb: number; gens: string; out: Map<string, CnvGroup[]> } | null = null;
 export function groupsOf(s: CghState): Map<string, CnvGroup[]> {
   const f = s.filter, keys = s.files.flatMap(fl => fl.samples.map(x => x.key));
   const gens = keys.map(k => (probeRead.get(k) ? probeGen.get(k) ?? 0 : -1)).join(',');
-  if (groupMemo && groupMemo.files === s.files && groupMemo.sex === s.sex && groupMemo.minProbes === f.minProbes && groupMemo.minKb === f.minKb && groupMemo.gens === gens) return groupMemo.out;
-  const out = new Map<string, CnvGroup[]>();
+  if (groupMemo && groupMemo.files === s.files && groupMemo.sex === s.sex && groupMemo.manual === s.manual && groupMemo.minProbes === f.minProbes && groupMemo.minKb === f.minKb && groupMemo.gens === gens) return groupMemo.out;
+  const out = new Map<string, CnvGroup[]>(), man = new Map(Object.entries(s.manual));
   for (const fl of s.files) for (const x of fl.samples) {
     const sex = s.sex[x.key];
-    const gs = cnvGroups(x.cnvs, { build: fl.build ?? 'GRCh37', sex, probes: probeRead.get(x.key)?.byChrom, eligible: c => isAnalysed(c, f.minProbes, f.minKb) && !hiddenBySex(c, sex) && !c.suppressed });
+    const gs = cnvGroups(x.cnvs, { build: fl.build ?? 'GRCh37', sex, probes: probeRead.get(x.key)?.byChrom, manual: man, eligible: c => isAnalysed(c, f.minProbes, f.minKb) && !hiddenBySex(c, sex) && !c.suppressed });
     if (gs.length) out.set(x.key, gs);
   }
-  groupMemo = { files: s.files, sex: s.sex, minProbes: f.minProbes, minKb: f.minKb, gens, out };
+  groupMemo = { files: s.files, sex: s.sex, manual: s.manual, minProbes: f.minProbes, minKb: f.minKb, gens, out };
   return out;
 }
 /** a call of a group read as a reference mismatch (a male's whole X near −1…): no copy or mosaic estimate assuming a sex-matched reference */

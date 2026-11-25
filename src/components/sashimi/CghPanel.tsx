@@ -279,7 +279,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     if (g) {
       if (done.has(g.id)) continue;
       done.add(g.id);
-      items.push({ group: g, f: it.row.f }, ...g.members.map((c, k) => ({ row: { c, f: it.row.f, grp: { g, last: k === g.members.length - 1 } } })));
+      // folded: the summary row alone
+      items.push({ group: g, f: it.row.f }, ...(s.collapsed[g.id] ? [] : g.members.map((c, k) => ({ row: { c, f: it.row.f, grp: { g, last: k === g.members.length - 1 } } }))));
       continue;
     }
     if (u && !done.has(u.id)) { done.add(u.id); items.push({ regroup: u }); }
@@ -352,21 +353,23 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     const build = fl.build ?? 'GRCh37', k = KIND[g.kind], cls = (s.classes[g.id] ?? '').trim(), col = classColor(cls), note = s.notes[g.id] ?? '';
     const iscn = iscnOfGroup(s, g, build), nested = g.nested.size, memberCls = g.members.map(c => classOf(s, c).trim());
     const applied = !!cls && memberCls.every(x => x === cls);
-    const sx = s.sex[g.sampleKey];
+    const sx = s.sex[g.sampleKey], folded = !!s.collapsed[g.id];
     return [
-      <tr key={g.id} data-cgh-group={g.id} className={`bg-violet-50 ${GRP_TOP}`}>
+      <tr key={g.id} data-cgh-group={g.id} data-cgh-group-folded={folded || undefined} className={`bg-violet-50 ${GRP_TOP} ${folded && groupNote !== g.id ? GRP_BOTTOM : ''}`}>
         {withSample && <td className="px-1.5 py-1 text-slate-600 whitespace-nowrap">{g.sample}{sx ? ` ${SEX_MARK[sx]}` : ''}</td>}
-        <td className="px-1.5 py-1 whitespace-nowrap font-semibold text-violet-800" title="CNV group: calls of one direction covering a whole arm or chromosome"><span className="mr-1 px-1 rounded bg-violet-600 text-white text-[9.5px] font-bold align-middle">GROUP</span>{g.chrom.replace(/^chr/, '')}{g.scope === 'chr' ? '' : g.scope}</td>
+        <td className="px-1.5 py-1 whitespace-nowrap font-semibold text-violet-800" title="CNV group: calls of one direction covering a whole arm or chromosome"><button onClick={() => cgh.setCollapsed(g.id, !folded)} data-cgh-group-toggle aria-expanded={!folded}
+            aria-label={folded ? `Show the ${g.members.length} calls of the group` : 'Fold the group to this row'} title={folded ? `Show the ${g.members.length} calls of the group` : 'Fold the group to this row (this session)'}
+            className="mr-1 w-4 text-violet-700 hover:text-violet-900 font-bold">{folded ? '▸' : '▾'}</button><span className="mr-1 px-1 rounded bg-violet-600 text-white text-[9.5px] font-bold align-middle">GROUP</span>{g.chrom.replace(/^chr/, '')}{g.scope === 'chr' ? '' : g.scope}</td>
         <td className="px-1.5 py-1 font-mono text-[10.5px] text-slate-700 whitespace-nowrap" title="From the first call's start to the last call's end">{g.chrom}:{fmt(g.start)}-{fmt(g.end)}</td>
         <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title="Span of the group">{sizeText(g.spanKb)}</td>
         <td className="px-1.5 py-1 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }}
           title="Copies of the group: the calls' own when they agree, else from its weighted log ratio (nearest log2(n/2)); mosaic fraction by the AChro-Puce formula when a one-copy change is below 80 %">{k.word} {g.copiesText}</span></td>
         {hasProbeCol && <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title={`Probes of the group${nested ? `, the ${nested} nested call${nested > 1 ? 's' : ''} not counted again` : ''}`}>{g.probes ?? '?'}</td>}
-        {hasLrCol && <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title={`Mean log ratio of the calls weighted by their probes${nested ? ' (nested calls left out)' : ''}`}>{g.logRatio != null ? g.logRatio.toFixed(2) : '–'}</td>}
+        {hasLrCol && <td className="px-1.5 py-1 text-right tabular-nums whitespace-nowrap" title={`Mean log ratio of the calls weighted by their probes${nested ? ' (nested calls left out)' : ''}`}><span className="block ml-auto w-[52px] whitespace-normal text-[9px] leading-[10px] font-semibold text-violet-700">weighted avg. log R</span>{g.logRatio != null ? g.logRatio.toFixed(2) : '–'}</td>}
         {samples.length > 1 && <td />}
         <td colSpan={4} className="px-1.5 py-1 text-[11px] text-slate-700 leading-[15px]" data-cgh-group-suggestion><div className="max-w-[460px] min-w-[260px] whitespace-normal">
           <span className="text-slate-500">Suggests: </span><b className="text-violet-800">{g.suggestion}</b>
-          <span className="text-slate-500"> · {g.label} · {g.arms.map(a => `${a.arm} ${Math.round(a.cover * 100)} %`).join(', ')} covered · {g.members.length} calls{nested ? ` (${nested} nested)` : ''}</span>
+          <span className="text-slate-500"> · {g.label} · {g.arms.map(a => `${a.arm} ${Math.round(a.cover * 100)} %`).join(', ')} covered · {g.members.length} calls{nested ? ` (${nested} nested)` : ''}{g.manual.size ? ` (${g.manual.size} added by hand)` : ''}{folded ? ' · folded' : ''}</span>
           {iscn.text && <span className="ml-1.5 font-mono text-[11px] text-slate-800" data-cgh-group-iscn>{iscn.text}<CopyButton text={iscn.text} what="the group's ISCN" /></span>}
         </div></td>
         <td data-cgh-class className="px-1.5 py-1 whitespace-nowrap sticky right-[72px] z-[1] bg-inherit shadow-[-6px_0_6px_-6px_rgba(15,23,42,0.18)]">
@@ -521,7 +524,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                 <tr key={c.id} data-cgh-row data-cgh-call={c.id} data-cgh-below={low || undefined} data-shown={on || undefined} onClick={() => show(i, true)} title={`${iscnTip(iscnOfCall(s, c, fl.build ?? 'GRCh37'))}${c.suppressed ? '\nSuppressed in CytoGenomics' : ''}\nClick: draw it in the browser below`}
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 [&>td]:border-t-2 [&>td]:border-t-accent-600 [&>td:first-child]:border-l-2 [&>td:first-child]:border-l-accent-600 [&>td:last-child]:border-r-2 [&>td:last-child]:border-r-accent-600' : 'bg-white hover:bg-slate-50'} ${c.suppressed ? 'opacity-60' : ''} ${low ? 'text-slate-500' : ''} ${grp ? `${GRP_SIDE} ${grp.last ? GRP_BOTTOM : ''}` : ''}`} data-cgh-member={grp?.g.id}>
                   {!s.sample && samples.length > 1 && <td className="px-1.5 py-0.5 text-slate-600 whitespace-nowrap">{c.sample}{s.sex[c.sampleKey] ? ` ${SEX_MARK[s.sex[c.sampleKey]]}` : ''}</td>}
-                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{grp && <span className={`mr-1 font-normal ${grp.g.nested.has(c.id) ? 'text-violet-400' : 'text-violet-600'}`} title={grp.g.nested.has(c.id) ? 'Nested in a larger call of the group: not counted in its probes nor weighted in its log ratio' : 'A call of the CNV group above'}>{grp.g.nested.has(c.id) ? '└╴' : '│'}</span>}{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
+                  <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{grp && <span className={`mr-1 font-normal ${grp.g.nested.has(c.id) ? 'text-violet-400' : 'text-violet-600'}`} title={grp.g.nested.has(c.id) ? 'Nested in a larger call of the group: not counted in its probes nor weighted in its log ratio' : 'A call of the CNV group above'}>{grp.g.nested.has(c.id) ? '└╴' : '│'}</span>}{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}{grp?.g.manual.has(c.id) && <span data-cgh-manual className="ml-1 px-1 rounded border border-violet-300 bg-violet-50 text-violet-700 text-[9.5px] font-semibold align-middle" title="Added to the group by hand (this session); “remove from group” in its detail takes it out">manual</span>}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}{low && !hasProbeCol && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
                   <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} build={fl.build} mm={refMismatch(s, c)} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
@@ -565,7 +568,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
         A gain is drawn as a tandem duplication: array-CGH gives the copy number, not where the extra copy lies; a loss of both copies (x0) as homozygous.
         Positions and ISCN as in the file. Classes and notes are kept in this tab only, never in the browser's storage: <b>Export classified table</b> writes each file back with them (Classification column, and a Comment column; a VCF in INFO; an .xlsx as tab-separated text).
-        <div className="mt-1" data-cgh-group-methods><b>CNV groups.</b> A patient's calls of one direction (loss or gain) on one chromosome make a group when, together, they cover ≥ {Math.round(GROUP_COVER * 100)} % of an arm: of its probes when the patient has a probe file (PARs left out), else of its length outside the centromere, heterochromatin, stalks, acrocentric p arms and PARs (UCSC cytobands embedded), or of both arms (a whole chromosome; an acrocentric's q arm); calls under the minimums or suppressed are left out. A call inside a larger one is a nested member: shown, not counted in the probes nor weighted in the mean log ratio (weighted by probes). Copies: the calls' own when they agree, else from the mean log ratio as for a call; the mosaic fraction by the AChro-Puce formula. The suggestion (trisomy, monosomy, partial … of an arm, mosaic with its fraction; for X and Y read against the sex given, a sex mismatch with the reference always named; a male's whole-X loss, or his Y far above 0, is what a normal male gives against a female reference: copies x1 = normal male, no mosaic fraction nor ISCN, there and on its calls) is a hint, never a class. The group's own class and note stay in the page; its ISCN (<span className="font-mono">(8)x3</span>, an arm by its bands) replaces its calls' in the patient's ISCN when its class is ticked. The export adds a <i>{OWN_GROUP_HEADER}</i> column to the calls of a group (label, suggestion, group class; a VCF: INFO CGH_GROUP, a probe-calls export: a CNV group column); <b>ungroup</b> (this tab only) leaves it out.</div>
+        <div className="mt-1" data-cgh-group-methods><b>CNV groups.</b> A patient's calls of one direction (loss or gain) on one chromosome make a group when, together, they cover ≥ {Math.round(GROUP_COVER * 100)} % of an arm: of its probes when the patient has a probe file (PARs left out), else of its length outside the centromere, heterochromatin, stalks, acrocentric p arms and PARs (UCSC cytobands embedded; on chrY also Yq12 and Yp11.2 from the TSPY array to the centromere, ampliconic or unsequenced, without unique probes on arrays), or of both arms (a whole chromosome; an acrocentric's q arm); calls under the minimums or suppressed are left out. A call inside a larger one is a nested member: shown, not counted in the probes nor weighted in the mean log ratio (weighted by probes). Copies: the calls' own when they agree, else from the mean log ratio as for a call; the mosaic fraction by the AChro-Puce formula. The suggestion (trisomy, monosomy, partial … of an arm, mosaic with its fraction; for X and Y read against the sex given, a sex mismatch with the reference always named; a male's whole-X loss, or his Y far above 0, is what a normal male gives against a female reference: copies x1 = normal male, no mosaic fraction nor ISCN, there and on its calls) is a hint, never a class. The group's own class and note stay in the page; its ISCN (<span className="font-mono">(8)x3</span>, an arm by its bands) replaces its calls' in the patient's ISCN when its class is ticked. The export adds a <i>{OWN_GROUP_HEADER}</i> column to the calls of a group (label, suggestion, group class; a VCF: INFO CGH_GROUP, a probe-calls export: a CNV group column); <b>ungroup</b> (this tab only) leaves it out. ▾ / ▸ folds a group to its summary row (this tab). A call's detail can <b>add</b> it to one of the patient's groups on its chromosome (of its direction), whatever the minimums: the group's probes, weighted average log ratio, copies, suggestion and ISCN are computed again with it, the call tagged <i>manual</i>; <b>remove from group</b> takes it out (this tab).</div>
         <ProbeMethods probes={samples.some(({ x }) => cgh.hasProbes(x.key))} />
         <PriorityRules />
       </details>
@@ -752,6 +755,26 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
+/** the call's CNV group in its detail: a call added by hand can be taken out; a call of no group can be added to one of
+ * this patient's groups on its chromosome (of its direction: a gain group takes gains) */
+function GroupLine({ c }: { c: CghCnv }) {
+  const st = useCgh();
+  if (c.fromProbes) return null;
+  const gs = (groupsOf(st).get(c.sampleKey) ?? []).filter(g => g.chrom === c.chrom && !st.ungrouped[g.id]);
+  if (!gs.length) return null;
+  const mine = gs.find(g => g.members.some(m => m.id === c.id)), word = (g: CnvGroup) => `${g.label}, ${g.kind}`;
+  return <div className="mb-1 text-[11px]" data-cgh-group-line><span className="font-semibold text-slate-900">CNV group</span>{' '}
+    {mine ? <>{mine.manual.has(c.id) ? 'added by hand to' : 'in'} <b className="text-violet-800">{word(mine)}</b>
+      {mine.manual.has(c.id) && <> · <button className="text-violet-700 font-semibold hover:underline" data-cgh-group-remove onClick={() => cgh.setManual(c, null)} title="Take this call out of the group: its metrics, suggestion and ISCN are computed again without it">remove from group</button></>}</>
+      : <select value="" aria-label="Add this call to a CNV group" data-cgh-group-add onChange={e => e.target.value && cgh.setManual(c, e.target.value)}
+          title="Add this call to one of this patient's CNV groups on its chromosome (this session): the group's metrics, suggestion and ISCN are computed again with it"
+          className="h-[20px] px-1 rounded border border-violet-300 bg-white text-[11px] text-violet-800 outline-none cursor-pointer">
+          <option value="">add to group…</option>
+          {gs.map(g => <option key={g.id} value={g.id} disabled={g.kind !== c.kind}>{word(g)}{g.kind !== c.kind ? ` (${g.kind === 'gain' ? 'gains' : 'losses'} only)` : ''}</option>)}
+        </select>}
+  </div>;
+}
+
 function CnvDetail({ c, v, build, onRetry, lab, hints, sex, series, note, focusNote, onNoteFocused }: { c: CghCnv; v: View; build: GenomeBuild; onRetry: (srcs: (CghSource | 'panelapp')[]) => void; lab: LabHit | undefined; hints: string[]; sex: CghSex | undefined; series: SeriesInfo | undefined; note: string; focusNote: boolean; onNoteFocused: () => void }) {
   const [allGenes, setAllGenes] = useState(false);
   const noteBox = <textarea value={note} onChange={e => cgh.setNote(c, e.target.value)} rows={1} placeholder="Note on this call (exported in the Comment column)"
@@ -760,7 +783,7 @@ function CnvDetail({ c, v, build, onRetry, lab, hints, sex, series, note, focusN
     className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
   const seen = series && series.others > 0 ? <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Series</span> {series.hits.length ? <>found in {series.hits.length} of {series.others} other patient{series.others > 1 ? 's' : ''}: {series.hits.map(h => `${h.name} (${Math.round(h.pct * 100)} %)`).join(', ')}</> : <>in none of the {series.others} other patient{series.others > 1 ? 's' : ''}</>}<span className="text-slate-500"> · same type, reciprocal overlap ≥ {Math.round(SERIES_OVERLAP * 100)} %</span></div> : null;
   const st = useCgh(), iscn = iscnOfCall(st, c, build);
-  const mosaic = <>{seen}{(iscn.text || iscn.file) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">ISCN</span> <CallIscnText i={iscn} /></div>}<MosaicLine c={c} sex={sex} build={build} mm={refMismatch(st, c)} /></>;
+  const mosaic = <>{seen}{(iscn.text || iscn.file) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">ISCN</span> <CallIscnText i={iscn} /></div>}<MosaicLine c={c} sex={sex} build={build} mm={refMismatch(st, c)} /><GroupLine c={c} /></>;
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
   const ann = v.ann, key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position

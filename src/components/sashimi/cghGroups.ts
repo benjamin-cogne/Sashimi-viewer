@@ -18,10 +18,14 @@ const ACROCENTRIC = new Set(['13', '14', '15', '21', '22']);
  * Per build, per chromosome, in units of 100 kb: centromere start, centromere end, then the spans without probes on arrays
  * (UCSC cytoBand `acen`, `gvar`, `stalk` merged; `E` = the chromosome's end). Read from the UCSC API on 2026-11-25. Used when
  * the patient has no probe file; with one, an arm's span is that of its probes (`GroupOpts.probes`).
+ * chrY: Yp11.2 from the assembly gap before the TSPY array to the centromere (GRCh37 8.9-11.6 Mb, which holds the
+ * 10.10-13.10 Mb centromere gap of the sequence; GRCh38 9.0-10.3 Mb) is added: ampliconic or unsequenced, no unique probe
+ * there on arrays (Agilent 60K: the last usable Yp probe at 8.88 Mb, those of the TSPY array homology-filtered). Without it
+ * a gain of all of Yp's probe-covered span read as ~64 % of the arm. Yq12 (gvar) and the PARs were already left out.
  */
 const BLIND: Record<GenomeBuild, string> = {
-  GRCh37: '1:1215,1289,1215-1426 2:905,968,905-968 3:879,939,879-983 4:482,527,482-527 5:461,507,461-507 6:587,633,587-633 7:580,617,580-617 8:431,481,431-481 9:473,507,473-659 10:380,423,380-423 11:516,557,516-557 12:333,382,333-382 13:163,195,0-195 14:161,191,0-191 15:158,207,0-207 16:346,386,346-470 17:222,258,222-258 18:154,190,154-190 19:244,286,200-324 20:256,294,256-294 21:109,143,0-143 22:122,179,0-179 X:581,630,581-630 Y:116,134,116-134,288-E',
-  GRCh38: '1:1217,1251,1217-1432 2:918,960,918-960 3:878,940,878-986 4:482,518,482-518 5:461,514,461-514 6:585,626,585-626 7:581,621,581-621 8:432,472,432-472 9:422,455,422-615 10:380,416,380-416 11:510,558,510-558 12:332,378,332-378 13:165,189,0-189 14:161,182,0-182 15:175,205,0-205 16:353,384,353-470 17:227,274,227-274 18:154,215,154-215 19:242,281,199-319 20:257,304,257-304 21:109,130,0-130 22:137,174,0-174 X:581,638,581-638 Y:103,106,103-106,266-E',
+  GRCh37: '1:1215,1289,1215-1426 2:905,968,905-968 3:879,939,879-983 4:482,527,482-527 5:461,507,461-507 6:587,633,587-633 7:580,617,580-617 8:431,481,431-481 9:473,507,473-659 10:380,423,380-423 11:516,557,516-557 12:333,382,333-382 13:163,195,0-195 14:161,191,0-191 15:158,207,0-207 16:346,386,346-470 17:222,258,222-258 18:154,190,154-190 19:244,286,200-324 20:256,294,256-294 21:109,143,0-143 22:122,179,0-179 X:581,630,581-630 Y:116,134,89-134,288-E',
+  GRCh38: '1:1217,1251,1217-1432 2:918,960,918-960 3:878,940,878-986 4:482,518,482-518 5:461,514,461-514 6:585,626,585-626 7:581,621,581-621 8:432,472,432-472 9:422,455,422-615 10:380,416,380-416 11:510,558,510-558 12:332,378,332-378 13:165,189,0-189 14:161,182,0-182 15:175,205,0-205 16:353,384,353-470 17:227,274,227-274 18:154,215,154-215 19:242,281,199-319 20:257,304,257-304 21:109,130,0-130 22:137,174,0-174 X:581,638,581-638 Y:103,106,90-106,266-E',
 };
 interface ChromInfo { len: number; cen: [number, number]; blind: [number, number][] }
 const infoCache = new Map<string, ChromInfo | null>();
@@ -92,6 +96,8 @@ export interface CnvGroup {
   scope: 'chr' | 'p' | 'q';
   /** every member, by position; `nested`: the ids of those inside a larger member (not weighted, not counted) */
   members: CghCnv[]; nested: Set<string>;
+  /** the members added by hand (`GroupOpts.manual`): counted and weighted like the others */
+  manual: Set<string>;
   start: number; end: number; spanKb: number;
   /** the probes of the members not nested (null when a member has no count) */
   probes: number | null;
@@ -162,6 +168,9 @@ export interface GroupOpts {
   build: GenomeBuild; sex: CghSex | undefined; eligible: (c: CghCnv) => boolean;
   /** the patient's probes by chromosome, when read: an arm's span is then that of its probes */
   probes?: Map<string, GroupProbes> | null;
+  /** calls added by hand to a group: call id → group id (`grp|<sample key>|<chrom>|<kind>`); a call of the group's
+   * chromosome and direction joins it whatever the minimums, when the group exists without it */
+  manual?: Map<string, string> | null;
 }
 /** the groups of one patient's calls */
 export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
@@ -179,15 +188,29 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
     for (const c of sorted) { if (c.end <= reach) nested.add(c.id); else reach = c.end; }
     const top = sorted.filter(c => !nested.has(c.id)), iv = top.map(c => [c.start - 1, c.end] as [number, number]);
     const pr = o.probes?.get(chrom);
-    const pc = acro ? 0 : coverOf(0, ci.cen[0], ci.blind, iv, pr), qc = coverOf(ci.cen[1], ci.len, ci.blind, iv, pr);
+    let pc = acro ? 0 : coverOf(0, ci.cen[0], ci.blind, iv, pr); let qc = coverOf(ci.cen[1], ci.len, ci.blind, iv, pr);
     const p = !acro && pc >= GROUP_COVER, q = qc >= GROUP_COVER;
     const scope: CnvGroup['scope'] | null = (p || acro) && q ? 'chr' : p ? 'p' : q ? 'q' : null;
     if (!scope) continue;
-    // the members: on the arm(s) covered, with the calls nested in them
+    // the members: on the arm(s) covered, with the calls nested in them; then the calls added by hand to this group
     const onArm = (c: CghCnv) => scope === 'chr' || (scope === 'p' ? c.start - 1 < ci.cen[0] : c.end > ci.cen[1]);
-    const tops = top.filter(onArm), topIds = new Set(tops.map(c => c.id));
-    const members = sorted.filter(c => topIds.has(c.id) || (nested.has(c.id) && tops.some(t => c.start >= t.start && c.end <= t.end)));
-    if (members.length < 2) continue;
+    const auto0 = top.filter(onArm), autoIds = new Set(auto0.map(c => c.id));
+    const gid = `grp|${list[0].sampleKey}|${chrom}|${kind}`;
+    const auto = sorted.filter(c => autoIds.has(c.id) || (nested.has(c.id) && auto0.some(t => c.start >= t.start && c.end <= t.end)));
+    if (auto.length < 2) continue;
+    const ids = new Set(auto.map(c => c.id));
+    const manual = cnvs.filter(c => !c.fromProbes && !ids.has(c.id) && c.chrom === chrom && c.kind === kind && o.manual?.get(c.id) === gid);
+    // nested again over the members (a call added by hand may hold, or lie in, another)
+    const members = [...auto, ...manual].sort((a, b) => a.start - b.start || b.end - a.end), mNested = new Set<string>();
+    reach = -Infinity;
+    for (const c of members) { if (c.end <= reach) mNested.add(c.id); else reach = c.end; }
+    const tops = members.filter(c => !mNested.has(c.id));
+    if (manual.length) {
+      // the arms' cover with the added calls
+      const miv = tops.map(c => [c.start - 1, c.end] as [number, number]);
+      if (scope !== 'q' && !acro) pc = coverOf(0, ci.cen[0], ci.blind, miv, pr);
+      if (scope !== 'p') qc = coverOf(ci.cen[1], ci.len, ci.blind, miv, pr);
+    }
     const start = Math.min(...tops.map(c => c.start)), end = Math.max(...tops.map(c => c.end));
     const probes = tops.every(c => c.probes != null) ? tops.reduce((a, c) => a + c.probes!, 0) : null;
     const withLr = tops.filter(c => c.logRatio != null), w = (c: CghCnv) => (probes != null ? c.probes! : c.sizeKb);
@@ -195,7 +218,7 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
     const logRatio = withLr.length && wsum > 0 ? withLr.reduce((a, c) => a + c.logRatio! * w(c), 0) / wsum : null;
     const cps = new Set(tops.map(c => (c.copies != null && c.copiesHi == null ? c.copies : null)));
     const common = cps.size === 1 ? [...cps][0] : null;
-    const as: CghCnv = { ...tops[0], id: `grp|${tops[0].sampleKey}|${chrom}|${kind}`, start, end, sizeKb: (end - start + 1) / 1000, probes, logRatio,
+    const as: CghCnv = { ...tops[0], id: gid, start, end, sizeKb: (end - start + 1) / 1000, probes, logRatio,
       copies: common, copiesHi: null, amp: tops.some(c => c.amp), iscn: null, cytoband: '', genes: [], note: '', classification: '', classRest: '' };
     let copies: number | null = common, mosaic: number | null = null;
     // the cases groupSuggestion reads as expected for a male against a female reference: the stated sex's copies, x1
@@ -205,7 +228,7 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
     else { const e = estCopies(as, o.sex, o.build); copies = e?.n ?? null; mosaic = e?.mosaic ?? null; }
     const arms = [...(!acro && (scope === 'chr' || scope === 'p') ? [{ arm: `${n}p`, cover: pc }] : []), ...(scope !== 'p' ? [{ arm: `${n}q`, cover: qc }] : [])];
     const g = { chrom, kind, scope, copies, mosaic, logRatio };
-    out.push({ id: as.id, sampleKey: as.sampleKey, sample: as.sample, chrom, kind, scope, members, nested: new Set([...nested].filter(id => members.some(c => c.id === id))),
+    out.push({ id: as.id, sampleKey: as.sampleKey, sample: as.sample, chrom, kind, scope, members, nested: mNested, manual: new Set(manual.map(c => c.id)),
       start, end, spanKb: as.sizeKb, probes, logRatio, arms, copies, mosaic, mismatch,
       copiesText: mismatch ? 'x1 = normal male (female reference?)' : copies == null ? (as.amp ? 'amp' : '') : `x${copies}${mosaic != null ? ` mosaic ${pct(mosaic).replace(' ', '')}` : ''}`,
       label: `${scope === 'chr' ? n : `${n}${scope}`} (${scope === 'chr' ? 'whole chromosome' : 'whole arm'})`, suggestion: groupSuggestion(g, o.sex), as });
