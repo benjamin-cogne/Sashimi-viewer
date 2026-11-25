@@ -277,15 +277,18 @@ Type cell, *copies x1* above the browser and in the call's detail, and in the IS
 than 80 % of cells by the AChro-Puce estimate (an autosomal loss above −0.74, a gain below +0.49) is shown *mosaic ~n%*,
 its ISCN with the fraction in brackets; that is the only uncertainty shown.
 
-**ISCN.** Each call's array ISCN follows ISCN 2024 (chapter 8, microarray): `arr[GRCh37] 22q11.21(18,894,835_21,505,417)x1`,
+**ISCN.** Each call's array ISCN follows the array ISCN of ISCN 2024: `arr[GRCh37] 22q11.21(18,894,835_21,505,417)x1`,
 bands from pter to qter (one band written once) at the finest resolution of the build's cytogenetic bands (UCSC, e.g.
 `7q11.23` where the file says `7q11`; the file's band only when the bands cannot be read or the call is not annotated), positions with thousands commas, the copy number (the file's, else from
 the log ratio), a mosaic fraction in brackets (`x1[0.48]`), a whole chromosome as `(21)x3`. It stands on the call's card
 above the browser and in its detail (each with *copy*), and in the row's tooltip; when the file gives its own ISCN and
 it differs (positions, bands, copies, mosaic), the file's is shown beside it, marked *differs*. A patient's tab has a
 **Patient ISCN** line (*copy*): its calls of the chosen classes (*from* P / LP / VUS by default, also PIEV, LB, B; kept in
-the browser) joined by commas, chromosomes 1-22, X, Y then position; with none, *no abnormal call selected* (the normal-
-result form is not written). Inheritance (dn, mat, pat) is not written.
+the browser) joined by commas, chromosomes 1-22, X, Y then position. It is a small card titled *ISCN — patient*, under the
+filters and above the table, with the line (*copy*), a sentence saying which classes it is built from (chips with full names
+in tooltips) and, when no call of the ticked classes exists, the laboratory's normal result for the patient's sex:
+`arr (1-22,X)x2` (female) or `arr (X,Y)x1,(1-22)x2` (male); with the sex not given, no line (*Set the patient's sex to
+write the normal result*). Nothing in *All patients*. Inheritance (dn, mat, pat) is not written.
 
 **Disclaimer.** Copy numbers are inferred from the log ratio with the thresholds stated. All numbers, calls and
 nomenclature must be checked in the dedicated analysis software; the authors cannot be held responsible for any

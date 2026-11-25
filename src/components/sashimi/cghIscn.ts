@@ -1,9 +1,7 @@
 /**
- * Array ISCN (ISCN 2024, McGowan-Jordan, Hastings, Moore eds., Karger, doi:10.1159/000538512, chapter 8 "Microarray"),
- * as in its examples `arr[GRCh38] 1p36.11p35.3(25,889,422_28,493,687)x3mat,11p12p11.12(41,444,865_49,146,935)x1dn[0.5]`
- * and `arr[GRCh38] Xp22.33q28(168,546_155,233,730)x1[0.6]`: the build, the chromosome, the bands from pter to qter (the
- * band at the start first; one band written once), the positions with thousands commas, the copy number, a mosaic
- * fraction in brackets; several abnormalities of a patient separated by commas, by chromosome (1-22, X, Y) then position.
+ * Array ISCN, as in ISCN 2024: the build, the chromosome, the bands from pter to qter (the band at the start first;
+ * one band written once), the positions with thousands commas, the copy number, a mosaic fraction in brackets; several
+ * abnormalities of a patient separated by commas, by chromosome (1-22, X, Y) then position.
  * The copy number: the file's, else the one inferred from the log ratio (cghMosaic.ts `estCopies`); the mosaic fraction
  * when the AChro-Puce estimate classes the call as mosaic (one-copy change in < 80 % of cells).
  */
@@ -58,6 +56,11 @@ export function callIscn(c: CghCnv, build: string, band: string, sex: CghSex | u
   const part = where && copies ? `${where}${copies}${mosaic != null ? `[${frac(mosaic)}]` : ''}` : null;
   const text = part ? `arr[${build}] ${part}` : null;
   return { text, part, file: c.iscn, differs: !!(c.iscn && text && norm(c.iscn) !== norm(text)) };
+}
+
+/** the normal result of the laboratory's convention, by the patient's sex; null when the sex is not given */
+export function normalIscn(sex: CghSex | undefined | null): string | null {
+  return sex === 'female' ? 'arr (1-22,X)x2' : sex === 'male' ? 'arr (X,Y)x1,(1-22)x2' : null;
 }
 
 /** a patient's ISCN from its calls' parts, by chromosome then position; null when none */
