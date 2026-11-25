@@ -35,8 +35,8 @@ export function useCytobands(chrom: string, get?: (chrom: string) => Promise<Cyt
   return bands?.chrom === chrom && bands.list.length ? bands.list : undefined;
 }
 
-export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' }: { rec: SvReconstruction; build: string; bands?: Cytoband[]; zygosity?: 'het' | 'hom' }) {
-  const n = nomenclatureOf(rec, build, c => (c === rec.chrs[0] ? bands : undefined), zygosity);
+export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het', copies = 2 }: { rec: SvReconstruction; build: string; bands?: Cytoband[]; zygosity?: 'het' | 'hom'; /** copies of the chromosome outside the event: 1 for a male's X or Y */ copies?: number }) {
+  const n = nomenclatureOf(rec, build, c => (c === rec.chrs[0] ? bands : undefined), zygosity, copies);
   const [copied, setCopied] = useState(false);
   const [rowCopied, setRowCopied] = useState<string | null>(null);
   if (!n.hgvs.length && !n.iscnSeq.length) return null;
@@ -80,7 +80,7 @@ export default function SvNomenclatureBox({ rec, build, bands, zygosity = 'het' 
       {n.hgvs.map(h => row('HGVS', h, 'HGVS allele form: the changes on the reference from pter to qter (HGVS recommendations, complex HGVS/ISCN). Best positions from the reads, not shifted by the 3′ rule.'))}
       {n.uncertainty && <div className="text-[10.5px] text-slate-500">breakpoints {n.uncertainty} around the positions given</div>}
       {n.iscn && row('ISCN', n.iscn, 'ISCN 2024, karyotype format (§4.7): the bands of the breakpoints (UCSC cytoBand), short system for a single deletion, duplication or inversion, else the detailed system from pter to qter; then the HGVS description')}
-      {n.iscnArr && row('ISCN copies', n.iscnArr, `ISCN 2024, microarray format (§4.7.2): each stretch gained or lost with its copy number, drawn as ${zygosity === 'het' ? 'heterozygous' : 'homozygous'}`)}
+      {n.iscnArr && row('ISCN copies', n.iscnArr, `ISCN 2024, microarray format (§4.7.2): each stretch gained or lost with its copy number, drawn as ${copies === 1 ? 'haploid (one copy of the chromosome)' : zygosity === 'het' ? 'heterozygous' : 'homozygous'}${copies !== 2 && copies !== 1 ? `, ${copies} copies of the chromosome` : ''}`)}
       {n.iscnSeq.map(s => row('junctions', s, 'Not an ISCN form: the rebuilt chromosome from pter to qter as stretches of the reference, :: at each junction. The SV browser reads it back. Left out of the copied text.'))}
       {!n.iscn && <div className="text-[10.5px] text-slate-500">bands unavailable: ISCN not given</div>}
       <div className="text-[10px] text-slate-500 mt-0.5">{NOMENCLATURE_VERSIONS}</div>

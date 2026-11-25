@@ -263,18 +263,19 @@ function iscnOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | 
 /**
  * ISCN 2024 microarray format of the copy-number changes: each segment's copies, from the homologues left intact and
  * the copies of it the rearranged chromosomes carry (heterozygous: one homologue per rearranged chromosome replaced;
- * homozygous: both); runs of contiguous segments with the same copy number other than 2 are listed.
+ * homozygous: all); runs of contiguous segments whose copy number differs from the chromosome's (`copies`: 2, 1 for
+ * a male's X or Y) are listed: a deletion on a male X is ×0, a duplication ×2.
  */
-function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | undefined, build: string, zygosity: 'het' | 'hom'): string | null {
+function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | undefined, build: string, zygosity: 'het' | 'hom', copies = 2): string | null {
   const ders = rec.ders.filter(d => d.rearranged);
   if (!ders.length) return null;
   const count = new Map<number, number>();
   for (const d of ders) for (const p of d.pieces) count.set(p.seg.id, (count.get(p.seg.id) ?? 0) + 1);
   const derOn = (c: string) => ders.filter(d => d.chrom === c).length;
-  const k = zygosity === 'hom' ? 2 : 1;
+  const k = zygosity === 'hom' ? copies : 1;
   const items: { chrom: string; start: number; end: number; cn: number; pter: boolean; qter: boolean }[] = [];
   for (const c of rec.chrs) {
-    const kept = Math.max(0, 2 - k * derOn(c));
+    const kept = Math.max(0, copies - k * derOn(c));
     for (const sg of rec.byChr[c] ?? []) {
       const cn = kept + k * (count.get(sg.id) ?? 0);
       const last = items[items.length - 1];
@@ -283,7 +284,7 @@ function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | u
       else items.push({ chrom: c, start: sg.start, end: sg.end, cn, pter, qter });
     }
   }
-  const changed = items.filter(x => x.cn !== 2);
+  const changed = items.filter(x => x.cn !== copies);
   if (!changed.length) return null;
   const order = (c: string) => { const n = num(c).toUpperCase(); return n === 'X' ? -2 : n === 'Y' ? -1 : Number(n) || 99; };
   const parts: string[] = [];
@@ -300,12 +301,12 @@ function arrOf(rec: SvReconstruction, bandsOf: (chrom: string) => Cytoband[] | u
   return `seq[${build}] ${parts.join(',')}`;
 }
 
-export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (chrom: string) => Cytoband[] | undefined = () => undefined, zygosity: 'het' | 'hom' = 'het'): SvNomenclature {
+export function nomenclatureOf(rec: SvReconstruction, build: string, bandsOf: (chrom: string) => Cytoband[] | undefined = () => undefined, zygosity: 'het' | 'hom' = 'het', copies = 2): SvNomenclature {
   const hgvs = rec.ders.filter(d => d.rearranged).map(d => hgvsOf(d, rec.segs, build)).filter((x): x is string => !!x);
   const { band, seq } = iscnOf(rec, bandsOf, build);
   const errs = Object.values(rec.bpError ?? {});
   const lo = errs.length ? Math.min(...errs) : 0, hi = errs.length ? Math.max(...errs) : 0;
-  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity), iscnSeq: seq, uncertainty: !errs.length || hi === 0 ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
+  return { hgvs, iscn: band, iscnArr: arrOf(rec, bandsOf, build, zygosity, copies), iscnSeq: seq, uncertainty: !errs.length || hi === 0 ? '' : lo === hi ? `±${hi} bp` : `±${lo}–${hi} bp` };
 }
 
 // ======================== Reading a description ========================

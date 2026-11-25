@@ -101,7 +101,15 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
   const cnvTracks = useCnvRegionTracks(build === 'GRCh37' ? 'GRCh37' : 'GRCh38');
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelected));
   const [zygosity, setZygosity] = useState<'het' | 'hom'>('het');
-  const [copies, setCopies] = useState<number>(/^(chr)?[XY]$/i.test(chrom) ? 1 : 2);
+  // copies of the chromosome outside the event: diploid by default, haploid on Y; on X the last choice for this sample
+  // (a male's X is haploid: its depth would not fit a diploid reading)
+  const ploidyKey = `sashimi.svPloidyX.${sample.name}`;
+  const [copies, setCopiesState] = useState<number>(() => {
+    if (/^(chr)?Y$/i.test(chrom)) return 1;
+    if (/^(chr)?X$/i.test(chrom)) { try { const v = Number(localStorage.getItem(ploidyKey)); if (v >= 1 && v <= 4) return v; } catch { /* no storage */ } }
+    return 2;
+  });
+  const setCopies = (n: number) => { setCopiesState(n); if (/^(chr)?X$/i.test(chrom)) { try { localStorage.setItem(ploidyKey, String(n)); } catch { /* no storage */ } } };
   const [useControls, setUseControls] = useState(true);
   const [t, setT] = useState(0);
   // the cartoon plays the first time it comes into view (at once on most screens; on a short one, once scrolled to)
@@ -274,9 +282,18 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
               )) : <div className="text-slate-400 mt-0.5">no junction selected: tick the junctions of the event below</div>}
               {rec.lost.length > 0 && <div className="text-[11px] text-red-700 mt-0.5">Lost from the rearranged homologue: {rec.lost.map(x => `${x.letter} (${formatBp(x.end - x.start)})`).join(', ')}.</div>}
               {chosen.length > 0 && <div className="text-[11px] mt-0.5"><span className={depth.verdict === 'unexplained' ? 'text-red-700' : depth.verdict === 'explained' ? 'text-emerald-700' : 'text-slate-600'}>Read depth: {verdictText.replace(/^[✓≈✗] /, '')}</span>{ranked.length > 1 ? <span className="text-slate-500"> · {ranked.length} possible paths, the best fit shown</span> : null}</div>}
-              <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as {zygosity === 'het' ? 'heterozygous' : 'homozygous'}, {copies} cop{copies === 1 ? 'y' : 'ies'} on the flanks{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]" data-sv-ploidy>
+                <span className="font-semibold text-slate-700">Ploidy</span>
+                {([[2, 'diploid'], [1, 'haploid'], [3, '3 copies'], [4, '4 copies']] as const).map(([n, label]) => (
+                  <button key={n} type="button" onClick={() => setCopies(n)}
+                    title={n === 1 ? `One copy of ${chrom} outside the event: a male's X or Y (or an X lost): the flanks' depth is one copy, a deletion leaves none (×0), a duplication makes two` : n === 2 ? 'Two copies of the chromosome: an autosome, or a female\'s X' : `${n} copies of the chromosome outside the event (an aneuploidy)`}
+                    className={`px-2 py-0.5 rounded-full border ${copies === n ? 'bg-accent-600 border-accent-600 text-white' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>{label}</button>
+                ))}
+                {/^(chr)?X$/i.test(chrom) && copies === 2 && <span className="text-slate-500">a male sample: choose haploid</span>}
+              </div>
+              <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as {copies === 1 ? 'haploid (one copy of the chromosome, no other homologue)' : `${zygosity === 'het' ? 'heterozygous' : 'homozygous'}, ${copies} copies on the flanks`}{rec.warnings.length ? ` · ${rec.warnings.length} warning${rec.warnings.length > 1 ? 's' : ''}` : ''}. Below: the reconstruction from the reads (cartoon, junctions, copy number per segment), then <button onClick={toGenes} className="text-accent-700 hover:underline font-semibold">▼ the genes on the rebuilt chromosome</button>.</div>
             </div>
-            <SvNomenclatureBox rec={rec} build={build} bands={bands} zygosity={zygosity} />
+            <SvNomenclatureBox rec={rec} build={build} bands={bands} zygosity={zygosity} copies={copies} />
           </div>
         </div>
         <div ref={reconRef} className="scroll-mt-12 border-t border-slate-200 pt-3">
@@ -330,12 +347,6 @@ export default function SvCartoon({ chrom, window: win, candidates, initialSelec
                   zygosity
                   <select value={zygosity} onChange={e => { setZygosity(e.target.value as 'het' | 'hom'); }} className="border rounded px-1 py-0.5 text-xs" disabled={copies === 1}>
                     <option value="het">heterozygous</option><option value="hom">homozygous</option>
-                  </select>
-                </label>
-                <label className="flex items-center gap-1" title="Copies of this chromosome in the sample outside the event: 2 for an autosome, 1 for X or Y in a male (the default on X and Y), 1 for a female's X after X-chromosome loss, etc. The depth of the flanks is taken as this many copies.">
-                  chromosome copies
-                  <select value={copies} onChange={e => setCopies(parseInt(e.target.value))} className="border rounded px-1 py-0.5 text-xs">
-                    {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n}</option>)}
                   </select>
                 </label>
                 {controls.length > 0 && (
@@ -494,7 +505,7 @@ function Caption({ t, scene, rec, depth, chosen, zygosity }: { t: number; scene:
   else {
     const bad = depth.segments.filter(s => s.fits === false);
     text = depth.verdict === 'none' ? 'The segments are too short for the depth to say anything (fewer than 3 bins each).'
-      : bad.length ? `The read depth does not fit ${letters(bad.map(b => b.seg))}: a junction is missing, one does not belong to this event, or the zygosity or chromosome copies differ${bad.some(b => b.mosaic) ? ' (a mosaic fits better, see the table)' : ''}.`
+      : bad.length ? `The read depth does not fit ${letters(bad.map(b => b.seg))}: a junction is missing, one does not belong to this event, or the zygosity or ploidy differ (a male's X is haploid: set Ploidy)${bad.some(b => b.mosaic) ? ' (a mosaic fits better, see the table)' : ''}.`
       : depth.verdict === 'balanced' ? 'Balanced event: no segment changes copy number, so the depth can neither confirm nor refute it; the junction reads are the evidence.'
       : `The read depth fits every segment: the selected junctions explain the coverage (reference: ${depth.reference.how}).`;
   }
