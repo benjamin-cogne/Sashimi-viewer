@@ -19,7 +19,8 @@ import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
 import { CghRecurrentDetail } from './CghClinGenTrack';
-import { ProbeCallsBar, ProbeMethods } from './CghProbeCalls';
+import { ProbeCallsBar, ProbeMethods, ProbeSettings } from './CghProbeCalls';
+import { exportProbeCalls, isProbeOnly, PROBE_ONLY_WARNING } from './cghProbeOnly';
 import { CallIscnText, PatientIscn, iscnOfCall, iscnTip } from './CghIscnView';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
@@ -120,7 +121,7 @@ function SizeSlider({ value, onChange, delay = 300, className = '' }: { value: n
   );
 }
 const EXPORT_GAP_MS = 600;
-const EXPORT_TITLE = 'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.\nSeveral files: one download each, and the browser may ask to allow several downloads.';
+const EXPORT_TITLE = 'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.\nA probes-only patient (a CGH_Log_Ratio.txt without its table) is written as a new tab-separated file, <name>.probe-calls.txt (source, build, detection settings, date; one row per probe call with its band, copies, ISCN, class and note).\nSeveral files: one download each, and the browser may ask to allow several downloads.';
 function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['pending']>; init: number; initKb: number; loaded: CghFile[] }) {
   const [n, setN] = useState<number>(init);
   const [kb, setKb] = useState<number>(initKb);
@@ -130,9 +131,12 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
   const many = every.length > CGH_MAX_ANNOTATED, over = kept > CGH_MAX_ANNOTATED;
   const [sexes, setSexes] = useState<Record<string, CghSex | null>>(() => Object.fromEntries(p.files.flatMap(f => f.samples.map(x => [x.key, x.sex]))));
   const samples = p.files.flatMap(f => f.samples.map(x => ({ x, f })));
-  const noCount = p.files.some(f => f.format !== 'interval' || f.warnings.some(w => /no #Probes/.test(w)));
+  const noCount = p.files.some(f => f.format === 'bed' || f.format === 'vcf' || f.warnings.some(w => /no #Probes/.test(w)));
   // no file of the question gives a probe count (BED, VCF): no minimum to ask
-  const counted = samples.some(({ x }) => x.cnvs.some(c => c.probes != null));
+  const counted = samples.some(({ x, f }) => isProbeOnly(f) || x.cnvs.some(c => c.probes != null));
+  // probes-only patients: their calls computed now, again when the detection settings change
+  const s = useCgh(), probeOnly = samples.filter(({ f }) => isProbeOnly(f)).map(({ x }) => x.key);
+  useEffect(() => { cgh.runProbeCalls(probeOnly); }, [s.probeOpts, probeOnly.join()]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="fixed inset-0 z-[80] bg-black/40 flex items-start justify-center p-6" role="dialog" aria-modal="true" aria-label="Minimum number of probes"
       onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); cgh.cancel(); } if (e.key === 'Enter' && samples.length && !/^(SELECT|BUTTON|A)$/.test((e.target as HTMLElement).tagName)) cgh.accept(n, sexes, kb); }}>
@@ -160,21 +164,25 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
             <tbody>{samples.map(({ x, f }) => {
               const kept = x.cnvs.filter(c => isAnalysed(c, n, kb)).length;
               return <tr key={x.key} className="border-b border-slate-100">
-                <td className="py-1 font-semibold">{x.name}</td><td className="text-slate-500 truncate max-w-[150px]" title={f.name}>{f.name}</td>
+                <td className="py-1 font-semibold">{x.name}{isProbeOnly(f) && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold whitespace-nowrap" title={PROBE_ONLY_WARNING} data-cgh-probeonly-tag>probes only</span>}</td><td className="text-slate-500 truncate max-w-[110px]" title={f.name}>{f.name}</td>
                 <td className={f.build ? '' : 'text-amber-700'} title={f.buildText ? `the file says Genome ${f.buildText}` : 'the file states no build: read as GRCh37'}>{f.build ?? 'GRCh37 ?'}</td>
                 <td><SexSelect value={sexes[x.key] ?? null} onChange={v => setSexes(m => ({ ...m, [x.key]: v }))} title={x.sex ? `the file says ${x.sex}` : undefined} /></td>
-                <td className="text-right tabular-nums">{x.cnvs.length}</td><td className="text-right tabular-nums font-semibold">{kept}</td>
+                {isProbeOnly(f) && !cgh.probeCallsOf(x.key) ? <td colSpan={2} className="text-right text-slate-400">detecting…</td>
+                  : <><td className="text-right tabular-nums">{x.cnvs.length}</td><td className="text-right tabular-nums font-semibold">{kept}</td></>}
               </tr>;
             })}</tbody>
           </table>}
           {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x }) => { const d = cgh.probes(x.key)?.dlrs;
             return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : cgh.probesReading(x.key) ? ' · reading…' : ' (not readable)'}</div>; })}
+          {probeOnly.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-900 flex flex-wrap items-center gap-x-2 gap-y-1" data-cgh-probeonly-question>
+            <span><b>Probes only:</b> no call table; the calls are detected from the probes by this page (CBS) with these settings, again when they or the sex change; not CytoGenomics calls, to confirm in the dedicated software.</span>
+            <ProbeSettings /></div>}
           {noCount && counted && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
             <button className="text-accent-700 hover:underline" onClick={() => cgh.remap(f)}>{f.remembered ? '(change…)' : 'columns…'}</button></div>)}
           {p.notes.map(e => <div key={e} className="text-[11px] text-slate-500">{e}</div>)}
-          {duplicateNames([...loaded, ...p.files]).map(e => <div key={e} className="text-[11px] text-amber-700" data-cgh-dup>{e}</div>)}
+          {duplicateNames([...loaded.filter(f => !f.samples.some(x => p.replaces?.includes(x.key))), ...p.files]).map(e => <div key={e} className="text-[11px] text-amber-700" data-cgh-dup>{e}</div>)}
           {p.errors.map(e => <div key={e} className="text-[11px] text-red-700">{e}</div>)}
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
@@ -278,7 +286,10 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   /** one file written back; a file holds every sample it was read with: all of them are marked exported, only once its download is triggered */
   const exportOne = (fl: CghFile) => {
     // a class given here, else the file's own cell as written (not translated into the list's words)
-    const text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), c => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '');
+    const iscn = (c: CghCnv) => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '';
+    const text = isProbeOnly(fl)
+      ? exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => bandOfCall(c, s.ann[c.id]), copies: c => estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? '', iscn, cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c) })
+      : exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
     a.download = fl.saveAs;
@@ -303,7 +314,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         {samples.map(({ x, f: fl }) => {
           const n = x.cnvs.filter(c => passes(s, c)).length, on = s.sample === x.key || samples.length === 1;
           return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
-            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
+            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null}{isProbeOnly(fl) && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[9.5px] font-semibold align-[1px]" title={PROBE_ONLY_WARNING} data-cgh-probeonly-tag>probes only</span>} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
             <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
               onClick={() => { if (!s.dirtyKeys[x.key] || confirm(`${x.name}: the classes and notes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
           </span>;
@@ -372,6 +383,9 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           {notAnn.length > 0 && <span data-cgh-notann> · {notAnn.length} not annotated · <button className="text-accent-700 hover:underline font-medium" onClick={() => annotateNow(notAnn)}
             title={`Annotate the listed calls not annotated yet (up to ${CGH_MAX_ANNOTATED} a click, the largest first)`}>annotate them</button></span>}</span>
       </div>
+      {listed.some(e => isProbeOnly(e.f)) && <div className="mx-5 mb-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11.5px] text-amber-900" role="note" data-cgh-probeonly-banner>
+        <b>Probes only{listed.length > 1 ? ` (${listed.filter(e => isProbeOnly(e.f)).map(e => e.x.name).join(', ')})` : ''}:</b> {PROBE_ONLY_WARNING}
+        {listed.some(e => isProbeOnly(e.f) && !cgh.probeCallsOf(e.x.key)) && <span className="text-amber-700"> Detecting…</span>}</div>}
       <ProbeCallsBar listed={listed} shown={s.shown} onShow={onShow} />
       {(() => { const one = s.sample ? s.files.flatMap(fl => fl.samples.map(x => ({ x, fl }))).find(y => y.x.key === s.sample) : null; return one ? <PatientIscn x={one.x} build={one.fl.build ?? 'GRCh37'} /> : null; })()}
       <div ref={tableBox} style={{ maxHeight: 'max(250px, 40vh)' }} className="mx-5 mb-1.5 border border-slate-200 rounded-lg overflow-auto outline-none focus:ring-2 focus:ring-accent-100" tabIndex={0} aria-label="Array-CGH calls (↑ ↓ to go from one to the next)"

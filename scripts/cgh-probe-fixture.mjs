@@ -1,7 +1,9 @@
 // Writes an invented array-CGH export (zip: IntervalBasedReport.xls + CGH_Log_Ratio.txt) with known events, to test
 // the probe calls (cghSegment.ts). Invented data only: a fake sample, about 60k probes, Gaussian noise (SD 0.13).
-// Usage: node scripts/cgh-probe-fixture.mjs out.zip [--female]
-import { writeFileSync } from 'node:fs';
+// Usage: node scripts/cgh-probe-fixture.mjs out.zip [--female] [--split DIR]
+// --split DIR also writes, for the probes-only mode, DIR/CGH_Log_Ratio_DEMO02.txt (the probe file alone),
+// DIR/demo2-probes-only.zip (the probe file and two dummy files, no table) and DIR/IntervalBasedReport_DEMO02.xls (the table alone).
+import { writeFileSync, mkdirSync } from 'node:fs';
 import { zipSync, strToU8 } from 'fflate';
 
 const out = process.argv[2] ?? 'cgh-probe-fixture.zip', female = process.argv.includes('--female');
@@ -44,3 +46,12 @@ rows.push(`${rows.length + 1}\tchr3\tp21\t60000000\t60000059\t1\t0.000000\t0.000
 const rep = ['Genome: hg19', `Array Design Info: ${S}[000000_20000101]`, '', H, S, ...rows, '', 'Number of calls per sample:', `${S} =${rows.length}`, ''];
 writeFileSync(out, zipSync({ 'demo2/IntervalBasedReport.xls': strToU8(rep.join('\r\n')), 'demo2/CGH_Log_Ratio.txt': strToU8(lines.join('\n') + '\n') }));
 console.log(`${out}: ${k} probes; events`, EVENTS.map((e, q) => `${e.chr}:${span[q][0]}-${span[q][span[q].length - 1]} ${e.n}p ${e.lr}`).join(', '));
+const split = process.argv.indexOf('--split');
+if (split > 0) {
+  const dir = process.argv[split + 1], probes = strToU8(lines.join('\n') + '\n');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${dir}/CGH_Log_Ratio_${S}.txt`, probes);
+  writeFileSync(`${dir}/demo2-probes-only.zip`, zipSync({ 'demo2/CGH_Log_Ratio.txt': probes, 'demo2/QC_Metrics.xml': strToU8('<qc><dlrs>0.13</dlrs></qc>'), 'demo2/plot.png': new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]) }));
+  writeFileSync(`${dir}/IntervalBasedReport_${S}.xls`, strToU8(rep.join('\r\n')));
+  console.log(`${dir}: probe file alone, zip without a table, table alone`);
+}

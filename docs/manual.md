@@ -231,7 +231,7 @@ automated export (images, XML, QC tables…) are left aside, said in one line of
 a table whose columns are not recognised is only asked about when the zip holds no table read by itself. The probes' log
 ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
 memory with the zip's patient (read on first view); dropped alone, the file goes with the loaded
-sample of that name, else the question says it was not matched. The page then asks the
+sample of that name, else it makes a **probes-only** patient (see *Probes only* below). The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
 with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
@@ -317,6 +317,20 @@ the copies estimated from it; a click draws one like a call (probe panel and bro
 (they are made from the same probes). *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
 low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
 panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
+
+**Probes only.** A `CGH_Log_Ratio.txt` added with no loaded patient of its name (alone, or in a zip without a call table)
+makes a patient of its own, named from its `Normalized log ratio(<name>)` header (else the file name), on the build of
+its AMADID line (hg19 / hg38). Its calls are its probe calls with the current settings, recomputed when the settings or
+the sex change (a class or a note stays on a call whose position is unchanged); they are the patient's table rows, with
+*Probes*, *Log R* (the segment's mean), copies from the log ratio (mosaic tag), the band from the UCSC bands, then the
+usual annotation, priority, ISCN, classification, note, filters, series, whole genome and probe panel. The question
+shows the patient *probes only*, with its sex, the detection *settings* and the DLRS; its tab carries a *probes only*
+tag and a banner: *Calls detected from the probes by this page (CBS), not by CytoGenomics: to confirm in the dedicated
+software.* Its export is a new tab-separated file, `<name>.probe-calls.txt`: header lines (source probe file, build,
+detection settings, date), then Chromosome, Start, Stop, Cytoband, Size(kb), Type, #Probes, Mean Log Ratio, Copies,
+ISCN, Classification, Comment. A table of the same patient added later takes its probes and replaces the probes-only
+patient when its question is accepted: the question says so, and that the classes and notes given to the probe calls are
+not carried over (Cancel to export them first).
 
 **Whole genome.** Under the table, where the call's window stands, the *Whole genome* panel shows one patient (the tab's;
 in *All patients* a patient list in the panel): chromosomes 1-22, X, Y, sizes from their GRCh37 lengths, every probe

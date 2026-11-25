@@ -64,7 +64,7 @@ export interface CghSample { key: string; name: string; fileId: string; declared
   sex: CghSex | null }
 export interface CghFile {
   /** the file's name (for a file of a zip: zip › path inside), and the name its export is saved under */
-  id: string; name: string; saveAs: string; format: 'interval' | 'bed' | 'vcf';
+  id: string; name: string; saveAs: string; format: 'interval' | 'bed' | 'vcf' | 'probes';
   /** the build the file states (Genome hg19 → GRCh37), null when it states none */
   build: GenomeBuild | null; buildText: string | null;
   /** the header lines as key / value (Array Design Info, Creation Date…) */
