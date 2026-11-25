@@ -70,7 +70,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   // the ClinGen track folded by default: HI 3 / TS 3 regions only, the recurrent list and its LCRs on demand
-  const cnvTracks = useCnvRegionTracks(drawn?.build ?? 'GRCh37');
+  const cnvTracks = useCnvRegionTracks(drawn?.build ?? 'GRCh37', { clinGenOn: true });
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
     setGenome(false);

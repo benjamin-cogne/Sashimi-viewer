@@ -215,7 +215,7 @@ const store = {
  */
 const SV_SETTING_KEYS = ['sashimi.svColorBy', 'sashimi.svNear', 'sashimi.svDgv', 'sashimi.svAchro', 'sashimi.svClinvarSv', 'sashimi.svClinvarSnv',
   'sashimi.svClinvarSvMode', 'sashimi.svClinvarSnvMode', 'sashimi.svGeneFilter', 'sashimi.svDomains',
-  'sashimi.svExtra.panelAppCnv', 'sashimi.svExtra.cghClinGen'];
+  'sashimi.svExtra.panelAppCnv', 'sashimi.svExtra.cghClinGen', 'sashimi.svExtra.cghClinGen.cghPage'];
 export function resetSvBrowserSettings(): void { for (const k of SV_SETTING_KEYS) store.set(k, null); }
 const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, name: p.name, version: p.version, genes: new Map(p.genes.map(g => [g.symbol.toUpperCase(), g])) });
 
