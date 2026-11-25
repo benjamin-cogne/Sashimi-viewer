@@ -109,6 +109,8 @@ export interface EmbeddedView {
   uniqueOnly?: boolean;
   /** by sample id; the JSON form of version 1 exports or the columnar form of version 2 */
   coverage: Record<string, EncodedCoverage | EncodedCoverageV2>;
+  /** why a view carries no reads: '*' for every sample (reads track off, view wider than its reads window), else by sample id (an error) */
+  readsNotExported?: Record<string, string>;
   /** reads by sample id, for views exported with their reads track on */
   reads?: Record<string, EncodedReads | EncodedReadsV2>;
   /** CpG methylation by sample id (long-read DNA samples), for views exported with their Methylation layer on */
@@ -427,7 +429,12 @@ export class EmbeddedDataSource extends LocalDataSource {
     const phasedAsk = mode === 'reads' && !opts?.support && !!opts?.phase;
     const { vi: bestVi, exact, mismatch } = this.pickView(chrom, start, end, v => v.reads?.[String(sampleId)]?.window, minMapq, !!opts?.secondary, minLengthOf(opts) ?? 0, true, v => phasedAsk && !!v.phase?.[String(sampleId)]);
     if (bestVi < 0 && mismatch) throw new Error(`The reads of this window were exported with ${mismatch}: set the filters back to it to see them, or add the alignment files`);
-    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
+    if (bestVi < 0) {
+      // a view over this window that says why its reads are missing
+      const why = this.payload.views.find(v => sameChrom(v.window.chrom, chrom) && v.window.end > start && v.window.start < end && (v.readsNotExported?.[String(sampleId)] || v.readsNotExported?.['*']));
+      const reason = why ? why.readsNotExported![String(sampleId)] ?? why.readsNotExported!['*'] : null;
+      throw new Error(reason ? `The reads of this window were not exported: ${reason}. Add the alignment files to see them` : `The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
+    }
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
     const support = !collapsed ? opts?.support : undefined;

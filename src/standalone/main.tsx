@@ -713,8 +713,9 @@ function App() {
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' ? 'rna' as const : false;
             raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary, minReadLength: st.minReadLength,
-              // a stranded sample of a view showing the strands keeps them split in the page
-              strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
+              // a stranded sample keeps its strands split in the page, whether or not the view shows them now: the reader
+              // can turn Strands on (exported without them, its coverage stayed one, only its reads split)
+              strands: smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -750,10 +751,15 @@ function App() {
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
         let phase: Record<string, EmbeddedPhase> | undefined;
+        // why reads are missing, for the exported page to say it: '*' the whole view, else by sample id
+        const readsNotExported: Record<string, string> = {};
+        if (!st.reads) readsNotExported['*'] = 'the reads track was off in this view when it was exported';
         if (st.reads) {
           const readsMax = readsWindowOfView(st);
-          if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
-          else {
+          if (span > readsMax) {
+            skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
+            readsNotExported['*'] = `the view was ${(span / 1000).toFixed(0)} kb wide when it was exported, above its ${readsMax / 1000} kb reads window`;
+          } else {
             const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
             // as the view asks for them: grouped by the page's phasing, the reads the page phases (the view and a quarter
             // of it on each side, up to READS_PHASE_CAP of them) exported as they are, each with its haplotype, and the
@@ -786,12 +792,12 @@ function App() {
                 if (mw) r.reads = r.reads.map(x => (x.me ? { ...x, me: x.me.map((v, i, a) => (i & 1 ? exportedCall(v, thresholdAt(mw, a[i - 1])) : v)) } : x));
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
-              } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
+              } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); readsNotExported[String(smp.id)] = `they could not be read when the page was exported (${e?.message || e})`; }
               done++;
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
