@@ -84,7 +84,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
   // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
-  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey]) : null;
+  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!over) setOver(true); }}

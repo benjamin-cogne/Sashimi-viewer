@@ -5,7 +5,7 @@
  * without a probe file: its calls only, as bars over the chromosomes drawn to scale (no log-ratio axis, no chromosome view).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cgh, useCgh, classOf, passes, probeCnv, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
+import { cgh, useCgh, classOf, passes, probeCnv, buildOfKey, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
 import { fmtBp as fmt, sizeText, type CghCnv, type CghFile } from './cghIntervals';
 import { lowerBound } from './cghProbes';
 import { chromLength } from '../../standalone/assembly';
@@ -58,7 +58,7 @@ export function LrScale() {
 
 /** a call's characteristics, for the hover tips (here and in the probe panel) */
 export function callLines(s: CghState, c: CghCnv): string[] {
-  const est = c.copies == null ? estCopies(c, s.sex[c.sampleKey]) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
+  const est = c.copies == null ? estCopies(c, s.sex[c.sampleKey], buildOfKey(s, c.sampleKey)) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
   return [
     `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${sizeText(c.sizeKb)} · ${c.kind}`,
     `${c.probes ?? '?'} probes${c.logRatio != null ? ` · mean log ratio ${c.logRatio.toFixed(2)}` : ''}`,
@@ -74,7 +74,10 @@ export function CghTip({ x, y, w, title, lines }: { x: number; y: number; w: num
 }
 
 /** the median of a few values (sorted in place) */
-const median = (v: number[]) => { v.sort((a, b) => a - b); const h = v.length >> 1; return v.length % 2 ? v[h] : (v[h - 1] + v[h]) / 2; };
+/** numeric sort of a typed copy (native, no comparator: 1M probes' pixel medians in tens of ms, not hundreds) */
+const median = (v: number[]) => { const a = Float64Array.from(v).sort(), h = a.length >> 1; return a.length % 2 ? a[h] : (a[h - 1] + a[h]) / 2; };
+/** a pixel's median line point: over 201 evenly spaced probes of it when it holds more (1M-probe arrays; a 60k array has under 100 a pixel) */
+const cellMedian = (v: number[]) => (v.length <= 201 ? median(v) : median(Array.from({ length: 201 }, (_, k) => v[Math.floor((k * (v.length - 1)) / 200)])));
 
 export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: boolean; onToggle: () => void; onOpen: (c: CghCnv, f: CghFile) => void; loadersFor: (b: GenomeBuild) => Pick<SvGeneLoaders, 'getCytobands'> }) {
   const s = useCgh();
@@ -100,7 +103,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     if (!open || !key || !cgh.hasProbes(key)) return null;
     const t = performance.now(), p = cgh.probes(key);
     return p ? { p, ms: performance.now() - t } : null;
-  }, [open, key]);
+  }, [open, key, cgh.probeGen(key)]); // eslint-disable-line react-hooks/exhaustive-deps
   /** the chromosomes' plots and the canvas height: side by side, one chromosome, or columns (one row, two when narrow) */
   const { segs, H, rows } = useMemo<{ segs: Seg[]; H: number; rows: number }>(() => {
     if (!w) return { segs: [], H: HH, rows: 1 };
@@ -171,31 +174,34 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
       } else for (const sg of segs) g.fillText(sg.ch.slice(3), (sg.p0 + sg.p1) / 2, PB + 10);
       g.strokeStyle = '#cbd5e1'; g.strokeRect(L + 0.5, PT + 0.5, w - L - R - 1, PH - 1);
     }
-    let n = 0, clipped = 0;
-    if (pr) {
-      const rws = H, cols = Math.ceil(w) + 1, grid = new Uint8Array(cols * rws), med: [number, number][][] = [];
-      const clip: { sg: Seg; at: number; hi: boolean }[] = [], seen = new Set<string>();
-      for (const sg of segs) {
-        const q = pr.p.byChrom.get(sg.ch); if (!q) continue;
-        const pts: [number, number][] = [], buf: number[] = [];
-        let cell = -1;
-        // the median line: per pixel along the position (whole genome), or over 15 probes (one chromosome)
-        const flush = () => { if (buf.length) { const m = lrOf(sg, median(buf), S); pts.push(vert ? [m, cell + 0.5] : [cell + 0.5, m]); buf.length = 0; } };
-        const lo = Math.min(sg.p0, sg.p1), hi = Math.max(sg.p0, sg.p1);
-        for (let i = 0; i < q.lr.length; i++) {
-          const v = q.lr[i]; if (Number.isNaN(v)) continue;
-          const at = posOf(sg, (q.start[i] + q.end[i]) / 2); if (at < lo || at > hi) continue;
-          const [x, y] = xyOf(sg, (q.start[i] + q.end[i]) / 2, v, S); n++;
-          if (Math.abs(v) > S) {
-            // beyond the range: one triangle per 3 px along the chromosome and side
-            clipped++; const k = `${sg.ch}|${(at / 3) | 0}|${v > 0}`; if (!seen.has(k)) { seen.add(k); clip.push({ sg, at, hi: v > 0 }); }
-          } else grid[(x | 0) * rws + (y | 0)] = v > THR ? 2 : v < -THR ? 3 : 1;
-          const c = at | 0;
-          if (chrom) { buf.push(v); if (buf.length === 15) { pts.push([x, lrOf(sg, median(buf.slice()), S)]); buf.shift(); } } else { if (c !== cell) { flush(); cell = c; } buf.push(v); }
-        }
-        if (!chrom) flush();
-        med.push(pts);
+    let n = 0, clipped = 0, timer = 0;
+    const done = () => { el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', String(n)); el.setAttribute('data-clipped', String(clipped)); };
+    if (!pr) { done(); return; }
+    const rws = H, cols = Math.ceil(w) + 1, grid = new Uint8Array(cols * rws), med: [number, number][][] = [];
+    const clip: { sg: Seg; at: number; hi: boolean }[] = [], seen = new Set<string>();
+    const one = (sg: Seg) => {
+      const q = pr.p.byChrom.get(sg.ch); if (!q) return;
+      const pts: [number, number][] = [], buf: number[] = [];
+      let cell = -1;
+      // the median line: per pixel along the position (whole genome), or over 15 probes (one chromosome)
+      const flush = () => { if (buf.length) { const m = lrOf(sg, cellMedian(buf), S); pts.push(vert ? [m, cell + 0.5] : [cell + 0.5, m]); buf.length = 0; } };
+      const lo = Math.min(sg.p0, sg.p1), hi = Math.max(sg.p0, sg.p1);
+      for (let i = 0; i < q.lr.length; i++) {
+        const v = q.lr[i]; if (Number.isNaN(v)) continue;
+        const at = posOf(sg, (q.start[i] + q.end[i]) / 2); if (at < lo || at > hi) continue;
+        // no tuple per probe (1M probes): the position and the log ratio's pixel
+        const l = lrOf(sg, v, S), x = sg.vert ? l : at, y = sg.vert ? at : l; n++;
+        if (Math.abs(v) > S) {
+          // beyond the range: one triangle per 3 px along the chromosome and side
+          clipped++; const k = `${sg.ch}|${(at / 3) | 0}|${v > 0}`; if (!seen.has(k)) { seen.add(k); clip.push({ sg, at, hi: v > 0 }); }
+        } else grid[(x | 0) * rws + (y | 0)] = v > THR ? 2 : v < -THR ? 3 : 1;
+        const c = at | 0;
+        if (chrom) { buf.push(v); if (buf.length === 15) { pts.push([x, lrOf(sg, median(buf.slice()), S)]); buf.shift(); } } else { if (c !== cell) { flush(); cell = c; } buf.push(v); }
       }
+      if (!chrom) flush();
+      med.push(pts);
+    };
+    const paint = () => {
       const d = chrom ? 2 : 1.5;
       for (const [cls, col] of [[1, '#111827'], [2, '#dc2626'], [3, '#16a34a']] as const) {
         g.fillStyle = col; g.beginPath();
@@ -212,8 +218,17 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
       }
       g.strokeStyle = '#1e3a8a'; g.lineWidth = vert ? 1 : 1.2;
       for (const pts of med) { g.beginPath(); pts.forEach(([x, y], j) => (j ? g.lineTo(x, y) : g.moveTo(x, y))); g.stroke(); }
-    }
-    el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', String(n)); el.setAttribute('data-clipped', String(clipped));
+      done();
+    };
+    // a large array (1M probes) is read a few chromosomes a task (under ~60 ms each), so the page keeps answering; 61k probes: at once
+    let k = 0;
+    const run = () => {
+      const t1 = performance.now();
+      while (k < segs.length && (performance.now() - t1 < 60 || pr.p.n < 300_000)) one(segs[k++]);
+      if (k < segs.length) timer = window.setTimeout(run, 0); else paint();
+    };
+    run();
+    return () => clearTimeout(timer);
   }, [w, segs, H, pr, open, S, probesOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the calls: file calls (loss red, gain blue) and probe calls (purple), cheap, redrawn with the state

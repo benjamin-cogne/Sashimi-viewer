@@ -9,9 +9,10 @@ import { parseCghFile, aberrationHeader, leafOf, toClass, type CghFile, type Cgh
 import { NeedsMapping, findMap, splitRecords, type MapSpec } from './cghMapping';
 import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from './cghFormats';
 import { isVcf, parseVcf } from './cghVcf';
-import { parseProbes, probeSampleOf, type CghProbes } from './cghProbes';
+import { parseProbes, probeSampleOf, type CghProbes, type CghProbeChrom } from './cghProbes';
 import { seriesOf } from './cghSeries';
 import { detect, SEG_DEFAULTS, type ProbeCalls, type ProbeEvent, type SegOpts } from './cghSegment';
+import ProbeWorker from './cghProbeWorker?worker&inline';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
 import type { CnvAnn } from './cghAnnotate';
 import type { GeneModes } from '../../standalone/panelapp';
@@ -168,15 +169,71 @@ const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]
  * read once into typed arrays. Kept out of the state (no redraw), in this tab only: drawn by the probe panel, their DLRS in the import question.
  */
 const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, CghProbes | null>();
-const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); } };
+/** each patient's probe data version: bumped when its probes are replaced or dropped (memos over the probes, results computed on older ones) */
+const probeGen = new Map<string, number>();
+const bump = (k: string) => probeGen.set(k, (probeGen.get(k) ?? 0) + 1);
+const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); bump(k); } callsQueue = callsQueue.filter(k => !keys.includes(k)); };
 /** what a patient's probe calls depend on: the settings and the sex (chrY read for a male only) */
 const callsKey = (k: string) => `${state.sex[k] ?? ''}|${state.probeOpts.minProbes}|${state.probeOpts.minLr}|${state.probeOpts.t}`;
-let callsQueue: string[] = [];
-/** one patient a tick (about half a second each for 60k probes), so the page stays usable while they are computed */
-function nextCalls() {
+let callsQueue: string[] = [], callsBusy = false;
+/** the worker computing the probe calls (cghSegWorker.ts); null: none could be made, they are computed on the page */
+let segWorker: Worker | null | undefined, segReq = 0;
+const segWaiting = new Map<number, (r: any) => void>();
+function worker(): Worker | null {
+  if (segWorker !== undefined) return segWorker;
+  try {
+    segWorker = new ProbeWorker();
+    segWorker.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => { const f = segWaiting.get(e.data.id); segWaiting.delete(e.data.id); f?.(e.data.result ?? null); };
+    segWorker.onerror = () => { segWorker?.terminate(); segWorker = null; for (const f of segWaiting.values()) f(null); segWaiting.clear(); };
+  } catch { segWorker = null; }
+  return segWorker;
+}
+/** a patient's probe calls: in the worker (a 1M-probe array takes seconds), else on the page */
+function detectOff(pr: CghProbes, o: SegOpts, male: boolean): Promise<ProbeCalls> {
+  const w = worker();
+  if (!w) return Promise.resolve(detect(pr, o, male));
+  const id = ++segReq, byChrom = new Map([...pr.byChrom].map(([c, p]) => [c, { start: p.start, end: p.end, lr: p.lr, name: [] as string[] }]));
+  return new Promise(res => { segWaiting.set(id, r => res(r ?? detect(pr, o, male))); w.postMessage({ id, byChrom, build: pr.build, opts: o, male }); });
+}
+/** probe files being read in the worker, by sample key */
+const probeParsing = new Map<string, Promise<CghProbes | null>>();
+const parseSync = (b: Uint8Array) => { try { return parseProbes(b); } catch { return null; } };
+/** a patient's probes read (in the worker when there is one: 1M probes take over a second); the page redrawn when they are */
+function probesAsync(k: string): Promise<CghProbes | null> {
+  if (probeRead.has(k)) return Promise.resolve(probeRead.get(k) ?? null);
+  const b = probeBytes.get(k); if (!b) return Promise.resolve(null);
+  const had = probeParsing.get(k); if (had) return had;
+  const w = worker(), gen = probeGen.get(k);
+  const pr: Promise<CghProbes | null> = !w ? Promise.resolve(parseSync(b)) : new Promise(res => {
+    const id = ++segReq;
+    segWaiting.set(id, (r: (Omit<CghProbes, 'byChrom'> & { byChrom: Map<string, Omit<CghProbeChrom, 'name'> & { name: string }> }) | null) =>
+      res(r ? { ...r, byChrom: new Map([...r.byChrom].map(([c, x]) => [c, { ...x, name: x.name.split('\n') }])) } : parseSync(b)));
+    w.postMessage({ id, parse: b });
+  });
+  const done = pr.then(p => {
+    if (probeParsing.get(k) === done) probeParsing.delete(k);
+    // the probes replaced or dropped meanwhile: this reading is dropped
+    if (probeGen.get(k) !== gen || probeBytes.get(k) !== b) return probeRead.get(k) ?? null;
+    probeRead.set(k, p); probeBytes.delete(k); bump(k); set({});
+    return p;
+  });
+  probeParsing.set(k, done);
+  return done;
+}
+/** one patient at a time, in the worker, so the page stays usable while they are computed */
+async function nextCalls() {
+  if (callsBusy) return;
   const k = callsQueue.shift(); if (k == null) return;
-  const pr = cgh.probes(k), key = callsKey(k);
-  if (pr && state.probeCalls[k]?.key !== key) set({ probeCalls: { ...state.probeCalls, [k]: { ...detect(pr, state.probeOpts, state.sex[k] === 'male'), key } } });
+  callsBusy = true;
+  try {
+    const pr = await probesAsync(k), key = callsKey(k), gen = probeGen.get(k);
+    if (pr && state.probeCalls[k]?.key !== key) {
+      const r = await detectOff(pr, state.probeOpts, state.sex[k] === 'male');
+      // kept only when the settings, sex and probes are still those it was computed for (else asked again)
+      if (callsKey(k) === key && probeGen.get(k) === gen && cgh.hasProbes(k)) set({ probeCalls: { ...state.probeCalls, [k]: { ...r, key } } });
+      else if (cgh.hasProbes(k) && !callsQueue.includes(k)) callsQueue.push(k);
+    }
+  } finally { callsBusy = false; }
   if (callsQueue.length) setTimeout(nextCalls, 0);
 }
 /** a probe-only event as a call, to be drawn like one (never in a file, never exported) */
@@ -200,21 +257,20 @@ export const cgh = {
   setModes(m: Record<string, GeneModes | 'loading' | 'error'>) { set({ modes: { ...state.modes, ...m } }); },
   /** whether a patient has its probes' log ratios (CGH_Log_Ratio.txt) */
   hasProbes: (sampleKey: string) => probeBytes.has(sampleKey) || !!probeRead.get(sampleKey),
-  /** a patient's probes' log ratios, read on first use (null: none, or not readable) */
+  /** a patient's probes are being read (in the worker) */
+  probesReading: (sampleKey: string) => probeParsing.has(sampleKey),
+  /** a patient's probe data version (a memo over its probes depends on it) */
+  probeGen: (sampleKey: string) => probeGen.get(sampleKey) ?? 0,
+  /** a patient's probes' log ratios, read on first use in the worker (null: none, not readable, or being read: the page is redrawn when they are) */
   probes(sampleKey: string): CghProbes | null {
-    if (!probeRead.has(sampleKey)) {
-      const b = probeBytes.get(sampleKey); if (!b) return null;
-      let p: CghProbes | null = null;
-      try { p = parseProbes(b); } catch { /* not readable */ }
-      probeRead.set(sampleKey, p); probeBytes.delete(sampleKey);
-    }
+    if (!probeRead.has(sampleKey)) { void probesAsync(sampleKey); return probeRead.get(sampleKey) ?? null; }
     return probeRead.get(sampleKey) ?? null;
   },
   /** the probe calls of these patients, computed in the background when missing or out of date */
   runProbeCalls(keys: string[]) {
     const todo = keys.filter(k => cgh.hasProbes(k) && state.probeCalls[k]?.key !== callsKey(k) && !callsQueue.includes(k));
     if (!todo.length) return;
-    const idle = !callsQueue.length; callsQueue.push(...todo); if (idle) setTimeout(nextCalls, 0);
+    callsQueue.push(...todo); if (!callsBusy) setTimeout(nextCalls, 0);
   },
   /** the current probe calls of a patient (null: none yet, or out of date) */
   probeCallsOf: (k: string): ProbeCalls | null => (state.probeCalls[k]?.key === callsKey(k) ? state.probeCalls[k] : null),
@@ -232,11 +288,14 @@ export const cgh = {
   /** read the files picked; they wait for the minimum number of probes */
   async add(list: FileList | File[]) {
     const files: CghFile[] = [], errors: string[] = [], notes: string[] = [], toMap: CghState['toMap'] = [];
-    const seen = new Set([...state.files, ...(state.pending?.files ?? [])].map(f => f.lines.join('\n')));
-    const take = (f: CghFile) => { const k = f.lines.join('\n'); if (seen.has(k)) { notes.push(`${f.name}: already added`); return; } seen.add(k); files.push(f); };
+    const seen = new Map([...state.files, ...(state.pending?.files ?? [])].map(f => [f.lines.join('\n'), f] as const));
+    /** the file accepted, or the one already loaded with the same content (its samples get the zip's probes) */
+    const take = (f: CghFile): CghFile => { const k = f.lines.join('\n'), had = seen.get(k); if (had) { notes.push(`${f.name}: already added`); return had; } seen.set(k, f); files.push(f); return f; };
     // probe log-ratio files given alone (or in a zip without a table): matched to a sample by name after the loop
     const loose: { name: string; sample: string; bytes: Uint8Array }[] = [];
-    const keep = (keys: string[], bytes: Uint8Array) => { for (const k of keys) { probeBytes.set(k, bytes); probeRead.delete(k); } };
+    // new probes for a patient: its probe calls of the former ones dropped, out of the queue
+    const stale: string[] = [];
+    const keep = (keys: string[], bytes: Uint8Array) => { dropProbes(keys); for (const k of keys) { probeBytes.set(k, bytes); stale.push(k); } };
     for (const f of Array.from(list)) {
       try {
         const buf = new Uint8Array(await f.arrayBuffer());
@@ -255,7 +314,7 @@ export const cgh = {
               const r = readBytes(raw, path, patient);
               if ('toMap' in r) { asks.push(r.toMap); continue; }
               if (r.file.format === 'bed' && !/\.bed$/i.test(e.path)) { other.push(e.path); continue; }
-              read.push(r.file); take(r.file);
+              read.push(take(r.file));
               if (r.note) notes.push(r.note);
             } catch (x) { if ((x as Error).message === OLE_MESSAGE) errors.push(`${path}: ${OLE_MESSAGE}`); else other.push(e.path); }
           }
@@ -289,7 +348,10 @@ export const cgh = {
     }
     // files dropped while the question is open join it
     const p = state.pending, next = { files: [...(p?.files ?? []), ...files], errors: [...(p?.errors ?? []), ...errors], notes: [...(p?.notes ?? []), ...notes] };
-    set({ pending: next.files.length || next.errors.length || next.notes.length ? next : null, toMap: [...state.toMap, ...toMap] });
+    const probeCalls = { ...state.probeCalls }; for (const k of stale) delete probeCalls[k];
+    set({ pending: next.files.length || next.errors.length || next.notes.length ? next : null, toMap: [...state.toMap, ...toMap], probeCalls });
+    // probes given to patients already listed: their probe calls now (the list's effect runs only when the files change)
+    cgh.runProbeCalls(stale.filter(k => state.files.some(f => f.samples.some(x => x.key === k))));
   },
   /** the table at the head of the queue read with the columns chosen (null: skipped, or kept as it was) */
   mapped(file: CghFile | null) {
@@ -340,6 +402,8 @@ export const cgh = {
 
 /** a call's class: the one given in the browser, else the file's (in the laboratory's words when recognised) */
 export const classOf = (s: CghState, c: CghCnv) => s.classes[c.id] ?? toClass(c.classification) ?? c.classification;
+/** the build of a patient's file (GRCh37 when it states none) */
+export const buildOfKey = (s: CghState, key: string) => s.files.find(f => f.samples.some(x => x.key === key))?.build ?? 'GRCh37';
 /** a call's note: the one written in the browser, else the file's */
 export const noteOf = (s: CghState, c: CghCnv) => s.notes[c.id] ?? c.note;
 
@@ -348,6 +412,8 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
   const f = s.filter;
   if (!belowToo && !isAnalysed(c, f.minProbes, f.minKb)) return false;
   if (f.kind !== 'all' && c.kind !== f.kind) return false;
+  // a chrX row typed by copy number in a file without the sex: hidden when it is the normal one for the sex set (x1 male, x2 female)
+  if (c.cnSex) { const sx = s.sex[c.sampleKey]; if (sx && c.copies === (sx === 'male' ? 1 : 2)) return false; }
   if (f.hideSuppressed && c.suppressed) return false;
   const cls = classOf(s, c).trim();
   if (f.classed === 'unclassified' && cls) return false;

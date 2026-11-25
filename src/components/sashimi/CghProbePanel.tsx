@@ -55,7 +55,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
   // call bars above the plot: file calls (loss red, gain blue), then probe calls (purple)
   const T = calls ? T0 + 22 : T0, H = H0 + T - T0;
   // read on first view (61k probes: some tens of ms), then kept
-  const p = useMemo(() => cgh.probes(sk)?.byChrom.get(chrom) ?? null, [sk, chrom]);
+  const gen = cgh.probeGen(sk), p = useMemo(() => cgh.probes(sk)?.byChrom.get(chrom) ?? null, [sk, chrom, gen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [win, setWin] = useState<[number, number]>(() => (c ? around(c) : [0, chromLen]));
   const bars = useRef<Bar[]>([]), drag = useRef<{ x: number; from: number; to: number; moved: boolean } | null>(null);
   const [k, setK] = useState(7);

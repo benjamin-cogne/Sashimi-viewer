@@ -42,18 +42,18 @@ export interface CallIscn {
   differs: boolean;
 }
 /** the copy number and the mosaic fraction written for a call: the file's copies, else inferred from the log ratio */
-export function iscnCopies(c: CghCnv, sex: CghSex | undefined): { copies: string | null; mosaic: number | null } {
-  const m = mosaicOf(c, sex), mos = m?.ok && m.f < MOSAIC_TAG_BELOW ? m.f : null;
+export function iscnCopies(c: CghCnv, sex: CghSex | undefined, build?: string): { copies: string | null; mosaic: number | null } {
+  const gb = build === 'GRCh38' ? 'GRCh38' : 'GRCh37', m = mosaicOf(c, sex, gb), mos = m?.ok && m.f < MOSAIC_TAG_BELOW ? m.f : null;
   if (c.copies != null) return { copies: `x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''}`, mosaic: c.copiesHi == null ? mos : null };
   if (c.amp) return { copies: 'amp', mosaic: null };
-  const e = estCopies(c, sex);
+  const e = estCopies(c, sex, gb);
   return e ? { copies: `x${e.n}`, mosaic: e.mosaic } : { copies: null, mosaic: null };
 }
 const norm = (t: string) => t.replace(/\b(hg19|GRCh37)\b/gi, 'GRCh37').replace(/\b(hg38|GRCh38)\b/gi, 'GRCh38').replace(/[\s,]/g, '').toLowerCase();
 
 /** a call's ISCN; `whole`: the call spans the whole chromosome (written `(21)x3`) */
 export function callIscn(c: CghCnv, build: string, band: string, sex: CghSex | undefined, whole = false): CallIscn {
-  const { copies, mosaic } = iscnCopies(c, sex), b = iscnBands(band);
+  const { copies, mosaic } = iscnCopies(c, sex, build), b = iscnBands(band);
   const where = whole ? `(${chr(c)})` : b ? `${chr(c)}${b}(${num(c.start)}_${num(c.end)})` : null;
   const part = where && copies ? `${where}${copies}${mosaic != null ? `[${frac(mosaic)}]` : ''}` : null;
   const text = part ? `arr[${build}] ${part}` : null;

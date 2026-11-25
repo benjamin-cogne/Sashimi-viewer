@@ -8,12 +8,13 @@ import { agrees, SENSITIVITY, SEG_DEFAULTS, type ProbeCalls, type Sensitivity } 
 import { estCopies, estTip } from './cghMosaic';
 import { Stepper, Popover } from './controls';
 import { fmtBp as fmt, sizeText, type CghCnv, type CghFile, type CghSample } from './cghIntervals';
+import type { GenomeBuild } from '../../standalone/ensembl';
 
 const sensOf = (t: number): Sensitivity => (t <= SENSITIVITY.high ? 'high' : t >= SENSITIVITY.low ? 'low' : 'normal');
 const HOW = 'Circular binary segmentation of the probes (Olshen et al. 2004) with a fixed threshold, the segments called by their probes and mean log ratio, adjacent ones of one direction merged; chrY only for a patient said male. A second opinion beside the file\'s calls.';
 
 /** the detected events the file does not call (same type, reciprocal overlap ≥ 50 %) */
-export const extrasOf = (r: ProbeCalls, x: CghSample) => r.events.filter(e => !x.cnvs.some(c => agrees(e, c)));
+export const extrasOf = (r: ProbeCalls, x: CghSample, build: GenomeBuild | null = 'GRCh37') => r.events.filter(e => !x.cnvs.some(c => agrees(e, c, build)));
 
 
 function Settings() {
@@ -46,8 +47,8 @@ export function ProbeCallsBar({ listed, shown, onShow }: { listed: { x: CghSampl
     <div className="px-5 pb-1.5 text-[11px] text-slate-600" data-cgh-probe-calls>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="font-semibold text-slate-800" title={HOW}>Probe calls</span>
-        {withProbes.map(({ x }) => {
-          const r = cgh.probeCallsOf(x.key), n = r ? extrasOf(r, x).length : null, open = !!s.probeOpen[x.key];
+        {withProbes.map(({ x, f }) => {
+          const r = cgh.probeCallsOf(x.key), n = r ? extrasOf(r, x, f.build).length : null, open = !!s.probeOpen[x.key];
           return <button key={x.key} disabled={n == null} onClick={() => cgh.setProbeOpen(x.key, !open)} data-cgh-probe-toggle={x.key}
             className={`h-[22px] px-1.5 rounded border text-[11px] ${open ? 'border-accent-300 bg-accent-50 text-accent-800' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'} disabled:text-slate-400`}
             title={r ? `${r.events.length} events found in ${x.name}'s probes (${Math.round(r.ms)} ms; noise ${r.sigma.toFixed(2)}), ${n} not in the file` : 'Being computed from the probes…'}>
@@ -58,7 +59,7 @@ export function ProbeCallsBar({ listed, shown, onShow }: { listed: { x: CghSampl
       </div>
       {withProbes.filter(({ x }) => s.probeOpen[x.key]).map(({ x, f }) => {
         const r = cgh.probeCallsOf(x.key); if (!r) return null;
-        const ev = extrasOf(r, x);
+        const ev = extrasOf(r, x, f.build);
         return <div key={x.key} className="mt-1 border border-slate-200 rounded-lg overflow-auto max-h-[180px]" data-cgh-probe-list={x.key}>
           <table className="w-full text-[11px] border-collapse italic text-slate-500">
             <thead className="sticky top-0 bg-slate-50 not-italic text-left whitespace-nowrap"><tr className="border-b border-slate-200">
@@ -68,7 +69,7 @@ export function ProbeCallsBar({ listed, shown, onShow }: { listed: { x: CghSampl
               <th className="px-1.5 py-0.5 font-medium w-full" /></tr></thead>
             <tbody>
               {ev.map(e => {
-                const c = probeCnv(e, x.key, x.name), est = estCopies(c, s.sex[x.key]), on = shown === c.id;
+                const c = probeCnv(e, x.key, x.name), est = estCopies(c, s.sex[x.key], f.build), on = shown === c.id;
                 return <tr key={c.id} data-cgh-probe-row onClick={() => { cgh.setShown(c.id); onShow(c, f); }} title="From the probes, not in the file. Click: draw it below. Not exported."
                   className={`border-b border-slate-100 cursor-pointer ${on ? 'bg-accent-50 text-slate-700' : 'hover:bg-slate-50'}`}>
                   {many && <td className="px-1.5 py-0.5 whitespace-nowrap">{x.name}</td>}
@@ -98,7 +99,7 @@ export function ProbeMethods({ probes }: { probes: boolean }) {
     <div><b>DLRS</b> (derivative log ratio spread), per patient: the standard deviation of the differences between the log ratios of consecutive probes (sorted by position, within each chromosome, every chromosome of the file including X and Y, chrM left out), divided by √2; probes without a value skipped; no outlier removed (events and waves raise it a little). Under 10 differences: not given. Words from Agilent's guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3 poor.</div>
     <div><b>Probe calls</b>, per patient and chromosome, probes without a value skipped: circular binary segmentation (Olshen AB et al., Biostatistics 2004;5:557-72). The arc whose mean differs most from the rest of the stretch, Z = (S<sub>j</sub> − S<sub>i</sub> − k·T/n)·√(n / (k(n − k))) / σ, cuts it when |Z| ≥ t, and each piece is cut again; a fixed threshold t, without the permutation test (sensitivity high / normal / low: t = 6 / 8 / 10). σ, the noise per probe, taken once per patient: the median absolute difference between consecutive probes × 1.4826 / √2 (robust to the events). A segment is a gain (loss) when its mean log ratio is ≥ +threshold (≤ −threshold; 0.25 by default); a segment of fewer than the minimum probes (3 by default) lying between two of one direction takes that direction; neighbouring segments of one direction are merged (mean weighted by probes); kept when the merged mean still passes the threshold and it has at least the minimum probes. chrY: its pseudo-autosomal probes left out (the chrX PAR ones again), the rest read only for a patient said male (cross-hybridisation in a female). A probe call is <i>not in the file</i> when no file call of the same chromosome and type overlaps it reciprocally by ≥ 50 % (the overlap over the longer of the two; a chrY PAR call compared as its chrX twin); those are listed, never exported. The file's calls carry no mark (they are made from these same probes).</div>
     <div><b>Copy number</b>, when the file gives none: the n whose log2(n / 2) is nearest the call's mean log ratio (x0 taken as −2, so a loss is x0 below −1.5, else x1; a gain x3 up to +0.79, x4 up to +1.16…; a male's X outside the PARs and chrY: log2(n / 1)). <b>Mosaic</b>: for a one-copy change, the fraction of cells from the AChro-Puce calculator (loss 2 − 2·2<sup>LR</sup>, gain 2·2<sup>LR</sup> − 2; one-copy X / Y of a male 1 − 2<sup>LR</sup> and 2<sup>LR</sup> − 1); below 80 % the call is shown <i>mosaic ~n%</i> (an autosomal loss above −0.74, a gain below +0.49), else as a whole x1 / x3.</div>
-    <div><b>ISCN</b> (ISCN 2024, chapter 8, microarray): <span className="font-mono">arr[build] chromosome, bands from pter to qter (one band once), (start_end) with thousands commas, x copies</span>, the mosaic fraction in brackets (<span className="font-mono">x1[0.48]</span>), a whole chromosome as <span className="font-mono">(21)x3</span>; the band is the file's, else the cytogenetic bands', the copies the file's, else those above. The file's own ISCN is shown beside ours when they differ. The patient's ISCN joins the calls of the chosen classes by commas, chromosomes 1-22, X, Y, then position; with none, <i>no abnormal call selected</i> (no normal-result form written). Inheritance is not written.</div>
+    <div><b>ISCN</b> (ISCN 2024, chapter 8, microarray): <span className="font-mono">arr[build] chromosome, bands from pter to qter (one band once), (start_end) with thousands commas, x copies</span>, the mosaic fraction in brackets (<span className="font-mono">x1[0.48]</span>), a whole chromosome as <span className="font-mono">(21)x3</span>; the band is read from the UCSC cytogenetic bands at sub-band precision, the file's band only when they cannot be read, the copies the file's, else those above. The file's own ISCN is shown beside ours when they differ. The patient's ISCN joins the calls of the chosen classes by commas, chromosomes 1-22, X, Y, then position; with none, <i>no abnormal call selected</i> (no normal-result form written). Inheritance is not written.</div>
     <div className="text-amber-800"><b>Disclaimer.</b> Copy numbers are inferred from the log ratio with the thresholds above. All numbers, calls and nomenclature must be checked in the dedicated analysis software; the authors cannot be held responsible for any misinterpretation of these data.</div>
     <div><b>Whole genome view</b>: each probe drawn in its pixel cell (one mark per cell and colour, so 61k probes cost no more than the pixels), chromosomes side by side (horizontal) or as columns, position going down from pter and log ratio across (vertical); the dark line is the median of each pixel line. A chromosome opened is drawn as the call's probe panel (every probe, moving median of 3 / 7 / 15). Log-ratio range ±0.5 / ±1 (default) / ±2, further with ⊖, shared by the three views; a probe beyond it is drawn as a triangle at the edge; the colours stay at ±0.2. A male's X and Y may lie near −1 (one copy against a reference of two): not normalised.</div>
   </div>;

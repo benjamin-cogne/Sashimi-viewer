@@ -11,6 +11,7 @@
  * tab, with the classification typed in the table, and can be written back as the same table.
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
+import { parOf } from './cghMosaic';
 import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
 /** a position with thousands commas; a call's size from kb (2.61 Mb, 450 kb, 12.5 kb, 800 bp): shared by the page's parts */
@@ -55,6 +56,8 @@ export interface CghCnv {
   pval?: number | null;
   /** detected from the probes (cghSegment.ts), not in the file: drawn, never exported */
   fromProbes?: boolean;
+  /** typed by its copy number on chrX while the file states no sex: x1 kept as a loss, x2 as a gain; the one normal for the sex set later is not listed (`passes`) */
+  cnSex?: boolean;
 }
 export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[];
   /** the sex a header line gives (Gender, Sex), else null */
@@ -174,7 +177,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   const buildText = metaOf(/^genome$/i);
   const record = metaOf(/^record name$/i);
   const warnings: string[] = [];
-  let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, untyped = 0, normal = 0, iscnBuild: GenomeBuild | null = null;
+  let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, untyped = 0, normal = 0, xSexless = 0, iscnBuild: GenomeBuild | null = null;
   // the log-ratio columns (one, or gain / loss ones): each with the type its name says (Gain, Loss…), else the sign's
   const head = hi >= 0 ? sp(lines[hi]) : [];
   const lrCols = [c.lr, ...(spec.lrMore ?? [])].filter((j, k, a) => j >= 0 && a.indexOf(j) === k).map(j => { const h = head[j] ?? ''; return { j, kind: /del|loss|perte/i.test(h) && /dup|gain|amp/i.test(h) ? null : kindOfText(h), name: h.trim() }; });
@@ -218,12 +221,19 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     if (choice === 'ignore') { ignored++; skip(`line ${i + 1}: type "${typeText}" ignored`); continue; }
     if (!choice && isLohText(typeText)) { loh++; skip(`line ${i + 1}: copy-neutral (${typeText})`); continue; }
     // no type: the copy number against the normal one (a male's X, and a Y, have one), else the log ratio's sign (0: none)
-    const cn2 = chrom === 'chrY' || (chrom === 'chrX' && sex === 'male') ? 1 : 2;
-    const byCn = cn.amp ? 'gain' : cn.copies != null ? (cn.copies < cn2 ? 'loss' : cn.copies > cn2 ? 'gain' : 'normal') : null;
+    // the PARs are diploid in a male too
+    const par = (parOf(cghBuild(buildText) ?? opts.build)[chrom] ?? []).some(([a, b]) => start >= a && end <= b);
+    const cn2 = !par && (chrom === 'chrY' || (chrom === 'chrX' && sex === 'male')) ? 1 : 2;
+    // chrX outside the PARs with no sex in the file: x2 is a male's gain, x1 a female's loss; both kept, the normal one hidden once the sex is set
+    const xNoSex = chrom === 'chrX' && !sex && !par;
+    const xCn = xNoSex && !cn.amp && (cn.copies === 1 || cn.copies === 2);
+    const byCn = cn.amp ? 'gain' : xCn ? (cn.copies === 1 ? 'loss' : 'gain') : cn.copies != null ? (cn.copies < cn2 ? 'loss' : cn.copies > cn2 ? 'gain' : 'normal') : null;
     const kindRaw = choice ?? kindOfText(typeText) ?? byCn ?? (lr ? lrBy?.kind ?? (lr < 0 ? 'loss' : 'gain') : null);
     if (kindRaw === 'normal') { normal++; skip(`line ${i + 1}: copy number ${cn.copies}, the normal one`); continue; }
     if (!kindRaw) { untyped++; skip(`line ${i + 1}: no type, copy number or non-zero log ratio`); continue; }
     const kind: CghKind = kindRaw;
+    const cnSex = xCn && !choice && !kindOfText(typeText) ? true : undefined;
+    if (cnSex) xSexless++;
     const cell = c.cls >= 0 ? (f[c.cls] ?? '') : '';
     if (cell.trim()) { if (cell.includes(';;')) suffixYes++; else suffixNo++; }
     const name = (c.sample >= 0 && f[c.sample]?.trim()) || record || base;
@@ -237,7 +247,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
       sizeKb: size != null ? size * SIZE_MULT[opts.sizeUnit] : (end - start) / 1000, kind, typeText: typeText || (lrBy?.kind && lr ? lrBy.name : kind === 'loss' ? 'Deletion' : 'Gain'),
       probes: c.probes >= 0 ? nn(f[c.probes]) : null, logRatio: lr, iscn, ...cn,
       suppressed: c.sup >= 0 && /^(true|yes|1)$/i.test((f[c.sup] ?? '').trim()),
-      ...splitClass(cell), note: c.note >= 0 ? (f[c.note] ?? '').trim() : '', line: i,
+      ...splitClass(cell), note: c.note >= 0 ? (f[c.note] ?? '').trim() : '', line: i, ...(cnSex ? { cnSex } : {}),
     });
   }
   for (const s of samples.values()) {
@@ -247,6 +257,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   }
   if (untyped) warnings.push(`${count(untyped, 'row')} skipped: no type could be deduced (no type, no copy number, log ratio 0 or missing)`);
   if (normal) warnings.push(`${count(normal, 'row')} skipped: copy number normal (2; 1 on a male's X or a Y)`);
+  if (xSexless) warnings.push(`${count(xSexless, 'chrX row')} typed by copy number with no sex in the file: x1 kept as a loss, x2 as a gain; set the sex to hide the one normal for it`);
   if (ignored) warnings.push(`${count(ignored, 'row')} ignored by their type`);
   if (loh) warnings.push(`${count(loh, 'LOH / ROH row')} skipped (copy-neutral)`);
   if (mito) warnings.push(`${count(mito, 'call')} on chrM skipped`);
@@ -282,7 +293,8 @@ function parseAberrations(lines: string[], id: string, fileName: string, base: s
     if (m) meta.push([m[1].trim(), m[2].replace(/\t+/g, ' ').trim()]);
   }
   const metaOf = (re: RegExp) => meta.find(([k]) => re.test(k))?.[1] || null;
-  const buildText = metaOf(/^genome$/i);
+  // the build: the Genome line, else any header line naming one (hg19, GRCh38…); none: GRCh37 assumed, said in the question
+  const buildText = metaOf(/^genome$/i) ?? meta.find(([, v]) => cghBuild(v))?.[1] ?? null;
   // Array Design Info: 26X0001[012345_20200101]: the sample before its design
   const design = metaOf(/^array design info$/i)?.match(/^\s*([^[\],;]+?)\s*\[/)?.[1] ?? null;
   const head = lines[hi].split('\t').map(norm), col = (k: string) => head.indexOf(k);
@@ -325,6 +337,7 @@ function parseAberrations(lines: string[], id: string, fileName: string, base: s
     if (s.declaredCalls != null && s.declaredCalls !== s.cnvs.length) warnings.push(`${s.name}: the file announces ${s.declaredCalls} calls, ${s.cnvs.length} were read`);
   }
   if (mito) warnings.push(`${count(mito, 'call')} on chrM skipped`);
+  if (!cghBuild(buildText)) warnings.push('the report states no genome build (no Genome: line): GRCh37 assumed');
   if (!samples.size) throw new Error(`${fileName}: an interval-based report with no call that could be read.`);
   return { id, name: fileName, format: 'interval', build: cghBuild(buildText), buildText, meta, lines, eol, classCol: null, classSuffix: '', headerLine: hi, commentCol: null, samples: [...samples.values()], warnings, delim: '\t', spec: null, skipped, firstSkip };
 }
@@ -384,13 +397,15 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
     if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
     if (iscnOf && !hasIscn) { iscnCol = h.length; h.push('ISCN'); }
     out[file.headerLine] = joinDelimited(h, d);
-  } else if (file.format === 'interval' && (classCol == null || noteCol == null)) {
-    // a table without a header row: the missing columns after the widest call row
-    const w = Math.max(...[...byLine.keys()].map(i => { const f = sp(out[i]); let n = f.length; while (n > 0 && !f[n - 1].trim()) n--; return n; }));
+  }
+  // a table without a header row: the missing columns after the widest call row (the ISCN too, never over a data cell)
+  const wide = () => Math.max(0, ...[...byLine.keys()].map(i => { const f = sp(out[i]); let n = f.length; while (n > 0 && !f[n - 1].trim()) n--; return n; }));
+  if (file.headerLine == null && file.format === 'interval' && (classCol == null || noteCol == null)) {
+    const w = wide();
     if (classCol == null) classCol = noteCol === w ? w + 1 : w;
     if (noteCol == null) noteCol = Math.max(w, classCol + 1);
   }
-  if (iscnOf && !hasIscn && iscnCol == null && classCol != null && noteCol != null) iscnCol = Math.max(classCol, noteCol) + 1;
+  if (iscnOf && !hasIscn && iscnCol == null && classCol != null && noteCol != null) iscnCol = Math.max(wide(), classCol + 1, noteCol + 1);
   for (const [i, cnv] of byLine) {
     const cls = classOf(cnv).trim(), note = flat(noteOf(cnv));
     const cell = cls ? `${cls}${cnv.classRest || file.classSuffix}` : '';

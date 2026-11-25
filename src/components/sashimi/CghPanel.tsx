@@ -139,7 +139,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
       <div data-cgh-question className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg text-slate-900 text-xs mt-16 outline-none" tabIndex={-1} ref={el => { if (el && !el.contains(document.activeElement)) el.focus(); }}>
         <div className="px-4 pt-3 pb-2 border-b border-slate-200">
           <div className="font-bold text-sm">Array-CGH samples</div>
-          <div className="text-[11px] text-slate-500 mt-0.5">{counted ? 'Calls with fewer probes, or smaller, than this are not analysed: neither listed nor annotated (both can be changed in the list afterwards).' : 'Calls smaller than this are not analysed: neither listed nor annotated (can be changed in the list afterwards). The file gives no probe count: no minimum of probes.'}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">{!samples.length ? 'No new sample: what was done with the files is said below.' : counted ? 'Calls with fewer probes, or smaller, than this are not analysed: neither listed nor annotated (both can be changed in the list afterwards).' : 'Calls smaller than this are not analysed: neither listed nor annotated (can be changed in the list afterwards). The file gives no probe count: no minimum of probes.'}</div>
         </div>
         <div className="px-4 py-3 space-y-3">
           {counted && <div className="flex items-center gap-2">
@@ -168,7 +168,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
             })}</tbody>
           </table>}
           {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x }) => { const d = cgh.probes(x.key)?.dlrs;
-            return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : ' (not readable)'}</div>; })}
+            return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : cgh.probesReading(x.key) ? ' · reading…' : ' (not readable)'}</div>; })}
           {noCount && counted && <div className="text-[11px] text-amber-700">A file gives no probe count (BED, VCF): its calls are all kept.</div>}
           {p.files.flatMap(f => f.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => <div key={f.id + w} className="text-[11px] text-amber-700">{f.name}: {w}</div>))}
           {p.files.filter(f => f.spec).map(f => <div key={f.id + 'cols'} className="text-[11px] text-slate-500">{f.name.split(/[›/\\]/).pop()}: {f.remembered ? 'columns as mapped before ' : ''}
@@ -178,7 +178,7 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
           {p.errors.map(e => <div key={e} className="text-[11px] text-red-700">{e}</div>)}
         </div>
         <div className="px-4 py-2.5 border-t border-slate-200 flex justify-end gap-2">
-          <button onClick={() => cgh.cancel()} className="h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50">Cancel</button>
+          <button onClick={() => cgh.cancel()} className="h-[30px] px-3 rounded-[6px] border border-slate-200 text-slate-700 hover:bg-slate-50">{samples.length ? 'Cancel' : 'OK'}</button>
           {samples.length > 0 && <button data-cgh-analyse autoFocus onClick={() => cgh.accept(n, sexes, kb)} className="h-[30px] px-4 rounded-[6px] bg-accent-600 text-white font-semibold hover:bg-accent-700 disabled:opacity-40 disabled:cursor-not-allowed">Analyse {samples.length} sample{samples.length > 1 ? 's' : ''}</button>}
         </div>
       </div>
@@ -415,9 +415,9 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   <td className="px-1.5 py-0.5 font-semibold whitespace-nowrap" title={!c.cytoband && v.ann?.band ? 'Band read from the cytogenetic bands (the file gives none)' : undefined}>{c.chrom.replace(/^chr/, '')}{bandOfCall(c, v.ann).replace(/\s+/g, '')}<TopoTag c={c} v={v} hints={hints.get(c.id)} /></td>
                   <td className="px-1.5 py-0.5 font-mono text-[10.5px] text-slate-700 whitespace-nowrap">{c.chrom}:{fmt(c.start)}-{fmt(c.end)}</td>
                   <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{sizeText(c.sizeKb)}{low && !hasProbeCol && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>
-                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
+                  <td className="px-1.5 py-0.5 whitespace-nowrap"><span className="inline-flex items-center gap-[3px] rounded px-1.5 text-[10.5px] font-bold whitespace-nowrap" style={{ color: k.color, background: k.bg }} title={c.typeText}>{k.word}{' '}<EstCn c={c} sex={s.sex[c.sampleKey]} build={fl.build} /></span><DgvMedal v={v} /><LabTag hit={lab.get(c.id)} /></td>
                   {hasProbeCol && <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap"><span className={c.probes == null ? 'text-slate-400' : ''}>{c.probes ?? '?'}</span>{low && <BelowTag c={c} minProbes={f.minProbes} minKb={f.minKb} />}</td>}
-                  {hasLrCol && <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} /></td>}
+                  {hasLrCol && <td className="px-1.5 py-0.5 text-right tabular-nums whitespace-nowrap">{c.logRatio != null ? <span className="text-slate-600">{c.logRatio.toFixed(2)}</span> : <span className="text-slate-400">–</span>}<MosaicTag c={c} sex={s.sex[c.sampleKey]} build={fl.build} /></td>}
                   {samples.length > 1 && <SeriesCell info={series.get(c.id)} />}
                   {na ? <><NotAnnCell /><NotAnnCell /><NotAnnCell /><td className="px-1.5 py-0.5 whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     <button className="px-1 rounded border border-slate-300 bg-white text-[10px] font-semibold text-slate-600 hover:bg-slate-50" onClick={() => annotateNow([c])} title="Annotate this call (genes, PanelApp, ClinGen, gnomAD, DGV Gold)">annotate</button></td></>
@@ -515,19 +515,19 @@ function RetryCtl({ col, groups }: { col: RetryCol; groups: RetryGroup[] }) {
 }
 
 /** the small amber tag of a call whose log ratio says a share of the cells only carries it */
-function MosaicTag({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
-  const m = mosaicOf(c, sex);
+function MosaicTag({ c, sex, build }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null }) {
+  const m = mosaicOf(c, sex, build);
   if (!m?.ok || m.f >= MOSAIC_TAG_BELOW) return null;
   return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-slate-300 bg-white text-slate-600 leading-[15px] align-middle" title="Fraction of cells estimated from the mean log ratio (AChro-Puce calculator, July 2025): indicative, see the call's detail">mosaic ~{Math.round(m.f * 100)}%</span>;
 }
 /** the copy number of the table's Type cell: the file's, else the one from the log ratio (tooltip), else the type */
-function EstCn({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
-  const e = estCopies(c, sex);
+function EstCn({ c, sex, build }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null }) {
+  const e = estCopies(c, sex, build);
   return e ? <span title={estTip(e, c.logRatio!)} data-cgh-est>x{e.n}{e.text.includes('+') ? '+' : ''}</span> : <>{copyText(c)}</>;
 }
 /** the call's detail line: expected and observed log ratio, and the fraction of cells it gives */
-function MosaicLine({ c, sex }: { c: CghCnv; sex: CghSex | undefined }) {
-  const m = mosaicOf(c, sex), e = estCopies(c, sex);
+function MosaicLine({ c, sex, build }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild }) {
+  const m = mosaicOf(c, sex, build), e = estCopies(c, sex, build);
   if (!m) return null;
   const pc = (x: number) => `${Math.round(x * 100)} %`;
   return <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Log ratio</span>{' '}
@@ -646,7 +646,7 @@ function CnvDetail({ c, v, build, onRetry, lab, hints, sex, series, note, focusN
     className="w-full mb-1 px-2 py-1 rounded border border-slate-300 bg-white text-[11.5px] text-slate-800 resize-y outline-none focus:border-accent-400 focus:ring-2 focus:ring-accent-100" />;
   const seen = series && series.others > 0 ? <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">Series</span> {series.hits.length ? <>found in {series.hits.length} of {series.others} other patient{series.others > 1 ? 's' : ''}: {series.hits.map(h => `${h.name} (${Math.round(h.pct * 100)} %)`).join(', ')}</> : <>in none of the {series.others} other patient{series.others > 1 ? 's' : ''}</>}<span className="text-slate-500"> · same type, reciprocal overlap ≥ {Math.round(SERIES_OVERLAP * 100)} %</span></div> : null;
   const iscn = iscnOfCall(useCgh(), c, build);
-  const mosaic = <>{seen}{(iscn.text || iscn.file) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">ISCN</span> <CallIscnText i={iscn} /></div>}<MosaicLine c={c} sex={sex} /></>;
+  const mosaic = <>{seen}{(iscn.text || iscn.file) && <div className="mb-1 text-[11px]"><span className="font-semibold text-slate-900">ISCN</span> <CallIscnText i={iscn} /></div>}<MosaicLine c={c} sex={sex} build={build} /></>;
   if (!v.ann || v.ann.state === 'loading' || !v.score) return <div className="px-4 py-2 bg-slate-50 text-slate-500 text-[11px]" onClick={e => e.stopPropagation()}>{noteBox}{mosaic}Reading the genes of the call…</div>;
   const ann = v.ann, key = c.kind === 'loss' ? 'hi' : 'ts';
   // PanelApp green first, then amber, then red, then the others; within each, the dosage score, then the position
