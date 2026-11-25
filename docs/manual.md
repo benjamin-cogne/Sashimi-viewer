@@ -392,7 +392,7 @@ buttons stand at the foot of the first column, by the log-ratio axis), the patie
 lengths, log ratio across (−range left, + right), the bars beside each column; one row, or two when the panel is narrower
 than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a call bar opens the call; on a chromosome elsewhere
 opens it in the panel, always horizontal and drawn as the call's probe panel is (the same code: every probe as a dot, the
-moving median of 3 / 7 / 15, the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
+moving median of 3 / 7 / 15 probes (3 by default, one setting for every probe plot), the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
 the plot and the chromosome's **ideogram** under it (the SV browser's bands and colours, band names where they fit, the
 centromere marked *cen*, the window boxed: a click or a drag on it moves the window; the call's probe panel has one too);
 ← → beside the name for the neighbours, *whole genome* back; a click on a call bar opens the call as its row

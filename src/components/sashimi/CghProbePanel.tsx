@@ -34,12 +34,11 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
   const gen = cgh.probeGen(sk), p = useMemo(() => cgh.probes(sk)?.byChrom.get(chrom) ?? null, [sk, chrom, gen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [win, setWin] = useState<[number, number]>(() => (c ? around(c) : [0, chromLen]));
   const bars = useRef<Bar[]>([]), drag = useRef<{ x: number; from: number; to: number; moved: boolean } | null>(null);
-  const [k, setK] = useState(7);
   const [w, setW] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number; i: number } | null>(null);
   const [callTip, setCallTip] = useState<{ x: number; y: number } | null>(null);
   const [barTip, setBarTip] = useState<{ x: number; y: number; c: CghCnv } | null>(null);
-  const s = useCgh(), CLIP = s.view.scale, dots = s.view.dots;
+  const s = useCgh(), CLIP = s.view.scale, dots = s.view.dots, k = s.view.median;
   const box = useRef<HTMLDivElement>(null), cv = useRef<HTMLCanvasElement>(null);
   const bands = useBands(getBands, chrom);
   useEffect(() => {
@@ -185,8 +184,8 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
         </span>
         <input type="range" min={0} max={Math.max(0, Math.round(len - span))} step={Math.max(1, Math.round(span / 50))} value={Math.round(from)} disabled={span >= len} onChange={e => { const a = Number(e.target.value); go(a, a + span); }}
           aria-label="Move along the chromosome" title="Move the window along the chromosome (also: drag the plot; Ctrl / ⌘ + wheel zooms)" className="w-32 accent-slate-500" data-cgh-pan />
-        <label className="inline-flex items-center gap-1" title="Moving median over this many probes (dark blue line)">median of
-          <select value={k} onChange={e => setK(Number(e.target.value))} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
+        <label className="inline-flex items-center gap-1" title="Moving median over this many probes (dark blue line); 3 by default, shared by every probe plot of the page (kept as a setting)">median of
+          <select value={k} onChange={e => cgh.setView({ median: Number(e.target.value) })} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
         {c && <span className="text-slate-500" title="The call's mean log ratio as the file gives it (orange segment), and the mean of the probes it spans">
           call: {fileMean != null ? <>{c.fromProbes || c.id.startsWith('pc|') ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>}
         <DotsToggle />
