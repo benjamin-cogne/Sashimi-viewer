@@ -802,28 +802,31 @@ function InCall({ g }: { g: CnvGene }) {
 /** the calls table's column widths, by column id (only ids and pixels kept, localStorage): automatic until a header
  * border is dragged; then every column fixed at its width (the others measured at that moment); double-click: automatic again */
 const COLS_KEY = 'sashimi.cghColumns', COL_MIN = 36;
+/** the least each column may take (its header or content badge stays readable); Genes keeps room so the row does not reflow when the genes arrive */
+const COL_MINS: Record<string, number> = { sample: 70, band: 56, pos: 150, size: 56, type: 70, probes: 52, logr: 52, series: 52, genes: 130, panelapp: 70, dosage: 70, priority: 64, class: 150, links: 72 };
+const minOf = (id: string) => COL_MINS[id] ?? COL_MIN;
 function useColWidths(box: React.RefObject<HTMLDivElement | null>) {
   const [widths, setWidths] = useState<Record<string, number> | null>(() => { try { return JSON.parse(localStorage.getItem(COLS_KEY) ?? 'null') as Record<string, number> | null; } catch { return null; } });
   const save = (v: Record<string, number> | null) => { setWidths(v); try { if (v) localStorage.setItem(COLS_KEY, JSON.stringify(v)); else localStorage.removeItem(COLS_KEY); } catch { /* storage blocked */ } };
   const ths = () => [...(box.current?.querySelectorAll<HTMLTableCellElement>('thead th[data-col]') ?? [])];
   // a column not seen when the widths were taken (Sample, Series): 90 px until dragged
   const fixed = !!widths;
-  const wOf = (id: string) => widths?.[id] ?? (id === 'links' ? 72 : 90);
+  const wOf = (id: string) => id === 'links' ? 72 : Math.max(minOf(id), widths?.[id] ?? 90);
   return {
     fixed,
     /** `ids`: the columns shown */
     tableStyle: (ids: string[]) => (fixed ? { tableLayout: 'fixed' as const, width: ids.reduce((a, id) => a + wOf(id), 0), minWidth: '100%' } : undefined),
-    th: (id: string) => ({ 'data-col': id, style: fixed ? { width: wOf(id) } : undefined }),
+    th: (id: string) => ({ 'data-col': id, style: fixed ? { width: wOf(id), minWidth: wOf(id) } : { minWidth: minOf(id) } }),
     grip: (id: string) => <span aria-hidden data-col-grip={id} title="Drag: column width · double-click: automatic widths" onClick={e => e.stopPropagation()}
       onDoubleClick={e => { e.stopPropagation(); save(null); }}
       onPointerDown={e => {
         e.preventDefault(); e.stopPropagation();
         const base: Record<string, number> = { ...(widths ?? {}) };
-        for (const t of ths()) if (!widths || !(t.dataset.col! in widths)) base[t.dataset.col!] = Math.round(t.getBoundingClientRect().width);
+        for (const t of ths()) if (!widths || !(t.dataset.col! in widths)) base[t.dataset.col!] = Math.max(minOf(t.dataset.col!), Math.round(t.getBoundingClientRect().width));
         base.links = 72; // the sticky Classification sits 72 px from the right
         const x0 = e.clientX, w0 = base[id] ?? 90, el = e.currentTarget; el.setPointerCapture(e.pointerId);
         let cur = base;
-        const move = (ev: PointerEvent) => { cur = { ...base, [id]: Math.max(COL_MIN, Math.round(w0 + ev.clientX - x0)) }; setWidths(cur); };
+        const move = (ev: PointerEvent) => { cur = { ...base, [id]: Math.max(minOf(id), Math.round(w0 + ev.clientX - x0)) }; setWidths(cur); };
         const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); save(cur); };
         el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
         setWidths(base);
