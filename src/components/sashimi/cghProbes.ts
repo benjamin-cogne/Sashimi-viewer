@@ -18,6 +18,8 @@ export interface CghProbes {
   byChrom: Map<string, CghProbeChrom>;
   /** derivative log ratio spread over all chromosomes (null: under 10 probes) */
   dlrs: number | null;
+  /** the design id a header line gives (`AMADID 031746 hg19`), else null */
+  design?: string | null;
 }
 
 const LR_HEAD = /normalized\s+log\s*ratio\s*\(([^)]*)\)/i;
@@ -49,7 +51,8 @@ export function parseProbes(bytes: Uint8Array, spec?: ProbeSpec): CghProbes {
     const v = Number(f[cL]);
     a.s.push(s); a.e.push(e); a.v.push(Number.isFinite(v) ? v : NaN); a.p.push(f[cName] ?? ''); n++;
   }
-  return sorted(acc, sample, build, n);
+  const design = lines.slice(0, hi).map(l => l.match(/^\s*amadid\s*[\t:,;= ]\s*([^\t,; ]+)/i)?.[1]).find(Boolean) ?? null;
+  return { ...sorted(acc, sample, build, n), design };
 }
 type Acc = Map<string, { s: number[]; e: number[]; v: number[]; p: string[] }>;
 const CHR_RANK = (c: string) => { const x = c.slice(3); return x === 'X' ? 23 : x === 'Y' ? 24 : Number(x); };

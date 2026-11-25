@@ -9,12 +9,13 @@ import { topoLabel, topoWords, rearrangementHints } from './cghTopo';
 import { seriesOf, duplicateNames, SERIES_OVERLAP, type SeriesInfo } from './cghSeries';
 import { mosaicOf, MOSAIC_TAG_BELOW, estCopies, estTip } from './cghMosaic';
 import { DLRS_TIP, dlrsWord } from './cghProbes';
+import { arrayInfo, designOfMeta, CHIP_STYLE, type ArrayInfo } from './cghArray';
 import { CghMapDialog } from './CghMapDialog';
 import { decodeText } from './cghFormats';
 import { Icon, Stepper, Segmented, Pill, Popover } from './controls';
 import { CGH_EXAMPLES, loadExamples } from './cghExamples';
 import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, activeGroups, groupsOf, refMismatch, largestFirst, CGH_ACCEPT, CGH_FILES_TEXT, CGH_MIN_PROBES_DEFAULT, CGH_MAX_ANNOTATED, SERIES_OPS, type SeriesOp, type CghState } from './cghStore';
-import { fmtBp as fmt, sizeText, CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
+import { fmtBp as fmt, sizeText, CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSample, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
 import { type SvGeneLoaders } from './SvGenomeBrowser';
@@ -181,8 +182,10 @@ function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['p
               </tr>;
             })}</tbody>
           </table>}
-          {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x }) => { const d = cgh.probes(x.key)?.dlrs;
-            return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" title={DLRS_TIP} data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</> : cgh.probesReading(x.key) ? ' · reading…' : ' (not readable)'}</div>; })}
+          {samples.filter(({ x }) => cgh.hasProbes(x.key)).map(({ x, f }) => { const d = cgh.probes(x.key)?.dlrs, ai = arrayOfSample(x, f);
+            return <div key={x.key + 'dlrs'} className="text-[11px] text-slate-600" data-cgh-dlrs>{x.name}: probes' log ratios{d != null ? <span title={DLRS_TIP}> · DLRS <b>{d.toFixed(2)}</b> ({dlrsWord(d)})</span> : cgh.probesReading(x.key) ? ' · reading…' : ' (not readable)'}{ai && <span title={ai.how} data-cgh-array-line> · {ai.text}</span>}</div>; })}
+          {samples.filter(({ x }) => !cgh.hasProbes(x.key)).map(({ x, f }) => { const ai = arrayOfSample(x, f);
+            return ai && <div key={x.key + 'array'} className="text-[11px] text-slate-500" title={ai.how} data-cgh-array-line>{x.name}: {ai.text}</div>; })}
           {probeOnly.length > 0 && <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-900 flex flex-wrap items-center gap-x-2 gap-y-1" data-cgh-probeonly-question>
             <span><b>Probes only:</b> no call table; the calls are detected from the probes by this page (CBS) with these settings, again when they or the sex change; not CytoGenomics calls, to confirm in the dedicated software.</span>
             <ProbeSettings /></div>}
@@ -404,7 +407,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         {samples.map(({ x, f: fl }) => {
           const n = x.cnvs.filter(c => passes(s, c)).length, on = s.sample === x.key || samples.length === 1;
           return <span key={x.key} role="tab" aria-selected={on} className={tab(on)}>
-            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null}{isProbeOnly(fl) && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[9.5px] font-semibold align-[1px]" title={PROBE_ONLY_WARNING} data-cgh-probeonly-tag>probes only</span>} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
+            <button onClick={() => cgh.setSample(x.key)} title={`${fl.name}${fl.meta.length ? `\n${fl.meta.map(([k, v]) => `${k}: ${v}`).join('\n')}` : ''}`}>{x.name}{s.sex[x.key] ? <span className="ml-0.5 text-slate-500" title={s.sex[x.key]}>{SEX_MARK[s.sex[x.key]]}</span> : null}<ArrayChipTag info={arrayOfSample(x, fl)} />{isProbeOnly(fl) && <span className="ml-1 px-1 rounded bg-amber-100 text-amber-800 text-[9.5px] font-semibold align-[1px]" title={PROBE_ONLY_WARNING} data-cgh-probeonly-tag>probes only</span>} <span className="text-slate-400 font-normal tabular-nums">{n}/{x.cnvs.length}</span></button>
             <button className="text-slate-400 hover:text-red-600 leading-none text-sm px-0.5" title="Take this patient off the list"
               onClick={() => { if (!s.dirtyKeys[x.key] || confirm(`${x.name}: the classes and notes given here are not exported yet and will be lost.`)) cgh.remove(x.key); }}>×</button>
           </span>;
@@ -755,6 +758,17 @@ function PriorityBadge({ v }: { v: View }) {
 }
 
 /** under the call's row: why its priority, the AChro-Puce regions, and each gene with its scores */
+/** a patient's array: its design ids (report, probe file) and the format deduced from its probes (cghArray.ts) */
+const arrayOfSample = (x: CghSample, fl: CghFile): ArrayInfo | null => {
+  const pr = cgh.hasProbes(x.key) ? cgh.probes(x.key) : null;
+  return arrayInfo({ designs: [{ id: designOfMeta(fl.meta), from: 'the report (Array Design Info)' }, { id: pr?.design, from: "the probe file's AMADID line" }], probes: pr });
+};
+/** the tab's chip: the short format only (nothing without a probe file), the details in its tooltip */
+function ArrayChipTag({ info }: { info: ArrayInfo | null }) {
+  if (!info?.chip) return null;
+  return <span data-cgh-array-chip={info.chip} title={info.how} className={`ml-1 px-1 rounded border text-[9.5px] font-bold align-[1px] whitespace-nowrap ${CHIP_STYLE[info.chip]}`}>{info.chip}</span>;
+}
+
 /** the call's CNV group in its detail: a call added by hand can be taken out; a call of no group can be added to one of
  * this patient's groups on its chromosome (of its direction: a gain group takes gains) */
 function GroupLine({ c }: { c: CghCnv }) {

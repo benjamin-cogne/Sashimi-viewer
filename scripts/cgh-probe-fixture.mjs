@@ -1,6 +1,6 @@
 // Writes an invented array-CGH export (zip: IntervalBasedReport.xls + CGH_Log_Ratio.txt) with known events, to test
 // the probe calls (cghSegment.ts). Invented data only: a fake sample, about 60k probes, Gaussian noise (SD 0.13).
-// Usage: node scripts/cgh-probe-fixture.mjs out.zip [--female] [--split DIR]
+// Usage: node scripts/cgh-probe-fixture.mjs out.zip [--female] [--split DIR] [--layouts DIR] [--hg38 DIR] [--density N FILE]
 // --split DIR also writes, for the probes-only mode, DIR/CGH_Log_Ratio_DEMO02.txt (the probe file alone),
 // DIR/demo2-probes-only.zip (the probe file and two dummy files, no table) and DIR/IntervalBasedReport_DEMO02.xls (the table alone).
 // --layouts DIR writes the same invented probes (same events) in other probe-level layouts (cghProbes.ts `probeLayoutOf`):
@@ -108,4 +108,23 @@ if (h38 > 0) {
   });
   writeFileSync(`${dir}/IntervalBasedReport_DEMO38.xls`, ['Genome: hg38', 'Array Design Info: DEMO38[000000_20000101]', '', H, 'DEMO38', ...rows, '', 'Number of calls per sample:', `DEMO38 =${rows.length}`, ''].join('\r\n'));
   console.log(`${dir}: GRCh38 male, ${q} probes; events`, E38.map((e, j) => `${e.chr}:${sp[j][0]}-${sp[j][sp[j].length - 1]}`).join(', '));
+}
+// --density N FILE: a probe file alone (no event, noise only) with about N probes spread over the genome (GRCh37 lengths),
+// to test the array format deduced from the probe count and spacing (cghArray.ts): e.g. 60000, 180000, 1000000.
+const dens = process.argv.indexOf('--density');
+if (dens > 0) {
+  const want = Number(process.argv[dens + 1]), file = process.argv[dens + 2];
+  const total = Object.values(LEN).reduce((a, mb) => a + mb * 1e6 - 2e6, 0), step = total / want;
+  const out = ['AMADID\t000000\thg19', 'Probe Name\tChrName\tStart\tStop\tFeatureNum\tDescription\tName of Gene\tNormalized log ratio(DEMO-DENSITY)\t'];
+  let q = 0;
+  for (const [chr, mb] of Object.entries(LEN)) {
+    const n = Math.floor((mb * 1e6 - 2e6) / step);
+    for (let i = 0; i < n; i++) {
+      const s = 1_000_000 + Math.floor(i * step + rnd() * step * 0.4);
+      q++;
+      out.push(`A_00_D${String(q).padStart(7, '0')}\t${chr}\t${s}\t${s + 59}\t${q}\tUnknown\t\t${(gauss() * 0.13).toFixed(4)}`);
+    }
+  }
+  writeFileSync(file, out.join('\n') + '\n');
+  console.log(`${file}: ${q} probes, step ${Math.round(step)} bp`);
 }
