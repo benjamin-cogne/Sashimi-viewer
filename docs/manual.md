@@ -400,7 +400,7 @@ saying, when no probe file is loaded, that the probe methods do not apply.
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
 patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients
 to a value: *any*, *=*, *≥*, *≤*, *>*, *<* and a number (*= 0*: in no other patient; *≥ 2*: in at least 2 others). Not written to the export.
-A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26A0657 loaded twice (file A, file B)*).
+A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26X0001 loaded twice (file A, file B)*).
 
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons

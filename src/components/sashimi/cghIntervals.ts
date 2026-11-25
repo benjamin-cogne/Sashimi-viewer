@@ -197,7 +197,7 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   for (let i = hi + 1; i < lines.length; i++) {
     const l = lines[i];
     if (!l.trim()) continue;
-    // the footer's count per sample (26A0657=36): a line of one cell, not a call's CN=1
+    // the footer's count per sample (26X0001=36): a line of one cell, not a call's CN=1
     const foot = sp(l).filter(x => x.trim()).length === 1 ? l.match(/^\s*([^\t=]+?)\s*=\s*(\d+)\s*$/) : null;
     if (foot) { declared.set(foot[1], +foot[2]); continue; }
     if (/^number of calls/i.test(l)) continue;

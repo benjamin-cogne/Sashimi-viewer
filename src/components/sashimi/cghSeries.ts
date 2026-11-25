@@ -15,7 +15,7 @@ export interface SeriesInfo { hits: SeriesHit[]; /** the other patients loaded *
 
 /** a sample name compared: trimmed, case-insensitive */
 export const nameKey = (n: string) => n.trim().toLowerCase();
-/** the sample names loaded more than once, with the files holding them: "26A0657 loaded twice (file A, file B)" */
+/** the sample names loaded more than once, with the files holding them: "26X0001 loaded twice (file A, file B)" */
 export function duplicateNames(files: CghFile[]): string[] {
   const by = new Map<string, { name: string; files: string[] }>();
   for (const f of files) for (const x of f.samples) { const k = nameKey(x.name), e = by.get(k) ?? { name: x.name.trim(), files: [] }; e.files.push(f.name); by.set(k, e); }
