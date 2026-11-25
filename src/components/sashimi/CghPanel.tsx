@@ -228,7 +228,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const samples = s.files.flatMap(f => f.samples.map(x => ({ x, f })));
   const listed = s.sample ? samples.filter(e => e.x.key === s.sample) : samples;
   const all = listed.flatMap(({ x, f }) => x.cnvs.map(c => ({ c, f })));
-  const series = seriesOf(s.files);
+  const series = seriesOf(s.files, s.sex);
   const lab = labHits(s.files, s.lab);
   const rank = (id: string) => { const v = views.get(id)?.score; return v ? LEVEL_RANK[v.level] : -1; };
   const byRank = (l: typeof all) => { if (s.filter.sort === 'priority') l.sort((a, b) => rank(b.c.id) - rank(a.c.id)); return l; };

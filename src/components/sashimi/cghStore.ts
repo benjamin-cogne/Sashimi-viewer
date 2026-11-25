@@ -10,7 +10,7 @@ import { NeedsMapping, findMap, splitRecords, type MapSpec } from './cghMapping'
 import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from './cghFormats';
 import { isVcf, parseVcf } from './cghVcf';
 import { parseProbes, probeSampleOf, type CghProbes, type CghProbeChrom } from './cghProbes';
-import { seriesOf } from './cghSeries';
+import { seriesOf, hiddenBySex } from './cghSeries';
 import { detect, SEG_DEFAULTS, type ProbeCalls, type ProbeEvent, type SegOpts } from './cghSegment';
 import ProbeWorker from './cghProbeWorker?worker&inline';
 import { labHits, loadStoredLab, storeLab, type LabBenign } from './cghLabBenign';
@@ -413,12 +413,12 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
   if (!belowToo && !isAnalysed(c, f.minProbes, f.minKb)) return false;
   if (f.kind !== 'all' && c.kind !== f.kind) return false;
   // a chrX row typed by copy number in a file without the sex: hidden when it is the normal one for the sex set (x1 male, x2 female)
-  if (c.cnSex) { const sx = s.sex[c.sampleKey]; if (sx && c.copies === (sx === 'male' ? 1 : 2)) return false; }
+  if (hiddenBySex(c, s.sex[c.sampleKey])) return false;
   if (f.hideSuppressed && c.suppressed) return false;
   const cls = classOf(s, c).trim();
   if (f.classed === 'unclassified' && cls) return false;
   if (f.classed === 'classified' && !cls) return false;
-  if (f.series !== 'any') { const n = seriesOf(s.files).get(c.id)?.hits.length ?? 0; if (!seriesOk(f.series, n, f.seriesN)) return false; }
+  if (f.series !== 'any') { const n = seriesOf(s.files, s.sex).get(c.id)?.hits.length ?? 0; if (!seriesOk(f.series, n, f.seriesN)) return false; }
   if (f.lab !== 'any' && (labHits(s.files, s.lab).has(c.id) !== (f.lab === 'in'))) return false;
   const q = f.query.trim().toLowerCase();
   if (q) {

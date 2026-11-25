@@ -179,7 +179,8 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
   }
   const metaOf = (re: RegExp) => meta.find(([k]) => re.test(k))?.[1] || null;
   const buildText = metaOf(/^genome$/i);
-  const record = metaOf(/^record name$/i);
+  // the patient: Record Name, else a header line naming the patient / sample (Patient;NAME, Sample: NAME, Patient ID,NAME), else the file's name
+  const record = metaOf(/^record name$/i) ?? meta.find(([k, v]) => v.trim() && /^(patient|sample)(\s*(name|id|no\.?|number))?$/i.test(k.trim()))?.[1].trim() ?? null;
   const warnings: string[] = [];
   let skipped = 0, firstSkip: string | null = null, ignored = 0, loh = 0, mito = 0, swapped = 0, untyped = 0, normal = 0, xSexless = 0, iscnBuild: GenomeBuild | null = null;
   // the log-ratio columns (one, or gain / loss ones): each with the type its name says (Gain, Loss…), else the sign's
