@@ -214,8 +214,12 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
-**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **Examples ▾** (on the empty page and in the frame's bar) adds
+**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down. Esc
+first clears the view (no call selected, its detail and call window closed, the whole genome folded back to its strip;
+filters, tab, sort and the table's scroll kept); Esc again, or **← SV browser**, asks *Leave Array-CGH and go back to the
+SV browser?* (**Cancel** focused, Esc = Cancel; it counts the patients with unexported changes). The samples, classes and
+notes stay while the tab is open; export to keep them in a file. An open menu, the quick guide and the import / column
+questions take Esc first; in a search or note field Esc only leaves the field. **Examples ▾** (on the empty page and in the frame's bar) adds
 invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
 (22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
 EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,

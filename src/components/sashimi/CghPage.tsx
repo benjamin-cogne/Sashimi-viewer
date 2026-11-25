@@ -1,9 +1,10 @@
 /**
  * The array-CGH page, one level under the SV browser: the calls of the samples added (interval tables, BED, zips), one
  * tab per patient, and under them the SV browser's own browser drawing the call clicked (DEL / DUP on the file's build,
- * GRCh37), with its tracks. Back to the SV browser from the bar (or Esc).
+ * GRCh37), with its tracks. Esc folds what is open (back to the list, the whole genome folded); on that base view, Esc or
+ * the bar's ← SV browser asks before going back to the SV browser.
  */
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
@@ -51,7 +52,7 @@ export function CghOpenButton() {
 }
 export function CghPageSlot({ loadersFor }: { loadersFor: (b: GenomeBuild) => Loaders }) {
   const open = useCgh().open;
-  return open ? <CghPage loadersFor={loadersFor} onBack={() => cgh.setOpen(false)} /> : null;
+  return open ? <CghPage loadersFor={loadersFor} onBack={() => cgh.askLeave()} /> : null;
 }
 
 export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: GenomeBuild) => Loaders; onBack: () => void }) {
@@ -85,6 +86,15 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
   // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
   const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
+  // Esc: what is open beyond the base view (told to the store), folded when the store says so
+  const busy = useRef(false);
+  busy.current = (genome && s.files.length > 0) || !!c || !!error;
+  useEffect(() => { cgh.setViewBusy(() => busy.current); return () => cgh.setViewBusy(null); }, []);
+  const reset0 = useRef(s.viewReset);
+  useEffect(() => {
+    if (s.viewReset === reset0.current) return;
+    reset0.current = s.viewReset; setGenome(false); setDrawn(null); setError(null);
+  }, [s.viewReset]);
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
       onDragOver={e => { e.preventDefault(); e.stopPropagation(); if (!over) setOver(true); }}
@@ -93,11 +103,11 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
       <div className="w-full min-h-full pb-4">
         {/* the SV browser's bar, one level down */}
         <div className="sticky top-0 z-30 flex items-center gap-3 px-4 h-12 bg-bar border-b border-bar-line">
-          <button onClick={onBack} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the SV browser (Esc)">← SV browser</button>
+          <button onClick={onBack} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium border bg-bar-ctrl border-bar-line text-bar-text hover:border-accent-300" title="Back to the SV browser (asks first; the patients stay in this tab)">← SV browser</button>
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
           <CghGuideButton />
-          <span className="text-[11px] text-bar-muted">Esc: back to the SV browser</span>
+          <span className="text-[11px] text-bar-muted" title="Esc folds what is open (the call, its detail, the whole genome) back to the list; Esc again asks to go back to the SV browser">Esc: clear the view · twice: leave</span>
         </div>
         {!s.files.length && (
           <div className={`mx-4 mt-3 rounded-xl border-2 border-dashed ${over ? 'border-accent-400 bg-accent-50' : 'border-slate-300 bg-white'} px-6 py-10 text-center`}>
@@ -133,6 +143,38 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
       </div>
       <CghProbeDialog />
       <CghGuide />
+      {s.leaving && <LeaveDialog />}
+    </div>
+  );
+}
+
+/** "Leave Array-CGH?": Cancel focused (Esc = Cancel, Enter = the focused button); the patients stay in the store */
+function LeaveDialog() {
+  const s = useCgh();
+  const cancelBtn = useRef<HTMLButtonElement>(null);
+  const n = Object.keys(s.dirtyKeys).length;
+  const cancel = () => cgh.setLeaving(false);
+  useEffect(() => {
+    cancelBtn.current?.focus();
+    // capture: before the page's own Esc, wherever the focus is
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); cancel(); } };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+  const btn = 'h-[30px] px-4 rounded-[6px] text-[12.5px] font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400 focus-visible:ring-offset-1';
+  return (
+    <div className="fixed inset-0 z-[90] bg-slate-900/30 flex items-center justify-center p-4" onClick={e => { if (e.target === e.currentTarget) cancel(); }} data-cgh-leave>
+      <div role="alertdialog" aria-modal="true" aria-labelledby="cgh-leave-title" aria-describedby="cgh-leave-note" className="w-full max-w-[420px] bg-white rounded-xl shadow-xl border border-slate-200 px-5 py-4">
+        <div id="cgh-leave-title" className="text-[14px] font-bold text-slate-900">Leave Array-CGH and go back to the SV browser?</div>
+        <div id="cgh-leave-note" className="mt-1.5 text-[12px] text-slate-600 leading-5">
+          The loaded patients, their classes and notes stay in this tab (Array-CGH ▸ brings them back) until the tab is closed or reloaded; export first to keep them in a file.
+          {n > 0 && <div className="mt-1 font-semibold text-amber-700" data-cgh-leave-dirty>{n} patient{n > 1 ? 's' : ''} with unexported changes.</div>}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button ref={cancelBtn} onClick={cancel} className={`${btn} border border-slate-300 bg-white text-slate-700 hover:bg-slate-50`} data-cgh-leave-cancel>Cancel</button>
+          <button onClick={() => cgh.setOpen(false)} className={`${btn} bg-accent-600 text-white hover:bg-accent-700`} data-cgh-leave-ok>Leave</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -8,7 +8,8 @@ file loaded, the only visible change is the **Array-CGH ▸** button in the SV b
 ## What the page does
 
 - **Examples.** *Examples ▾* (empty page and frame bar, as the SV browser offers its examples) adds three invented patients (`cghExamples.ts`, CytoGenomics text, GRCh37) through the normal import question: 22q11.2 LCR22A-D deletion (HIGH), 1q21.1 distal BP3-BP4 duplication (AChro-Puce PIEV, ClinGen TS 2 region: MODERATE), terminal 16q24.3 loss breaking in ANKRD11 intron 4 + terminal 9p24.3 gain (der() hint, ANKRD11 5′ part cut, HIGH). Coordinates checked on UCSC hg19 (ncbiRefSeqCurated, ClinGen tracks). Public build: never real data there.
-- **Quick guide.** *? Quick guide* in the page's bar: an interactive tour of 15 steps on the examples (`CghGuide.tsx`): an outline on the target and a popover beside it (kept on screen, following scroll, never over the target when it fits elsewhere, draggable by its title); each step does its own action (load the examples, Analyse, open More filters or a call): the user only clicks *Next*; Esc / *Skip tour* ends it (the store's `help` keeps Esc from closing the page). Targets found by `data-cgh-*` attributes. The former screenshot guide (`src/assets/cgh-guide/`, `docs/cgh-demo/`) is removed.
+- **Quick guide.** *? Quick guide* in the page's bar: an interactive tour of 15 steps on the examples (`CghGuide.tsx`): an outline on the target and a popover beside it (kept on screen, following scroll, never over the target when it fits elsewhere, draggable by its title); each step does its own action (load the examples, Analyse, open More filters or a call): the user only clicks *Next*; Esc / *Skip tour* ends it (the store's `help` keeps Esc from acting on the page).
+- **Esc and leaving.** Esc on the page first clears the view (`cgh.escape()`: `shown` cleared, the store's `viewReset` counter folds the detail in `CghFrame`, the chromosome view in `CghGenome`, the call window and the whole genome in `CghPage`; filters, tab, sort, table scroll kept; the page tells the store what it holds open through `setViewBusy`); on that base view Esc, or the bar's *← SV browser*, opens *Leave Array-CGH…?* (`leaving`, `LeaveDialog` in `CghPage.tsx`: Cancel focused, Esc = Cancel, the number of patients in `dirtyKeys`; with no patient loaded it leaves at once). The store is module-level, so leaving keeps the patients for the tab's life. A menu open, the guide, the import / column questions keep their own Esc; Esc in a text field (search, note) only blurs it. Targets found by `data-cgh-*` attributes. The former screenshot guide (`src/assets/cgh-guide/`, `docs/cgh-demo/`) is removed.
 - **Input.** Files are read in the page, never uploaded:
   - CytoGenomics interval tables (`.txt`), CSV / TSV of any layout (a column-mapping dialog when the columns are not
     recognised, remembered by column names, only when the header row looks like one);
@@ -100,11 +101,11 @@ Also `scripts/cgh-probe-audit-check.ts` checks that every probe is taken into ac
 
 Also new: this file, `ARRAY-CGH.md`.
 
-**Shared files changed (whole footprint: 4 files, about 65 lines):**
+**Shared files changed (whole footprint: 4 files, about 75 lines):**
 
 | File | Change |
 |---|---|
-| `src/components/sashimi/SvBrowserDialog.tsx` | imports `CghOpenButton`, `CghPageSlot`, `cgh`; the button in the header; the page slot; Esc goes up one level (question / mapping dialog → page → viewer) |
+| `src/components/sashimi/SvBrowserDialog.tsx` | imports `CghOpenButton`, `CghPageSlot`, `cgh`; the button in the header; the page slot; Esc handler: the array-CGH questions, guide (`help`) and leave question (`leaving`) answer it themselves, an open page menu closes first, a page text field is only blurred, else `cgh.escape()` (clear the view, then ask to leave); with the page closed, Esc closes the SV browser as before |
 | `src/components/sashimi/SvGenomeBrowser.tsx` | `export const MOI` (was `const`); `export const STAIN` (was `const`; the array-CGH ideogram's colours); optional loader field `getDosageRegions` in `SvGeneLoaders`; optional prop `strongEvent` (off by default: shades the event, bolder breakpoints); optional prop `extraTrack` + exported `SvExtraTrack` interface (a caller's track under AChro-Puce: state `showExtra`, `extraLaid` / `yExtra` in the layout before `yRefBand`, its side label, its `<g>` before the reference band, a `Pill` after AChro-Puce's and its legend; absent in the SV browser, so nothing drawn there); **bug fix, also visible in the SV browser**: the SVG's ids (`svb-clip`, gradients, pattern) made unique per instance with `useId` (`sid(...)`): the array-CGH page's browser drawn over the SV browser's resolved `url(#svb-clip)` to the other, shorter one, so a grown ClinVar SV track (*▸ all SVs*) hid all below it; bug fix, also visible in the SV browser: in "▸ all SVs", ClinVar SVs that find no free lane among the 60 are no longer drawn over others but counted ("+n SV not drawn (zoom in)") |
 | `src/standalone/ucsc.ts` | new `getDosageRegions` + `DosageRegion` (ClinGen ISCA regions; `getDosageScores` untouched) |
 | `src/standalone/svLoaders.ts` | wires `getDosageRegions` |
@@ -202,8 +203,8 @@ npm run build
 6. Test by hand in `sashimi-viewer.html`:
    - Open the SV browser on `#sv=DEL%2020:10489766-10783340`: the browser is as before, with the **Array-CGH ▸** button,
      and *Genes on the rebuilt chromosome* still shows its gene summary (from `dev`'s `onGeneSummary`).
-   - Click **Array-CGH ▸**, add an interval table, analyse it, click a call: it is drawn below, and Esc goes back one
-     level at a time.
+   - Click **Array-CGH ▸**, add an interval table, analyse it, click a call: it is drawn below; Esc clears the view, Esc
+     again asks to leave (Cancel / Leave).
 7. Commit the merge, then push the branch you choose.
 
 ### If a conflict appears elsewhere
@@ -217,7 +218,7 @@ npm run build
   - `<CghOpenButton />` in the title row;
   - `<CghPageSlot loadersFor={cghLoaders} />` before the closing `</div>`;
   - the `cghLoaders` memo;
-  - the Esc handler (`cgh.get().pending`, `toMap`, `open`).
+  - the Esc handler (`cgh.get().pending`, `toMap`, `help`, `leaving`, `open`, the menu / text-field capture, `cgh.escape()`).
   Re-apply them onto `dev`'s version.
 
 ### To leave the module out of a build

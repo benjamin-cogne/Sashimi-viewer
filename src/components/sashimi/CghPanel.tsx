@@ -206,6 +206,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const [noteFocus, setNoteFocus] = useState<string | null>(null);
   /** the detail under the call clicked folded (a second click on its row) */
   const [folded, setFolded] = useState(false);
+  // Esc back to the base view: the next call clicked opens with its detail
+  useEffect(() => { setFolded(false); setNoteFocus(null); }, [s.viewReset]);
   // the analysed calls of every patient, the CGH_MAX_ANNOTATED largest: their genes (RefSeq), dosage, constraint, PanelApp, AChro-Puce
   const buildOf = useMemo(() => new Map(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.map(c => [c.id, fl.build ?? 'GRCh37'] as const)))), [s.files]);
   const auto = useMemo(() => new Set(largestFirst(s.files.flatMap(fl => fl.samples.flatMap(x => x.cnvs.filter(c => isAnalysed(c, s.filter.minProbes, s.filter.minKb)))))

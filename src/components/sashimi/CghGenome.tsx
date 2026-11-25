@@ -105,6 +105,8 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
   const [chromSel, setChrom] = useState<string | null>(null), chrom = probesOk ? chromSel : null;
   const [w, setW] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number; title: string; lines: string[]; dot?: [number, number] } | null>(null);
+  // Esc back to the page's base view: the whole genome again, not a chromosome, when it is next opened
+  useEffect(() => { setChrom(null); setHover(null); }, [s.viewReset]);
   const box = useRef<HTMLDivElement>(null), base = useRef<HTMLCanvasElement>(null), top = useRef<HTMLCanvasElement>(null), bars = useRef<Bar[]>([]);
   const S = s.view.scale, dots = s.view.dots, vert = s.view.layout === 'vertical' && !chrom && probesOk;
   const chromPanel = !!chrom && open;

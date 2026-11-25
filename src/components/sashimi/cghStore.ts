@@ -72,6 +72,10 @@ export interface CghState {
   revealed: Record<string, true>;
   /** the quick guide is open (Esc closes it, not the page) */
   help: boolean;
+  /** the question "Leave Array-CGH?" is open (the bar's ← SV browser, or Esc on the page's base view) */
+  leaving: boolean;
+  /** counts the page's views cleared by Esc: the page's parts fold what they hold open when it changes */
+  viewReset: number;
   /** the settings of the probe calls (cghSegment.ts), kept in localStorage */
   probeOpts: SegOpts;
   /** events detected from each patient's probes, by sample key (computed in the background, for these settings and sex) */
@@ -111,7 +115,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView() };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, leaving: false, viewReset: 0, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView() };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -303,9 +307,21 @@ export const probeCnv = (e: ProbeEvent, sampleKey: string, sample: string): CghC
 const someNames = (names: string[]) => names.map(n => leafOf(n)).slice(0, 4).join(', ') + (names.length > 4 ? ', …' : '');
 const exportedOf = (keys: string[]) => { const dirtyKeys = { ...state.dirtyKeys }; for (const k of keys) delete dirtyKeys[k]; return { dirtyKeys, dirty: Object.keys(dirtyKeys).length > 0 }; };
 
+/** whether the page holds something open beyond its base view (a call drawn, the whole genome expanded): told by the page */
+let viewBusy: () => boolean = () => false;
+
 export const cgh = {
   get: () => state,
-  setOpen(open: boolean) { set({ open }); },
+  setOpen(open: boolean) { set({ open, leaving: false }); },
+  setViewBusy(f: (() => boolean) | null) { viewBusy = f ?? (() => false); },
+  /** Esc on the page: back to its base view (the list, no call selected, the whole genome folded, no call window); there, the question to leave */
+  escape() {
+    if (state.shown || viewBusy()) { set({ shown: null, viewReset: state.viewReset + 1 }); return; }
+    cgh.askLeave();
+  },
+  /** leave the page: asked first when patients are loaded (they stay in the store) */
+  askLeave() { if (state.files.length) set({ leaving: true }); else cgh.setOpen(false); },
+  setLeaving(leaving: boolean) { set({ leaving }); },
   setHelp(help: boolean) { set({ help }); },
   setAnn(id: string, a: CnvAnn) { set({ ann: { ...state.ann, [id]: a } }); },
   /** many calls' annotations at once (the queue's placeholders: one redraw) */
