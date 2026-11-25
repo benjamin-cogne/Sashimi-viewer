@@ -11,42 +11,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { cgh, useCgh } from './cghStore';
 import { STAIN } from './SvGenomeBrowser';
 import type { Cytoband } from './svNomenclature';
-import { callLines, CghTip, clipMark, lrAxis, lrLabel, LrScale, BTN } from './CghGenome';
+import { callLines, CghTip, clipMark, lrAxis, lrLabel, LrScale, lrScaleH, DotsToggle, BTN } from './CghGenome';
 import type { CghCnv } from './cghIntervals';
-import { lowerBound, meanIn, type CghProbeChrom } from './cghProbes';
+import { meanIn, visible, runningMedian } from './cghProbes';
 import type { ProbeSeg } from './cghSegment';
 
-const H0 = 190, L = 34, R = 8, T0 = 8, B = 20, THR = 0.2, MIN_SPAN = 20_000;
+/** L: the left margin, holding the log-ratio range buttons and the axis labels (as the whole genome's) */
+const H0 = 190, L = 60, R = 8, T0 = 8, B = 20, THR = 0.2, MIN_SPAN = 20_000;
 const fmtPos = (bp: number, step: number) => (step >= 1e6 ? `${(bp / 1e6).toFixed(0)} Mb` : step >= 1e5 ? `${(bp / 1e6).toFixed(1)} Mb` : step >= 1e4 ? `${(bp / 1e6).toFixed(2)} Mb` : `${(bp / 1e3).toFixed(0)} kb`);
 
 /** the margin each side of a call: half its size, at least 100 kb (this panel and the browser below open on it) */
 export const callMargin = (c: CghCnv) => Math.max((c.end - c.start) / 2, 100_000);
 const around = (c: CghCnv): [number, number] => { const pad = callMargin(c); return [Math.max(0, c.start - pad), c.end + pad]; };
-
-/** the non-NaN probes of [from, to], with k/2 more on each side for the median's edges */
-function visible(p: CghProbeChrom, from: number, to: number, k: number) {
-  let i0 = lowerBound(p.start, from), extra = 0;
-  while (i0 > 0 && extra < k >> 1) { i0--; if (!Number.isNaN(p.lr[i0])) extra++; }
-  const idx: number[] = [];
-  let after = 0;
-  for (let i = i0; i < p.start.length; i++) {
-    if (Number.isNaN(p.lr[i])) continue;
-    idx.push(i);
-    if (p.start[i] > to && ++after > k >> 1) break;
-  }
-  return idx;
-}
-/** the running median of k probes (k odd), centred */
-function runningMedian(v: number[], k: number): number[] {
-  const h = k >> 1, out = new Array<number>(v.length), w: number[] = [];
-  for (let i = 0; i < v.length; i++) {
-    w.length = 0;
-    for (let j = Math.max(0, i - h); j <= Math.min(v.length - 1, i + h); j++) w.push(v[j]);
-    w.sort((a, b) => a - b);
-    out[i] = w.length % 2 ? w[w.length >> 1] : (w[w.length / 2 - 1] + w[w.length / 2]) / 2;
-  }
-  return out;
-}
 
 /** `segs`: the chromosome's segments from the probe calls (cghSegment.ts), drawn as a thin purple line */
 type Bar = { x: number; y: number; w: number; h: number; c: CghCnv };
@@ -63,7 +39,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
   const [hover, setHover] = useState<{ x: number; y: number; i: number } | null>(null);
   const [callTip, setCallTip] = useState<{ x: number; y: number } | null>(null);
   const [barTip, setBarTip] = useState<{ x: number; y: number; c: CghCnv } | null>(null);
-  const s = useCgh(), CLIP = s.view.scale;
+  const s = useCgh(), CLIP = s.view.scale, dots = s.view.dots;
   const box = useRef<HTMLDivElement>(null), cv = useRef<HTMLCanvasElement>(null);
   const bands = useBands(getBands, chrom);
   useEffect(() => {
@@ -109,7 +85,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
     g.save(); g.beginPath(); g.rect(L, T, w - L - R, H - T - B); g.clip();
     // probes: smaller dots when dense
     const inside = idx.filter(i => p.start[i] >= from && p.start[i] <= to).length, r = inside > (w - L - R) * 1.5 ? 1.2 : inside > (w - L - R) / 3 ? 1.8 : 2.4;
-    for (const i of idx) {
+    if (dots) for (const i of idx) {
       const v = p.lr[i], x = xOf((p.start[i] + p.end[i]) / 2);
       g.fillStyle = v > THR ? '#dc2626' : v < -THR ? '#16a34a' : '#111827';
       g.beginPath();
@@ -141,8 +117,8 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
       out.push(bar);
     }
     bars.current = out;
-    el.setAttribute('data-drawn', String(inside)); el.setAttribute('data-ms', (performance.now() - t0).toFixed(0));
-  }, [w, p, from, to, idx, med, cs, ce, fileMean, probeMean.mean, segs, CLIP, calls, s.shown]); // eslint-disable-line react-hooks/exhaustive-deps
+    el.setAttribute('data-drawn', String(inside)); el.setAttribute('data-dots', String(dots)); el.setAttribute('data-ms', (performance.now() - t0).toFixed(0));
+  }, [w, p, from, to, idx, med, cs, ce, fileMean, probeMean.mean, segs, CLIP, calls, s.shown, dots]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Ctrl / ⌘ + wheel: zoom around the pointer (a plain wheel still scrolls the page)
   const live = useRef({ from, to, len, w }); live.current = { from, to, len, w };
@@ -175,6 +151,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
     const bb = barAt(x, y);
     if (bb) { setBarTip({ x, y, c: bb.c }); return; }
     if (x < L || x > w - R || y < T || y > H - B) return;
+    if (!dots) { if (c && x >= xOf(cs) && x <= Math.max(xOf(cs) + 2, xOf(ce))) setCallTip({ x, y }); return; }
     // the nearest probe within 8 px (those of ± 8 px across); else, inside the call's shading, the call's tip
     const bpx = span / (w - L - R), bp = from + (x - L) * bpx;
     let lo = 0, hi = idx.length;
@@ -212,11 +189,12 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
           <select value={k} onChange={e => setK(Number(e.target.value))} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
         {c && <span className="text-slate-500" title="The call's mean log ratio as the file gives it (orange segment), and the mean of the probes it spans">
           call: {fileMean != null ? <>{c.fromProbes ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>}
-        <LrScale />
+        <DotsToggle />
         <span className="text-slate-400">· {c ? 'own window (not synced with the browser) · ' : ''}dashed: ±0.2 · clipped at ±{CLIP} (▲▼ beyond){segs ? <> · <span className="text-fuchsia-700">purple</span>: probe-call segments</> : ''}</span>
       </div>
       <div ref={box} className={`relative mt-1 select-none ${barTip ? 'cursor-pointer' : 'cursor-grab'}`} onMouseMove={onMove} onMouseDown={onDown} onClick={onClick} onMouseLeave={() => { setHover(null); setCallTip(null); setBarTip(null); drag.current = null; }} data-cgh-probe-plot>
         <canvas ref={cv} style={{ width: '100%', height: H, display: 'block' }} />
+        <LrScale top={T + Math.max(0, (H - T - B - lrScaleH(CLIP)) / 2)} />
         {hover && <div className="absolute z-10 pointer-events-none rounded border border-slate-300 bg-white/95 shadow px-1.5 py-0.5 text-[10.5px] text-slate-800 whitespace-nowrap"
           style={{ left: Math.min(hover.x + 8, Math.max(0, w - 210)), top: Math.max(0, Math.min(hover.y - 30, H - 44)) }} data-cgh-probe-tip>
           <div className="font-semibold">{p.name[hover.i] || 'probe'}</div>

@@ -293,10 +293,12 @@ misinterpretation of these data.
 
 **Log ratio (probes).** When the patient's `CGH_Log_Ratio.txt` came with the calls, the call clicked shows, above the
 browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
-log ratio over ±1 by default (*log ratio* ±0.5 / ±1 / ±2, ⊖ further out to ±8, ⊕ back in: one setting for this panel,
-the whole genome and the chromosome view, kept in the browser; a probe beyond the range is a small triangle at the edge;
+log ratio over ±1 by default (small buttons stacked left of the log-ratio axis: ±0.5 / ±1 / ±2, ⊖ further out to ±8,
+⊕ back in: one setting for this panel, the whole genome and the chromosome view, kept in the browser; a probe beyond the range is a small triangle at the edge;
 the colours stay at ±0.2) with guide lines and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
-probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside). The window
+probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside, over the
+probes whose midpoint lies within the call, ends included: the file's number of probes). *show probes* off hides the
+dots and keeps the median line, segments, call shading and bars (one setting for the three views, kept in the browser). The window
 opens centred on the call with half its size on each side (at least 100 kb), as does the browser below, both centred
 again at each call clicked; its own buttons (⊖ ⊕ ← →, a slider along the chromosome, a drag of the plot, Ctrl / ⌘ +
 wheel to zoom, *whole chromosome*, *call*: back to that view) are not synced with the browser's. Hovering a dot gives the probe's name, position and log ratio; hovering the call's shading away from the
@@ -335,7 +337,8 @@ not carried over (Cancel to export them first).
 **Whole genome.** Under the table, where the call's window stands, the *Whole genome* panel shows one patient (the tab's;
 in *All patients* a patient list in the panel): chromosomes 1-22, X, Y, sizes from their GRCh37 lengths, every probe
 drawn as one mark per pixel cell (same colours as the probe panel, the log-ratio range of the probe panel, a probe beyond
-it a triangle at the edge), the median of each pixel line as a dark blue line, the patient's calls listed by the filters
+it a triangle at the edge), the median of each pixel line as a dark blue line (the only line drawn when *show probes* is off; in *vertical*, the range
+buttons stand at the foot of the first column, by the log-ratio axis), the patient's calls listed by the filters
 (loss red, gain blue) and its probe calls (purple) as bars. *horizontal*: the chromosomes side by side, the bars above.
 *vertical* (as CytoGenomics' genome view): one column per chromosome, position going down from pter, heights from the
 lengths, log ratio across (−range left, + right), the bars beside each column; one row, or two when the panel is narrower

@@ -81,9 +81,42 @@ export function lowerBound(a: Uint32Array, pos: number): number {
   while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < pos) lo = m + 1; else hi = m; }
   return lo;
 }
-/** the mean log ratio of the probes in [from, to] (NaN skipped), and their number */
+/**
+ * the mean log ratio of the probes in [from, to] (NaN skipped), and their number: a probe counts when its midpoint lies in
+ * [from, to], ends included, so a probe straddling an end counts on the side holding most of it, never twice nor never
+ * (CytoGenomics' calls run from their first probe's start to their last probe's stop: its #Probes, on every real call)
+ */
 export function meanIn(p: CghProbeChrom, from: number, to: number): { mean: number | null; n: number } {
-  let n = 0, sum = 0;
-  for (let i = lowerBound(p.start, from); i < p.start.length && p.start[i] <= to; i++) { const v = p.lr[i]; if (!Number.isNaN(v)) { n++; sum += v; } }
+  let n = 0, sum = 0, i = lowerBound(p.start, from);
+  while (i > 0 && p.end[i - 1] >= from) i--;
+  for (; i < p.start.length && p.start[i] <= to; i++) {
+    const v = p.lr[i], m = (p.start[i] + p.end[i]) / 2;
+    if (m >= from && m <= to && !Number.isNaN(v)) { n++; sum += v; }
+  }
   return { mean: n ? sum / n : null, n };
+}
+/** the non-NaN probes of [from, to] (those starting before `from` but reaching into it too), with k/2 more on each side for the median's edges */
+export function visible(p: CghProbeChrom, from: number, to: number, k: number) {
+  let i0 = lowerBound(p.start, from), extra = 0;
+  while (i0 > 0 && p.end[i0 - 1] >= from) i0--;
+  while (i0 > 0 && extra < k >> 1) { i0--; if (!Number.isNaN(p.lr[i0])) extra++; }
+  const idx: number[] = [];
+  let after = 0;
+  for (let i = i0; i < p.start.length; i++) {
+    if (Number.isNaN(p.lr[i])) continue;
+    idx.push(i);
+    if (p.start[i] > to && ++after > k >> 1) break;
+  }
+  return idx;
+}
+/** the running median of k probes (k odd), centred; at the ends of the list over the probes there are (fewer) */
+export function runningMedian(v: number[], k: number): number[] {
+  const h = k >> 1, out = new Array<number>(v.length), w: number[] = [];
+  for (let i = 0; i < v.length; i++) {
+    w.length = 0;
+    for (let j = Math.max(0, i - h); j <= Math.min(v.length - 1, i + h); j++) w.push(v[j]);
+    w.sort((a, b) => a - b);
+    out[i] = w.length % 2 ? w[w.length >> 1] : (w[w.length / 2 - 1] + w[w.length / 2]) / 2;
+  }
+  return out;
 }

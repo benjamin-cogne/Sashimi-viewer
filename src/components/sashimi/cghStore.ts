@@ -86,14 +86,14 @@ export interface CghState {
 /** `iscnClasses`: the classes whose calls make the patient's ISCN */
 /** a probe log-ratio file not given with a table read by itself (alone, or in a zip whose table waits for its columns) */
 export type LooseProbes = { name: string; sample: string; bytes: Uint8Array };
-export interface CghView { layout: 'horizontal' | 'vertical'; scale: number; iscnClasses: string[] }
+export interface CghView { layout: 'horizontal' | 'vertical'; scale: number; iscnClasses: string[]; /** the probes drawn as dots (off: the median line, segments and calls only) */ dots: boolean }
 /** the log-ratio ranges (±): presets ±0.5, ±1 (default), ±2; ⊖ goes further out */
 export const LR_SCALES = [0.5, 1, 2, 3, 4, 6, 8];
 export const LR_PRESETS = [0.5, 1, 2];
 const VIEW_KEY = 'sashimi.cghView';
 const loadView = (): CghView => {
-  const d: CghView = { layout: 'horizontal', scale: 1, iscnClasses: ['Pathogenic', 'Likely pathogenic', 'Uncertain significance'] };
-  try { const v = { ...d, ...(JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as Partial<CghView> | null) }; return { layout: v.layout === 'vertical' ? 'vertical' : 'horizontal', scale: LR_SCALES.includes(v.scale) ? v.scale : 1, iscnClasses: Array.isArray(v.iscnClasses) ? v.iscnClasses.filter(x => typeof x === 'string') : d.iscnClasses }; } catch { return d; }
+  const d: CghView = { layout: 'horizontal', scale: 1, iscnClasses: ['Pathogenic', 'Likely pathogenic', 'Uncertain significance'], dots: true };
+  try { const v = { ...d, ...(JSON.parse(localStorage.getItem(VIEW_KEY) ?? 'null') as Partial<CghView> | null) }; return { layout: v.layout === 'vertical' ? 'vertical' : 'horizontal', scale: LR_SCALES.includes(v.scale) ? v.scale : 1, iscnClasses: Array.isArray(v.iscnClasses) ? v.iscnClasses.filter(x => typeof x === 'string') : d.iscnClasses, dots: v.dots !== false }; } catch { return d; }
 };
 
 const FILTER_KEY = 'sashimi.cghFilter';

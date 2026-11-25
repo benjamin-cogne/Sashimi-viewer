@@ -18,9 +18,11 @@ import type { SvGeneLoaders } from './SvGenomeBrowser';
 import type { GenomeBuild } from '../../standalone/ensembl';
 
 const CHROMS = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY'];
-const L = 34, R = 8, PT = 24, PH = 170, PB = PT + PH, HH = PB + 18, THR = 0.2, GAP = 2;
+/** L: the left margin, holding the log-ratio range buttons (`LrScale`, LRS_W wide) and the axis labels; L0 without probes (no axis) */
+export const LRS_W = 24;
+const L = 60, L0 = 34, R = 8, PT = 24, PH = 170, PB = PT + PH, HH = PB + 18, THR = 0.2, GAP = 2;
 /** vertical layout: a row's label band, its tallest column (chr1), the axis labels under it; the call bars beside each column */
-const VT = 16, VB = 16, VBARS = 12;
+const VT = 16, VB = 16, VBARS = 12, VL = LRS_W + 6;
 /** calls only (no probe file): the bars, the chromosomes as blocks under them, their names */
 const CT = 18, CB = 26, CH = 42;
 export const BTN = 'h-[22px] min-w-[24px] px-1.5 rounded border border-slate-200 bg-white text-[11px] text-slate-700 hover:border-accent-300 hover:bg-accent-50 disabled:opacity-40 disabled:pointer-events-none';
@@ -46,15 +48,27 @@ export function clipMark(g: CanvasRenderingContext2D, x: number, y: number, dir:
   const [a, b] = dir === 'u' ? [0, 1] : dir === 'd' ? [0, -1] : dir === 'l' ? [1, 0] : [-1, 0];
   g.moveTo(x, y); g.lineTo(x + a * 4 - b * 2.5, y + b * 4 - a * 2.5); g.lineTo(x + a * 4 + b * 2.5, y + b * 4 + a * 2.5); g.closePath();
 }
-/** the log-ratio range (±), shared by the whole genome, chromosome and probe panels, kept as a setting */
-export function LrScale() {
+const SB = 'w-full h-[15px] leading-[13px] rounded border text-[9.5px] tabular-nums disabled:opacity-40 disabled:pointer-events-none';
+/** the log-ratio range (±), shared by the whole genome, chromosome and probe panels, kept as a setting: small buttons
+ * stacked beside the log-ratio axis (in the plot's left margin), ⊕ narrower on top, the presets, ⊖ wider below */
+export function LrScale({ left = 2, top }: { left?: number; top: number }) {
   const S = useCgh().view.scale, i = LR_SCALES.indexOf(S);
-  return <span className="inline-flex items-center gap-1" data-cgh-scale title="Log-ratio axis range, shared by the whole genome, the chromosome and the call's probe panel (kept as a setting); points beyond it are drawn at the edge as small triangles; the colours stay at ±0.2">log ratio
-    <span className="inline-flex rounded border border-slate-200 overflow-hidden" role="group" aria-label="Log-ratio range">
-      {LR_PRESETS.map(v => <button key={v} onClick={() => cgh.setView({ scale: v })} aria-pressed={S === v} data-scale={v} className={`h-[22px] px-1.5 text-[11px] tabular-nums ${S === v ? 'bg-accent-50 text-accent-700 font-semibold' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>±{v}</button>)}
-      {!LR_PRESETS.includes(S) && <span className="h-[22px] px-1.5 text-[11px] leading-[22px] bg-accent-50 text-accent-700 font-semibold tabular-nums">±{S}</span>}</span>
-    <button className={BTN} disabled={i <= 0} onClick={() => cgh.setView({ scale: LR_SCALES[i - 1] })} title="Narrower log-ratio range (zoom in)" aria-label="Zoom in on the log ratio">⊕</button>
-    <button className={BTN} disabled={i >= LR_SCALES.length - 1} onClick={() => cgh.setView({ scale: LR_SCALES[i + 1] })} title="Wider log-ratio range (zoom out: ±3, ±4, ±6, ±8)" aria-label="Zoom out on the log ratio">⊖</button></span>;
+  const pre = (v: number) => `${SB} ${S === v ? 'border-accent-300 bg-accent-50 text-accent-700 font-semibold' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`;
+  return <div className="absolute z-[5] flex flex-col gap-[2px]" style={{ left, top, width: LRS_W }} data-cgh-scale role="group" aria-label="Log-ratio range"
+    title="Log-ratio axis range, shared by the whole genome, the chromosome and the call's probe panel (kept as a setting); points beyond it are drawn at the edge as small triangles; the colours stay at ±0.2"
+    onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()} onMouseMove={e => e.stopPropagation()}>
+    <button className={pre(NaN)} disabled={i <= 0} onClick={() => cgh.setView({ scale: LR_SCALES[i - 1] })} title="Narrower log-ratio range (zoom in)" aria-label="Zoom in on the log ratio">⊕</button>
+    {[...LR_PRESETS].reverse().map(v => <button key={v} onClick={() => cgh.setView({ scale: v })} aria-pressed={S === v} data-scale={v} title={`Log ratio ±${v}`} className={pre(v)}>±{v}</button>)}
+    {!LR_PRESETS.includes(S) && <span className={`${SB} block text-center border-accent-300 bg-accent-50 text-accent-700 font-semibold`}>±{S}</span>}
+    <button className={pre(NaN)} disabled={i >= LR_SCALES.length - 1} onClick={() => cgh.setView({ scale: LR_SCALES[i + 1] })} title="Wider log-ratio range (zoom out: ±3, ±4, ±6, ±8)" aria-label="Zoom out on the log ratio">⊖</button></div>;
+}
+/** the stack's height (⊕, the presets, the current range when not a preset, ⊖) */
+export const lrScaleH = (S: number) => (LR_PRESETS.length + 2 + (LR_PRESETS.includes(S) ? 0 : 1)) * 17;
+/** show / hide the probes' dots (the median line, segments, call shading and bars stay), kept as a setting */
+export function DotsToggle() {
+  const on = useCgh().view.dots;
+  return <label className="inline-flex items-center gap-1 cursor-pointer" title="Show the probes as dots; off, only the median line, the segments and the calls are drawn (kept as a setting, shared by the three views)" data-cgh-dots>
+    <input type="checkbox" checked={on} onChange={e => cgh.setView({ dots: e.target.checked })} className="accent-slate-600" />show probes</label>;
 }
 
 /** a call's characteristics, for the hover tips (here and in the probe panel) */
@@ -92,7 +106,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
   const [w, setW] = useState(0);
   const [hover, setHover] = useState<{ x: number; y: number; title: string; lines: string[]; dot?: [number, number] } | null>(null);
   const box = useRef<HTMLDivElement>(null), base = useRef<HTMLCanvasElement>(null), top = useRef<HTMLCanvasElement>(null), bars = useRef<Bar[]>([]);
-  const S = s.view.scale, vert = s.view.layout === 'vertical' && !chrom && probesOk;
+  const S = s.view.scale, dots = s.view.dots, vert = s.view.layout === 'vertical' && !chrom && probesOk;
   const chromPanel = !!chrom && open;
   useEffect(() => {
     const el = box.current; if (!el) return;
@@ -111,19 +125,19 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     const lens = CHROMS.map(ch => chromLength(build, ch) ?? 1);
     if (chrom) return { segs: [{ ch: chrom, to: lens[CHROMS.indexOf(chrom)], vert: false, p0: L, p1: w - R, q0: PT, q1: PB }], H: HH, rows: 1 };
     if (vert) {
-      const rows = w < 1000 ? 2 : 1, n = Math.ceil(CHROMS.length / rows), colW = (w - 8) / n, ph = rows === 1 ? 400 : 290, k = ph / Math.max(...lens);
+      const rows = w < 1000 ? 2 : 1, n = Math.ceil(CHROMS.length / rows), colW = (w - 8 - VL) / n, ph = rows === 1 ? 400 : 290, k = ph / Math.max(...lens);
       // each row as tall as its longest chromosome
       const tops = [0]; for (let r = 0; r < rows; r++) tops.push(tops[r] + VT + Math.max(...lens.slice(r * n, (r + 1) * n)) * k + VB);
       return {
         rows, H: Math.ceil(tops[rows]) + 2,
         segs: CHROMS.map((ch, i) => {
-          const r = Math.floor(i / n), x = 4 + (i % n) * colW + 2, y = tops[r] + VT;
+          const r = Math.floor(i / n), x = 4 + VL + (i % n) * colW + 2, y = tops[r] + VT;
           return { ch, to: lens[i], vert: true, p0: y, p1: y + lens[i] * k, q0: x, q1: x + colW - 4 - VBARS };
         }),
       };
     }
-    const tot = lens.reduce((a, b) => a + b, 0), k = (w - L - R - GAP * (CHROMS.length - 1)) / tot;
-    let x = L;
+    const l0 = probesOk ? L : L0, tot = lens.reduce((a, b) => a + b, 0), k = (w - l0 - R - GAP * (CHROMS.length - 1)) / tot;
+    let x = l0;
     const [q0, q1] = probesOk ? [PT, PB] : [CT, CB];
     return { H: probesOk ? HH : CH, rows: 1, segs: CHROMS.map((ch, i) => { const sg = { ch, to: lens[i], vert: false, p0: x, p1: x + lens[i] * k, q0, q1 }; x = sg.p1 + GAP; return sg; }) };
   }, [w, chrom, build, vert, probesOk]);
@@ -177,7 +191,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
       g.strokeStyle = '#cbd5e1'; g.strokeRect(L + 0.5, PT + 0.5, w - L - R - 1, PH - 1);
     }
     let n = 0, clipped = 0, timer = 0;
-    const done = () => { el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', String(n)); el.setAttribute('data-clipped', String(clipped)); };
+    const done = () => { el.setAttribute('data-ms', (performance.now() - t0).toFixed(0)); el.setAttribute('data-drawn', String(n)); el.setAttribute('data-clipped', String(clipped)); el.setAttribute('data-dots', String(dots)); };
     if (!pr) { done(); return; }
     const rws = H, cols = Math.ceil(w) + 1, grid = new Uint8Array(cols * rws), med: [number, number][][] = [];
     const clip: { sg: Seg; at: number; hi: boolean }[] = [], seen = new Set<string>();
@@ -196,7 +210,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
         if (Math.abs(v) > S) {
           // beyond the range: one triangle per 3 px along the chromosome and side
           clipped++; const k = `${sg.ch}|${(at / 3) | 0}|${v > 0}`; if (!seen.has(k)) { seen.add(k); clip.push({ sg, at, hi: v > 0 }); }
-        } else grid[(x | 0) * rws + (y | 0)] = v > THR ? 2 : v < -THR ? 3 : 1;
+        } else grid[(x | 0) * rws + (y | 0)] |= v > THR ? 2 : v < -THR ? 4 : 1;
         const c = at | 0;
         if (chrom) { buf.push(v); if (buf.length === 15) { pts.push([x, lrOf(sg, median(buf.slice()), S)]); buf.shift(); } } else { if (c !== cell) { flush(); cell = c; } buf.push(v); }
       }
@@ -205,12 +219,13 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     };
     const paint = () => {
       const d = chrom ? 2 : 1.5;
-      for (const [cls, col] of [[1, '#111827'], [2, '#dc2626'], [3, '#16a34a']] as const) {
+      // each colour present in a cell drawn (a red probe is not hidden by a black one of the same cell); off: the median line only
+      if (dots) for (const [cls, col] of [[1, '#111827'], [2, '#dc2626'], [4, '#16a34a']] as const) {
         g.fillStyle = col; g.beginPath();
-        for (let k = 0; k < grid.length; k++) if (grid[k] === cls) g.rect(Math.floor(k / rws) - d / 4, (k % rws) - d / 4, d, d);
+        for (let k = 0; k < grid.length; k++) if (grid[k] & cls) g.rect(Math.floor(k / rws) - d / 4, (k % rws) - d / 4, d, d);
         g.fill();
       }
-      for (const up of [true, false]) {
+      if (dots) for (const up of [true, false]) {
         g.fillStyle = up ? '#dc2626' : '#16a34a'; g.beginPath();
         for (const c of clip) if (c.hi === up) {
           const e = lrOf(c.sg, up ? 1e9 : -1e9, S);
@@ -218,7 +233,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
         }
         g.fill();
       }
-      g.strokeStyle = '#1e3a8a'; g.lineWidth = vert ? 1 : 1.2;
+      g.strokeStyle = '#1e3a8a'; g.lineWidth = dots ? (vert ? 1 : 1.2) : 1.6;
       for (const pts of med) { g.beginPath(); pts.forEach(([x, y], j) => (j ? g.lineTo(x, y) : g.moveTo(x, y))); g.stroke(); }
       done();
     };
@@ -231,7 +246,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     };
     run();
     return () => clearTimeout(timer);
-  }, [w, segs, H, pr, open, S, probesOk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [w, segs, H, pr, open, S, probesOk, dots]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the calls: file calls (loss red, gain blue) and probe calls (purple), cheap, redrawn with the state
   const barKey = `${calls.map(c => c.id).join()}|${events.length}|${s.shown}`;
@@ -270,7 +285,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     if (b) { setHover({ x, y, title: `${b.c.sample}${b.c.fromProbes ? ' · probe call' : ''}`, lines: callLines(s, b.c) }); return; }
     const sg = segAt(x, y), q = sg && pr?.p.byChrom.get(sg.ch);
     const across = sg ? (sg.vert ? x : y) : 0, along = sg ? (sg.vert ? y : x) : 0;
-    if (!sg || !q || across < Math.min(sg.q0, sg.q1) - 2 || across > Math.max(sg.q0, sg.q1) + 2) { setHover(null); return; }
+    if (!sg || !q || !dots || across < Math.min(sg.q0, sg.q1) - 2 || across > Math.max(sg.q0, sg.q1) + 2) { setHover(null); return; }
     // the nearest probe drawn within 6 px (the probes of ± 3 px of the pointer along the chromosome)
     const bpx = sg.to / (sg.p1 - sg.p0), bp = (along - sg.p0) * bpx;
     let best = -1, bd = 36;
@@ -307,7 +322,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
           <button className={BTN} onClick={() => step(1)} title="Next chromosome" aria-label="Next chromosome">→</button></span>}
         {!chrom && probesOk && <span className="inline-flex rounded border border-slate-200 overflow-hidden" role="group" aria-label="Layout" data-cgh-layout title="Chromosomes side by side (position across), or as columns (position down from pter, log ratio across); kept as a setting. A chromosome's own view stays horizontal.">
           {(['horizontal', 'vertical'] as const).map(v => <button key={v} onClick={() => cgh.setView({ layout: v })} aria-pressed={lay === v} className={`h-[22px] px-1.5 text-[11px] ${lay === v ? 'bg-accent-50 text-accent-700 font-semibold' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{v}</button>)}</span>}
-        {probesOk && !(chromPanel && pr) && <LrScale />}
+        {probesOk && !(chromPanel && pr) && <DotsToggle />}
         {!probesOk ? <span className="text-slate-400" data-cgh-calls-only>· no probe file for this patient: its calls (as listed) on the chromosomes, to scale · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> · click a bar: open the call</span>
         : <span className="text-slate-400">· {chrom ? 'click a call bar: open it' : vert ? 'click a chromosome: its probes, a call bar: the call · position down from pter, log ratio across' : 'click a chromosome: its probes, a call bar: the call'} · dots black within ±0.2, red above, green below · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> (calls listed), <span className="text-fuchsia-700">probe calls</span> · {chromPanel && pr ? 'every probe, as in the call\'s probe panel' : `clipped at ±${S} (▲▼ beyond)`}{male ? ' · male: X and Y near −1 (one copy, not normalised)' : ''}</span>}
       </div>
@@ -316,6 +331,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
       : <div ref={box} className="relative mt-1 mx-1 select-none cursor-pointer" onMouseMove={onMove} onMouseLeave={() => setHover(null)} onClick={onClick}>
         <canvas ref={base} style={{ width: '100%', height: H, display: 'block' }} data-cgh-genome-probes data-layout={vert ? 'vertical' : 'horizontal'} />
         <canvas ref={top} style={{ width: '100%', height: H, display: 'block', position: 'absolute', inset: 0 }} />
+        {probesOk && segs.length > 0 && <LrScale top={vert ? Math.max(0, segs[0].p1 - lrScaleH(S)) : PT + Math.max(0, (PH - lrScaleH(S)) / 2)} />}
         {hover?.dot && <div className="absolute pointer-events-none rounded-full border-2 border-slate-900" style={{ left: hover.dot[0] - 4, top: hover.dot[1] - 4, width: 8, height: 8 }} />}
         {hover && <CghTip x={hover.x} y={hover.y} w={w} title={hover.title} lines={hover.lines} />}
       </div>}
