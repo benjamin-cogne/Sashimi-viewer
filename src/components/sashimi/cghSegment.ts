@@ -44,13 +44,13 @@ export const EXACT_MAX = 10000;
 /** a longer stretch is searched on this many blocks first (block sums), then exactly around the best block arc */
 const COARSE = 2500;
 
-/** the best arc (i, j] of x[l, l + n) over i in [i0, i1], j in [j0, j1] (0 < j - i < n), its |Z| */
-function bestArc(S: Float64Array, n: number, m: number, w: Float64Array, i0: number, i1: number, j0: number, j1: number, step: number) {
+/** the best arc (i, j] of x[l, l + n) over i in [i0, i1], j in [j0, j1] (0 < j - i < n, j - i ≤ kmax), its |Z| */
+function bestArc(S: Float64Array, n: number, m: number, w: Float64Array, i0: number, i1: number, j0: number, j1: number, step: number, kmax = n) {
   let best = 0, bi = 0, bj = 0;
   for (let i = i0; i <= i1; i += step) {
     const si = S[i];
     for (let j = Math.max(i + 1, j0); j <= j1; j += step) {
-      const k = j - i; if (k >= n) break;
+      const k = j - i; if (k >= n || k > kmax) break;
       const z = Math.abs(S[j] - si - k * m) * w[k];
       if (z > best) { best = z; bi = i; bj = j; }
     }
@@ -63,7 +63,8 @@ function bestArc(S: Float64Array, n: number, m: number, w: Float64Array, i0: num
  * (k = j - i); split there when |Z| ≥ t, and recurse on the up-to-three pieces. Returns the breakpoints. A stretch
  * longer than EXACT_MAX (arrays of 180k probes and more) is searched in two passes, as DNAcopy's hybrid does in its way:
  * the arcs between block edges first (COARSE blocks), then every arc whose ends lie within a block of the best one's,
- * so O(COARSE² + b²) instead of O(n²); a stretch up to EXACT_MAX is searched exactly, as before.
+ * and every arc of up to two blocks (2b probes) exactly, so O(COARSE² + b² + n·b) instead of O(n²): a short event inside
+ * one block, diluted in the block sums, is still found; a stretch up to EXACT_MAX is searched exactly, as before.
  */
 function cbs(x: Float64Array, l: number, r: number, sigma: number, t: number, out: number[]) {
   const n = r - l;
@@ -78,8 +79,9 @@ function cbs(x: Float64Array, l: number, r: number, sigma: number, t: number, ou
     else {
       const b = Math.ceil(n / COARSE), c = bestArc(S, n, m, w, 0, n - 1, b, n, b);
       a = bestArc(S, n, m, w, Math.max(0, c.bi - b), Math.min(n - 1, c.bi + b), Math.max(1, c.bj - b), Math.min(n, c.bj + b), 1);
-      // the ends of the stretch (one breakpoint) searched exactly too: O(n)
-      for (const e of [bestArc(S, n, m, w, 0, 0, 1, n, 1), bestArc(S, n, m, w, 0, n - 1, n, n, 1)]) if (e.best > a.best) a = e;
+      // the ends of the stretch (one breakpoint) searched exactly too: O(n); and every short arc (up to two blocks),
+      // which the block sums dilute (a 5-probe loss in a 32-probe block): O(n·2b)
+      for (const e of [bestArc(S, n, m, w, 0, 0, 1, n, 1), bestArc(S, n, m, w, 0, n - 1, n, n, 1), bestArc(S, n, m, w, 0, n - 1, 1, n, 1, 2 * b)]) if (e.best > a.best) a = e;
     }
     const { best, bi, bj } = a;
     if (best >= t) {

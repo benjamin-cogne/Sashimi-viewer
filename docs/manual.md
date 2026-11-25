@@ -228,7 +228,7 @@ header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `ga
 one patient each: the interval tables and BED files inside are found by their content and read (one nested zip level; a file
 already added is not added twice), the patient named by the table's Record Name, else by the zip. The other files of an
 automated export (images, XML, QC tables…) are left aside, said in one line of the question (*ignored: n other files*);
-a table whose columns are not recognised is only asked about when the zip holds no table read by itself. The probes' log
+a table whose columns are not recognised is only asked about when the zip holds no table read by itself (its probe file then waits with it and goes to the table once its columns are chosen, also when they are changed later with *columns…*). The probes' log
 ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
 memory with the zip's patient (read on first view); dropped alone, the file goes with the loaded
 sample of that name, else it makes a **probes-only** patient (see *Probes only* below). The page then asks the
@@ -243,7 +243,7 @@ listed (lighter, tagged *1 probe*) and annotated on demand; *− hide them* fold
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
-A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and what the call is: a **type**, or one or several **log-ratio** columns (separate gain / loss columns, as Amplification / Gain / Loss / Deletion, each row taking the non-zero one, typed by the column's name when it says gain or loss), or a **copy number** (or an ISCN); the dialog names what is missing. With no type, the type comes from the copy number (below 2 a loss, above a gain; 1 is normal on a male's X outside the pseudo-autosomal regions, the sex read from a `Gender` header line, and on a Y; with no sex in the file, a chrX row at x1 is kept as a loss and one at x2 as a gain, said in the import question, and the one normal for the sex chosen there is no longer listed), else from the log ratio's sign; a row with neither (log ratio 0 or empty), or with the normal copy number, is skipped and counted in the import question. This is also the way in for interval tables, interval-based reports, BED or VCF files laid out otherwise, with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and what the call is: a **type**, or one or several **log-ratio** columns (separate gain / loss columns, as Amplification / Gain / Loss / Deletion, each row taking the non-zero one, typed by the column's name when it says gain or loss), or a **copy number** (or an ISCN); the dialog names what is missing. With no type, the type comes from the copy number (below 2 a loss, above a gain; 1 is normal on a male's X outside the pseudo-autosomal regions, the sex read from a `Gender` header line, and on a Y; a chrX row at x1 is kept as a loss and one at x2 as a gain, with or without a sex in the file (said in the import question when there is none), and the one normal for the patient's current sex is not listed, so correcting the sex brings it back; a range, x2~3 or a male's X x1~2, is a gain when it reaches above the normal number, else a loss, never normal), else from the log ratio's sign; a row with neither (log ratio 0 or empty), or with the normal copy number, is skipped and counted in the import question. This is also the way in for interval tables, interval-based reports, BED or VCF files laid out otherwise, with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
 
 Files read (also inside zips):
 
@@ -308,7 +308,7 @@ poor). The probe file is read on first use, off the page in a background worker 
 
 **Probe calls.** A second opinion beside the file's calls, for each patient with probes: copy-number events detected
 from the probes themselves, by circular binary segmentation (Olshen et al., *Biostatistics* 2004) with a fixed
-threshold instead of permutations (about half a second for 61,000 probes, in a background worker: the page stays usable; a chromosome of more than 10,000 probes, as on 180k or 1M arrays, is searched first between blocks then exactly around the best one, so a 1M-probe array takes seconds, not hours). A segment is an event
+threshold instead of permutations (about half a second for 61,000 probes, in a background worker: the page stays usable; a chromosome of more than 10,000 probes, as on 180k or 1M arrays, is searched first between blocks then exactly around the best one, at its ends and over every arc of up to two blocks, so a short event inside a block is still found and a 1M-probe array takes seconds, not hours; if the probe calls fail, *probe calls failed* and the reason are shown on the patient's *Probe calls* line). A segment is an event
 when it holds at least 3 probes and its mean log ratio is at least ±0.25; adjacent segments of one direction are merged
 (a lone stray probe does not cut a gain in two). chrY is read only for a patient said male (its PAR probes are the chrX
 ones; the PARs of the file's build, GRCh37 or GRCh38). Under the filters, *Probe calls* gives per patient *▸ n not in the file*: the events no file call matches (same
@@ -328,7 +328,7 @@ shows the patient *probes only*, with its sex, the detection *settings* and the 
 tag and a banner: *Calls detected from the probes by this page (CBS), not by CytoGenomics: to confirm in the dedicated
 software.* Its export is a new tab-separated file, `<name>.probe-calls.txt`: header lines (source probe file, build,
 detection settings, date), then Chromosome, Start, Stop, Cytoband, Size(kb), Type, #Probes, Mean Log Ratio, Copies,
-ISCN, Classification, Comment. A table of the same patient added later takes its probes and replaces the probes-only
+ISCN, Classification, Comment; the UCSC bands are read for every call before writing (a header line counts the rows left without one). A table of the same patient added later takes its probes and replaces the probes-only
 patient when its question is accepted: the question says so, and that the classes and notes given to the probe calls are
 not carried over (Cancel to export them first).
 
@@ -434,8 +434,9 @@ recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin f�
 carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
 each file of the tab back unchanged but for its Classification column (a class the file already had and left as it is
 is written as it was, not in the list's words; mixed line endings kept) and a Comment column holding the notes (added
-after the last column when the table has none; a BED gets both as two last columns), plus an ISCN column when the
-file has none (a CytoGenomics interval table keeps its own; a VCF: INFO `CGH_ISCN`); the button is marked • while
+after the last column when the table has none; a BED gets them and the ISCN as three last columns), plus an ISCN column,
+named *ISCN (Sashimi viewer)*, when the file has none (a CytoGenomics interval table keeps its own; a VCF: INFO `CGH_ISCN`; read
+back, that column is not taken for the file's own ISCN and is rewritten at the next export); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
 With several files in the tab, the button opens a list: one **export** per file (one download, its patients marked exported) and **export all**, one file after another a moment apart, each marked as its download starts (the browser may ask to allow several downloads).
 

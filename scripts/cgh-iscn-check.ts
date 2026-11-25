@@ -37,7 +37,7 @@ eq('bands', iscnBands('q11.21 - q11.23'), 'q11.21q11.23');
 // export: a table without ISCN gets one; one with ISCN keeps its own
 const mkFile = (head: string, row: string, cnv: any) => ({ id: 'f', name: 'f.txt', format: 'interval', build: 'GRCh37', lines: [head, row], eol: '\n', classCol: null, classSuffix: '', headerLine: 0, commentCol: null, delim: '\t', samples: [{ key: 'S', name: 'S', cnvs: [{ ...cnv, line: 1 }] }] } as any);
 const e1 = exportCghFile(mkFile('Chr\tStart\tStop', 'chr22\t18894835\t21505417', b), () => 'Pathogenic', () => '', () => 'ISCNX');
-eq('export adds ISCN', e1, 'Chr\tStart\tStop\tClassification\tComment\tISCN\nchr22\t18894835\t21505417\tPathogenic\t\tISCNX');
+eq('export adds ISCN', e1, 'Chr\tStart\tStop\tClassification\tComment\tISCN (Sashimi viewer)\nchr22\t18894835\t21505417\tPathogenic\t\tISCNX');
 const e2 = exportCghFile(mkFile('Chr\tStart\tStop\tISCN', 'chr22\t18894835\t21505417\tarr', f1), () => 'Pathogenic', () => '', () => 'ISCNX');
 eq('export keeps ISCN', e2, 'Chr\tStart\tStop\tISCN\tClassification\tComment\nchr22\t18894835\t21505417\tarr\tPathogenic\t');
 // the band at sub-band precision from the cytogenetic bands (invented bands, 0-based half-open), the file's as the fallback

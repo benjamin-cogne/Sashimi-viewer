@@ -50,7 +50,10 @@ export function exportProbeCalls(file: CghFile, o: SegOpts, at: Date, cell: { ba
     `# ${PROBE_ONLY_WARNING}`,
     ['Chromosome', 'Start', 'Stop', 'Cytoband', 'Size(kb)', 'Type', '#Probes', 'Mean Log Ratio', 'Copies', 'ISCN', 'Classification', 'Comment'].join('\t'),
   ];
-  for (const c of file.samples.flatMap(x => x.cnvs)) out.push([c.chrom, c.start, c.end, cell.band(c), c.sizeKb.toFixed(2), c.kind === 'loss' ? 'Loss' : 'Gain', c.probes ?? '', c.logRatio?.toFixed(3) ?? '',
+  const cs = file.samples.flatMap(x => x.cnvs), noBand = cs.filter(c => !cell.band(c)).length;
+  // bands read from UCSC when the page exported: a row left without one is counted
+  if (noBand) out.splice(out.length - 1, 0, `# Rows without a cytoband (UCSC cytobands not read): ${noBand}`);
+  for (const c of cs) out.push([c.chrom, c.start, c.end, cell.band(c), c.sizeKb.toFixed(2), c.kind === 'loss' ? 'Loss' : 'Gain', c.probes ?? '', c.logRatio?.toFixed(3) ?? '',
     cell.copies(c), cell.iscn(c), flat(cell.cls(c)), flat(cell.note(c))].join('\t'));
   return out.join('\n') + '\n';
 }

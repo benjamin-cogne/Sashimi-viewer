@@ -12,7 +12,7 @@
  */
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { parOf } from './cghMosaic';
-import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
+import { norm, parseNum, parsePos, parseRegion, copiesOf, splitDelimited, joinDelimited, splitRecords, eolOf, OWN_ISCN_HEADER, isOwnIscnHeader, detectTable, autoCols, AUTO_OPTS, SIZE_MULT, NeedsMapping, type MapSpec } from './cghMapping';
 
 /** a position with thousands commas; a call's size from kb (2.61 Mb, 450 kb, 12.5 kb, 800 bp): shared by the page's parts */
 export const fmtBp = (n: number) => Math.round(n).toLocaleString('en-US');
@@ -56,7 +56,7 @@ export interface CghCnv {
   pval?: number | null;
   /** detected from the probes (cghSegment.ts), not in the file: drawn, never exported */
   fromProbes?: boolean;
-  /** typed by its copy number on chrX while the file states no sex: x1 kept as a loss, x2 as a gain; the one normal for the sex set later is not listed (`passes`) */
+  /** typed by its copy number on chrX outside the PARs (x1 / x2, with or without a sex in the file): x1 kept as a loss, x2 as a gain; the one normal for the patient's current sex is not listed (`passes`) */
   cnSex?: boolean;
 }
 export interface CghSample { key: string; name: string; fileId: string; declaredCalls: number | null; cnvs: CghCnv[];
@@ -229,16 +229,19 @@ function parseInterval(lines: string[], id: string, fileName: string, base: stri
     // the PARs are diploid in a male too
     const par = (parOf(cghBuild(buildText) ?? opts.build)[chrom] ?? []).some(([a, b]) => start >= a && end <= b);
     const cn2 = !par && (chrom === 'chrY' || (chrom === 'chrX' && sex === 'male')) ? 1 : 2;
-    // chrX outside the PARs with no sex in the file: x2 is a male's gain, x1 a female's loss; both kept, the normal one hidden once the sex is set
-    const xNoSex = chrom === 'chrX' && !sex && !par;
-    const xCn = xNoSex && !cn.amp && (cn.copies === 1 || cn.copies === 2);
-    const byCn = cn.amp ? 'gain' : xCn ? (cn.copies === 1 ? 'loss' : 'gain') : cn.copies != null ? (cn.copies < cn2 ? 'loss' : cn.copies > cn2 ? 'gain' : 'normal') : null;
+    // chrX outside the PARs, x1 or x2: x2 is a male's gain, x1 a female's loss; both kept (the sex stated in the file
+    // too: it can be corrected), the one normal for the patient's current sex hidden (`hiddenBySex`)
+    const xCn = chrom === 'chrX' && !par && !cn.amp && cn.copiesHi == null && (cn.copies === 1 || cn.copies === 2);
+    // a range (x2~3, a male's X x1~2: mosaic) is a change, never the normal: a gain when it reaches above the normal, else a loss
+    const byCn = cn.amp ? 'gain' : xCn ? (cn.copies === 1 ? 'loss' : 'gain')
+      : cn.copies != null && cn.copiesHi != null ? (cn.copies < cn2 ? 'loss' : 'gain')
+      : cn.copies != null ? (cn.copies < cn2 ? 'loss' : cn.copies > cn2 ? 'gain' : 'normal') : null;
     const kindRaw = choice ?? kindOfText(typeText) ?? byCn ?? (lr ? lrBy?.kind ?? (lr < 0 ? 'loss' : 'gain') : null);
     if (kindRaw === 'normal') { normal++; skip(`line ${i + 1}: copy number ${cn.copies}, the normal one`); continue; }
     if (!kindRaw) { untyped++; skip(`line ${i + 1}: no type, copy number or non-zero log ratio`); continue; }
     const kind: CghKind = kindRaw;
     const cnSex = xCn && !choice && !kindOfText(typeText) ? true : undefined;
-    if (cnSex) xSexless++;
+    if (cnSex && !sex) xSexless++;
     const cell = c.cls >= 0 ? (f[c.cls] ?? '') : '';
     if (cell.trim()) { if (cell.includes(';;')) suffixYes++; else suffixNo++; }
     const name = (c.sample >= 0 && f[c.sample]?.trim()) || record || base;
@@ -384,7 +387,8 @@ function parseBed(lines: string[], id: string, fileName: string, base: string, e
 /**
  * The file written back, each call with the class and the note given in the browser, the other lines as they were. An
  * interval table gets its Classification column filled and a Comment column (added after the last one when it has none);
- * a BED gets the class and the note as two last columns; a VCF gets them in INFO (CGH_CLASS, CGH_NOTE, percent-encoded).
+ * a BED gets the class, the note and the ISCN as three last columns; a VCF gets them in INFO (CGH_CLASS, CGH_NOTE, CGH_ISCN, percent-encoded).
+ * The ISCN column added (`OWN_ISCN_HEADER`, when the file has none) is rewritten at a later export of the file read back.
  */
 export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, noteOf: (cnv: CghCnv) => string = c => c.note, iscnOf?: (cnv: CghCnv) => string): string {
   const out = file.lines.slice(), d = file.delim, sp = (l: string) => splitDelimited(l, d);
@@ -394,13 +398,16 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
   // an interval table: its Classification and Comment columns, added after the last one when missing; an ISCN column
   // only when the file has none (a CytoGenomics interval table keeps its own)
   let classCol = file.classCol, noteCol = file.commentCol, iscnCol: number | null = null;
-  const hasIscn = file.headerLine != null ? sp(out[file.headerLine]).some(x => /^\s*iscn\s*$/i.test(x)) : file.samples.some(x => x.cnvs.some(c => c.iscn));
+  // the page's own ISCN column (a file exported here before) is written again, never taken for the file's
+  const ownIscn = file.headerLine != null ? sp(out[file.headerLine]).findIndex(isOwnIscnHeader) : -1;
+  const hasIscn = ownIscn >= 0 || (file.headerLine != null ? sp(out[file.headerLine]).some(x => /^\s*iscn\s*$/i.test(x)) : file.samples.some(x => x.cnvs.some(c => c.iscn)));
+  if (iscnOf && ownIscn >= 0) iscnCol = ownIscn;
   if (file.headerLine != null && (classCol == null || noteCol == null || (iscnOf && !hasIscn))) {
     const h = sp(out[file.headerLine]);
     while (h.length && h[h.length - 1] === '') h.pop();
     if (classCol == null) { classCol = h.length; h.push('Classification'); }
     if (noteCol == null) { noteCol = h.length; h.push('Comment'); }
-    if (iscnOf && !hasIscn) { iscnCol = h.length; h.push('ISCN'); }
+    if (iscnOf && !hasIscn) { iscnCol = h.length; h.push(OWN_ISCN_HEADER); }
     out[file.headerLine] = joinDelimited(h, d);
   }
   // a table without a header row: the missing columns after the widest call row (the ISCN too, never over a data cell)

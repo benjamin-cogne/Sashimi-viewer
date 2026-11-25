@@ -11,6 +11,7 @@ import { lowerBound } from './cghProbes';
 import { chromLength } from '../../standalone/assembly';
 import { estCopies } from './cghMosaic';
 import { viewOf } from './cghAnnotate';
+import { isProbeOnly } from './cghProbeOnly';
 import { CghProbePanel } from './CghProbePanel';
 import { LEVEL_STYLE } from './cghScore';
 import type { SvGeneLoaders } from './SvGenomeBrowser';
@@ -127,7 +128,8 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
     return { H: probesOk ? HH : CH, rows: 1, segs: CHROMS.map((ch, i) => { const sg = { ch, to: lens[i], vert: false, p0: x, p1: x + lens[i] * k, q0, q1 }; x = sg.p1 + GAP; return sg; }) };
   }, [w, chrom, build, vert, probesOk]);
   const calls = cur ? cur.x.cnvs.filter(c => passes(s, c)) : [];
-  const events = cur ? (cgh.probeCallsOf(key)?.events ?? []).map(e => probeCnv(e, key, cur.x.name)) : [];
+  // a probes-only patient's calls are its probe calls: drawn once, as its calls
+  const events = cur && !isProbeOnly(cur.f) ? (cgh.probeCallsOf(key)?.events ?? []).map(e => probeCnv(e, key, cur.x.name)) : [];
 
   // the probes: one mark per pixel cell (the same picture, bounded by the pixels), a median line; redrawn only on resize / view / scale
   useEffect(() => {

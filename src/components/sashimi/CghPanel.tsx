@@ -22,6 +22,7 @@ import { CghRecurrentDetail } from './CghClinGenTrack';
 import { ProbeCallsBar, ProbeMethods, ProbeSettings } from './CghProbeCalls';
 import { exportProbeCalls, isProbeOnly, PROBE_ONLY_WARNING } from './cghProbeOnly';
 import { CallIscnText, PatientIscn, iscnOfCall, iscnTip } from './CghIscnView';
+import { bandSpan, callIscn, iscnBandOf } from './cghIscn';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { MoiClass } from '../../standalone/panelapp';
 
@@ -121,7 +122,7 @@ function SizeSlider({ value, onChange, delay = 300, className = '' }: { value: n
   );
 }
 const EXPORT_GAP_MS = 600;
-const EXPORT_TITLE = 'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets both as two last columns, a VCF in INFO CGH_CLASS / CGH_NOTE; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.\nA probes-only patient (a CGH_Log_Ratio.txt without its table) is written as a new tab-separated file, <name>.probe-calls.txt (source, build, detection settings, date; one row per probe call with its band, copies, ISCN, class and note).\nSeveral files: one download each, and the browser may ask to allow several downloads.';
+const EXPORT_TITLE = 'Each file of the tab written back as it came, with the classes given here in its Classification column and the notes in a Comment column (added when the file has none; a BED gets them and the ISCN as three last columns, a VCF in INFO CGH_CLASS / CGH_NOTE / CGH_ISCN; an ISCN column, named ISCN (Sashimi viewer), is added when the file has none; an .xlsx is written as tab-separated text, .classified.txt).\nClasses and notes are kept in this tab only: export them to keep them.\nA probes-only patient (a CGH_Log_Ratio.txt without its table) is written as a new tab-separated file, <name>.probe-calls.txt (source, build, detection settings, date; one row per probe call with its band, copies, ISCN, class and note).\nSeveral files: one download each, and the browser may ask to allow several downloads.';
 function ProbeQuestion({ p, init, initKb, loaded }: { p: NonNullable<CghState['pending']>; init: number; initKb: number; loaded: CghFile[] }) {
   const [n, setN] = useState<number>(init);
   const [kb, setKb] = useState<number>(initKb);
@@ -284,12 +285,24 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const at = rows.findIndex(r => r.c.id === s.shown);
   const exportFiles = [...new Set(listed.map(e => e.f))];
   /** one file written back; a file holds every sample it was read with: all of them are marked exported, only once its download is triggered */
-  const exportOne = (fl: CghFile) => {
+  /** the bands of a probes-only patient's calls not annotated yet: the UCSC cytobands read per chromosome (the loader caches them) */
+  const bandsOf = async (fl: CghFile) => {
+    const m = new Map<string, string>(), get = loadersFor?.(fl.build ?? 'GRCh37').getCytobands;
+    const need = fl.samples.flatMap(x => x.cnvs).filter(c => !s.ann[c.id]?.band && !c.cytoband);
+    if (get) for (const ch of new Set(need.map(c => c.chrom))) {
+      try { const b = await get(ch); for (const c of need) if (c.chrom === ch) { const v = bandSpan(b, c.start - 1, c.end); if (v) m.set(c.id, v); } } catch { /* left blank, counted in the header */ }
+    }
+    return m;
+  };
+  const exportOne = async (fl: CghFile) => {
     // a class given here, else the file's own cell as written (not translated into the list's words)
     const iscn = (c: CghCnv) => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '';
-    const text = isProbeOnly(fl)
-      ? exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => bandOfCall(c, s.ann[c.id]), copies: c => estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? '', iscn, cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c) })
-      : exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn);
+    let text: string;
+    if (isProbeOnly(fl)) {
+      const bands = await bandsOf(fl), band = (c: CghCnv) => s.ann[c.id]?.band ?? bands.get(c.id);
+      text = exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => band(c) || bandOfCall(c, s.ann[c.id]), copies: c => estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? '',
+        iscn: c => callIscn(c, fl.build ?? 'GRCh37', iscnBandOf(c, band(c)), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr').text ?? '', cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c) });
+    } else text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
     a.download = fl.saveAs;
@@ -298,7 +311,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     cgh.exported(fl.samples.map(x => x.key));
   };
   // browsers block or ask before several downloads at once: one after another, each file marked as its own starts
-  const exportAll = () => exportFiles.forEach((fl, i) => setTimeout(() => exportOne(fl), i * EXPORT_GAP_MS));
+  const exportAll = () => exportFiles.forEach((fl, i) => setTimeout(() => void exportOne(fl), i * EXPORT_GAP_MS));
   /** classes or notes of the patients listed not exported yet */
   const listedDirty = listed.some(e => s.dirtyKeys[e.x.key]);
   const tab = (on: boolean) => `inline-flex items-center gap-1.5 h-8 pl-3 pr-2 -mb-px rounded-t-lg border text-xs whitespace-nowrap ${on ? 'bg-white border-slate-200 border-b-white text-slate-900 font-semibold shadow-[inset_0_2px_0_#0f766e]' : 'bg-slate-50 border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100'}`;
@@ -333,7 +346,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   {exportFiles.map(fl => <div key={fl.id} className="flex items-center gap-2 py-1 border-b border-slate-100">
                     <span className="flex-1 min-w-0 truncate" title={fl.name}>{fl.name}{fl.samples.some(x => s.dirtyKeys[x.key]) ? <span className="text-amber-700"> •</span> : null}
                       <span className="block text-[10.5px] text-slate-500 truncate">{fl.samples.map(x => x.name).join(', ')} → {fl.saveAs}</span></span>
-                    <button className="h-[24px] px-2 rounded border border-slate-200 hover:border-slate-300 font-medium" onClick={() => exportOne(fl)}>export</button>
+                    <button className="h-[24px] px-2 rounded border border-slate-200 hover:border-slate-300 font-medium" onClick={() => void exportOne(fl)}>export</button>
                   </div>)}
                   <div className="flex items-center gap-2 pt-1.5">
                     <span className="flex-1 text-[10.5px] text-slate-500">The browser may ask to allow several downloads.</span>
@@ -341,7 +354,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
                   </div>
                 </div>
               </Popover></span>
-            : <button data-cgh-export-btn onClick={() => exportFiles[0] && exportOne(exportFiles[0])} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
+            : <button data-cgh-export-btn onClick={() => { if (exportFiles[0]) void exportOne(exportFiles[0]); }} className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium ${listedDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}
                 title={EXPORT_TITLE}>
                 <Icon name="download" size={13} />Export classified table{listedDirty ? ' •' : ''}</button>}
         </span>

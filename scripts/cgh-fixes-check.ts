@@ -4,7 +4,10 @@
 import { detect, segmentChrom, agrees, chrYPart, EXACT_MAX } from '../src/components/sashimi/cghSegment';
 import { parseCghFile, exportCghFile } from '../src/components/sashimi/cghIntervals';
 import { estCopies, mosaicOf, parOf } from '../src/components/sashimi/cghMosaic';
-import { guessLrMore } from '../src/components/sashimi/cghMapping';
+import { guessLrMore, guessCols, OWN_ISCN_HEADER } from '../src/components/sashimi/cghMapping';
+import { hiddenBySex } from '../src/components/sashimi/cghSeries';
+import { exportProbeCalls, probeOnlyFile } from '../src/components/sashimi/cghProbeOnly';
+import { SEG_DEFAULTS } from '../src/components/sashimi/cghSegment';
 import type { CghProbeChrom } from '../src/components/sashimi/cghProbes';
 let bad = 0;
 const eq = (name: string, got: unknown, want: unknown) => { const ok = JSON.stringify(got) === JSON.stringify(want); if (!ok) bad++; console.log(ok ? 'ok  ' : 'FAIL', name, '|', JSON.stringify(got), ok ? '' : `| want ${JSON.stringify(want)}`); };
@@ -29,7 +32,11 @@ const chromOf = (n: number, ev: [number, number, number][]): CghProbeChrom => {
   eq('X no sex: kept', f.samples[0].cnvs.map(c => [c.chrom, c.copies, c.kind, !!c.cnSex]), [['chrX', 2, 'gain', true], ['chrX', 1, 'loss', true], ['chr3', 3, 'gain', false]]);
   eq('X no sex: warned', f.warnings.some(w => /chrX row.*no sex/.test(w)), true);
   const m = parseCghFile('Sex: male\n' + t, 'x.tsv', 'P1', { cols, opts: { delim: '\t', headerRow: 1, zeroBased: false, sizeUnit: 'kb', build: null, typeMap: {} } });
-  eq('X male in file: x1 normal, x2 gain', m.samples[0].cnvs.map(c => [c.chrom, c.copies, c.kind, !!c.cnSex]), [['chrX', 2, 'gain', false], ['chr3', 3, 'gain', false]]);
+  // review 8: a male stated in the file: x1 kept (flagged), hidden for a male, listed again when the sex is corrected
+  const mc = m.samples[0].cnvs;
+  eq('X male in file: x1 kept, flagged', mc.map(c => [c.chrom, c.copies, c.kind, !!c.cnSex]), [['chrX', 2, 'gain', true], ['chrX', 1, 'loss', true], ['chr3', 3, 'gain', false]]);
+  eq('X male in file: hidden by sex', [hiddenBySex(mc[1], 'male'), hiddenBySex(mc[1], 'female'), hiddenBySex(mc[0], 'male'), hiddenBySex(mc[0], 'female')], [true, false, false, true]);
+  eq('X male in file: no "no sex" warning', m.warnings.some(w => /no sex/.test(w)), false);
 }
 // 6. header-less export with Classification / Comment columns inside the rows: the ISCN after the widest row, no data overwritten
 {
@@ -78,6 +85,43 @@ const chromOf = (n: number, ev: [number, number, number][]): CghProbeChrom => {
   const f = parseCghFile(t, 'm.txt', 'M');
   eq('mixed line endings kept', exportCghFile(f, c => c.classification, () => '').split(/(\r\n|\n)/).filter(x => /\r?\n/.test(x)), ['\r\n', '\n', '\n', '\n', '\n']);
   eq('untouched class kept as written', exportCghFile(f, c => c.classification, () => '').includes('\tbénin;;\t'), true);
+}
+// review 3: a copy-number range is typed from the range, never skipped as normal
+{
+  const t = ['Chromosome\tStart\tEnd\tISCN', 'chr3\t1000000\t2000000\tarr[GRCh37] 3p26.3(1000000_2000000)x2~3', 'chr4\t1000000\t2000000\tarr[GRCh37] 4p16.3(1000000_2000000)x1~2',
+    'chrX\t10000000\t12000000\tarr[GRCh37] Xp22.2(10000000_12000000)x1~2'].join('\n');
+  const cols = { chrom: 0, start: 1, stop: 2, pos: -1, type: -1, copies: -1, iscn: 3, lr: -1, probes: -1, size: -1, band: -1, genes: -1, cls: -1, note: -1, sample: -1, sup: -1 };
+  const f = parseCghFile('Sex: male\n' + t, 'r.tsv', 'P1', { cols, opts: { delim: '\t', headerRow: 1, zeroBased: false, sizeUnit: 'kb', build: null, typeMap: {} } });
+  eq('ranges typed', f.samples[0].cnvs.map(c => [c.chrom, `${c.copies}~${c.copiesHi}`, c.kind, !!c.cnSex]), [['chr3', '2~3', 'gain', false], ['chr4', '1~2', 'loss', false], ['chrX', '1~2', 'gain', false]]);
+}
+// review 6: an invented 80k-probe chromosome (hybrid search), a 5-probe deletion at -0.8 (sigma 0.15) found
+{
+  const p = chromOf(80000, [[41003, 41008, -0.8]]);
+  const t0 = performance.now(), r = detect({ sample: '', build: 'GRCh37', n: 80000, byChrom: new Map([['chr1', p]]), dlrs: null });
+  eq('80k: 5-probe deletion found', r.events.map(e => [e.kind, e.i0, e.i1]), [['loss', 41003, 41007]]);
+  console.log('     80k-probe stretch in', Math.round(performance.now() - t0), 'ms');
+}
+// review 9: the ISCN column added at export is named for the page, not read back as the file's own, rewritten at the next export
+{
+  const t = ['Chromosome\tStart\tEnd\tType', 'chr1\t1000000\t2000000\tGain'].join('\n');
+  const f = parseCghFile(t, 'a.tsv', 'P1');
+  const e1 = exportCghFile(f, () => 'VUS', () => 'n', () => 'ISCN-A');
+  eq('own ISCN header', e1.split('\n')[0].split('\t'), ['Chromosome', 'Start', 'End', 'Type', 'Classification', 'Comment', OWN_ISCN_HEADER]);
+  eq('own ISCN column not guessed', guessCols(e1.split('\n')[0].split('\t'), [e1.split('\n')[1].split('\t')]).iscn, -1);
+  const g = parseCghFile(e1, 'a.classified.txt', 'P1');
+  eq('read back: no file ISCN', g.samples[0].cnvs[0].iscn, null);
+  const e2 = exportCghFile(g, () => 'Pathogenic', () => 'n2', () => 'ISCN-B').split('\n');
+  eq('re-export: the column rewritten, none added', [e2[0].split('\t').length, e2[1].split('\t').slice(-3)], [7, ['Pathogenic', 'n2', 'ISCN-B']]);
+  const bed = parseCghFile('chr1\t1000\t5000\tdel\n', 'b.bed', 'P2');
+  eq('BED: three last columns', exportCghFile(bed, () => 'VUS', () => 'n', () => 'ISCN-C').trim().split('\t').slice(-3), ['VUS', 'n', 'ISCN-C']);
+}
+// review 7: probes-only export: rows left without a band counted in the header
+{
+  const f = probeOnlyFile('CGH_Log_Ratio.txt', 'S', 'GRCh37');
+  const c = (chrom: string, band: string) => ({ id: chrom, sample: 'S', sampleKey: f.samples[0].key, chrom, start: 1000, end: 50000, cytoband: band, genes: [], sizeKb: 49, kind: 'loss' as const, typeText: '', probes: 5, logRatio: -1, iscn: null, copies: null, copiesHi: null, amp: false, suppressed: false, classification: '', classRest: '', note: '', line: -1 });
+  const fx = { ...f, samples: [{ ...f.samples[0], cnvs: [c('chr1', 'p36.33'), c('chr2', '')] }] };
+  const out = exportProbeCalls(fx, SEG_DEFAULTS, new Date(), { band: x => x.cytoband, copies: () => '', iscn: () => '', cls: () => '', note: () => '' }).split('\n');
+  eq('no-band rows counted', out.filter(l => l.startsWith('# Rows without a cytoband')), ['# Rows without a cytoband (UCSC cytobands not read): 1']);
 }
 console.log(bad ? `${bad} FAILED` : 'all ok');
 process.exit(bad ? 1 : 0);

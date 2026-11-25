@@ -52,7 +52,7 @@ export interface CghState {
   /** files read, waiting for the minimum number of probes; the files that could not be read */
   pending: { files: CghFile[]; errors: string[]; notes: string[]; replaces?: string[] } | null;
   /** tables whose columns were not recognised (or whose columns are changed), waiting for the column mapping; `orig` is kept when it is cancelled */
-  toMap: { name: string; text: string; fallback?: string; spec?: MapSpec; orig?: CghFile }[];
+  toMap: { name: string; text: string; fallback?: string; spec?: MapSpec; orig?: CghFile; probes?: LooseProbes[] }[];
   /** classes changed since the last export */
   dirty: boolean;
   /** the patients (sample keys) with classes or notes not exported yet */
@@ -76,12 +76,16 @@ export interface CghState {
   probeOpts: SegOpts;
   /** events detected from each patient's probes, by sample key (computed in the background, for these settings and sex) */
   probeCalls: Record<string, ProbeCalls & { key: string }>;
+  /** probe calls that failed, by sample key (for these settings and probes: not asked again until they change) */
+  probeErrors: Record<string, { key: string; gen: number; msg: string }>;
   /** the patients whose probe calls not in the file are listed */
   probeOpen: Record<string, true>;
   /** how the probes are drawn (kept in localStorage): the whole genome's layout, the log-ratio range ±scale (shared by the genome, chromosome and probe panels) */
   view: CghView;
 }
 /** `iscnClasses`: the classes whose calls make the patient's ISCN */
+/** a probe log-ratio file not given with a table read by itself (alone, or in a zip whose table waits for its columns) */
+export type LooseProbes = { name: string; sample: string; bytes: Uint8Array };
 export interface CghView { layout: 'horizontal' | 'vertical'; scale: number; iscnClasses: string[] }
 /** the log-ratio ranges (±): presets ±0.5, ±1 (default), ±2; ⊖ goes further out */
 export const LR_SCALES = [0.5, 1, 2, 3, 4, 6, 8];
@@ -107,7 +111,7 @@ const loadFilter = (): CghFilter => {
   try { const v = JSON.parse(localStorage.getItem(FILTER_KEY) ?? 'null') as Partial<CghFilter> | null; return v ? { ...d, ...v, query: '', series: 'any', lab: 'any' } : d; } catch { return d; }
 };
 
-let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeOpen: {}, view: loadView() };
+let state: CghState = { files: [], classes: {}, sample: null, filter: loadFilter(), shown: null, pending: null, toMap: [], dirty: false, dirtyKeys: {}, open: false, ann: {}, modes: {}, sex: {}, notes: {}, lab: loadStoredLab(), labStored: true, revealed: {}, help: false, probeOpts: loadProbeOpts(), probeCalls: {}, probeErrors: {}, probeOpen: {}, view: loadView() };
 const subs = new Set<() => void>();
 const set = (patch: Partial<CghState>) => { state = { ...state, ...patch }; subs.forEach(f => f()); };
 const subscribe = (f: () => void) => { subs.add(f); return () => { subs.delete(f); }; };
@@ -173,18 +177,19 @@ const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, Cg
 /** each patient's probe data version: bumped when its probes are replaced or dropped (memos over the probes, results computed on older ones) */
 const probeGen = new Map<string, number>();
 const bump = (k: string) => probeGen.set(k, (probeGen.get(k) ?? 0) + 1);
-const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); bump(k); } callsQueue = callsQueue.filter(k => !keys.includes(k)); };
+// a reading in flight is forgotten too: a later `probesAsync` reads the new bytes instead of waiting for the old ones
+const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); probeParsing.delete(k); bump(k); } callsQueue = callsQueue.filter(k => !keys.includes(k)); };
 /** what a patient's probe calls depend on: the settings and the sex (chrY read for a male only) */
 const callsKey = (k: string) => `${state.sex[k] ?? ''}|${state.probeOpts.minProbes}|${state.probeOpts.minLr}|${state.probeOpts.t}`;
 let callsQueue: string[] = [], callsBusy = false;
 /** the worker computing the probe calls (cghSegWorker.ts); null: none could be made, they are computed on the page */
 let segWorker: Worker | null | undefined, segReq = 0;
-const segWaiting = new Map<number, (r: any) => void>();
+const segWaiting = new Map<number, (r: any, error?: string) => void>();
 function worker(): Worker | null {
   if (segWorker !== undefined) return segWorker;
   try {
     segWorker = new ProbeWorker();
-    segWorker.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => { const f = segWaiting.get(e.data.id); segWaiting.delete(e.data.id); f?.(e.data.result ?? null); };
+    segWorker.onmessage = (e: MessageEvent<{ id: number; result?: unknown; error?: string }>) => { const f = segWaiting.get(e.data.id); segWaiting.delete(e.data.id); f?.(e.data.result ?? null, e.data.error); };
     segWorker.onerror = () => { segWorker?.terminate(); segWorker = null; for (const f of segWaiting.values()) f(null); segWaiting.clear(); };
   } catch { segWorker = null; }
   return segWorker;
@@ -194,7 +199,11 @@ function detectOff(pr: CghProbes, o: SegOpts, male: boolean): Promise<ProbeCalls
   const w = worker();
   if (!w) return Promise.resolve(detect(pr, o, male));
   const id = ++segReq, byChrom = new Map([...pr.byChrom].map(([c, p]) => [c, { start: p.start, end: p.end, lr: p.lr, name: [] as string[] }]));
-  return new Promise(res => { segWaiting.set(id, r => res(r ?? detect(pr, o, male))); w.postMessage({ id, byChrom, build: pr.build, opts: o, male }); });
+  // the worker's error: tried again on the page; settled either way (a throw here would leave the queue waiting)
+  return new Promise((res, rej) => {
+    segWaiting.set(id, (r: ProbeCalls | null, error?: string) => { if (r) { res(r); return; } try { res(detect(pr, o, male)); } catch (x) { rej(new Error((x as Error)?.message || error || 'unknown error')); } });
+    w.postMessage({ id, byChrom, build: pr.build, opts: o, male });
+  });
 }
 /** probe files being read in the worker, by sample key */
 const probeParsing = new Map<string, Promise<CghProbes | null>>();
@@ -214,7 +223,12 @@ function probesAsync(k: string): Promise<CghProbes | null> {
   const done = pr.then(p => {
     if (probeParsing.get(k) === done) probeParsing.delete(k);
     // the probes replaced or dropped meanwhile: this reading is dropped
-    if (probeGen.get(k) !== gen || probeBytes.get(k) !== b) return probeRead.get(k) ?? null;
+    if (probeGen.get(k) !== gen || probeBytes.get(k) !== b) {
+      if (probeRead.has(k)) return probeRead.get(k) ?? null;
+      // new bytes meanwhile: those are read (and the page redrawn when they are)
+      if (probeBytes.has(k)) return probesAsync(k);
+      set({}); return null;
+    }
     probeRead.set(k, p); probeBytes.delete(k); bump(k); set({});
     return p;
   });
@@ -226,14 +240,18 @@ async function nextCalls() {
   if (callsBusy) return;
   const k = callsQueue.shift(); if (k == null) return;
   callsBusy = true;
+  const key0 = callsKey(k);
   try {
     const pr = await probesAsync(k), key = callsKey(k), gen = probeGen.get(k);
     if (pr && state.probeCalls[k]?.key !== key) {
       const r = await detectOff(pr, state.probeOpts, state.sex[k] === 'male');
       // kept only when the settings, sex and probes are still those it was computed for (else asked again)
-      if (callsKey(k) === key && probeGen.get(k) === gen && cgh.hasProbes(k)) { set({ probeCalls: { ...state.probeCalls, [k]: { ...r, key } } }); applyProbeOnly(k); }
+      if (callsKey(k) === key && probeGen.get(k) === gen && cgh.hasProbes(k)) { const probeErrors = { ...state.probeErrors }; delete probeErrors[k]; set({ probeCalls: { ...state.probeCalls, [k]: { ...r, key } }, probeErrors }); applyProbeOnly(k); }
       else if (cgh.hasProbes(k) && !callsQueue.includes(k)) callsQueue.push(k);
     }
+  } catch (x) {
+    // said on the patient's *Probe calls* line; not asked again until the settings, sex or probes change
+    set({ probeErrors: { ...state.probeErrors, [k]: { key: key0, gen: probeGen.get(k) ?? 0, msg: (x as Error)?.message || String(x) } } });
   } finally { callsBusy = false; }
   if (callsQueue.length) setTimeout(nextCalls, 0);
 }
@@ -255,6 +273,17 @@ function copyProbes(from: string, to: string) {
   dropProbes([to]);
   const b = probeBytes.get(from), r = probeRead.get(from);
   if (b) probeBytes.set(to, b); else if (r) probeRead.set(to, r);
+}
+/** a patient's probes moved to another key (a table read again with other columns: new file id, same sample name) */
+function moveProbes(from: string, to: string) {
+  if (from === to || !cgh.hasProbes(from)) return;
+  copyProbes(from, to); dropProbes([from]);
+}
+/** a probe file with no table: a probes-only patient, its probes kept */
+function probeOnlyOf(p: LooseProbes): CghFile {
+  const po = probeOnlyFile(p.name, p.sample, probeBuildOf(decodeText(p.bytes.subarray(0, 8192))));
+  dropProbes([po.samples[0].key]); probeBytes.set(po.samples[0].key, p.bytes);
+  return po;
 }
 /** a probe-only event as a call, to be drawn like one (never in a file, never exported) */
 export const probeCnv = (e: ProbeEvent, sampleKey: string, sample: string): CghCnv => ({
@@ -288,12 +317,14 @@ export const cgh = {
   },
   /** the probe calls of these patients, computed in the background when missing or out of date */
   runProbeCalls(keys: string[]) {
-    const todo = keys.filter(k => cgh.hasProbes(k) && state.probeCalls[k]?.key !== callsKey(k) && !callsQueue.includes(k));
+    const todo = keys.filter(k => cgh.hasProbes(k) && state.probeCalls[k]?.key !== callsKey(k) && !callsQueue.includes(k) && !cgh.probeErrorOf(k));
     if (!todo.length) return;
     callsQueue.push(...todo); if (!callsBusy) setTimeout(nextCalls, 0);
   },
   /** the current probe calls of a patient (null: none yet, or out of date) */
   probeCallsOf: (k: string): ProbeCalls | null => (state.probeCalls[k]?.key === callsKey(k) ? state.probeCalls[k] : null),
+  /** why a patient's probe calls failed (for the current settings, sex and probes), else null */
+  probeErrorOf: (k: string): string | null => { const e = state.probeErrors[k]; return e && e.key === callsKey(k) && e.gen === (probeGen.get(k) ?? 0) ? e.msg : null; },
   setProbeOpts(patch: Partial<SegOpts>) {
     const probeOpts = { ...state.probeOpts, ...patch };
     try { localStorage.setItem(PROBE_OPTS_KEY, JSON.stringify(probeOpts)); } catch { /* storage blocked */ }
@@ -312,7 +343,7 @@ export const cgh = {
     /** the file accepted, or the one already loaded with the same content (its samples get the zip's probes) */
     const take = (f: CghFile): CghFile => { const k = f.lines.join('\n'), had = seen.get(k); if (had) { notes.push(`${f.name}: already added`); return had; } seen.set(k, f); files.push(f); return f; };
     // probe log-ratio files given alone (or in a zip without a table): matched to a sample by name after the loop
-    const loose: { name: string; sample: string; bytes: Uint8Array }[] = [];
+    const loose: LooseProbes[] = [];
     // new probes for a patient: its probe calls of the former ones dropped, out of the queue
     const stale: string[] = [];
     const keep = (keys: string[], bytes: Uint8Array) => { dropProbes(keys); for (const k of keys) { probeBytes.set(k, bytes); stale.push(k); } };
@@ -324,7 +355,7 @@ export const cgh = {
           const { entries, skipped } = zipEntries(buf);
           const patient = f.name.replace(/\.zip$/i, '');
           // the tables are found by their content; the other files (images, XML, QC tables…) are left aside, counted
-          const other = [...skipped], asks: CghState['toMap'] = [], read: CghFile[] = [], probesIn: { name: string; sample: string; bytes: Uint8Array }[] = [];
+          const other = [...skipped], asks: CghState['toMap'] = [], read: CghFile[] = [], probesIn: LooseProbes[] = [];
           for (const e of entries) {
             const path = `${f.name} › ${e.path}`;
             try {
@@ -343,6 +374,8 @@ export const cgh = {
           if (n) other.push(...asks.map(a => a.name)); else toMap.push(...asks);
           // one patient per zip: its probe log ratios go with its sample(s) (by name when several)
           const ss = read.flatMap(x => x.samples);
+          // no table read by itself, one waiting for its columns: its probes wait with it (`mapped` gives them to its samples)
+          if (!n && asks.length && probesIn.length) { asks[0].probes = probesIn.splice(0); notes.push(`${f.name}: probe log ratios kept for the table whose columns are asked`); }
           for (const p of probesIn) {
             const to = ss.length === 1 ? ss : ss.filter(x => x.name === p.sample);
             if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${f.name}: probe log ratios (${leafOf(p.name)}) kept for ${to[0].name}`); }
@@ -379,8 +412,8 @@ export const cgh = {
     for (const p of loose) {
       const to = all.filter(x => x.name === p.sample);
       if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${leafOf(p.name)}: probe log ratios kept for ${p.sample}`); continue; }
-      const po = probeOnlyFile(p.name, p.sample, probeBuildOf(decodeText(p.bytes.subarray(0, 8192))));
-      files.push(po); all.push(po.samples[0]); keep([po.samples[0].key], p.bytes);
+      const po = probeOnlyOf(p);
+      files.push(po); all.push(po.samples[0]); stale.push(po.samples[0].key);
       notes.push(`${leafOf(p.name)}: no table of "${po.samples[0].name}": a probes-only patient, its calls detected from the probes with the settings below`);
     }
     // files dropped while the question is open join it
@@ -395,8 +428,23 @@ export const cgh = {
     const [head, ...toMap] = state.toMap;
     const add = file ?? head?.orig;
     const pending = state.pending ?? { files: [], errors: [], notes: [] };
-    const next = add ? { ...pending, files: [...pending.files, add] } : pending;
-    set({ toMap, pending: toMap.length || next.files.length || next.errors.length || next.notes.length ? next : null });
+    const files = add ? [...pending.files, add] : [...pending.files], notes = [...pending.notes], run: string[] = [];
+    // read again with other columns: a new file id, so new sample keys; the probes go to the samples of the same name
+    if (file && head?.orig) for (const o of head.orig.samples) {
+      const to = file.samples.find(x => x.name === o.name) ?? (file.samples.length === 1 && head.orig.samples.length === 1 ? file.samples[0] : null);
+      if (to && cgh.hasProbes(o.key)) { moveProbes(o.key, to.key); run.push(to.key); }
+    }
+    // a zip's probes waiting with this table: its sample(s) (by name when several); skipped, or no sample of that name: a probes-only patient
+    for (const p of head?.probes ?? []) {
+      const ss = add?.samples ?? [], to = ss.length === 1 ? ss : ss.filter(x => x.name === p.sample);
+      if (to.length) { for (const x of to) { dropProbes([x.key]); probeBytes.set(x.key, p.bytes); } notes.push(`${leafOf(p.name)}: probe log ratios kept for ${to[0].name}`); continue; }
+      const po = probeOnlyOf(p); files.push(po); run.push(po.samples[0].key);
+      notes.push(`${leafOf(p.name)}: no table of "${po.samples[0].name}": a probes-only patient, its calls detected from the probes with the settings below`);
+    }
+    const next = { ...pending, files, notes };
+    const probeCalls = { ...state.probeCalls }; if (head?.orig) for (const o of head.orig.samples) if (file) delete probeCalls[o.key];
+    set({ toMap, probeCalls, pending: toMap.length || next.files.length || next.errors.length || next.notes.length ? next : null });
+    cgh.runProbeCalls(run.filter(k => files.some(f => isProbeOnly(f) && f.samples.some(x => x.key === k))));
   },
   /** a file read, to be read again with other columns */
   remap(f: CghFile) {
