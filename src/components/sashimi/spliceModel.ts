@@ -50,7 +50,7 @@ export interface SpliceEvent {
 const exonBlocks = (tx: TxModel): Block[] => tx.exons.map(e => ({ start: e.start, end: e.end, kind: 'exon' as const, rank: e.rank }));
 
 /** Which exons and which parts of them the aberrant transcript keeps, from one junction (genomic reasoning, strand-agnostic). */
-export function spliceEvent(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[] = []): SpliceEvent {
+export function spliceEvent(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number; count?: number }[] = []): SpliceEvent {
   const ex = tx.exons;
   const canonical = exonBlocks(tx);
   const li = ex.findIndex(e => e.end === j.start), ri = ex.findIndex(e => e.start === j.end);
@@ -358,7 +358,7 @@ export interface FusionStoryInfo {
   shift: number | null;
 }
 
-export function spliceStory(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number }[], seqAt: (s: number, e: number) => string, features: ProteinDomain[]): SpliceStory {
+export function spliceStory(j: { start: number; end: number }, tx: TxModel, others: { start: number; end: number; count?: number }[], seqAt: (s: number, e: number) => string, features: ProteinDomain[]): SpliceStory {
   const event = spliceEvent(j, tx, others);
   const canonical = buildIsoform(event.canonical, tx, seqAt);
   const aberrant = buildIsoform(event.blocks, tx, seqAt);

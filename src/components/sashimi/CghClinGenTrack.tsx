@@ -1,8 +1,9 @@
 /**
- * The array-CGH browser's "ClinGen CNV regions" track (SvGenomeBrowser's optional `extraTrack`, absent in the SV browser):
+ * The "ClinGen CNV regions" track (one of SvGenomeBrowser's `extraTracks`, off by default: PanelAppCnvTrack's useCnvRegionTracks), the same in every browser: the SV browser,
+ * the SV cartoon's and the array-CGH page's (useClinGenTrack):
  * HI 3 / TS 3 dosage regions, the recurrent CNV list's regions and its breakpoint / LCR segments, from embedded data.
  */
-import { useId } from 'react';
+import { useId, useMemo, useState } from 'react';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import type { SvExtraTrack } from './SvGenomeBrowser';
 import { clinGenOn, recurrentOf, shortName, PIEV_RO, LCR_PAD, type ClinGenDosage, type ClinGenRecurrent } from './cghRecurrent';
@@ -89,6 +90,11 @@ function Track({ dos, rec, lcr, nd, nr, x0, fold }: { dos: Item[]; rec: Item[]; 
 const sw = (style: React.CSSProperties) => <span className="inline-block w-4 h-2.5 rounded-sm" style={style} />;
 /** the track for a build, folded (HI 3 / TS 3 regions only) or open (with the recurrent list and its LCRs): memoise
  * per build and fold (a new object redraws the browser) */
+/** The track for a browser on `build`, folded at first: one per browser, so the SV browser, the SV cartoon and the array-CGH page draw the same. */
+export function useClinGenTrack(build: GenomeBuild): SvExtraTrack {
+  const [open, setOpen] = useState(false);
+  return useMemo(() => clinGenTrack(build, open, () => setOpen(o => !o)), [build, open]);
+}
 export function clinGenTrack(build: GenomeBuild, open: boolean, onToggle: () => void): SvExtraTrack {
   return {
     id: 'cghClinGen', label: 'ClinGen CNV regions', side: ['ClinGen CNV', 'regions'],

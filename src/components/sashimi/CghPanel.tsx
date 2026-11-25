@@ -17,7 +17,8 @@ import { cgh, useCgh, passes, classOf, noteOf, isAnalysed, activeGroups, groupsO
 import { fmtBp as fmt, sizeText, CGH_CLASSES, classColor, cnvHubUrl, copyText, exportCghFile, type CghCnv, type CghFile, type CghSex } from './cghIntervals';
 import { annotate, retry, viewOf, CGH_SOURCES, type CghSource, bandOfCall, PANEL_SOURCE, PANELAPP_MAX_GENES, DGV_COVER, type DgvRelation } from './cghAnnotate';
 import { LEVEL_RANK, LEVEL_STYLE, SCORE_RULES, type CnvGene, type GeneView, type Level, type RegionHit } from './cghScore';
-import { MOI, type SvGeneLoaders } from './SvGenomeBrowser';
+import { type SvGeneLoaders } from './SvGenomeBrowser';
+import { MOI } from './SvGeneSummary';
 import { CghRecurrentDetail } from './CghClinGenTrack';
 import { ProbeCallsBar, ProbeMethods, ProbeSettings } from './CghProbeCalls';
 import { exportProbeCalls, isProbeOnly, PROBE_ONLY_WARNING } from './cghProbeOnly';

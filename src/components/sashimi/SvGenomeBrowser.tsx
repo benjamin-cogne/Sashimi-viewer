@@ -17,6 +17,7 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { reconstruct, type SvReconstruction } from './svModel';
 import type { Cytoband } from './svNomenclature';
+import { MOI, type GeneSummary, type GeneSummaryItem } from './SvGeneSummary';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { geneStory, dosageReading, toDer, LOEUF_INTOLERANT, LOEUF_CONSTRAINED, LOEUF_CLASS, loeufClass, PLI_INTOLERANT, NEAR_BREAKPOINT_DEFAULT,
@@ -43,6 +44,8 @@ let VW = 1200, X1 = VW - 14, PW = X1 - X0, XC = (X0 + X1) / 2;
 const setWidth = (w: number) => { VW = w; X1 = w - 14; PW = X1 - X0; XC = (X0 + X1) / 2; };
 const DGV_LANE_H = 9, DGV_MAX_LANES = 8;
 const DGV_COLOR = { loss: '#dc2626', gain: '#2563eb', both: '#7c3aed', unknown: '#64748b' } as const;
+/** under each rebuilt chromosome: its junctions' labels, then its own coordinates */
+const DER_RULER_H = 36;
 const TX_H = 13, LABEL_H = 13, LANE_GAP = 5, MAX_LANES = 8, TAD_H = 58, BAND_H = 20, RIB_H = 118;
 const IDEO_Y = 22, IDEO_H = 13, LENS_H = 22, RULER_H = 24;
 /** the deepest zoom (bp across the plot), and the spans past which genes become bars, then a density profile */
@@ -133,17 +136,22 @@ interface Props {
   highlight?: { start: number; end: number; key: number } | null;
   /** a small variant marked on the reference (no rebuilt chromosome): its stretch (0-based half-open), a label, its card's lines */
   variant?: { start: number; end: number; key: string; label: string; lines: string[] };
+  /** the genes the event changes, with their constraint and PanelApp readings, as they come in (null: no event) */
+  onGeneSummary?: (s: GeneSummary | null) => void;
   /** the event's losses and gains shaded through the tracks, its breakpoints drawn bolder (the array-CGH page) */
   strongEvent?: boolean;
-  /** a track the caller draws under AChro-Puce, with its toggle and legend (the array-CGH page); none in the SV browser */
-  extraTrack?: SvExtraTrack;
+  /** tracks the caller draws under AChro-Puce, each with its toggle and legend (the known CNV regions: PanelApp, ClinGen) */
+  extraTracks?: SvExtraTrack[];
 }
 /** a caller's track: `layout` gives its height and drawing (y from 0) for the stretch in view, x(pos) the x of a 0-based position */
 export interface SvExtraTrack {
   id: string; label: string; side: string[]; title: string; legend: React.ReactNode;
+  /** shown when the browser opens (default true) */
+  defaultOn?: boolean;
   layout: (v: { chrom: string; s: number; e: number; x: (pos: number) => number; x0: number; x1: number }) => { height: number; node: React.ReactNode };
 }
 
+const NO_TRACKS: SvExtraTrack[] = [];
 /** the small variant's mark */
 const VARIANT_COLOR = '#0f172a';
 /** Where a position lies in a transcript: exon n of N (UTR or coding), intron n, upstream or downstream. */
@@ -201,6 +209,14 @@ const store = {
   get<T>(k: string): T | null { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : null; } catch { return null; } },
   set(k: string, v: unknown) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage full or blocked */ } },
 };
+/**
+ * The SV browser's display settings: remembered while it is open (each search draws the view anew), back to their
+ * defaults each time it opens. The gene panel (PanelApp or a file) is kept across openings.
+ */
+const SV_SETTING_KEYS = ['sashimi.svColorBy', 'sashimi.svNear', 'sashimi.svDgv', 'sashimi.svAchro', 'sashimi.svClinvarSv', 'sashimi.svClinvarSnv',
+  'sashimi.svClinvarSvMode', 'sashimi.svClinvarSnvMode', 'sashimi.svGeneFilter', 'sashimi.svDomains',
+  'sashimi.svExtra.panelAppCnv', 'sashimi.svExtra.cghClinGen'];
+export function resetSvBrowserSettings(): void { for (const k of SV_SETTING_KEYS) store.set(k, null); }
 const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, name: p.name, version: p.version, genes: new Map(p.genes.map(g => [g.symbol.toUpperCase(), g])) });
 
 // ======================== Drawing helpers ========================
@@ -286,17 +302,6 @@ const pieceRange = (dp: DerPiece, L: number): [number, number] => [dp.seg.first 
 
 
 
-/** Modes of inheritance (PanelApp), as colours and words. */
-export const MOI: Record<MoiClass | 'none', { color: string; short: string; label: string }> = {
-  AD: { color: '#dc2626', short: 'AD', label: 'monoallelic (AD)' },
-  'AD+AR': { color: '#7c3aed', short: 'AD/AR', label: 'mono- or biallelic' },
-  AR: { color: '#2563eb', short: 'AR', label: 'biallelic (AR)' },
-  XLR: { color: '#db2777', short: 'XLR', label: 'X-linked, females biallelic' },
-  XLD: { color: '#9d174d', short: 'XLD', label: 'X-linked, females may be affected' },
-  MT: { color: '#059669', short: 'MT', label: 'mitochondrial' },
-  '?': { color: '#94a3b8', short: '?', label: 'unknown / other' },
-  none: { color: '#cbd5e1', short: '—', label: 'not in PanelApp' },
-};
 
 
 /** Which genes are drawn: every criterion set must hold (empty or 'any' = not filtering on it). */
@@ -332,7 +337,7 @@ const achroChrom = (r: AchroRegion) => `chr${r.name.match(/^(\d+|X|Y)[pq]/)?.[1]
 
 // ======================== Component ========================
 
-export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, strongEvent, extraTrack }: Props) {
+export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin, segColors, flankCopies, zygosity, build, loaders, rebuild, focus, highlight, variant, onGeneSummary, strongEvent, extraTracks = NO_TRACKS }: Props) {
   // the drawing as wide as its box, in px
   const [vw, setVw] = useState(1200);
   setWidth(vw);
@@ -371,7 +376,9 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const [pop, setPop] = useState<{ list: PopulationSv[]; loading: boolean; error?: string }>({ list: [], loading: false });
   /** the AChro-Puce recurrent CNVs (their sheets' classes), drawn under the population CNVs */
   const [showAchro, setShowAchro] = useState<boolean>(() => store.get<boolean>('sashimi.svAchro') ?? true);
-  const [showExtra, setShowExtra] = useState<boolean>(() => (extraTrack ? store.get<boolean>(`sashimi.svExtra.${extraTrack.id}`) ?? true : false));
+  const [showExtra, setShowExtra] = useState<Record<string, boolean>>({});
+  const extraOn = (t: SvExtraTrack) => showExtra[t.id] ?? store.get<boolean>(`sashimi.svExtra.${t.id}`) ?? t.defaultOn ?? true;
+  const setExtraOn = (t: SvExtraTrack, v: boolean) => { setShowExtra(m => ({ ...m, [t.id]: v })); store.set(`sashimi.svExtra.${t.id}`, v); };
   const [showClinSv, setShowClinSv] = useState<boolean>(() => store.get<boolean>('sashimi.svClinvarSv') ?? true);
   const [showClinSnv, setShowClinSnv] = useState<boolean>(() => store.get<boolean>('sashimi.svClinvarSnv') ?? true);
   /** the ClinVar SVs one by one (expanded), or summed up as a profile (the default) */
@@ -578,6 +585,37 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       <title>{`Mode of inheritance (PanelApp): ${MOI[m.cls].label}${m.fromPanel ? ` in ${m.fromPanel}` : m.m ? ` · ${m.m.parts.map(p => `${MOI[p.cls].short} in ${p.panels} panel${p.panels > 1 ? 's' : ''}`).join(', ')}` : ''}${(() => { const ds = diseasesOf(sym); return ds.length ? `\nDisease: ${ds.slice(0, 5).map(d => d.name).join('; ')}${ds.length > 5 ? `; +${ds.length - 5} more` : ''}` : ''; })()}`}</title></g>;
   };
   useEffect(() => { wantModes(story.genes.filter(g => g.kind !== 'unaffected').map(g => g.gene.symbol)); }, [story, moiSrc.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // ---- the gene summary (next to the nomenclature): the genes the event changes, their constraint, where they are green ----
+  /** where a gene is green (diagnostic grade) in PanelApp: the loaded panel, then every panel of the source; its mode there */
+  const greenOf = (sym: string): { cls: MoiClass | null | 'pending'; panels: string[] } => {
+    const classes = new Set<MoiClass>(), panels: string[] = [];
+    const pg = panel?.genes.get(sym.toUpperCase());
+    if (pg && pg.confidence === 3) { classes.add(pg.moi ? classifyMoi(pg.moi) : '?'); panels.push(panel!.name); }
+    const m = modes.current.get(sym);
+    if (m && typeof m === 'object') {
+      for (const e of m.entries) if (e.confidence === 3) { classes.add(e.cls); if (panels.length < 4 && !panels.includes(e.panel)) panels.push(e.panel); }
+    } else if ((m === 'loading' || m === undefined) && !classes.size) return { cls: 'pending', panels };
+    if (!classes.size) return { cls: null, panels };
+    if (classes.has('AD+AR') || (classes.has('AD') && classes.has('AR'))) return { cls: 'AD+AR', panels };
+    const named: MoiClass[] = [...classes].filter(c => c !== '?');
+    const order: MoiClass[] = ['AD', 'AR', 'XLD', 'XLR', 'MT'];
+    return { cls: named.length ? order.find(c => named.includes(c)) ?? named[0] : '?', panels };
+  };
+  const geneSummary = useMemo((): GeneSummary | null => {
+    if (!eventRec) return null;
+    const WHOLE = new Set<string>(['deleted', 'duplicated', 'moved']), PART = new Set<string>(['intragenic-del', 'intragenic-dup', 'partial-copy', 'disrupted', 'fusion']);
+    const items: GeneSummaryItem[] = story.genes.filter(g => WHOLE.has(g.kind) || PART.has(g.kind)).map(g => {
+      const c = ann.constraint.get(g.gene.symbol), gr = greenOf(g.gene.symbol);
+      return {
+        symbol: g.gene.symbol, start: g.gene.start, end: g.gene.end, kind: g.kind, whole: WHOLE.has(g.kind),
+        coding: g.gene.transcripts.some(t => t.cdsStart != null && t.cdsEnd != null && t.cdsEnd > t.cdsStart),
+        loeuf: c?.loeuf ?? null, pli: c?.pli ?? null, version: c?.version ?? null, green: gr.cls, greenPanels: gr.panels,
+      };
+    });
+    return { cnv: story.genes.some(g => g.kind === 'deleted' || g.kind === 'duplicated' || g.kind === 'intragenic-del' || g.kind === 'intragenic-dup' || g.kind === 'partial-copy') || (rec?.lost.length ?? 0) > 0, items, constraintLoading: ann.loading, source: moiSrc.label };
+  }, [eventRec, rec, story, ann, panel, modesVersion, moiSrc.label]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onGeneSummaryRef = useRef(onGeneSummary); onGeneSummaryRef.current = onGeneSummary;
+  useEffect(() => { onGeneSummaryRef.current?.(geneSummary); }, [geneSummary]);
   /** does a gene pass the gene filter (a criterion whose data is still on its way does not hold yet) */
   const passes = (sym: string): boolean => {
     const f = geneFilter;
@@ -1101,13 +1139,16 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     }
   }
   const yAchro = showAchro ? y : -1; if (showAchro) y += keep('achro', Math.max(1, ...achroItems.map(d => d.lane + 1)) * ACHRO_LANE_H) + 8;
-  const extraLaid = extraTrack && showExtra ? extraTrack.layout({ chrom, s: vp.s, e: ve, x: p => cx(refX(p)), x0: X0, x1: X1 }) : null;
-  const yExtra = extraLaid ? y : -1; if (extraLaid) y += keep('extra', extraLaid.height) + 8;
+  const extraLaid = extraTracks.filter(extraOn).map(t => {
+    const l = t.layout({ chrom, s: vp.s, e: ve, x: p => cx(refX(p)), x0: X0, x1: X1 }), at = y;
+    y += keep(`extra.${t.id}`, Math.max(l.height, t.side.length * 12)) + 8;
+    return { t, l, y: at };
+  });
   const yRefBand = rec ? y : -1; if (rec) y += BAND_H;
   const yRib = y; if (ders.length) y += RIB_H;
   const derY = ders.map((d, i) => {
     const band = y; y += BAND_H;
-    const ruler = y; y += 24;
+    const ruler = y; y += DER_RULER_H;
     const genesY = y; y += keep(`der${i}`, lod === 'density' ? derPacked[i].height + 40 : derPacked[i].height) + 4;
     const tad = domains.length ? y : -1; if (domains.length) y += TAD_H;
     y += 18;
@@ -1154,12 +1195,35 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
 
   // ---- gestures: drag to pan (a fling goes on), Ctrl / ⌘ + wheel or pinch to zoom, two-finger swipe to pan, double-click to zoom in,
   //      drag along the ruler to zoom on a stretch, click or drag on the ideogram to go there ----
-  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo' | 'select'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number } | null>(null);
+  const dragRef = useRef<{ kind: 'pan' | 'band' | 'ideo' | 'select'; x0: number; vp0: Vp; moved: boolean; samples: { x: number; t: number }[]; id: number; der?: string } | null>(null);
+  /**
+   * The rows of the rebuilt chromosomes (their band down to the next one), their offsets and the figure's height, for
+   * the gestures: over a rebuilt chromosome a zoom keeps its line-up (what is under the pointer there stays, a fusion
+   * included) and a Ctrl / ⌘ + drag picks a stretch of it, in its own positions.
+   */
+  const derRowsRef = useRef<{ d: DerLayout; y0: number; y1: number }[]>([]);
+  derRowsRef.current = ders.map((d, i) => ({ d, y0: derY[i].band - 6, y1: i + 1 < ders.length ? derY[i + 1].band - 6 : H }));
+  const derOffRef = useRef(derOff); derOffRef.current = derOff;
+  const svgHRef = useRef(H); svgHRef.current = H;
+  const derAt = (yy: number) => derRowsRef.current.find(r => yy >= r.y0 && yy < r.y1)?.d ?? null;
+  const derNamed = (name: string) => ders.find(d => d.name === name) ?? null;
+  /** the reference stretches a stretch [s, e) of a rebuilt chromosome (its own positions, as toDer) is made of, in its order */
+  const derToRef = (d: DerLayout, s0: number, e0: number) => d.pieces.flatMap(dp => {
+    const [lo, hi] = pieceRange(dp, L);
+    let a = toDer(dp, lo), b = toDer(dp, hi); if (a > b) [a, b] = [b, a];
+    const x0 = Math.max(a, s0), x1 = Math.min(b, e0); if (x1 <= x0) return [];
+    const r = (v: number) => (dp.piece.reversed ? dp.seg.end - (v - dp.derStart) : dp.seg.start + (v - dp.derStart));
+    const ra = r(x0), rb = r(x1);
+    return [{ letter: dp.seg.letter, rev: !!dp.piece.reversed, s: Math.round(Math.min(ra, rb)), e: Math.round(Math.max(ra, rb)) }];
+  });
   /** the click that ends a drag opens no card */
   const suppressClick = useRef(false);
   const [band, setBand] = useState<{ a: number; b: number } | null>(null);
-  /** an interval picked with Ctrl / ⌘ + drag: highlighted on the reference axis (it follows the view) until closed */
-  const [sel, setSel] = useState<{ s: number; e: number } | null>(null);
+  /**
+   * an interval picked with Ctrl / ⌘ + drag: highlighted (it follows the view) until closed. On the reference, or, when
+   * picked over a rebuilt chromosome, on it (`der`: its name; s, e in its positions, as toDer)
+   */
+  const [sel, setSel] = useState<{ s: number; e: number; der?: string } | null>(null);
   const [selCopied, setSelCopied] = useState(false);
   // an interval asked for (typed coordinates): highlighted as a Ctrl / ⌘ + drag would, with its bar
   useEffect(() => { if (highlight) { setSel({ s: highlight.start, e: highlight.end }); setSelCopied(false); } }, [highlight?.key]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1171,7 +1235,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     anim.current = {}; suppressClick.current = false;
     const x = toSvgX(e.clientX), yy = toSvgY(e.clientY);
     const kind = yy < IDEO_Y + IDEO_H + 4 ? 'ideo' : (e.ctrlKey || e.metaKey) && x >= X0 && x <= X1 ? 'select' : yy >= yRuler && yy < yRuler + RULER_H ? 'band' : 'pan';
-    dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId };
+    dragRef.current = { kind, x0: x, vp0: vpRef.current, moved: false, samples: [{ x: e.clientX, t: performance.now() }], id: e.pointerId, der: kind === 'select' ? derAt(yy)?.name : undefined };
     if (kind === 'ideo') { const sp = vpRef.current.e - vpRef.current.s, p = ideoPos(x); flyTo(p - sp / 2, p + sp / 2, 320); }
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -1189,7 +1253,16 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     dragRef.current = null; suppressClick.current = d.moved;
     if (d.kind === 'select') {
       const a = band ? Math.min(band.a, band.b) : d.x0, b = band ? Math.max(band.a, band.b) : d.x0; setBand(null);
-      if (d.moved && b - a > 2) { const s0 = vpRef.current.s, k = bppRef.current; setSel({ s: Math.max(0, Math.round(s0 + (a - X0) * k)), e: Math.min(L, Math.round(s0 + (b - X0) * k)) }); setSelCopied(false); }
+      if (d.moved && b - a > 2) {
+        const s0 = vpRef.current.s, k = bppRef.current, rs = s0 + (a - X0) * k, re = s0 + (b - X0) * k;
+        const dl = d.der ? derNamed(d.der) : null;
+        if (dl) {
+          // on the rebuilt chromosome: its own positions under the pointer (the reference's plus its offset in view)
+          const off = derOffRef.current.get(dl) ?? 0, ext = derExtent(dl);
+          setSel({ s: Math.max(ext.lo, Math.round(rs + off)), e: Math.min(ext.hi, Math.round(re + off)), der: dl.name });
+        } else setSel({ s: Math.max(0, Math.round(rs)), e: Math.min(L, Math.round(re)) });
+        setSelCopied(false);
+      }
       return;
     }
     if (d.kind === 'band' && band) {
@@ -1213,8 +1286,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       const v = vpRef.current, sp = v.e - v.s;
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
-        const f = Math.exp(e.deltaY * unit * 0.0022), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
-        moveTo(at - (at - v.s) * f, at + (v.e - at) * f, at);
+        // never past the closest zoom: clamped there, the view would recentre and leave the point under the pointer
+        const f = Math.max(MIN_SPAN / sp, Math.exp(e.deltaY * unit * 0.0022)), at = v.s + (Math.max(X0, Math.min(X1, x)) - X0) * bppRef.current;
+        // over a rebuilt chromosome its line-up stays: the point under the pointer there (a fusion) stays under it
+        const overDer = !!derAt(((e.clientY - r.top) / r.height) * svgHRef.current);
+        moveTo(at - (at - v.s) * f, at + (v.e - at) * f, overDer ? undefined : at);
       } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
         e.preventDefault();
         const dx = (e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX) * unit, sh = dx / r.width * VW * bppRef.current;
@@ -1226,8 +1302,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   }, [txs.loading, L]); // eslint-disable-line react-hooks/exhaustive-deps
   const onDoubleClick = (e: React.MouseEvent) => {
     const x = toSvgX(e.clientX); if (x < X0 || x > X1) return;
-    const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : 0.5;
-    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320, at);
+    const v = vpRef.current, at = v.s + (x - X0) * bppRef.current, f = e.shiftKey ? 2 : Math.max(0.5, MIN_SPAN / (v.e - v.s));
+    flyTo(at - (at - v.s) * f, at + (v.e - at) * f, 320, derAt(toSvgY(e.clientY)) ? 'keep' : at);
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const v = vpRef.current, sp = v.e - v.s;
@@ -1237,8 +1313,22 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
     else if ((e.key === 'e' || e.key === 'E') && rec) { e.preventDefault(); eventView(); }
     else if (e.key === 'Escape' && sel) { e.preventDefault(); e.stopPropagation(); setSel(null); }
   };
-  const zoomToSel = () => { if (sel) { const pad = Math.max(100, (sel.e - sel.s) * 0.04); flyTo(sel.s - pad, sel.e + pad); } };
-  const selText = sel ? `${chrom}:${fmt(sel.s + 1)}-${fmt(sel.e)}` : '';
+  const selDer = sel?.der ? derNamed(sel.der) : null;
+  /** where a highlighted position is drawn: on the reference, or on its rebuilt chromosome */
+  const selX = (v: number) => (selDer ? derX(selDer, v) : refX(v));
+  const zoomToSel = () => {
+    if (!sel) return;
+    const pad = Math.max(100, (sel.e - sel.s) * 0.04);
+    // a stretch of a rebuilt chromosome: its line-up kept, so the stretch itself fills the view (a fusion with its two partners)
+    if (selDer) { const off = derOff.get(selDer) ?? 0; flyTo(sel.s - off - pad, sel.e - off + pad, 480, 'keep'); }
+    else flyTo(sel.s - pad, sel.e + pad);
+  };
+  const selPieces = sel && selDer ? derToRef(selDer, sel.s, sel.e) : [];
+  const selDerLo = selDer ? derExtent(selDer).lo : 0;
+  const pieceText = (q: { letter: string; rev: boolean; s: number; e: number }) => `${chrom}:${fmt(q.s + 1)}-${fmt(q.e)}${q.rev ? ' (inverted)' : ''}`;
+  const selText = !sel ? '' : selDer
+    ? `${selDer.name}:${fmt(sel.s - selDerLo + 1)}-${fmt(sel.e - selDerLo)} = ${selPieces.map(pieceText).join(' + ')}`
+    : `${chrom}:${fmt(sel.s + 1)}-${fmt(sel.e)}`;
 
   // ---- ruler ----
   const step = niceStep(ve - vp.s, 9);
@@ -1320,10 +1410,11 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {yClinSnv >= 0 && clinSnvMode === 'each' && <text x={14} y={yClinSnv + snvH / 2 + 11} fontSize={9.5} fill={C.accent} style={{ cursor: 'pointer' }}
           onClick={e => { e.stopPropagation(); setPinned(null); setTip(null); setClinSnvMode('gene'); store.set('sashimi.svClinvarSnvMode', 'gene'); }}>▾ per gene<title>Count the variants per gene: loss of function above (predicted NMD, predicted escape), missense below</title></text>}
         {yAchro >= 0 && <text x={14} y={yAchro + 10} fontWeight={600} fill={C.text}>AChro-Puce<title>{`${ACHRO_SOURCE.title}, ${ACHRO_SOURCE.version}`}</title></text>}
-        {yExtra >= 0 && extraTrack && <text x={14} y={yExtra + 10} fontWeight={600} fill={C.text}>{extraTrack.side.map((l, i) => <tspan key={l} x={14} dy={i ? 12 : 0}>{l}</tspan>)}<title>{extraTrack.title}</title></text>}
+        {extraLaid.map(({ t, y: ty }) => <text key={t.id} x={14} y={ty + 10} fontWeight={600} fill={C.text}>{t.side.map((l, i) => <tspan key={l} x={14} dy={i ? 12 : 0}>{l}</tspan>)}<title>{t.title}</title></text>)}
         {rec && <><text x={14} y={yRefBand + 9} fontSize={9.5}>reference</text><text x={14} y={yRefBand + 20} fontSize={9.5} fontFamily={MONO}>{kb(L)}</text></>}
         {ders.map((d, i) => { const len = derExtent(d).len, diff = len - L; return (
           <g key={d.name}><text x={14} y={derY[i].band + 9} fontWeight={700} fill={C.accent}>{d.name}</text>
+            <text x={14} y={derY[i].ruler + DER_RULER_H - 5} fontSize={9} fill={C.muted}><title>{`Positions along ${d.name} itself (1 at its start; the reference's own before the event), recalculated from the rebuilt chromosome`}</title>{`${d.name} coord.`}</text>
             <text x={14} y={derY[i].band + 21} fontSize={9.5} fontFamily={MONO}>{kb(len)}</text>
             {Math.abs(diff) >= 1 && <text x={14} y={derY[i].band + 32} fontSize={9.5} fontWeight={700} fontFamily={MONO} fill={diff > 0 ? '#15803d' : C.lost}>{diff > 0 ? '+' : '−'}{kb(Math.abs(diff))}</text>}
           </g>); })}
@@ -1390,10 +1481,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             const vs = clinSvInView.filter(v => v.start <= pos + tol && v.end >= pos - tol).sort((p, q) => (p.end - p.start) - (q.end - q.start));
             return { key: `cvagg:${Math.round((x - X0) / 4)}`, vs, pos: Math.round(pos) };
           };
-          const onMove = (e: React.MouseEvent) => { const r = at(e); if (!r.vs.length) { hoverOff(); return; } if (tip?.gene !== r.key) setTip({ ...boxPos(e), gene: r.key, clin: r.vs, clinAt: r.pos }); else placeTip(boxPos(e).x, boxPos(e).y); lastTipPos.current = boxPos(e); };
+          // ClinVar cards open on a click only (no card following the pointer over these tracks)
           const onClick = (e: React.MouseEvent) => { e.stopPropagation(); if (suppressClick.current) return; const r = at(e); if (!r.vs.length) return; setPinned(cur => (cur?.gene === r.key ? null : { ...boxPos(e), gene: r.key, clin: r.vs, clinAt: r.pos })); };
           return (
-            <g style={{ cursor: 'pointer' }} onMouseMove={onMove} onMouseLeave={hoverOff} onClick={onClick}>
+            <g style={{ cursor: 'pointer' }} onClick={onClick}>
               <rect x={X0} y={yClinSv} width={PW} height={CLIN_AGG_H} fill="transparent" />
               <path d={path(clinAgg.loss, 1)} fill={CLIN_KIND_COLOR.loss} fillOpacity={0.55} />
               <path d={path(clinAgg.gain, -1)} fill={CLIN_KIND_COLOR.gain} fillOpacity={0.55} />
@@ -1407,7 +1498,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const yy = yClinBars + lane * CLIN_SV_LANE_H, col = CLIN_KIND_COLOR[v.kind] ?? CLIN_KIND_COLOR.other, key = `cv:${v.id}:${v.start}`;
           const same = clinMatch(v);
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key, undefined, [v])} onMouseMove={hoverOn(key, undefined, [v])} onMouseLeave={hoverOff} onClick={pinOn(key, undefined, [v])}>
+            <g key={key} style={{ cursor: 'pointer' }} onClick={pinOn(key, undefined, [v])}>
               <rect x={a} y={yy} width={b - a} height={CLIN_SV_LANE_H - 1} fill="transparent" />
               <rect x={a} y={yy + 1} width={Math.max(1.5, b - a)} height={6} rx={1} fill={col} fillOpacity={v.code === 'PG' ? 0.9 : 0.4} stroke={same ? '#111827' : 'none'} strokeWidth={0.8} />
             </g>
@@ -1421,9 +1512,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const range: [number, number] = [Math.floor(vp.s + (b.x - X0) * bppRef.current), Math.ceil(vp.s + (b.x + CLIN_SNV_BIN - X0) * bppRef.current)];
           const vs = [...b.vs].sort((p, q) => ['lof', 'missense', 'inframe', 'other'].indexOf(p.effect) - ['lof', 'missense', 'inframe', 'other'].indexOf(q.effect) || (p.code === q.code ? 0 : p.code === 'PG' ? -1 : 1));
           const key = `cvsum:${b.k}`;
-          const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== key) setTip({ ...pt, gene: key, clin: vs, clinRange: range }); else placeTip(pt.x, pt.y); };
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={show} onMouseMove={show} onMouseLeave={hoverOff}
+            <g key={key} style={{ cursor: 'pointer' }}
               onClick={e => { e.stopPropagation(); if (suppressClick.current) return; const pt = boxPos(e); setPinned(cur => (cur?.gene === key ? null : { ...pt, gene: key, clin: vs, clinRange: range })); }}>
               <rect x={b.x} y={yClinSnv} width={CLIN_SNV_BIN} height={snvH} fill="transparent" />
               {b.lofP > 0 && <rect x={b.x} y={mid - b.lofP * k} width={w} height={b.lofP * k} fill={CLIN_EFFECT_COLOR.lof} />}
@@ -1451,7 +1541,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
               ? <path d={`M${x},${mid + stem + r * 1.25}L${x + r * 1.15},${mid + stem - r * 0.75}L${x - r * 1.15},${mid + stem - r * 0.75}Z`} fill={fill} stroke={stroke} strokeWidth={sw} strokeLinejoin="round" />
               : <path d={`M${x},${mid - r}L${x + r},${mid}L${x},${mid + r}L${x - r},${mid}Z`} fill={fill} stroke={stroke} strokeWidth={sw} />;
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={hoverOn(key, undefined, vs)} onMouseMove={hoverOn(key, undefined, vs)} onMouseLeave={hoverOff} onClick={pinOn(key, undefined, vs)}>
+            <g key={key} style={{ cursor: 'pointer' }} onClick={pinOn(key, undefined, vs)}>
               <rect x={x - 3} y={up ? yClinSnv : side === 'missense' ? mid : mid - 5} width={6} height={side === 'mid' ? 10 : snvH / 2} fill="transparent" />
               {side !== 'mid' && <line x1={x} x2={x} y1={mid} y2={up ? mid - stem : mid + stem} stroke={col} strokeOpacity={0.55} strokeWidth={1.1} />}
               {head}
@@ -1464,7 +1554,6 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const order = (v: ClinvarVariant) => (v.effect === 'lof' ? (isEsc(v) ? 1 : 0) : v.effect === 'missense' ? 2 : 3) * 2 + (v.code === 'PG' ? 0 : 1);
           const vs = [...gp.vs].sort((a, b) => order(a) - order(b));
           const info = { names, tx, s: gp.s, e: gp.e };
-          const show = (e: React.MouseEvent) => { if (dragRef.current?.moved) return; const pt = boxPos(e); lastTipPos.current = pt; if (tip?.gene !== key) setTip({ ...pt, gene: key, clin: vs, clinGenes: info }); else placeTip(pt.x, pt.y); };
           const rN = snvR(gp.nmd), rE = snvR(gp.esc), both = gp.nmd > 0 && gp.esc > 0;
           const cxN = both ? gp.x - rN - 1 : gp.x, cxE = both ? gp.x + rE + 1 : gp.x;
           const t = snvTri(gp.mis), th = t * 1.3, triFs = gp.mis > 99 ? 7.5 : 9;
@@ -1472,7 +1561,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           const gx0 = Math.max(X0, refX(gp.s)), gx1 = Math.min(X1, refX(gp.e));
           const lw = Math.max(gp.w * 2, 10);
           return (
-            <g key={key} style={{ cursor: 'pointer' }} onMouseEnter={show} onMouseMove={show} onMouseLeave={hoverOff}
+            <g key={key} style={{ cursor: 'pointer' }}
               onClick={e => { e.stopPropagation(); if (suppressClick.current) return; const pt = boxPos(e); setPinned(cur => (cur?.gene === key ? null : { ...pt, gene: key, clin: vs, clinGenes: info })); }}>
               {/* the gene's stretch on the line */}
               {gx1 > gx0 && <rect x={gx0} y={midY - 1.5} width={Math.max(gx1 - gx0, 1)} height={3} rx={1.5} fill={C.faint} fillOpacity={0.35} />}
@@ -1514,7 +1603,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           return <g key={`achro${p.r.id}`}>{bar('del', yy + 1, true)}{bar('dup', yy + 14, !hasDel)}</g>;
         })}
         {yAchro >= 0 && !achroItems.length && <text x={X0 + 6} y={yAchro + 10} fontSize={9.5} fill={C.faint}>{ACHRO_REGIONS.some(r => achroChrom(r) === chrom) ? 'no AChro-Puce recurrent CNV in view' : `no AChro-Puce sheet on ${chrom}`}</text>}
-        {extraLaid && <g transform={`translate(0 ${yExtra})`}>{extraLaid.node}</g>}
+        {extraLaid.map(({ t, l, y: ty }) => <g key={t.id} transform={`translate(0 ${ty})`}>{l.node}</g>)}
         {/* reference band: the event's segments */}
         {rec && rec.segs.map(s => {
           const [lo, hi] = [s.first ? 0 : s.start, s.last ? L : s.end];
@@ -1558,6 +1647,20 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
                   </g>
                 );
               })}
+              {(() => {
+                // its own coordinates (position 1 at its start: the reference's before the event), under its junctions' labels
+                const ext = derExtent(d), off = derOff.get(d) ?? 0;
+                const v0 = Math.max(ext.lo, vp.s + off), v1 = Math.min(ext.hi, vp.e + off);
+                if (v1 <= v0) return null;
+                const st = niceStep(v1 - v0, 9), yT = Y.band + BAND_H, out: React.ReactNode[] = [];
+                for (let t = Math.ceil((v0 - ext.lo) / st) * st; t <= v1 - ext.lo; t += st) {
+                  const x = derX(d, t + ext.lo);
+                  if (x < X0 - 1 || x > X1 + 1) continue;
+                  out.push(<g key={`dt${t}`}><line x1={x} x2={x} y1={yT} y2={yT + 4} stroke={C.muted} strokeWidth={0.8} />
+                    <text x={x} y={Y.ruler + DER_RULER_H - 5} fontSize={9} textAnchor="middle" fill={C.muted} fontFamily={MONO}>{tickText(t, st)}</text></g>);
+                }
+                return <g pointerEvents="none">{out}</g>;
+              })()}
               {d.pieces.slice(1).map((dp, i) => {
                 const x = derX(d, dp.derStart), via = dp.piece.via, alt = i % 2;
                 if (x < X0 - 2 || x > X1 + 2) return null;
@@ -1683,12 +1786,15 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
       {domains.length > 0 && ders.map((d, i) => <text key={`tadl${i}`} x={14} y={derY[i].tad + 16} fontSize={10.5} fill={C.muted}>TADs</text>)}
       {/* the stretch being chosen on the ruler */}
       {sel && (() => {
-        const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e));
+        const a = Math.max(X0, selX(sel.s)), b = Math.min(X1, selX(sel.e));
         if (b <= a) return null;
+        // a stretch of a rebuilt chromosome: highlighted on its rows (the reference above holds it elsewhere, or twice)
+        const di = selDer ? ders.indexOf(selDer) : -1;
+        const top = di >= 0 ? derY[di].band - 4 : yRuler, bot = di >= 0 ? (di + 1 < ders.length ? derY[di + 1].band - 8 : H - 6) : H - 6;
         return <g pointerEvents="none" data-export="skip">
-          <rect x={a} y={yRuler} width={Math.max(1, b - a)} height={H - yRuler - 6} fill="#f59e0b" fillOpacity={0.12} />
-          {refX(sel.s) >= X0 && <line x1={a} x2={a} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
-          {refX(sel.e) <= X1 && <line x1={b} x2={b} y1={yRuler} y2={H - 6} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+          <rect x={a} y={top} width={Math.max(1, b - a)} height={bot - top} fill="#f59e0b" fillOpacity={0.12} />
+          {selX(sel.s) >= X0 && <line x1={a} x2={a} y1={top} y2={bot} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
+          {selX(sel.e) <= X1 && <line x1={b} x2={b} y1={top} y2={bot} stroke="#d97706" strokeWidth={1.2} strokeDasharray="4 3" />}
         </g>;
       })()}
       {/* the small variant searched: a line (a band when wider) through every track, its name on the ruler */}
@@ -1814,7 +1920,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           title={`ClinVar SNVs and short indels (under 50 bp) classified pathogenic or likely pathogenic, UCSC track clinvarMain: counted per gene (loss of function by predicted NMD, missense) or each at its place; shown below ${kb(CLIN_SNV_MAX_SPAN)} in view`} />}
         <Pill size="sm" icon="grid" label="AChro-Puce" on={showAchro} onChange={v => { setShowAchro(v); store.set('sashimi.svAchro', v); }}
           title={`${ACHRO_SOURCE.title} (${ACHRO_SOURCE.version}): the recurrent CNVs the French network classifies, each with its class for the deletion and the duplication`} />
-        {extraTrack && <Pill size="sm" icon="layers" label={extraTrack.label} on={showExtra} onChange={v => { setShowExtra(v); store.set(`sashimi.svExtra.${extraTrack.id}`, v); }} title={extraTrack.title} />}
+        {extraTracks.map(t => <Pill key={t.id} size="sm" icon="layers" label={t.label} on={extraOn(t)} onChange={v => setExtraOn(t, v)} title={t.title} />)}
         {rec && <label className={`inline-flex items-center gap-1.5 h-[26px] px-2 rounded-lg border text-xs font-medium cursor-pointer whitespace-nowrap ${domainsFile ? 'bg-accent-50 border-accent-200 text-accent-600' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50'}`} title="Chromatin domains (TADs) as a BED file (chrom, start, end, name; 0-based, the same genome build), e.g. from Hi-C of a relevant tissue. They show which genes change domain: an intact gene joined to another domain may be misregulated (position effect).">
           <Icon name="upload" size={13} />{domainsFile ? `TADs: ${domainsFile.name} (${domains.length})` : 'Add chromatin domains (BED)…'}
           <input type="file" accept=".bed,.txt,.tsv" className="hidden" onChange={async e => { const f = e.target.files?.[0]; if (f) { const v = { name: f.name, text: await f.text() }; setDomainsFile(v); store.set('sashimi.svDomains', v.text.length < 3e6 ? v : null); } e.target.value = ''; }} />
@@ -1845,19 +1951,28 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
           // the bar over the highlighted interval, in the box's pixels (centred on its visible part)
           const r = svgRef.current?.getBoundingClientRect(), br = boxRef.current?.getBoundingClientRect();
           if (!r || !br) return null;
-          const a = Math.max(X0, refX(sel.s)), b = Math.min(X1, refX(sel.e)), k = r.width / VW;
-          const inView = b > a, mid = inView ? (a + b) / 2 : refX(sel.s) < X0 ? X0 : X1;
-          const left = r.left - br.left + mid * k, top = r.top - br.top + (yRuler + RULER_H / 2) * k;
+          const a = Math.max(X0, selX(sel.s)), b = Math.min(X1, selX(sel.e)), k = r.width / VW;
+          const inView = b > a, mid = inView ? (a + b) / 2 : selX(sel.s) < X0 ? X0 : X1;
+          const di = selDer ? ders.indexOf(selDer) : -1;
+          const left = r.left - br.left + mid * k, top = r.top - br.top + (di >= 0 ? derY[di].band - 16 : yRuler + RULER_H / 2) * k;
           return (
             <div className="absolute z-30 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1 rounded-md border border-amber-300 bg-white/95 shadow-md px-1.5 py-0.5 text-[11px] whitespace-nowrap"
               style={{ left: Math.max(170, Math.min(br.width - 170, left)), top }} onMouseDown={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-              {!inView && refX(sel.e) <= X0 ? <span className="text-slate-400">◂</span> : null}
-              <span className="font-mono text-slate-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
-              <span className="text-slate-400">· {kb(sel.e - sel.s)}</span>
-              <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title="Zoom to the highlighted interval">🔍 zoom to region</button>
+              {!inView && selX(sel.e) <= X0 ? <span className="text-slate-400">◂</span> : null}
+              {selDer ? <>
+                <span className="font-mono text-slate-700" title={`the highlighted interval on the rebuilt chromosome ${selDer.name}, in its own coordinates (1-based, inclusive)`}>{selDer.name}:{fmt(sel.s - selDerLo + 1)}-{fmt(sel.e - selDerLo)}</span>
+                <span className="text-slate-400">· {kb(sel.e - sel.s)} · from</span>
+                <span className="font-mono text-slate-600" title="the stretches of the reference it is made of, in its order (each with its segment letter)">
+                  {selPieces.slice(0, 3).map((q, i) => <span key={i}>{i ? ' + ' : ''}<b className="font-sans text-slate-500">{q.letter}{q.rev ? '′' : ''}</b> {pieceText(q)}</span>)}{selPieces.length > 3 ? ` + ${selPieces.length - 3} more` : ''}
+                </span>
+              </> : <>
+                <span className="font-mono text-slate-700" title="the highlighted interval (1-based, inclusive)">{selText}</span>
+                <span className="text-slate-400">· {kb(sel.e - sel.s)}</span>
+              </>}
+              <button onClick={zoomToSel} className="ml-1 px-1.5 py-0.5 rounded bg-amber-500 text-white font-semibold hover:bg-amber-600" title={selDer ? `Zoom to this stretch of ${selDer.name} (the rebuilt chromosome stays lined up under it)` : 'Zoom to the highlighted interval'}>🔍 zoom to region</button>
               <button onClick={() => { void navigator.clipboard?.writeText(selText).then(() => setSelCopied(true), () => {}); }} className="px-1.5 py-0.5 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy the coordinates">{selCopied ? '✓ copied' : 'copy'}</button>
               <button onClick={() => setSel(null)} className="px-1 text-slate-400 hover:text-slate-700 text-sm leading-none" title="Remove the highlight (Esc)">×</button>
-              {!inView && refX(sel.s) >= X1 ? <span className="text-slate-400">▸</span> : null}
+              {!inView && selX(sel.s) >= X1 ? <span className="text-slate-400">▸</span> : null}
             </div>
           );
         })()}
@@ -1873,7 +1988,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {colorBy === 'loeuf' && <span>(gnomAD v4; v2.1.1 scores: &lt; {LOEUF_INTOLERANT['v2.1.1']} intolerant)</span>}
         {rec && <span className="inline-flex items-center gap-1"><svg width="10" height="14"><path d="M6,1 l-3,3 l3,3 l-3,3 l3,3" fill="none" stroke={C.lost} strokeWidth="1.4" /></svg>cut by a breakpoint</span>}
         {showAchro && <span className="inline-flex items-center gap-1">AChro-Puce: <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.del }} /> deletion <span className="inline-block w-4 h-2.5 rounded-sm" style={{ background: ACHRO_TYPE_COLOR.dup }} /> duplication, the network's class after each bar (click a bar for its sheet); dashed: placed approximately</span>}
-        {extraLaid && extraTrack!.legend}
+        {extraLaid.map(({ t }) => <span key={t.id} className="contents">{t.legend}</span>)}
         {(showClinSv || showClinSnv) && loaders.getClinvar && <span className="inline-flex items-center gap-1">ClinVar (pathogenic / likely pathogenic):
           {showClinSv && !clinSvAll && <> SVs summed up (more than {CLIN_SV_STACK_MAX} overlap here): how many cover each point, <span style={{ color: CLIN_KIND_COLOR.loss }}>losses</span> above the line, <span style={{ color: CLIN_KIND_COLOR.gain }}>gains</span> below, <span style={{ color: CLIN_KIND_COLOR.inv }}>inversions and complex</span> on it{rec ? ', the ones matching a loss or gain of the event as outlined bars under it' : ''} (“▸ all SVs” lists them);</>}
           {showClinSv && clinSvAll && <><span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.loss }} /> loss <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.gain }} /> gain <span className="inline-block w-4 h-2 rounded-sm" style={{ background: CLIN_KIND_COLOR.inv }} /> inversion, complex (pale: likely pathogenic){rec ? '; outlined when it matches a loss or gain of the event' : ''};</>}
@@ -1881,7 +1996,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {showDgv && loaders.getPopulationSvs && <span className="inline-flex items-center gap-1"><svg width="26" height="10"><line x1="1" x2="25" y1="5" y2="5" stroke={DGV_COLOR.loss} /><line x1="1" x2="1" y1="2" y2="8" stroke={DGV_COLOR.loss} /><line x1="25" x2="25" y1="2" y2="8" stroke={DGV_COLOR.loss} /><rect x="8" y="2.5" width="10" height="5" fill={DGV_COLOR.loss} /></svg>DGV Gold CNV: outer extent (line), inner (bar); <span style={{ color: DGV_COLOR.loss }}>loss</span> <span style={{ color: DGV_COLOR.gain }}>gain</span> <span style={{ color: DGV_COLOR.both }}>both</span>{rec ? '; solid and outlined when it matches a loss or gain of the event' : ''}</span>}
         <span className="inline-flex items-center gap-1">badge after a name: mode of inheritance (PanelApp) — {(['AD', 'AR', 'AD+AR', 'XLR', 'XLD', 'MT'] as MoiClass[]).map(k2 => <span key={k2} className="inline-flex items-center rounded-full px-1 text-[9px] font-bold border" style={{ color: MOI[k2].color, borderColor: `${MOI[k2].color}88`, background: `${MOI[k2].color}21` }} title={MOI[k2].label}>{MOI[k2].short}</span>)}</span>
         {panel && <span className="inline-flex items-center gap-1">● panel rating: <span style={{ color: CONF[3].color }}>green</span> <span style={{ color: CONF[2].color }}>amber</span> <span style={{ color: CONF[1].color }}>red</span></span>}
-        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom, two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
+        <span>· drag to pan (it glides on), Ctrl / ⌘ + scroll or pinch to zoom (over a rebuilt chromosome, about its own point under the pointer: a fusion stays), two-finger swipe or Shift + scroll to pan, double-click to zoom in (Shift: out), Ctrl / ⌘ + drag to highlight an interval (then zoom to it; over a rebuilt chromosome, in its own coordinates, with the reference stretches it is made of), drag along the ruler to zoom on a stretch, click the ideogram to go there; ← → + − {rec ? 'E ' : ''}on the keyboard; hover a gene for its card, click to keep it open</span>
       </div>
       <div className="px-5 mt-2 pb-1">
         {rec && !story.genes.some(g => g.kind !== 'unaffected') && !txs.loading && <div className="text-slate-400 text-xs py-1">No gene of the window is changed by the selected junctions.</div>}

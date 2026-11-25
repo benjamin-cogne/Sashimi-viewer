@@ -26,8 +26,10 @@ import { attachVariantWorker } from './variantClient';
 import type { KnownVariant, LibraryEvidence, LibraryStrand, LibraryType, SampleCoverage, StrandEvidence } from '../components/sashimi/types';
 import { breakpointsOf } from './alignments';
 import { safeFileName, serializePlotSvg, stackSvgs } from '../components/sashimi/svgExport';
-import { describeLink, parseLink, variantOfInterest, parseSvLink } from './link';
+import { describeLink, parseLink, variantOfInterest, parseSvLink, parsePageLink } from './link';
+import { cgh } from '../components/sashimi/cghStore';
 import { Icon, MenuItem, Popover, Segmented } from '../components/sashimi/controls';
+import ContactLink from '../components/ContactLink';
 import { GeneSuggest } from '../components/sashimi/GeneSuggest';
 import { rememberGene } from './geneSuggest';
 import '../index.css';
@@ -49,6 +51,8 @@ if (DEV) {
 const LINK = parseLink(window.location.hash, window.location.search);
 /** a link to the SV browser (#sv=DEL 20:399240-599326): the page opens on it */
 const SV_LINK = parseSvLink(window.location.hash, window.location.search);
+/** a link straight to the SV browser (#sv) or its array-CGH page (#cgh) */
+const PAGE_LINK = parsePageLink(window.location.hash, window.location.search);
 const LINK_TEXT = LINK ? `${LINK.mark.chrom}:${LINK.mark.start.toLocaleString('en-US')}${LINK.mark.end > LINK.mark.start ? `-${LINK.mark.end.toLocaleString('en-US')}` : ''}` : '';
 
 /** The data an exported page carries (null for the normal viewer). */
@@ -259,12 +263,16 @@ function App() {
   const recorder = useRef<RecorderHandle>(null);
   const [recording, setRecording] = useState(false);
   /** the SV browser (a rearrangement typed as HGVS or ISCN) and the gene loaders it uses */
-  const [svBrowser, setSvBrowser] = useState(!!SV_LINK);
+  const [svBrowser, setSvBrowser] = useState(!!SV_LINK || !!PAGE_LINK);
   /** the search the SV browser opens with (a link), and a key to open it afresh when another link comes */
   const [svInit, setSvInit] = useState<{ text: string; build?: GenomeBuild; key: number } | null>(() => (SV_LINK ? { ...SV_LINK, key: 0 } : null));
   // a link pasted in the address bar while the page is open
   useEffect(() => {
-    const onHash = () => { const l = parseSvLink(window.location.hash, window.location.search); if (l && (!svInit || l.text !== svInit.text || (l.build ?? '') !== (svInit.build ?? ''))) { setSvInit({ ...l, key: Date.now() }); setSvBrowser(true); } };
+    const onHash = () => {
+      // #sv or #cgh typed in the address bar: the page opens (the array-CGH page through the SV browser)
+      const pg = parsePageLink(window.location.hash, window.location.search);
+      if (pg) { setSvBrowser(true); if (pg === 'cgh') cgh.setOpen(true); }
+      const l = parseSvLink(window.location.hash, window.location.search); if (l && (!svInit || l.text !== svInit.text || (l.build ?? '') !== (svInit.build ?? ''))) { setSvInit({ ...l, key: Date.now() }); setSvBrowser(true); } };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, [svInit]);
@@ -704,9 +712,10 @@ function App() {
             // DNA samples also carry their structural hints (deletions, split reads, placed clips, discordant pairs), as the live track does;
             // RNA samples their fusion junctions (split reads and placed clips) when the page shows the hints
             const structural = smp.lib?.type === 'dna' ? true : smp.lib?.type === 'rna' ? 'rna' as const : false;
-            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary,
-              // a stranded sample of a view showing the strands keeps them split in the page
-              strands: !!st.strands && smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
+            raw.set(smp.id, await ds.getCoverage(smp.id, st.gene.chrom, ws, we, st.minMapq, { intronStarts: [...intronStarts], intronEnds: [...intronEnds] }, { core: { start: vs, end: ve }, maxReads: 250_000, structural, secondary: !!st.secondary, minReadLength: st.minReadLength,
+              // a stranded sample keeps its strands split in the page, whether or not the view shows them now: the reader
+              // can turn Strands on (exported without them, its coverage stayed one, only its reads split)
+              strands: smp.lib?.type !== 'dna' && (smp.lib?.strand?.call === 'reverse' || smp.lib?.strand?.call === 'forward') }));
           } catch (e: any) {
             coverage[String(smp.id)] = { start: ws, len: [], depth: [], junctions: [], window: { start: ws, end: we }, error: e?.message || String(e) };
           }
@@ -742,10 +751,15 @@ function App() {
         // reads of every loaded sample when the view shows its reads track (window and cap from the dialog)
         let reads: Record<string, EncodedReadsV2> | undefined;
         let phase: Record<string, EmbeddedPhase> | undefined;
+        // why reads are missing, for the exported page to say it: '*' the whole view, else by sample id
+        const readsNotExported: Record<string, string> = {};
+        if (!st.reads) readsNotExported['*'] = 'the reads track was off in this view when it was exported';
         if (st.reads) {
           const readsMax = readsWindowOfView(st);
-          if (span > readsMax) skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
-          else {
+          if (span > readsMax) {
+            skipped.push(`${t.label} (window of ${(span / 1000).toFixed(0)} kb, above its ${readsMax / 1000} kb reads window)`);
+            readsNotExported['*'] = `the view was ${(span / 1000).toFixed(0)} kb wide when it was exported, above its ${readsMax / 1000} kb reads window`;
+          } else {
             const half = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.floor((readsMax - span) / 2);
             // as the view asks for them: grouped by the page's phasing, the reads the page phases (the view and a quarter
             // of it on each side, up to READS_PHASE_CAP of them) exported as they are, each with its haplotype, and the
@@ -761,13 +775,13 @@ function App() {
               progress(`${t.label}: reads of ${smp.name}`);
               try {
                 const r = await ds.getReads(smp.id, st.gene.chrom, rs, re, st.minMapq, READS_CAPS[opts.readsCap], 'reads', 1, minVaf, {
-                  secondary: !!st.secondary, methylation: !!st.methylation && smp.lib?.type === 'dna',
+                  secondary: !!st.secondary, minReadLength: st.minReadLength, methylation: !!st.methylation && smp.lib?.type === 'dna',
                 });
                 if (phased) {
                   // the reads over the phased window are those the page phases (the same sample of them): the exported page
                   // draws them as the live one, and the export's own reads only past that window
                   const ph = await ds.getReads(smp.id, st.gene.chrom, pw.start, pw.end, st.minMapq, READS_PHASE_CAP, 'reads', 1, minVaf,
-                    { secondary: !!st.secondary, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
+                    { secondary: !!st.secondary, minReadLength: st.minReadLength, phase: true, haplotypes: st.haplotypes, phaseSource: st.phaseSource, longReadMinIndel: 1, longReadMinVaf, methylation: !!st.methylation && smp.lib?.type === 'dna' });
                   if (ph.phase) {
                     r.reads = [...r.reads.filter(x => x.e <= pw.start || x.s >= pw.end), ...ph.reads].sort((a, b) => a.s - b.s);
                     (phase ??= {})[String(smp.id)] = { window: pw, minVaf, longReadMinIndel: 1, longReadMinVaf, result: ph.phase, total: ph.total };
@@ -778,12 +792,12 @@ function App() {
                 if (mw) r.reads = r.reads.map(x => (x.me ? { ...x, me: x.me.map((v, i, a) => (i & 1 ? exportedCall(v, thresholdAt(mw, a[i - 1])) : v)) } : x));
                 reads[String(smp.id)] = await encodeReadsV2({ window: { start: rs, end: re }, total: r.total, reads: r.reads, reference: r.reference, reference_source: r.reference_source });
                 nReads += r.reads.length; nReadSets++;
-              } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); }
+              } catch (e: any) { skipped.push(`${t.label} / ${smp.name}: ${e?.message || e}`); readsNotExported[String(smp.id)] = `they could not be read when the page was exported (${e?.message || e})`; }
               done++;
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), coverage, reads, ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -1284,7 +1298,7 @@ function App() {
         </div></div>
       )}
       <RecorderHost ref={recorder} names={samples.map(x => x.name)} onRecording={setRecording} />
-      {svBrowser && <SvBrowserDialog key={svInit?.key ?? 'sv'} build={build} loaders={svLoaders} loadersFor={svLoadersFor} initial={svInit ?? undefined} onClose={() => { setSvBrowser(false); setSvInit(null); }} />}
+      {svBrowser && <SvBrowserDialog key={svInit?.key ?? 'sv'} build={build} loaders={svLoaders} loadersFor={svLoadersFor} initial={svInit ?? undefined} initialPage={PAGE_LINK === 'cgh' ? 'cgh' : undefined} onClose={() => { setSvBrowser(false); setSvInit(null); }} />}
       {exportProgress && (
         <div className="fixed inset-0 z-[60] bg-black/40 flex items-start justify-center p-6" role="status" aria-live="polite" data-export-progress>
           <div className="bg-white rounded-xl shadow-2xl border border-gray-200 w-full max-w-md text-gray-900 text-xs mt-16" onMouseDown={e => e.stopPropagation()}>
@@ -1380,6 +1394,8 @@ function App() {
         <span>Sashimi viewer {VERSION}</span>
         <span>·</span>
         <span>Benjamin Cogné (CHU Nantes, 2026)</span>
+        <span>·</span>
+        <ContactLink email="benjamin.cogne@chu-nantes.fr" subject="Sashimi viewer" up className="hover:text-accent-700" />
         <span>·</span>
         <a href="https://github.com/benjamin-cogne/Sashimi-viewer" target="_blank" rel="noopener noreferrer" className="hover:text-accent-700 underline decoration-dotted">github.com/benjamin-cogne/Sashimi-viewer</a>
         <span>·</span>

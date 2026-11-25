@@ -4,9 +4,11 @@
  * the same chromosome, else the reference alone). GRCh38 by default, GRCh37 on demand: an `NC_` accession's version
  * picks its build by itself.
  */
-import { useEffect, useMemo, useState } from 'react';
-import SvGenomeBrowser, { type SvGeneLoaders } from './SvGenomeBrowser';
-import SvNomenclatureBox, { useCytobands } from './SvNomenclatureBox';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import SvGenomeBrowser, { resetSvBrowserSettings, type SvGeneLoaders } from './SvGenomeBrowser';
+import SvNomenclatureBox, { useCytobands, plainCopy } from './SvNomenclatureBox';
+import SvGeneSummary, { type GeneSummary } from './SvGeneSummary';
+import { useCnvRegionTracks } from './PanelAppCnvTrack';
 import { parseSv, type ParsedSv } from './svNomenclature';
 import { segmentColors } from './svColors';
 import { parseLocus } from './geometry';
@@ -19,7 +21,7 @@ import { rememberGene } from '../../standalone/geneSuggest';
 import { svLinkHref } from '../../standalone/link';
 import { parseSmallGenomic, TRANSCRIPT_HGVS_RE, SMALL_KIND_WORD, SMALL_MAX, type SmallVariant } from './smallVariant';
 import { CghOpenButton, CghPageSlot } from './CghPage';
-import { cgh } from './cghStore';
+import { cgh, useCgh } from './cghStore';
 
 const FONT = '"Inter Viewer", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 const EXAMPLES = [
@@ -58,25 +60,44 @@ type ShownVariant = { kind: 'variant'; chrom: string; start: number; end: number
 type Shown = { kind: 'sv'; parsed: ParsedSv; text: string } | { kind: 'region'; chrom: string; start: number; end: number } | ShownVariant;
 type Loaders = Omit<SvGeneLoaders, 'fallback'>;
 
-export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose, initial }: {
+export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionLoaders, loadersFor, onClose, initial, initialPage }: {
   build: string; loaders: Loaders;
   /** loaders for another build (the SV browser's own switch); without it, the session's build only */
   loadersFor?: (build: GenomeBuild) => Loaders;
   onClose: () => void;
   /** a search to run at once (a link: #sv=…), in its build when it gives one */
   initial?: { text: string; build?: GenomeBuild };
+  /** a link to the array-CGH page (#cgh): it opens at once */
+  initialPage?: 'cgh';
 }) {
-  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? (initial?.build ?? ((load(BUILD_KEY) as GenomeBuild) || 'GRCh38')) : (sessionBuild as GenomeBuild)));
+  // each opening starts from the default settings (the gene panel aside), before the view below reads them
+  useState(() => { resetSvBrowserSettings(); save(BUILD_KEY, ''); return 0; });
+  const [build, setBuild] = useState<GenomeBuild>(() => (loadersFor ? (initial?.build ?? 'GRCh38') : (sessionBuild as GenomeBuild)));
   const loaders = useMemo(() => (loadersFor ? loadersFor(build) : sessionLoaders), [build, loadersFor, sessionLoaders]);
   const [text, setText] = useState(() => initial?.text ?? load(KEY));
   /** the interval asked for, highlighted in the view (coordinates typed) */
   const [mark, setMark] = useState<{ start: number; end: number; key: number } | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
   /** the address bar follows the search, so the page's address is a link to it */
-  const setLink = (t: string | null, b: GenomeBuild) => { try { history.replaceState(history.state, '', svLinkHref(t, b)); } catch { /* a sandboxed frame */ } setLinkCopied(false); };
-  const close = () => { setLink(null, build); onClose(); };
+  /** the search in the address (its last), to put back when the array-CGH page closes */
+  const linkText = useRef<string | null>(null);
+  const setLink = (t: string | null, b: GenomeBuild) => { linkText.current = t; try { history.replaceState(history.state, '', svLinkHref(t, b, cgh.get().open ? 'cgh' : t !== null || !closing.current ? 'sv' : null)); } catch { /* a sandboxed frame */ } setLinkCopied(false); };
+  const closing = useRef(false);
+  const close = () => { closing.current = true; setLink(null, build); onClose(); };
+  // the address follows the page shown: #sv (with its search) for this page, #cgh for the array-CGH page, so that it can
+  // be copied or bookmarked; a link to the array-CGH page opens it
+  const cghOpen = useCgh().open;
+  useEffect(() => { if (initialPage === 'cgh') cgh.setOpen(true); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (closing.current) return;
+    try { history.replaceState(history.state, '', svLinkHref(cghOpen ? null : linkText.current, build, cghOpen ? 'cgh' : 'sv')); } catch { /* a sandboxed frame */ }
+  }, [cghOpen]); // eslint-disable-line react-hooks/exhaustive-deps
   const [shown, setShown] = useState<Shown | null>(null);
   const [focus, setFocus] = useState<{ start: number; end: number; key: number } | null>(null);
+  /** the genes the event changes, as the browser reads them (next to the nomenclature) */
+  const [geneSum, setGeneSum] = useState<GeneSummary | null>(null);
+  /** the browser as on the array-CGH page: its known CNV region tracks (PanelApp Australia shown, ClinGen a toggle away), the event shaded through the tracks */
+  const cnvTracks = useCnvRegionTracks(build);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -100,7 +121,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
       const accBuild = acc ? buildOfNc(acc) : null;
       if (accBuild && accBuild !== b) {
         if (!loadersFor) throw new Error(`${acc} is a ${accBuild} accession; this session reads ${b}.`);
-        b = accBuild; setBuild(b); save(BUILD_KEY, b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
+        b = accBuild; setBuild(b); setNote(`${acc} is a ${b} accession: switched to ${b}.`);
       }
       const showVariant = (v: SmallVariant, typed: string, hgvsg: string | null, spdi: string | null, vcf: string | null = null, source: string | null = null) => {
         const len = chromLength(b, v.chrom);
@@ -171,7 +192,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   };
   const switchBuild = (b: GenomeBuild) => {
     if (b === build) return;
-    setBuild(b); save(BUILD_KEY, b); setShown(null); setFocus(null);
+    setBuild(b); setShown(null); setFocus(null);
     if (text.trim()) void draw(text, b);
   };
 
@@ -216,7 +237,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   /** the array-CGH page reads GRCh37 (its files' build) whatever the SV browser shows */
   const cghLoaders = useMemo(() => (loadersFor ?? ((b: GenomeBuild) => (b === sessionBuild ? sessionLoaders : {}))), [loadersFor, sessionBuild, sessionLoaders]);
   return (
-    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }}>
+    <div className="fixed inset-0 z-[70] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} onCopy={plainCopy}>
       <div className="w-full min-h-full pb-4">
         {/* a full-screen page: back to the Sashimi viewer from its bar (or Esc) */}
         {/* the Sashimi viewer's app bar */}
@@ -258,7 +279,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           {error && <div className="text-[12px] text-red-700 mt-2">{error}</div>}
           {note && <div className="text-[11.5px] text-accent-800 mt-1">{note}</div>}
           {sv && rec && (
-            <div className="mt-2 grid grid-cols-[1fr_1fr] gap-4 text-xs">
+            <div className="mt-2 grid grid-cols-1 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1.2fr)] gap-4 text-xs">
               <div>
                 <div className="text-[10.5px] font-semibold text-slate-700">Rebuilt chromosome</div>
                 <div className="font-mono text-[11px] bg-slate-50 border border-slate-200 rounded px-2 py-1 mt-0.5">{rec.ders[0].name} = {rec.ders[0].pieces.map(p => `${p.seg.letter}${p.reversed ? '′' : ''}`).join(' · ')}</div>
@@ -267,6 +288,8 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
                 <div className="text-[10.5px] text-slate-500 mt-0.5">Drawn as heterozygous, 2 copies on the flanks; no read depth (open the cartoon on a sample for that).</div>
               </div>
               <SvNomenclatureBox rec={rec} build={build} bands={bands} />
+              {geneSum ? <SvGeneSummary s={geneSum} onGene={g => { const pad = Math.max(2000, (g.end - g.start) * 0.15); setFocus({ start: g.start - pad, end: g.end + pad, key: Date.now() }); }} />
+                : <div className="text-[10.5px] text-slate-400">Genes in the event: reading them…</div>}
             </div>
           )}
         </div>
@@ -275,7 +298,7 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
           <div className="mx-4 mt-3 bg-white border border-slate-200 rounded-xl shadow-sm pb-2 overflow-hidden [&>div:first-child]:border-t-0 [&>div:first-child]:mt-0">
           <SvGenomeBrowser key={`${build}|${shown.kind === 'sv' ? shown.text : shown.kind === 'variant' ? `variant:${shown.text}` : `region:${shown.chrom}`}`} rec={rec ?? null} chrom={chrom}
             window={sv ? sv.window : { start: (shown as { start: number }).start, end: (shown as { end: number }).end }}
-            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark}
+            segColors={colors} flankCopies={2} zygosity="het" build={build} loaders={full} rebuild={sv?.rebuild} focus={focus} highlight={mark} onGeneSummary={setGeneSum} strongEvent extraTracks={cnvTracks}
             variant={variant ? {
               start: variant.v.start, end: variant.v.end, key: variant.text,
               label: variant.hgvsg ? variant.typed.replace(/\(([^)]*)\)/, '') : variant.v.hgvs,

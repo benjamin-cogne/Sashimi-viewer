@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Recording } from './recorder';
 import { recordingToSvg, recordingToPlayer, playerHtml, packedPlayerHtml, utf8Length, autoZooms, timeMap, invertTime, idleCuts, replaceText, MAX_IDLE_DEFAULT_MS, ZOOM_LEVEL_DEFAULT, STOP_AT_DEFAULT, type StopAt, type Zoom } from './exportRecording';
 import Timeline, { type TimelineLane } from './Timeline';
+import { toPlainMp4 } from './videoFile';
 import { suggestCaptions, CAPTION_DEFAULT_MS, CHAPTER_CARD_MS, type Caption, type CaptionKind, type Chapter } from './captions';
 
 type Rect = [number, number, number, number];
@@ -293,12 +294,22 @@ export default function RecordingEditor({ rec, names, initial, onClose, onAgain 
       (videoFrame.current?.contentWindow as any)?.recPlayer?.play();
       await sleep(duration + 500);
       mr.stop(); await stopped;
-      const type = mr.mimeType || mime || 'video/webm';
-      const blob = new Blob(parts, { type });
+      stream.getTracks().forEach(t => t.stop());
+      const recType = mr.mimeType || mime || 'video/webm';
+      const recorded = new Blob(parts, { type: recType });
+      // the recorder's file is a live stream (no duration in its header, variable frame rate), which upload sites
+      // such as LinkedIn refuse: re-encoded into a plain MP4, kept as recorded where the browser cannot
+      setVideoMsg('Writing a standard MP4…');
+      let plain: Awaited<ReturnType<typeof toPlainMp4>> = null, why = '';
+      try { plain = await toPlainMp4(recorded, f => setVideoMsg(`Writing a standard MP4… ${Math.round(f * 100)} %`)); }
+      catch (e) { why = (e as Error).message; }
+      const blob = plain?.blob ?? recorded, type = blob.type || recType;
       const url = URL.createObjectURL(blob), a = document.createElement('a');
       a.href = url; a.download = `sashimi-recording-${stamp()}.${type.includes('mp4') ? 'mp4' : 'webm'}`; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 4000);
-      setVideoMsg(`Video saved: ${type.includes('mp4') ? (type.includes('avc1') ? 'MP4 (H.264)' : 'MP4') : 'WebM (VP9)'}, ${fmtSize(blob.size)}${CT?.fromElement ? '' : ' (this browser records the whole tab)'}.`);
+      const kind = plain ? (plain.how === 'encoded' ? 'MP4 (H.264, 30 fps)' : `MP4${recType.includes('avc1') ? ' (H.264)' : ''}`) : type.includes('mp4') ? (type.includes('avc1') ? 'MP4 (H.264)' : 'MP4') : 'WebM (VP9)';
+      setVideoMsg(`Video saved: ${kind}, ${fmtSize(blob.size)}${CT?.fromElement ? '' : ' (this browser records the whole tab)'}.`
+        + (plain ? '' : ` Kept as the browser recorded it${why ? ` (${why})` : ''}: some sites (LinkedIn) may refuse it; use a recent Chrome or Edge.`));
     } catch (e) { setVideoMsg(`Video failed: ${(e as Error).message}`); }
     finally { stream.getTracks().forEach(t => t.stop()); setVideo(null); }
   };

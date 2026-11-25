@@ -15,7 +15,8 @@ import { cgh, useCgh, refMismatch, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore
 import { MISMATCH_TIP } from './cghGroups';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
-import { clinGenTrack } from './CghClinGenTrack';
+import ContactLink from '../ContactLink';
+import { useCnvRegionTracks } from './PanelAppCnvTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
 import { CghProbePanel, callMargin } from './CghProbePanel';
 import { DLRS_TIP, dlrsWord } from './cghProbes';
@@ -69,8 +70,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const [error, setError] = useState<string | null>(null);
   const [over, setOver] = useState(false);
   // the ClinGen track folded by default: HI 3 / TS 3 regions only, the recurrent list and its LCRs on demand
-  const [recOpen, setRecOpen] = useState(false);
-  const track = useMemo(() => clinGenTrack(drawn?.build ?? 'GRCh37', recOpen, () => setRecOpen(o => !o)), [drawn?.build, recOpen]);
+  const cnvTracks = useCnvRegionTracks(drawn?.build ?? 'GRCh37');
   /** a call clicked: DEL / DUP over its positions, on the file's build (GRCh37 when it states none) */
   const show = (c: CghCnv, f: CghFile) => {
     setGenome(false);
@@ -119,6 +119,10 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
           <CghGuideButton />
+          <span className="text-[11px] text-bar-muted">
+            CGH-array support implemented by Wallid Deb (CHU Nantes) · <ContactLink email="wallid.deb@chu-nantes.fr" subject="Sashimi viewer — Array-CGH" className="hover:text-bar-text" />
+          </span>
+          <span className="text-[11px] text-bar-muted">·</span>
           <span className="text-[11px] text-bar-muted" data-cgh-esc-hint title="Esc folds what is open (the call, its detail, the whole genome) back to the list; Esc again asks to go back to the SV browser">Esc: clear the view · twice: leave</span>
         </div>
         {!s.files.length && (
@@ -149,7 +153,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
             {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} segs={cgh.probeCallsOf(c.sampleKey)?.segs.get(c.chrom)} getBands={full.getCytobands} />}
             <div className="[&>div:first-child]:mt-2" data-cgh-svb>
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
-                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />
+                zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTracks={cnvTracks} />
             </div>
           </div>
         )}

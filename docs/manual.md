@@ -206,6 +206,15 @@ insert size of the arc's ends); soft-clip clusters (≥ 3 reads clipped ≥ 20 b
 its count in every DNA sample and a g. notation; a duplication's tooltip says whether its whole exons keep the frame.
 Hover a track's *DNA* tag to see why an arc is missing.
 
+**Joints from split reads.** In the SV cartoon (*🎬 rebuild the SV*), each junction seen in split reads gets a *joint*
+line once the cartoon opens: the bases **inserted** between the two sides (orange; *templated* when they copy a stretch
+within 5 kb of a breakpoint, either strand, at most one mismatch per 10 bases), or the bases **shared** by the two
+sides (violet, microhomology: the breakpoint can sit anywhere along them), or *blunt*, with the split reads agreeing.
+*▸ bases* shows the joint base by base under the reference at either side, with a hint at the repair (end joining,
+microhomology-mediated, replication-based) that is not a call. A rebuilt junction's breakends sit where the reads put
+them, a deletion or tandem duplication as far 3′ as the shared bases allow, and its inserted bases enter the draft HGVS
+(`delinsTA`, `ins43249001_43249028`).
+
 **Repeat inspector.** The 77 pathogenic repeat loci of STRchive get an orange ruler pill (*FMR1 CGG repeat ·
 inspect ▸*); any other repeat opens with Shift+drag, then *⟲ Inspect repeat*. Long reads are sized between two
 locus-specific anchors, drawn as a size **histogram** and a **waterfall** of units (pathogenic motif blue, benign
@@ -214,7 +223,7 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
-**Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down. Esc
+**Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down. Esc
 first clears the view (no call selected, its detail and call window closed, the whole genome folded back to its strip;
 filters, tab, sort and the table's scroll kept). The call window follows the tab: a patient's tab shows that patient's
 last call clicked, or none; *All patients* keeps the call clicked; Esc again, or **← SV browser**, asks *Leave Array-CGH and go back to the
@@ -470,8 +479,9 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
 Click a row (↑ ↓ for the next one; click it again to fold its detail): its genes are listed under it, PanelApp green first, then amber, then red (whole
 or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rules it meets and the AChro-Puce regions it matches, and the call is drawn below
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
-its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp) plus one of this page
-only, **ClinGen CNV regions** (its own toggle, on by default; the SV browser does not have it): the ClinGen dosage regions
+its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp, and **ClinGen CNV
+regions**; the same browser as the SV browser's and the SV cartoon's, the event shaded through the tracks in all three).
+**ClinGen CNV regions** (its own toggle, on by default): the ClinGen dosage regions
 scored HI 3 (red) or TS 3 (blue; both: half and half), click one for its ClinGen page; folded by default; *▸ show recurrent CNVs / LCRs* under them adds the regions of the ClinGen recurrent
 CNV list v2.0 (hatched orange) and its breakpoint / LCR segments (thin grey, named: BP1-BP4, LCR22A-H, ...), so one sees
 whether a call's ends fall in the expected LCRs; a *PIEV* tag (*PIEV del* / *PIEV dup* when one type only) on a region
@@ -589,17 +599,31 @@ https://benjamin-cogne.github.io/Sashimi-viewer/#variant=NC_000017.11:g.43094464
 Template: `href="…/#variant={{ hg38_g_hgvs | urlencode }}&label={{ c_hgvs | urlencode }}&pad=100"`. A GRCh37
 laboratory sends the hg19 accession or `build=GRCh37`; deep-intronic variants need a larger `pad` or a `locus`.
 
+**Nomenclature of a rebuilt rearrangement.** The box under a rebuilt SV gives drafts to check before any report:
+HGVS (allele form on the `NC_` accession), and ISCN 2024 for sequencing in its two formats (§4.7): the karyotype
+format (bands, short system for one deletion, duplication or inversion, `t(A;B)(…;…)` for a balanced reciprocal
+translocation, else the detailed system with `→`, derivatives named after the chromosome giving the centromere,
+then the HGVS description) and the microarray format (each stretch gained or lost with its copy number, `×1`, `×3`;
+heterozygous unless the cartoon says homozygous). The junction line is the viewer's own and is left out of the copy.
+
 **Links to the SV browser.** `#sv=` opens the page on the SV browser with what its box takes, no alignment needed:
-a rearrangement (HGVS, ISCN sequence form, or `DEL` / `DUP` / `INV` before coordinates), a small variant (under 50 bp,
+a rearrangement (HGVS; ISCN 2024 with positions, `seq[GRCh38] del(20)(p12.2p12.2) NC_000020.11:g.10489766_10783340del`
+or `seq[GRCh38] 20p12.2(10,489,766_10,783,340)×1`; the viewer's junction line; or `DEL` / `DUP` / `INV` before
+coordinates), a small variant (under 50 bp,
 genomic `chr2:g.60461323del` or on a transcript `NM_022893.4:c.1592del`, moved to the genome by VariantValidator,
 or by Ensembl's Variant Recoder when VariantValidator fails or gives no answer in 10 s: marked on the reference, no rebuilt chromosome, the view on its gene, ClinVar variants each at its place),
 coordinates (opened with
 a quarter of the interval on each side, the interval highlighted), a chromosome or a gene. `build=GRCh37` for hg19
-positions. The SV browser keeps the address bar on its last search, and **🔗 copy link** copies it.
+positions. `#sv` alone opens the SV browser without a search, and `#cgh` its **Array-CGH** page (also typed in the
+address bar while the viewer is open). The address follows the page shown: `#sv=…` with the SV browser's last search
+(or `#sv`), `#cgh` on the Array-CGH page, nothing once back in the viewer; it can be bookmarked, and **🔗 copy link**
+copies it.
 
 ```
 …/sashimi-viewer.html#sv=DEL%2020:399240-599326
 …/sashimi-viewer.html#sv=20:399240-599326&build=GRCh37
+…/sashimi-viewer.html#sv
+…/sashimi-viewer.html#cgh
 ```
 
 ## Sessions and HTML export

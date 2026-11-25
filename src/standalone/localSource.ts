@@ -17,7 +17,7 @@ import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, 
 import { CoverageState, Layer, mapqThreshold, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylBlocks, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
-import { arcReadFromCigar, supportsArc } from './arcSupport';
+import { addsMates, minLengthOf, opsReadLength, rawReadLength, supportsRaw } from './readFilter';
 import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
@@ -195,7 +195,7 @@ const haplotag = (get: (tag: string) => unknown): { hp?: number; ps?: number; pc
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
-/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
+/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence (split reads' too) so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
 /** Widest insertion checked as a tandem copy (the reference read around the window grows by as much). */
@@ -221,7 +221,9 @@ const BAM_VIEW: RecordView<any> = {
   hap: r => haplotag(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(r.CIGAR)) || bigInsertion(r.CIGAR)));
+    // split reads (SA tag) too: their bases are the signature of the junction they cross, and a read whose clipped part
+    // was aligned elsewhere at MAPQ 0 is rescued as a clipped read (alignments.ts rescueClipEnds)
+    const withSeq = !light || (structural && (bigClip(r.CIGAR) || bigInsertion(r.CIGAR)));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -251,7 +253,7 @@ const CRAM_VIEW: RecordView<any> = {
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(cigar)) || bigInsertion(cigar)));
+    const withSeq = !light || (structural && (bigClip(cigar) || bigInsertion(cigar)));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -266,8 +268,11 @@ interface ScanOptions {
   structural?: boolean; signal?: AbortSignal;
   /** secondary alignments (0x100) kept too */
   secondary?: boolean;
-  /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
-  filter?: (light: RawRead) => boolean;
+  /**
+   * only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling;
+   * `full` decodes the record whole (bases, qualities, CRAM substitutions) for a test that needs them
+   */
+  filter?: (light: RawRead, full: () => RawRead) => boolean;
   /** sample fragments rather than reads: the two mates of a pair are kept or dropped together (see `scan`) */
   pairs?: boolean;
 }
@@ -599,7 +604,7 @@ export class LocalDataSource implements SashimiDataSource {
         seen++;
         if (!keepFlagsWith(view.flags(r), secondary)) continue;
         if (minMapq > 0 && view.mapq(r) < mapqThreshold(minMapq)) continue;
-        if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
+        if (filter && !filter(view.raw(r, true, true, loc.o.refNames), () => view.raw(r, false, true, loc.o.refNames))) continue;
         if (pairs) {
           // a record without a name (a CRAM written without them) is a fragment of its own
           const h = nameHash(view.name(r) || `#${total}`);
@@ -704,12 +709,12 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's allele state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private alleleState(id: number, chrom: string, start: number, end: number, secondary = false): AlleleState {
+  private alleleState(id: number, chrom: string, start: number, end: number, secondary = false, minLength = 0): AlleleState {
     let st = this.alleleStates.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
-    if (!st || st.chrom !== chrom || st.secondary !== secondary || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || st.minLength !== minLength || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > ALLELE_MAX_SPAN)) {
-      st = new AlleleState(chrom, secondary);
+      st = new AlleleState(chrom, secondary, minLength);
       this.alleleStates.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -819,7 +824,7 @@ export class LocalDataSource implements SashimiDataSource {
       const loc = await this.locate(sampleId, chrom);
       if (!loc) return { sites: [], total: 0, long_reads: false };
       const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-      const st = this.alleleState(sampleId, loc.name, start, end, !!opts?.secondary);
+      const st = this.alleleState(sampleId, loc.name, start, end, !!opts?.secondary, minLengthOf(opts) ?? 0);
       const scratch = { a: new Uint8Array(512) };
       // the reference over the records of the tile about to be counted, fetched before the (synchronous) counting
       let ref: RefWindow | null = null;
@@ -844,6 +849,7 @@ export class LocalDataSource implements SashimiDataSource {
         if (!keepFlagsWith(flags, st.secondary)) return;
         // every read is counted, whatever its MAPQ (a minimum MAPQ is read back from the counts, not scanned again)
         const ops = view.ops(r);
+        if (st.minLength && opsReadLength(ops) < st.minLength) return;
         const n = view.seqCodes(r, scratch);
         const start0 = view.start(r);
         // a phased file: the read's haplotag (HP 1, 2, … within the phase set PS) numbered for the counts
@@ -981,11 +987,12 @@ export class LocalDataSource implements SashimiDataSource {
    * elsewhere, on the same strand or far away) are kept whole; the others would add nothing to it
    * but their insert size, which the layer histograms instead.
    */
-  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false): void {
+  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false, minLength = 0): void {
     const flags = view.flags(r);
     if (!keepFlagsWith(flags, secondary)) return;
     const mapq = view.mapq(r);
     const ops = view.ops(r);
+    if (minLength && opsReadLength(ops) < minLength) return;
     const start = view.start(r);
     const insert = (flags & 1) && (flags & 2) ? Math.abs(view.tlen(r)) : 0;
     layer.add(start, ops, mapq, insert, flags);
@@ -1017,7 +1024,7 @@ export class LocalDataSource implements SashimiDataSource {
   private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void | Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     return this.fillStretch(id, st, loc, from, to, () => new Layer(st.strands),
-      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary), signal, onTile);
+      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary, st.minLength), signal, onTile);
   }
 
   /**
@@ -1083,15 +1090,15 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false, strands = false): CoverageState {
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false, strands = false, minLength = 0): CoverageState {
     let st = this.coverage.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
     // records kept for a genomic library include those of an RNA library (split and clipped reads), not the reverse
     // counts made with the strands answer a request without them, not the reverse
-    if (!st || st.chrom !== chrom || st.secondary !== secondary || (strands && !st.strands) || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || st.minLength !== minLength || (strands && !st.strands) || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
       || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
-      st = new CoverageState(chrom, structural, secondary, strands);
+      st = new CoverageState(chrom, structural, secondary, strands, minLength);
       this.coverage.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -1129,7 +1136,7 @@ export class LocalDataSource implements SashimiDataSource {
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
       const structural = opts?.structural || false;
-      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands);
+      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands, opts?.minReadLength && opts.minReadLength > 0 ? opts.minReadLength : 0);
       const strandsOf = (w: { start: number; end: number }) => (opts?.strands ? strandSlices(st, minMapq, w.start, w.end, boundaries) : Promise.resolve(undefined));
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
@@ -1221,23 +1228,33 @@ export class LocalDataSource implements SashimiDataSource {
     const support = !collapsed ? opts?.support : undefined;
     // reads phased in reads mode: more of them read for the phasing, `maxReads` of them returned (answerReads)
     const phased = !collapsed && !support && !!opts?.phase;
-    const cap = collapsed ? Math.max(40000, maxReads) : support ? Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
+    // the supporting reads are read with room to spare (only they are kept), then every k-th past the cap below: the
+    // scan's own thinning halves what it holds each time it overflows, which left between half the cap and the cap; it
+    // now only bounds the memory past 32 times the cap
+    const cap = collapsed ? Math.max(40000, maxReads) : support ? 32 * Math.max(1, maxReads) : phased ? Math.max(READS_PHASE_CAP, maxReads) : Math.max(100, maxReads);
     const ownName = (await this.locate(sampleId, chrom))?.name ?? chrom;
     // filtered and sampled before sequences and qualities are decoded: only the reads shown pay for them; the pair
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
     // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
     // are sampled as reads, and their mates in the window added afterwards
+    // a length floor and a support filter both apply before the cap (readFilter.ts)
+    const minLength = minLengthOf(opts);
+    const longEnough = (r: RawRead) => !minLength || rawReadLength(r) >= minLength;
     const scanned = await this.scan(sampleId, chrom, start, end, minMapq, cap, false,
-      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
+      { structural: true, signal: opts?.signal, filter: support ? (r, full) => longEnough(r) && supportsRaw(r, ownName, support, full) : minLength ? longEnough : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
-    if (support) {
+    if (support && raw.length > Math.max(1, maxReads)) {
+      const want = Math.max(1, maxReads), step = raw.length / want;
+      raw = Array.from({ length: want }, (_, i) => raw[Math.floor(i * step)]);
+    }
+    if (addsMates(support)) {
       // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
       const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
       if (want.size) {
         const extra = await this.scan(sampleId, chrom, start, end, minMapq, Infinity, false,
-          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`), secondary: !!opts?.secondary });
+          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`) && longEnough(r), secondary: !!opts?.secondary });
         mates = extra.kept.length;
         raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);
       }

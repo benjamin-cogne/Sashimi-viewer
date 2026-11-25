@@ -295,30 +295,114 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
   // translate changed) joins the node of its first place: written once, moved by the timeline (see svgShift.ts).
   interface TreeNode { chunk: number; open?: string; frames: number[]; kids: TreeNode[][]; canon?: string; pos?: { i: number; x: number; y: number }[] }
   const canon = canonsOf(rec);
+  // A definition (a clip path, a mask, a gradient…) is used where it is referenced, never drawn where it stands: moving
+  // it by a transform around it does nothing, so what holds one is never treated as moved (the copy would stay at the
+  // first place: a track's clip left at the top of the plot hides the track).
+  const DEF_TAGS = 'clipPath|mask|pattern|marker|linearGradient|radialGradient|filter|symbol';
+  const DEF_IN = new RegExp(`<(?:${DEF_TAGS})\\b`);
+  const DEF_HOLDER = new RegExp(`^<(?:defs|${DEF_TAGS})\\b`);
   const canonOf = (id: number): Canon | null => {
     let v = canon.get(id);
-    if (v === undefined) { const c = rec.chunks[id]; v = 'leaf' in c ? shiftCanon(c.leaf) : shiftCanon(c.open, true); canon.set(id, v); }
+    if (v === undefined) {
+      const c = rec.chunks[id];
+      v = 'leaf' in c ? (DEF_IN.test(c.leaf) ? null : shiftCanon(c.leaf)) : DEF_HOLDER.test(c.open) ? null : shiftCanon(c.open, true);
+      canon.set(id, v);
+    }
     return v;
   };
-  const insert = (alts: TreeNode[][], pos: number, id: number, frame: number) => {
+  const insert = (alts: TreeNode[][], pos: number, id: number, frame: number, inDef = false) => {
     const c = rec.chunks[id];
     const list = (alts[pos] ??= []);
     let node = list.find(n => ('leaf' in c ? n.chunk === id : n.open === c.open));
-    const cn = canonOf(id);
+    const cn = inDef ? null : canonOf(id);
     if (!node && cn) node = list.find(n => n.canon === cn.key && n.frames[n.frames.length - 1] !== frame);
     if (!node) { node = { chunk: id, open: 'leaf' in c ? undefined : c.open, frames: [], kids: [], canon: cn?.key, pos: cn ? [] : undefined }; list.push(node); }
     if (node.frames[node.frames.length - 1] !== frame) { node.frames.push(frame); if (node.pos && cn) node.pos.push({ i: frame, x: cn.x, y: cn.y }); }
-    if (!('leaf' in c)) c.kids.forEach((k, j) => insert(node!.kids, j, k, frame));
+    if (!('leaf' in c)) c.kids.forEach((k, j) => insert(node!.kids, j, k, frame, inDef || DEF_HOLDER.test(c.open)));
   };
-  const emit = (n: TreeNode, parentFrames: number): string => {
+  /**
+   * The definitions a chunk holds, by id: the page keeps an id while what it defines changes (a track's clip follows
+   * the track when a panel above it grows). Two versions in one file would leave the first serving every frame, so a
+   * drawing whose definition changes gets one copy per version, each with its own id (see `Versions`).
+   */
+  const DEF_RE = new RegExp(`<(${DEF_TAGS})\\b[^>]*?\\sid="([^"]+)"[^>]*?(?:\\/>|>[\\s\\S]*?<\\/\\1>)`, 'g');
+  const DEF_OPEN = new RegExp(`^<(?:${DEF_TAGS})\\b[^>]*?\\sid="([^"]+)"`);
+  const textMemo = new Map<number, string>();
+  const fullText = (id: number): string => {
+    let t = textMemo.get(id);
+    if (t == null) { const c = rec.chunks[id]; t = 'leaf' in c ? c.leaf : `${c.open}${c.kids.map(fullText).join('')}${c.close}`; textMemo.set(id, t); }
+    return t;
+  };
+  const defsMemo = new Map<number, Map<string, string>>();
+  const defsOf = (id: number): Map<string, string> => {
+    let m = defsMemo.get(id);
+    if (m) return m;
+    const c = rec.chunks[id];
+    m = new Map();
+    if ('leaf' in c) { if (DEF_IN.test(c.leaf)) for (const x of c.leaf.matchAll(DEF_RE)) if (!m.has(x[2])) m.set(x[2], x[0]); }
+    else {
+      const o = DEF_OPEN.exec(c.open);
+      if (o) m.set(o[1], fullText(id));
+      else for (const k of c.kids) for (const [a, t] of defsOf(k)) if (!m.has(a)) m.set(a, t);
+    }
+    defsMemo.set(id, m);
+    return m;
+  };
+  /** The ids of a drawing defined differently across its frames: for each, the version each frame has. */
+  interface Versions { ids: Set<string>; of: Map<string, Map<number, number>>; texts: Map<string, string[]> }
+  const versionsOf = (perFrame: Map<number, number[]>): Versions | null => {
+    const texts = new Map<string, string[]>(), of = new Map<string, Map<number, number>>();
+    for (const [f, kids] of perFrame) {
+      const seen = new Set<string>();
+      for (const k of kids) for (const [id, t] of defsOf(k)) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const list = texts.get(id) ?? []; if (!texts.has(id)) texts.set(id, list);
+        let v = list.indexOf(t); if (v < 0) { v = list.length; list.push(t); }
+        let m = of.get(id); if (!m) { m = new Map(); of.set(id, m); }
+        m.set(f, v);
+      }
+    }
+    const ids = new Set([...texts].filter(([, l]) => l.length > 1).map(([id]) => id));
+    return ids.size ? { ids, of, texts } : null;
+  };
+  const reEsc = (id: string) => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const emit = (n: TreeNode, parentFrames: number, ver: Versions | null = null): string => {
     const c = rec.chunks[n.chunk];
     const own = n.frames.length !== parentFrames;
     const mv = n.pos && n.canon != null ? moveClass(n.pos) : null;
-    const kids = () => n.kids.map(list => list.map(k => emit(k, n.frames.length)).join('')).join('');
-    const inner = mv
-      ? `<g class="a ${mv}">${'leaf' in c ? replaceText(n.canon!, opts.replace) : `${replaceText(n.canon!, opts.replace)}${kids()}${c.close}`}</g>`
-      : 'leaf' in c ? replaceText(c.leaf, opts.replace) : `${replaceText(n.open!, opts.replace)}${kids()}${c.close}`;
-    return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner;
+    let head = replaceText(mv ? n.canon! : 'leaf' in c ? c.leaf : n.open!, opts.replace);
+    let refs: string[] = [];
+    if (ver) {
+      // a definition with versions is written apart (one per version, own ids): left out here
+      const o = 'leaf' in c ? null : DEF_OPEN.exec(head);
+      if (o && ver.ids.has(o[1])) return '';
+      if ('leaf' in c && DEF_IN.test(head)) head = head.replace(DEF_RE, (m, _t, id: string) => (ver.ids.has(id) ? '' : m));
+      refs = [...ver.ids].filter(id => head.includes(`#${id}`));
+    }
+    const kids = () => n.kids.map(list => list.map(k => emit(k, n.frames.length, ver)).join('')).join('');
+    const body = (h: string, k: string) => {
+      const b = 'leaf' in c ? h : `${h}${k}${c.close}`;
+      return mv ? `<g class="a ${mv}">${b}</g>` : b;
+    };
+    if (!refs.length) { const inner = body(head, 'leaf' in c ? '' : kids()); return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner; }
+    // what refers to one: a copy per version, each shown in the frames that had that version and pointing at it
+    const groups = new Map<string, number[]>();
+    for (const f of n.frames) { const key = refs.map(id => ver!.of.get(id)?.get(f) ?? 0).join(','); const g = groups.get(key); if (g) g.push(f); else groups.set(key, [f]); }
+    const k = 'leaf' in c ? '' : kids();
+    const pointed = (key: string) => {
+      const vs = key.split(',');
+      return refs.reduce((h, id, j) => h.replace(new RegExp(`(url\\(\\s*['"]?#|href="#)${reEsc(id)}(?=['")\\s"])`, 'g'), `$1${id}__v${vs[j]}`), head);
+    };
+    if (groups.size === 1) { const [key] = groups.keys(); const inner = body(pointed(key), k); return own ? `<g class="fr ${win(n.frames)}">${inner}</g>` : inner; }
+    return [...groups].map(([key, fr]) => `<g class="fr ${win(fr)}">${body(pointed(key), k)}</g>`).join('');
+  };
+  /** The versions of the definitions, each under its own id, for a drawing's <defs>. */
+  const versionDefs = (ver: Versions | null): string => {
+    if (!ver) return '';
+    const out: string[] = [];
+    for (const id of ver.ids) ver.texts.get(id)!.forEach((t, v) => out.push(replaceText(t, opts.replace).replace(new RegExp(`(\\sid=")${reEsc(id)}"`), `$1${id}__v${v}"`)));
+    return `<defs>${out.join('')}</defs>`;
   };
 
   // the dialogs' HTML for the player: every tag (with its text) once, a content as its pieces (see Timeline.html)
@@ -402,7 +486,7 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
         part.push(originMove ? `<g class="a ${originMove}">${moving.join('\n')}</g>` : `<g transform="translate(${o[0]} ${o[1]})">${moving.join('\n')}</g>`);
       }
       // the drawings, slot by slot
-      const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][] }>();
+      const slots = new Map<string, { s: Layer['svgs'][number]; frames: number[]; pos: { i: number; x: number; y: number }[]; kids: TreeNode[][]; perFrame: Map<number, number[]> }>();
       for (const { f, i } of here) {
         const seen = new Map<string, number>();
         for (const sv of f.layers[L].svgs.filter(zIs(z))) {
@@ -411,16 +495,17 @@ function build(rec: Recording, opts: ExportOptions, player: boolean): Exported |
           const nth = seen.get(base) ?? 0; seen.set(base, nth + 1);
           const key = `${base}#${nth}`;
           let slot = slots.get(key);
-          if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [] }; slots.set(key, slot); }
-          slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y });
+          if (!slot) { slot = { s: sv, frames: [], pos: [], kids: [], perFrame: new Map() }; slots.set(key, slot); }
+          slot.frames.push(i); slot.pos.push({ i, x: sv.x, y: sv.y }); slot.perFrame.set(i, sv.kids);
           sv.kids.forEach((k, j) => insert(slot!.kids, j, k, i));
         }
       }
-      for (const { s: sv, frames, pos, kids } of slots.values()) {
+      for (const { s: sv, frames, pos, kids, perFrame } of slots.values()) {
         // the ids a drawing defines (clip paths, gradients, patterns) are its own: the page reuses one id while its
         // geometry changes (a clip that moves when a track is added), and the first in the file would serve them all
         const sfx = `_s${nSlots++}`;
-        const inner = kids.map(list => list.map(k => emit(k, frames.length)).join('')).join('')
+        const ver = versionsOf(perFrame);
+        const inner = (versionDefs(ver) + kids.map(list => list.map(k => emit(k, frames.length, ver)).join('')).join(''))
           .replace(/\sid="([^"]+)"/g, ` id="$1${sfx}"`)
           .replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, `url(#$2${sfx})`)
           .replace(/(\s(?:xlink:)?href)="#([^"]+)"/g, `$1="#$2${sfx}"`);

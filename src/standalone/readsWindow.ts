@@ -7,7 +7,7 @@
 import type { AlignedRead, ReadsResponse } from '../components/sashimi/types';
 import type { ReadsOptions } from '../components/sashimi/datasource';
 import { callSites, collapseReads } from './collapse';
-import { arcReadFromAligned, supportsArc } from './arcSupport';
+import { addsMates, readLength, supportsAligned } from './readFilter';
 import { phaseReads } from './phasing';
 import { haplotagCounts, windowHaplotypes } from './haplotypes';
 import { nameHash } from './mates';
@@ -33,16 +33,17 @@ export function isLongRead(reads: { b: [number, number][]; d: [number, number][]
  * is the reads of one mate key (`mk`, two reads a stream links to each other) or else of one name. `total` counts the
  * reads before the cap (the supporting ones with `support`), `mates` the mates added.
  */
-export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: number, collapsed: boolean, support: ReadsOptions['support'] | undefined):
-  { reads: AlignedRead[]; total: number; mates: number } {
-  let reads = all;
+export function supportAndCap(all: AlignedRead[], chrom: string, maxReads: number, collapsed: boolean, support: ReadsOptions['support'] | undefined,
+  minLength?: number): { reads: AlignedRead[]; total: number; mates: number } {
+  // reads too short for the request are left out first: of the window, and as mates
+  let reads = minLength ? all.filter(r => readLength(r) >= minLength) : all;
   let total = reads.length, mates = 0;
   if (support) {
-    let hits = reads.filter(r => supportsArc(arcReadFromAligned(r, chrom), chrom, support));
+    let hits = reads.filter(r => supportsAligned(r, chrom, support));
     total = hits.length;
     const cap = Math.max(1, maxReads);
     if (hits.length > cap) { const step = hits.length / cap; hits = Array.from({ length: cap }, (_, i) => hits[Math.floor(i * step)]); }
-    const kept = new Set(hits), names = new Set(hits.filter(r => r.mp != null).map(r => r.n));
+    const kept = new Set(hits), names = new Set(addsMates(support) ? hits.filter(r => r.mp != null).map(r => r.n) : []);
     const extra = reads.filter(r => !kept.has(r) && names.has(r.n));
     mates = extra.length;
     reads = [...hits, ...extra].sort((a, b) => a.s - b.s);

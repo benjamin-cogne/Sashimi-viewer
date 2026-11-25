@@ -78,7 +78,11 @@ export interface Breakpoint { start: number; end: number; kind: 'deletion' | 'sp
  * `own` breakpoints are this sample's arcs (the reads are added to the arc); borrowed ones come from another sample
  * shown next to it and are reported without an arc of their own.
  */
-export interface RescuedClips extends Breakpoint { count: number; /** hard-clipped records without SA tag at the breakpoint end, attached by position only */ hard: number; own: boolean }
+export interface RescuedClips extends Breakpoint {
+  count: number; /** hard-clipped records without SA tag at the breakpoint end, attached by position only */ hard: number; own: boolean;
+  /** bases inserted at the junction, at either end, as its rescued reads read them next to it (forward strand) */
+  inserts?: { at: number; side: 'left' | 'right'; seq: string; reads: number }[];
+}
 /** A clip cluster whose clipped consensus was placed on the reference of the window by realignment: it counts in the arc named here. */
 export interface RealignedClip {
   pos: number; side: 'left' | 'right'; count: number; hard: number;
@@ -86,6 +90,8 @@ export interface RealignedClip {
   target: number; strand: '+' | '-'; matched: number;
   /** the arc it joined */
   arc: { start: number; end: number; kind: 'deletion' | 'split' | 'duplication' | 'inversion' };
+  /** placed near the other end of a discordant-pair arc (alignments.ts placeClipNear), not anywhere in the window */
+  guided?: boolean;
 }
 /** Mates or split alignments on another chromosome, by position in the window (split: the breakpoint, rounded to 5 bp; pair: the 500 bp bin of the read start) and target chromosome. */
 export interface ElsewhereLink {

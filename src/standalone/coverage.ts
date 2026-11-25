@@ -420,7 +420,8 @@ export class CoverageState {
   ps = 0;
   pe = 0;
   lastUsed = 0;
-  constructor(readonly chrom: string, readonly structural: boolean | 'rna', readonly secondary = false, readonly strands = false) {
+  /** `minLength`: only the reads at least this long counted (readFilter.ts), 0 every read */
+  constructor(readonly chrom: string, readonly structural: boolean | 'rna', readonly secondary = false, readonly strands = false, readonly minLength = 0) {
     this.owned = new Layer(strands); this.spill = new Layer(strands);
   }
   get empty(): boolean { return this.pe <= this.ps; }
