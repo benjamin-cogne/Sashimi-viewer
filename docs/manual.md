@@ -231,7 +231,24 @@ automated export (images, XML, QC tables…) are left aside, said in one line of
 a table whose columns are not recognised is only asked about when the zip holds no table read by itself (its probe file then waits with it and goes to the table once its columns are chosen, also when they are changed later with *columns…*). The probes' log
 ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
 memory with the zip's patient (read on first view); dropped alone, the file goes with the loaded
-sample of that name, else it makes a **probes-only** patient (see *Probes only* below). The page then asks the
+sample of that name, else it makes a **probes-only** patient (see *Probes only* below).
+**Other probe files.** A probe-level table of another layout works the same way, one patient per log-ratio column. It is
+recognised by its header (tab, `;` or `,`; `#` comments or `key: value` lines before it allowed): a chromosome column
+(`Chr`, `ChrName`, `Chromosome`, `chrom`…), a position (`Position`, `Start`, `pos`…, with `Stop` / `End` if any) and
+log-ratio column(s) (`LogRatio`, `Log2Ratio`, `log2`, `logR`, `LRR`, `Log R Ratio`, `log_ratio`, `value`…), at least
+2,000 rows and no column of a calls table (type, size, number of probes, `num.mark`, `seg.mean`). Agilent
+Feature Extraction-like tables, Illumina final reports (`<sample>.Log R Ratio`), Affymetrix ChAS-like tables (`Log2Ratio`
+taken rather than `WeightedLog2Ratio`), CNVkit `.cnr` and DNAcopy / CBS inputs are read so. The sample is named by its
+column (`S1.Log R Ratio`, `log2(S1)`), else by a `Sample:` line, else by the file name; several columns make several
+patients. Chromosomes 1-22, X, Y with or without `chr`, 23 = X, 24 = Y; MT, XY and others left out; positions read as
+1-based (CNVkit and `chromStart` as 0-based, moved to 1-based: the question says which); empty, NA, NaN, null cells kept
+as missing probes; unsorted rows sorted; the build from a header line naming hg19 / hg38 (else GRCh37, said). A long
+table whose columns are not recognised opens the column dialog, which first asks what the table holds: **Calls** or
+**Probe log ratios (one row per probe)** (chosen first for 2,000 rows or more). In probe mode it asks the chromosome, the
+position or start (end optional), one log-ratio column per sample (each named, its column's name by default), the probe
+name (optional), 0-based positions and the build when the file states none; it reads only the first rows, then the whole
+file is read in the background. The columns are remembered by the header's column names (never a row or a sample name).
+The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
 with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
@@ -323,7 +340,7 @@ the copies estimated from it; a click draws one like a call (probe panel and bro
 low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
 panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
 
-**Probes only.** A `CGH_Log_Ratio.txt` added with no loaded patient of its name (alone, or in a zip without a call table)
+**Probes only.** A `CGH_Log_Ratio.txt` (or another probe file, above) added with no loaded patient of its name (alone, or in a zip without a call table)
 makes a patient of its own, named from its `Normalized log ratio(<name>)` header (else the file name), on the build of
 its AMADID line (hg19 / hg38). Its calls are its probe calls with the current settings, recomputed when the settings or
 the sex change (a class or a note stays on a call whose position is unchanged); they are the patient's table rows, with

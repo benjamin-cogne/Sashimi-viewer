@@ -17,7 +17,7 @@ import { clinGenTrack } from './CghClinGenTrack';
 import { CghGuide, CghGuideButton } from './CghGuide';
 import { CghProbePanel, callMargin } from './CghProbePanel';
 import { DLRS_TIP, dlrsWord } from './cghProbes';
-import { estCopies, estTip } from './cghMosaic';
+import { estCopies, estTip, parOf } from './cghMosaic';
 import { CghGenomePanel } from './CghGenome';
 import { CallIscnText, iscnOfCall } from './CghIscnView';
 
@@ -80,8 +80,8 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const colors = useMemo(() => (rec ? segmentColors(rec) : new Map<number, string>()), [rec]);
   // the call drawn, while its patient is on the list
   const c = drawn && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
-  // a male's chrX and chrY: one copy, the call on it (no other homologue)
-  const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY');
+  // a male's chrX and chrY outside the PARs (of the call's build): one copy, the call on it (no other homologue)
+  const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY') && !(parOf(drawn?.build)[c.chrom] ?? []).some(([a, b]) => c.start >= a && c.end <= b);
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
   // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
   const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;

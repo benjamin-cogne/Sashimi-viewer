@@ -9,7 +9,7 @@ import { parseCghFile, aberrationHeader, leafOf, toClass, type CghFile, type Cgh
 import { NeedsMapping, findMap, splitRecords, type MapSpec } from './cghMapping';
 import { decodeText, gunzip, isGzip, isOle, isZip, xlsxText, OLE_MESSAGE } from './cghFormats';
 import { isVcf, parseVcf } from './cghVcf';
-import { parseProbes, probeSampleOf, type CghProbes, type CghProbeChrom } from './cghProbes';
+import { parseProbes, probeSampleOf, probeLayoutOf, type CghProbes, type CghProbeChrom, type ProbeSpec } from './cghProbes';
 import { seriesOf, hiddenBySex } from './cghSeries';
 import { detect, SEG_DEFAULTS, type ProbeCalls, type ProbeEvent, type SegOpts } from './cghSegment';
 import ProbeWorker from './cghProbeWorker?worker&inline';
@@ -85,7 +85,7 @@ export interface CghState {
 }
 /** `iscnClasses`: the classes whose calls make the patient's ISCN */
 /** a probe log-ratio file not given with a table read by itself (alone, or in a zip whose table waits for its columns) */
-export type LooseProbes = { name: string; sample: string; bytes: Uint8Array };
+export type LooseProbes = { name: string; sample: string; bytes: Uint8Array; /** a layout other than CGH_Log_Ratio.txt: its columns */ spec?: ProbeSpec };
 export interface CghView { layout: 'horizontal' | 'vertical'; scale: number; iscnClasses: string[]; /** the probes drawn as dots (off: the median line, segments and calls only) */ dots: boolean }
 /** the log-ratio ranges (±): presets ±0.5, ±1 (default), ±2; ⊖ goes further out */
 export const LR_SCALES = [0.5, 1, 2, 3, 4, 6, 8];
@@ -122,11 +122,11 @@ const onUnload = (e: BeforeUnloadEvent) => { if (state.dirty) { e.preventDefault
 if (typeof window !== 'undefined') window.addEventListener('beforeunload', onUnload);
 
 /** the files a zip's entries are read from (a .xls may be a text export, or an old binary refused with a message) */
-const TABLE = /\.(txt|tsv|csv|xlsx?|bed|vcf)(\.gz)?$/i;
+const TABLE = /\.(txt|tsv|csv|cnr|xlsx?|bed|vcf)(\.gz)?$/i;
 /** the file pickers' list (kept in step with what `add` reads) */
-export const CGH_ACCEPT = '.txt,.tsv,.csv,.bed,.xls,.xlsx,.vcf,.gz,.zip,text/plain,application/zip';
+export const CGH_ACCEPT = '.txt,.tsv,.csv,.cnr,.bed,.xls,.xlsx,.vcf,.gz,.zip,text/plain,application/zip';
 /** what the pickers take, in words (the page's help and the buttons' tooltips) */
-export const CGH_FILES_TEXT = 'the interval table of each patient exported by CytoGenomics (.txt, or its automated IntervalBasedReport .xls), any other table of calls (.txt, .tsv, .csv, .xlsx: its columns are asked when not recognised; a position in one cell such as chr1:72523846-72667555 or an ISCN is read), BED files, SV / CNV VCF files (.vcf, .vcf.gz: DEL, DUP, CNV), or zip files of them (one patient per zip). Text in UTF-8, UTF-16 or Windows-1252; an old binary .xls must be saved as .xlsx, .csv or tab-separated text first';
+export const CGH_FILES_TEXT = 'the interval table of each patient exported by CytoGenomics (.txt, or its automated IntervalBasedReport .xls), any other table of calls (.txt, .tsv, .csv, .xlsx: its columns are asked when not recognised; a position in one cell such as chr1:72523846-72667555 or an ISCN is read), BED files, SV / CNV VCF files (.vcf, .vcf.gz: DEL, DUP, CNV), probe log ratios (CytoGenomics CGH_Log_Ratio.txt, or any table of chromosome, position and log ratio(s) per probe: Agilent-like, Illumina Log R Ratio, ChAS-like, CNVkit .cnr; its columns asked when not recognised), or zip files of them (one patient per zip). Text in UTF-8, UTF-16 or Windows-1252; an old binary .xls must be saved as .xlsx, .csv or tab-separated text first';
 /** a file's text read with the mapping remembered for its header when there is one, else by its header's names */
 function readTable(text: string, name: string, fallback?: string): CghFile {
   const recs = splitRecords(text);
@@ -174,11 +174,14 @@ const touched = (key: string) => { const dirtyKeys = { ...state.dirtyKeys, [key]
  * read once into typed arrays. Kept out of the state (no redraw), in this tab only: drawn by the probe panel, their DLRS in the import question.
  */
 const probeBytes = new Map<string, Uint8Array>(), probeRead = new Map<string, CghProbes | null>();
+/** the columns of a probe file other than CGH_Log_Ratio.txt, by sample key (one file may hold several samples) */
+const probeSpec = new Map<string, ProbeSpec>();
+const putProbes = (k: string, p: { bytes: Uint8Array; spec?: ProbeSpec }) => { probeBytes.set(k, p.bytes); if (p.spec) probeSpec.set(k, p.spec); else probeSpec.delete(k); };
 /** each patient's probe data version: bumped when its probes are replaced or dropped (memos over the probes, results computed on older ones) */
 const probeGen = new Map<string, number>();
 const bump = (k: string) => probeGen.set(k, (probeGen.get(k) ?? 0) + 1);
 // a reading in flight is forgotten too: a later `probesAsync` reads the new bytes instead of waiting for the old ones
-const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeRead.delete(k); probeParsing.delete(k); bump(k); } callsQueue = callsQueue.filter(k => !keys.includes(k)); };
+const dropProbes = (keys: string[]) => { for (const k of keys) { probeBytes.delete(k); probeSpec.delete(k); probeRead.delete(k); probeParsing.delete(k); bump(k); } callsQueue = callsQueue.filter(k => !keys.includes(k)); };
 /** what a patient's probe calls depend on: the settings and the sex (chrY read for a male only) */
 const callsKey = (k: string) => `${state.sex[k] ?? ''}|${state.probeOpts.minProbes}|${state.probeOpts.minLr}|${state.probeOpts.t}`;
 let callsQueue: string[] = [], callsBusy = false;
@@ -207,18 +210,18 @@ function detectOff(pr: CghProbes, o: SegOpts, male: boolean): Promise<ProbeCalls
 }
 /** probe files being read in the worker, by sample key */
 const probeParsing = new Map<string, Promise<CghProbes | null>>();
-const parseSync = (b: Uint8Array) => { try { return parseProbes(b); } catch { return null; } };
+const parseSync = (b: Uint8Array, spec?: ProbeSpec) => { try { return parseProbes(b, spec); } catch { return null; } };
 /** a patient's probes read (in the worker when there is one: 1M probes take over a second); the page redrawn when they are */
 function probesAsync(k: string): Promise<CghProbes | null> {
   if (probeRead.has(k)) return Promise.resolve(probeRead.get(k) ?? null);
   const b = probeBytes.get(k); if (!b) return Promise.resolve(null);
   const had = probeParsing.get(k); if (had) return had;
-  const w = worker(), gen = probeGen.get(k);
-  const pr: Promise<CghProbes | null> = !w ? Promise.resolve(parseSync(b)) : new Promise(res => {
+  const w = worker(), gen = probeGen.get(k), spec = probeSpec.get(k);
+  const pr: Promise<CghProbes | null> = !w ? Promise.resolve(parseSync(b, spec)) : new Promise(res => {
     const id = ++segReq;
     segWaiting.set(id, (r: (Omit<CghProbes, 'byChrom'> & { byChrom: Map<string, Omit<CghProbeChrom, 'name'> & { name: string }> }) | null) =>
-      res(r ? { ...r, byChrom: new Map([...r.byChrom].map(([c, x]) => [c, { ...x, name: x.name.split('\n') }])) } : parseSync(b)));
-    w.postMessage({ id, parse: b });
+      res(r ? { ...r, byChrom: new Map([...r.byChrom].map(([c, x]) => [c, { ...x, name: x.name.split('\n') }])) } : parseSync(b, spec)));
+    w.postMessage({ id, parse: b, spec });
   });
   const done = pr.then(p => {
     if (probeParsing.get(k) === done) probeParsing.delete(k);
@@ -272,17 +275,23 @@ function applyProbeOnly(k: string) {
 function copyProbes(from: string, to: string) {
   dropProbes([to]);
   const b = probeBytes.get(from), r = probeRead.get(from);
-  if (b) probeBytes.set(to, b); else if (r) probeRead.set(to, r);
+  if (b) putProbes(to, { bytes: b, spec: probeSpec.get(from) }); else if (r) probeRead.set(to, r);
 }
 /** a patient's probes moved to another key (a table read again with other columns: new file id, same sample name) */
 function moveProbes(from: string, to: string) {
   if (from === to || !cgh.hasProbes(from)) return;
   copyProbes(from, to); dropProbes([from]);
 }
+/** a probe file of another layout: one loose probe set per sample, its layout and positions said */
+function looseOf(name: string, bytes: Uint8Array, specs: ProbeSpec[], notes: string[]): LooseProbes[] {
+  const s = specs[0];
+  notes.push(`${leafOf(name)}: probe log ratios, ${s.layout}${specs.length > 1 ? `, ${specs.length} samples (one patient each)` : ''}; positions read as ${s.zeroBased ? '0-based (BED-like), moved to 1-based' : '1-based'}`);
+  return specs.map(spec => ({ name, sample: spec.sample, bytes, spec }));
+}
 /** a probe file with no table: a probes-only patient, its probes kept */
 function probeOnlyOf(p: LooseProbes): CghFile {
-  const po = probeOnlyFile(p.name, p.sample, probeBuildOf(decodeText(p.bytes.subarray(0, 8192))));
-  dropProbes([po.samples[0].key]); probeBytes.set(po.samples[0].key, p.bytes);
+  const po = probeOnlyFile(p.name, p.sample, p.spec ? p.spec.build : probeBuildOf(decodeText(p.bytes.subarray(0, 8192))), !!p.spec);
+  dropProbes([po.samples[0].key]); putProbes(po.samples[0].key, p);
   return po;
 }
 /** a probe-only event as a call, to be drawn like one (never in a file, never exported) */
@@ -346,7 +355,7 @@ export const cgh = {
     const loose: LooseProbes[] = [];
     // new probes for a patient: its probe calls of the former ones dropped, out of the queue
     const stale: string[] = [];
-    const keep = (keys: string[], bytes: Uint8Array) => { dropProbes(keys); for (const k of keys) { probeBytes.set(k, bytes); stale.push(k); } };
+    const keep = (keys: string[], p: LooseProbes) => { dropProbes(keys); for (const k of keys) { putProbes(k, p); stale.push(k); } };
     for (const f of Array.from(list)) {
       try {
         const buf = new Uint8Array(await f.arrayBuffer());
@@ -360,8 +369,9 @@ export const cgh = {
             const path = `${f.name} › ${e.path}`;
             try {
               const raw = isGzip(e.bytes) ? gunzip(e.bytes) : e.bytes;
-              const ps = probeSampleOf(raw);
+              const ps = probeSampleOf(raw), lay = ps == null ? probeLayoutOf(raw, path) : null;
               if (ps != null) { probesIn.push({ name: path, sample: ps, bytes: raw }); continue; }
+              if (lay) { probesIn.push(...looseOf(path, raw, lay, notes)); continue; }
               const r = readBytes(raw, path, patient);
               if ('toMap' in r) { asks.push(r.toMap); continue; }
               if (r.file.format === 'bed' && !/\.bed$/i.test(e.path)) { other.push(e.path); continue; }
@@ -378,15 +388,16 @@ export const cgh = {
           if (!n && asks.length && probesIn.length) { asks[0].probes = probesIn.splice(0); notes.push(`${f.name}: probe log ratios kept for the table whose columns are asked`); }
           for (const p of probesIn) {
             const to = ss.length === 1 ? ss : ss.filter(x => x.name === p.sample);
-            if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${f.name}: probe log ratios (${leafOf(p.name)}) kept for ${to[0].name}`); }
+            if (to.length) { keep(to.map(x => x.key), p); notes.push(`${f.name}: probe log ratios (${leafOf(p.name)}) kept for ${to[0].name}`); }
             else loose.push(p);
           }
           const total = entries.length + skipped.length;
           if (!n && !asks.length && !probesIn.length) errors.push(`${f.name}: no interval table or BED inside (${total} file${total > 1 ? 's' : ''})`);
           else if (other.length) notes.push(`${f.name}: ${n} table${n !== 1 ? 's' : ''} read; ignored: ${other.length} other file${other.length > 1 ? 's' : ''} (${someNames(other)})`);
         } else {
-          const raw = isGzip(buf) ? gunzip(buf) : buf, ps = probeSampleOf(raw);
+          const raw = isGzip(buf) ? gunzip(buf) : buf, ps = probeSampleOf(raw), lay = ps == null && !isZip(raw) && !isOle(raw) ? probeLayoutOf(raw, f.name) : null;
           if (ps != null) { loose.push({ name: f.name, sample: ps, bytes: raw }); continue; }
+          if (lay) { loose.push(...looseOf(f.name, raw, lay, notes)); continue; }
           const r = readBytes(buf, f.name);
           if ('toMap' in r) toMap.push(r.toMap); else { take(r.file); if (r.note) notes.push(r.note); }
         }
@@ -411,7 +422,7 @@ export const cgh = {
     const all = [...state.files, ...waiting, ...files].flatMap(x => x.samples);
     for (const p of loose) {
       const to = all.filter(x => x.name === p.sample);
-      if (to.length) { keep(to.map(x => x.key), p.bytes); notes.push(`${leafOf(p.name)}: probe log ratios kept for ${p.sample}`); continue; }
+      if (to.length) { keep(to.map(x => x.key), p); notes.push(`${leafOf(p.name)}: probe log ratios kept for ${p.sample}`); continue; }
       const po = probeOnlyOf(p);
       files.push(po); all.push(po.samples[0]); stale.push(po.samples[0].key);
       notes.push(`${leafOf(p.name)}: no table of "${po.samples[0].name}": a probes-only patient, its calls detected from the probes with the settings below`);
@@ -437,7 +448,7 @@ export const cgh = {
     // a zip's probes waiting with this table: its sample(s) (by name when several); skipped, or no sample of that name: a probes-only patient
     for (const p of head?.probes ?? []) {
       const ss = add?.samples ?? [], to = ss.length === 1 ? ss : ss.filter(x => x.name === p.sample);
-      if (to.length) { for (const x of to) { dropProbes([x.key]); probeBytes.set(x.key, p.bytes); } notes.push(`${leafOf(p.name)}: probe log ratios kept for ${to[0].name}`); continue; }
+      if (to.length) { for (const x of to) { dropProbes([x.key]); putProbes(x.key, p); } notes.push(`${leafOf(p.name)}: probe log ratios kept for ${to[0].name}`); continue; }
       const po = probeOnlyOf(p); files.push(po); run.push(po.samples[0].key);
       notes.push(`${leafOf(p.name)}: no table of "${po.samples[0].name}": a probes-only patient, its calls detected from the probes with the settings below`);
     }
@@ -445,6 +456,24 @@ export const cgh = {
     const probeCalls = { ...state.probeCalls }; if (head?.orig) for (const o of head.orig.samples) if (file) delete probeCalls[o.key];
     set({ toMap, probeCalls, pending: toMap.length || next.files.length || next.errors.length || next.notes.length ? next : null });
     cgh.runProbeCalls(run.filter(k => files.some(f => isProbeOnly(f) && f.samples.some(x => x.key === k))));
+  },
+  /** the table at the head of the queue read as probe log ratios (the dialog's probe mode): one patient per log-ratio column, attached to a loaded or waiting patient of that name, else a probes-only patient */
+  mappedProbes(specs: ProbeSpec[]) {
+    const [head, ...toMap] = state.toMap; if (!head) return;
+    const pending = state.pending ?? { files: [], errors: [], notes: [] };
+    const files = [...pending.files], notes = [...pending.notes], run: string[] = [];
+    const bytes = new TextEncoder().encode(head.text);
+    const loose = [...looseOf(head.name, bytes, specs, notes), ...(head.probes ?? [])];
+    const all = [...state.files, ...files].filter(f => !isProbeOnly(f)).flatMap(f => f.samples);
+    for (const p of loose) {
+      const to = all.filter(x => x.name === p.sample);
+      if (to.length) { for (const x of to) { dropProbes([x.key]); putProbes(x.key, p); run.push(x.key); } notes.push(`${leafOf(p.name)}: probe log ratios kept for ${p.sample}`); continue; }
+      const po = probeOnlyOf(p); files.push(po); run.push(po.samples[0].key);
+      notes.push(`${leafOf(p.name)}: no table of "${po.samples[0].name}": a probes-only patient, its calls detected from the probes with the settings below`);
+    }
+    const probeCalls = { ...state.probeCalls }; for (const k of run) delete probeCalls[k];
+    set({ toMap, probeCalls, pending: { ...pending, files, notes } });
+    cgh.runProbeCalls(run.filter(k => state.files.some(f => f.samples.some(x => x.key === k)) || files.some(f => isProbeOnly(f) && f.samples.some(x => x.key === k))));
   },
   /** a file read, to be read again with other columns */
   remap(f: CghFile) {

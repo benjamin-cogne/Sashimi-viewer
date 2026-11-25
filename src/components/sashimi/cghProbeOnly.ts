@@ -19,13 +19,13 @@ export function probeBuildOf(head: string): GenomeBuild | null {
 }
 
 /** a patient made from a probe file alone: no line, no call until the probe calls are computed */
-export function probeOnlyFile(fileName: string, sample: string, build: GenomeBuild | null): CghFile {
-  const id = nextFileId('probes'), name = sample || leafOf(fileName).replace(/\.(txt|tsv)(\.gz)?$/i, '');
+export function probeOnlyFile(fileName: string, sample: string, build: GenomeBuild | null, generic = false): CghFile {
+  const id = nextFileId('probes'), name = sample || leafOf(fileName).replace(/\.(txt|tsv|csv|cnr)(\.gz)?$/i, '');
   return {
     id, name: leafOf(fileName), saveAs: `${name.replace(/[\\/:*?"<>|]+/g, '_')}.probe-calls.txt`, format: 'probes', build, buildText: build ? (build === 'GRCh37' ? 'hg19' : 'hg38') : null,
     meta: [['Source probe file', leafOf(fileName)]], lines: [], eol: '\n', classCol: null, classSuffix: '', headerLine: null, commentCol: null,
     samples: [{ key: `${id}:${name}`, name, fileId: id, declaredCalls: null, cnvs: [], sex: null }],
-    warnings: build ? [] : ['the probe file names no build (AMADID line): read as GRCh37'], delim: '\t', spec: null, skipped: 0, firstSkip: null,
+    warnings: build ? [] : [`the probe file names no build (${generic ? 'no hg19 / hg38 line' : 'AMADID line'}): read as GRCh37`], delim: '\t', spec: null, skipped: 0, firstSkip: null,
   };
 }
 

@@ -407,7 +407,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <thead data-cgh-thead className="sticky top-0 z-10 bg-slate-50 text-slate-500 text-left whitespace-nowrap">
             <tr className="border-b border-slate-200">
               {!s.sample && samples.length > 1 && <th {...cols.th('sample')} className="relative px-1.5 py-0.5 font-medium">Sample{cols.grip('sample')}</th>}
-              <th {...cols.th('band')} className="relative px-1.5 py-0.5 font-medium">Band{rc('bands')}{cols.grip('band')}</th><th {...cols.th('pos')} className="relative px-1.5 py-0.5 font-medium">Position (GRCh37){cols.grip('pos')}</th>
+              <th {...cols.th('band')} className="relative px-1.5 py-0.5 font-medium">Band{rc('bands')}{cols.grip('band')}</th><th {...cols.th('pos')} className="relative px-1.5 py-0.5 font-medium">Position ({filesBuilds.join(' / ') || 'GRCh37'}){cols.grip('pos')}</th>
               <th {...cols.th('size')} className="relative px-1.5 py-0.5 font-medium text-right">Size{cols.grip('size')}</th><th {...cols.th('type')} className="relative px-1.5 py-0.5 font-medium">Type{rc('dgv')}{cols.grip('type')}</th>
               {hasProbeCol && <th {...cols.th('probes')} className="relative px-1.5 py-0.5 font-medium text-right" title="Number of probes of the call">Probes{cols.grip('probes')}</th>}
               {hasLrCol && <th {...cols.th('logr')} className="relative px-1.5 py-0.5 font-medium text-right" title="Mean log ratio of the call (the file's); a mosaic estimate beside it">Log R{cols.grip('logr')}</th>}
