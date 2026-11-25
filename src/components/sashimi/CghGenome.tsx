@@ -284,7 +284,9 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
   const onClick = (e: React.MouseEvent) => {
     const rc = e.currentTarget.getBoundingClientRect(), x = e.clientX - rc.left, y = e.clientY - rc.top;
     const b = barAt(x, y);
-    if (chrom || !probesOk) { if (b) { cgh.setShown(b.c.id); onOpen(b.c, cur.f); } return; }
+    // a call's bar (its tip shows on hover) opens the call, in every view; elsewhere a chromosome opens its view
+    if (b) { cgh.setShown(b.c.id); onOpen(b.c, cur.f); return; }
+    if (chrom || !probesOk) return;
     const sg = segAt(x, y); if (sg) { setChrom(sg.ch); setHover(null); }
   };
   const step = (d: number) => setChrom(c => CHROMS[(CHROMS.indexOf(c!) + d + CHROMS.length) % CHROMS.length]);
@@ -305,7 +307,7 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
           {(['horizontal', 'vertical'] as const).map(v => <button key={v} onClick={() => cgh.setView({ layout: v })} aria-pressed={lay === v} className={`h-[22px] px-1.5 text-[11px] ${lay === v ? 'bg-accent-50 text-accent-700 font-semibold' : 'bg-white text-slate-600 hover:bg-slate-50'}`}>{v}</button>)}</span>}
         {probesOk && !(chromPanel && pr) && <LrScale />}
         {!probesOk ? <span className="text-slate-400" data-cgh-calls-only>· no probe file for this patient: its calls (as listed) on the chromosomes, to scale · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> · click a bar: open the call</span>
-        : <span className="text-slate-400">· {chrom ? 'click a call bar: open it' : vert ? 'click a chromosome: its probes · position down from pter, log ratio across' : 'click a chromosome: its probes'} · dots black within ±0.2, red above, green below · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> (calls listed), <span className="text-fuchsia-700">probe calls</span> · {chromPanel && pr ? 'every probe, as in the call\'s probe panel' : `clipped at ±${S} (▲▼ beyond)`}{male ? ' · male: X and Y near −1 (one copy, not normalised)' : ''}</span>}
+        : <span className="text-slate-400">· {chrom ? 'click a call bar: open it' : vert ? 'click a chromosome: its probes, a call bar: the call · position down from pter, log ratio across' : 'click a chromosome: its probes, a call bar: the call'} · dots black within ±0.2, red above, green below · bars: <span className="text-red-600">loss</span> / <span className="text-blue-600">gain</span> (calls listed), <span className="text-fuchsia-700">probe calls</span> · {chromPanel && pr ? 'every probe, as in the call\'s probe panel' : `clipped at ±${S} (▲▼ beyond)`}{male ? ' · male: X and Y near −1 (one copy, not normalised)' : ''}</span>}
       </div>
       {chromPanel && pr ? <CghProbePanel key={`${key}|${chrom}`} at={{ sampleKey: key, chrom }} chromLen={chromLength(build, chrom) ?? 0} segs={cgh.probeCallsOf(key)?.segs.get(chrom)} getBands={loadersFor(build).getCytobands}
         calls={[...calls, ...events].filter(c => c.chrom === chrom)} onCall={c => { cgh.setShown(c.id); onOpen(c, cur.f); }} />

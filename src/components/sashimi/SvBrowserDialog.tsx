@@ -176,16 +176,21 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   };
 
   useEffect(() => {
+    // whether a menu of the array-CGH page was open when Esc was pressed (seen before the menu closes itself)
+    let cghMenu = false;
+    const onCapture = (e: KeyboardEvent) => { if (e.key === 'Escape') cghMenu = !!document.querySelector('[data-cgh-page] [aria-haspopup][aria-expanded="true"]'); };
     const onKey = (e: KeyboardEvent) => {
       // Esc goes up one level: the array-CGH questions (they answer it themselves), the array-CGH page, then this page
       if (e.key !== 'Escape') return;
       const g = cgh.get();
       if (g.pending || g.toMap.length || g.help) return;
+      // a menu open on the array-CGH page closes itself first (its own Esc), the page stays
+      if (g.open && cghMenu) return;
       if (g.open) { cgh.setOpen(false); return; }
       close();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onCapture, true); window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onCapture, true); window.removeEventListener('keydown', onKey); };
   }, [onClose, build]); // eslint-disable-line react-hooks/exhaustive-deps
   // a link's search runs once, at the start
   useEffect(() => { if (initial?.text.trim()) void draw(initial.text, build); }, []); // eslint-disable-line react-hooks/exhaustive-deps

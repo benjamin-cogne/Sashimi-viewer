@@ -277,7 +277,8 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
   const exportFiles = [...new Set(listed.map(e => e.f))];
   /** one file written back; a file holds every sample it was read with: all of them are marked exported, only once its download is triggered */
   const exportOne = (fl: CghFile) => {
-    const text = exportCghFile(fl, c => classOf(s, c), c => noteOf(s, c), c => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '');
+    // a class given here, else the file's own cell as written (not translated into the list's words)
+    const text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), c => iscnOfCall(s, c, fl.build ?? 'GRCh37').text ?? '');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
     a.download = fl.saveAs;

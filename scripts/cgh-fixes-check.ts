@@ -72,5 +72,12 @@ const chromOf = (n: number, ev: [number, number, number][]): CghProbeChrom => {
   const p = chromOf(600, [[200, 260, -0.7]]);
   eq('exact segments', segmentChrom('chr2', p, 0.15, 8).map(s => [s.i0, s.i1]), [[0, 199], [200, 259], [260, 599]]);
 }
+// export: mixed line endings written back as read (a CR LF title line, LF after)
+{
+  const t = 'title:\tINTERVAL_TABLE\r\nGenome\thg19\n\nChromosome\tStart\tStop\tType\tClassification\nchr1\t1000000\t2000000\tGain\tbénin;;\n';
+  const f = parseCghFile(t, 'm.txt', 'M');
+  eq('mixed line endings kept', exportCghFile(f, c => c.classification, () => '').split(/(\r\n|\n)/).filter(x => /\r?\n/.test(x)), ['\r\n', '\n', '\n', '\n', '\n']);
+  eq('untouched class kept as written', exportCghFile(f, c => c.classification, () => '').includes('\tbénin;;\t'), true);
+}
 console.log(bad ? `${bad} FAILED` : 'all ok');
 process.exit(bad ? 1 : 0);

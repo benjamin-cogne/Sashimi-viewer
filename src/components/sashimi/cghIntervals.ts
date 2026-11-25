@@ -70,6 +70,8 @@ export interface CghFile {
   /** the header lines as key / value (Array Design Info, Creation Date…) */
   meta: [string, string][];
   lines: string[]; eol: string;
+  /** each line's own ending when the file mixes them (a CR LF title line, LF after), written back as read */
+  eols?: string[];
   /** the Classification column (interval table), or null (a BED: the class is added as a last column; a VCF: in INFO) */
   classCol: number | null;
   /** whether the file's classifications end with `;;` (written the same way back) */
@@ -157,7 +159,9 @@ export function parseCghFile(text: string, fileName: string, fallbackSample?: st
       throw e;
     }
   }
-  return { ...f, fallback: fallbackSample, saveAs: leaf.replace(/\.xlsx$/i, '.txt').replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
+  const ends = text.replace(/^\uFEFF/, '').match(/\r\n|\n|\r/g) ?? [];
+  const eols = !text.includes('"') && ends.length === lines.length - 1 && ends.some(e => e !== eol) ? ends : undefined;
+  return { ...f, ...(eols ? { eols } : {}), fallback: fallbackSample, saveAs: leaf.replace(/\.xlsx$/i, '.txt').replace(/(\.[^.]+)?$/, m => `.classified${m || '.txt'}`) };
 }
 
 function parseInterval(lines: string[], id: string, fileName: string, base: string, eol: string, spec: MapSpec): Omit<CghFile, 'saveAs'> {
@@ -415,7 +419,7 @@ export function exportCghFile(file: CghFile, classOf: (cnv: CghCnv) => string, n
       f[classCol] = cell; f[noteCol] = note; if (iscnCol != null) f[iscnCol] = iscnOf!(cnv); out[i] = joinDelimited(f, d);
     } else out[i] = `${out[i].replace(/\t+$/, '')}\t${cell}\t${note}${iscnOf && !hasIscn ? `\t${iscnOf(cnv)}` : ''}`;
   }
-  return out.join(file.eol);
+  return file.eols?.length === out.length - 1 ? out.map((l, k) => l + (file.eols![k] ?? '')).join('') : out.join(file.eol);
 }
 /** INFO values: no blank, `;`, `=`, `,` or `%` as such */
 export const vcfEncode = (t: string) => t.replace(/[%;=,\s]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')}`);

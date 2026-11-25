@@ -325,7 +325,7 @@ it a triangle at the edge), the median of each pixel line as a dark blue line, t
 (loss red, gain blue) and its probe calls (purple) as bars. *horizontal*: the chromosomes side by side, the bars above.
 *vertical* (as CytoGenomics' genome view): one column per chromosome, position going down from pter, heights from the
 lengths, log ratio across (−range left, + right), the bars beside each column; one row, or two when the panel is narrower
-than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a chromosome
+than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a call bar opens the call; on a chromosome elsewhere
 opens it in the panel, always horizontal and drawn as the call's probe panel is (the same code: every probe as a dot, the
 moving median of 3 / 7 / 15, the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
 the plot and the chromosome's **ideogram** under it (the SV browser's bands and colours, band names where they fit, the
@@ -418,7 +418,8 @@ recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin f�
 **note** on the call. Each row also links to the call's **CNV-Hub** page
 (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
 carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
-each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
+each file of the tab back unchanged but for its Classification column (a class the file already had and left as it is
+is written as it was, not in the list's words; mixed line endings kept) and a Comment column holding the notes (added
 after the last column when the table has none; a BED gets both as two last columns), plus an ISCN column when the
 file has none (a CytoGenomics interval table keeps its own; a VCF: INFO `CGH_ISCN`); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
