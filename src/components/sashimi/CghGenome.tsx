@@ -107,6 +107,8 @@ export function CghGenomePanel({ open, onToggle, onOpen, loadersFor }: { open: b
   const [hover, setHover] = useState<{ x: number; y: number; title: string; lines: string[]; dot?: [number, number] } | null>(null);
   // Esc back to the page's base view: the whole genome again, not a chromosome, when it is next opened
   useEffect(() => { setChrom(null); setHover(null); }, [s.viewReset]);
+  // the quick guide opens a chromosome as a click would (CghGuide.tsx: event `cgh-chrom`, detail chr…)
+  useEffect(() => { const on = (e: Event) => setChrom((e as CustomEvent<string>).detail); window.addEventListener('cgh-chrom', on); return () => window.removeEventListener('cgh-chrom', on); }, []);
   const box = useRef<HTMLDivElement>(null), base = useRef<HTMLCanvasElement>(null), top = useRef<HTMLCanvasElement>(null), bars = useRef<Bar[]>([]);
   const S = s.view.scale, dots = s.view.dots, vert = s.view.layout === 'vertical' && !chrom && probesOk;
   const chromPanel = !!chrom && open;

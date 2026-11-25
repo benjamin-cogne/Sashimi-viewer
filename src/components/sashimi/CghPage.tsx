@@ -107,7 +107,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
           <span className="text-bar-muted">/</span>
           <span className="text-sm font-semibold text-bar-text">Array-CGH</span>
           <CghGuideButton />
-          <span className="text-[11px] text-bar-muted" title="Esc folds what is open (the call, its detail, the whole genome) back to the list; Esc again asks to go back to the SV browser">Esc: clear the view · twice: leave</span>
+          <span className="text-[11px] text-bar-muted" data-cgh-esc-hint title="Esc folds what is open (the call, its detail, the whole genome) back to the list; Esc again asks to go back to the SV browser">Esc: clear the view · twice: leave</span>
         </div>
         {!s.files.length && (
           <div className={`mx-4 mt-3 rounded-xl border-2 border-dashed ${over ? 'border-accent-400 bg-accent-50' : 'border-slate-300 bg-white'} px-6 py-10 text-center`}>
@@ -134,7 +134,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
               {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>
             {probes && <CghProbePanel key={c.id} c={c} chromLen={chromLength(drawn.build, c.chrom) ?? 0} segs={cgh.probeCallsOf(c.sampleKey)?.segs.get(c.chrom)} getBands={full.getCytobands} />}
-            <div className="[&>div:first-child]:mt-2">
+            <div className="[&>div:first-child]:mt-2" data-cgh-svb>
               <Browser key={`${drawn.build}|${c.id}`} rec={rec} chrom={c.chrom} window={drawn.parsed.window} segColors={colors} flankCopies={one ? 1 : 2}
                 zygosity={!one && c.copies === 0 ? 'hom' : 'het'} build={drawn.build} loaders={full} rebuild={drawn.parsed.rebuild} strongEvent extraTrack={track} />
             </div>

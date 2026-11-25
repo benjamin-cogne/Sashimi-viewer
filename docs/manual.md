@@ -222,10 +222,23 @@ notes stay while the tab is open; export to keep them in a file. An open menu, t
 questions take Esc first; in a search or note field Esc only leaves the field. **Examples ▾** (on the empty page and in the frame's bar) adds
 invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
 (22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
-EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,
-in the page's bar, is an interactive tour on these examples (added if missing): each of its 15 steps outlines a part of
-the page and explains it, and the tour does the actions itself (loads the examples, Analyse, opens More filters and the
-calls it talks about): only **Next** to click; **Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
+EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint), each with its
+invented probes' log ratios (a `CGH_Log_Ratio.txt` written when loaded: about 60k probes on GRCh37, noise SD 0.15, the
+calls' probes at their mean log ratio; EXAMPLE-DEL22Q11's probes also carry a small 3p14.2 loss the table does not list,
+a probe call *not in the file*), and EXAMPLE-PROBES-ONLY, a probe file alone (7q11.23 loss, 15q11.2 gain): a
+probes-only patient. *All (four)* adds them together. **? Quick guide**, in the page's bar, is an interactive tour on
+these examples (added if missing). Its 26 steps: input files (interval tables, the automated workflow zip with
+`CGH_Log_Ratio.txt`, other probe tables, the column dialog), the examples, the import question (DLRS, minimums, sex),
+patients' tabs, filters, More filters, priority, why this priority, the browser below, the call's ISCN (copy), the
+call's probe panel, the der() hint, a gene cut, a PIEV CNV, classify and note, the patient's ISCN card (classes, normal
+result by sex), the whole genome (layouts, call bars, probe calls in purple), a chromosome (probes, moving median,
+ideogram, zoom and slider), the log-ratio range buttons and *show probes*, the probe calls (*n not in the file*), the
+probes-only patient (banner, `.probe-calls.txt` export), the lab benign list, retry, export, the ⓘ methods (DLRS,
+detection, disclaimer) and Esc. Each step outlines its target, dims the rest of the page and puts its box beside it,
+never over it, with a pointer toward it; the box slides to its new place rather than jumping, keeps its place while a
+target is redrawn, and goes to the bottom centre only when the target cannot be found. The tour does the actions itself
+(loads the examples, Analyse, opens filters, calls, tabs, the whole genome and a chromosome): only **Next** to click;
+**Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,

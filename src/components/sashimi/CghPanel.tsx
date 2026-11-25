@@ -53,7 +53,7 @@ export function CghExamplesMenu({ compact }: { compact?: boolean }) {
         {CGH_EXAMPLES.map(x => <button key={x.id} data-cgh-example={x.id} onClick={() => pick(x.id)} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50">
           <span className="text-accent-700 font-medium">{x.name}</span> <span className="text-slate-700">{x.label}</span>
           <span className="block text-[10.5px] text-slate-500">{x.hint}</span></button>)}
-        <button data-cgh-example="all" onClick={() => pick('all')} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50 text-accent-700 font-semibold border-t border-slate-100 mt-0.5">All three</button>
+        <button data-cgh-example="all" onClick={() => pick('all')} className="block w-full text-left px-1.5 py-1 rounded hover:bg-slate-50 text-accent-700 font-semibold border-t border-slate-100 mt-0.5">All (four)</button>
       </div>
     </Popover>
   );
@@ -480,7 +480,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
         </table>
       </div>
       {s.files.some(fl => fl.warnings.some(w => !/^(BED|VCF): no probe/.test(w))) && <div className="px-5 text-[10.5px] text-amber-700">{s.files.flatMap(fl => fl.warnings.filter(w => !/^(BED|VCF): no probe/.test(w)).map(w => `${fl.name}: ${w}`)).join(' · ')}</div>}
-      <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4">
+      <details className="px-5 pb-2 text-[10.5px] text-slate-500 leading-4" data-cgh-methods>
         <summary className="cursor-pointer text-accent-700 font-medium select-none">ⓘ How the calls are read, annotated, ranked and exported</summary>
         Click a call to draw it below as a deletion or a duplication (↑ ↓ for the next one), with its genes listed under its row (click it again to fold them): the genes, DGV Gold, ClinVar, AChro-Puce and PanelApp tracks of the browser are compared with it.
         Genes are RefSeq's NM_ models of the interval (UCSC ncbiRefSeqCurated, the file's build), the file's Gene Name only when they cannot be read (then marked <span className="text-amber-700">file</span>); ClinGen dosage through the UCSC Genome Browser, gnomAD v2.1.1 constraint on GRCh37, PanelApp from {PANEL_SOURCE.label} (every panel); DGV Gold marked when a record of the same type shares {Math.round(DGV_COVER * 100)} % of the call or more (the call inside it: 100 %), or lies inside the call whatever its share; one icon per way they lie, with the best share and how many (×n): <DgvIcon rel="within" /> the call inside a DGV CNV, <DgvIcon rel="contains" /> the call holding one, <DgvIcon rel="overlaps" /> overlapping on one side.
