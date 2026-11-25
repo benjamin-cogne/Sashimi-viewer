@@ -5,7 +5,7 @@
  * without a probe file: its calls only, as bars over the chromosomes drawn to scale (no log-ratio axis, no chromosome view).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cgh, useCgh, classOf, passes, activeGroups, probeCnv, buildOfKey, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
+import { cgh, useCgh, classOf, passes, activeGroups, refMismatch, probeCnv, buildOfKey, LR_SCALES, LR_PRESETS, type CghState } from './cghStore';
 import { fmtBp as fmt, sizeText, type CghCnv, type CghFile } from './cghIntervals';
 import { lowerBound } from './cghProbes';
 import { chromLength } from '../../standalone/assembly';
@@ -74,11 +74,11 @@ export function DotsToggle() {
 /** a call's characteristics, for the hover tips (here and in the probe panel) */
 export function callLines(s: CghState, c: CghCnv): string[] {
   const gr = activeGroups(s).byCall.get(c.id);
-  const est = c.copies == null ? estCopies(c, s.sex[c.sampleKey], buildOfKey(s, c.sampleKey)) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
+  const mm = refMismatch(s, c), est = c.copies == null && !mm ? estCopies(c, s.sex[c.sampleKey], buildOfKey(s, c.sampleKey)) : null, lv = c.fromProbes ? null : viewOf(s, c).score?.level;
   return [
     `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${sizeText(c.sizeKb)} · ${c.kind}`,
     `${c.probes ?? '?'} probes${c.logRatio != null ? ` · mean log ratio ${c.logRatio.toFixed(2)}` : ''}`,
-    c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
+    mm ? 'copies x1? — a normal male against a female reference?' : c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
     c.fromProbes ? 'from probes: not in the file, not exported' : `class: ${classOf(s, c).trim() || 'none'} · priority: ${lv ? LEVEL_STYLE[lv].label : 'not read yet'}`,
     ...(gr ? [`CNV group ${gr.label}: ${gr.suggestion}`] : []),
   ];

@@ -16,11 +16,11 @@ export const GROUP_COVER = 0.9;
 const ACROCENTRIC = new Set(['13', '14', '15', '21', '22']);
 /**
  * Per build, per chromosome, in units of 100 kb: centromere start, centromere end, then the spans without probes on arrays
- * (UCSC cytoBand `acen`, `gvar`, `stalk` merged; `E` = the chromosome's end). Read from the UCSC API on 2026-11-25; GRCh37's
- * 9p11.2-p13.1 (38.7 Mb to the centromere, segmental duplications, few array probes) added, as in cghExampleProbes.ts.
+ * (UCSC cytoBand `acen`, `gvar`, `stalk` merged; `E` = the chromosome's end). Read from the UCSC API on 2026-11-25. Used when
+ * the patient has no probe file; with one, an arm's span is that of its probes (`GroupOpts.probes`).
  */
 const BLIND: Record<GenomeBuild, string> = {
-  GRCh37: '1:1215,1289,1215-1426 2:905,968,905-968 3:879,939,879-983 4:482,527,482-527 5:461,507,461-507 6:587,633,587-633 7:580,617,580-617 8:431,481,431-481 9:473,507,387-659 10:380,423,380-423 11:516,557,516-557 12:333,382,333-382 13:163,195,0-195 14:161,191,0-191 15:158,207,0-207 16:346,386,346-470 17:222,258,222-258 18:154,190,154-190 19:244,286,200-324 20:256,294,256-294 21:109,143,0-143 22:122,179,0-179 X:581,630,581-630 Y:116,134,116-134,288-E',
+  GRCh37: '1:1215,1289,1215-1426 2:905,968,905-968 3:879,939,879-983 4:482,527,482-527 5:461,507,461-507 6:587,633,587-633 7:580,617,580-617 8:431,481,431-481 9:473,507,473-659 10:380,423,380-423 11:516,557,516-557 12:333,382,333-382 13:163,195,0-195 14:161,191,0-191 15:158,207,0-207 16:346,386,346-470 17:222,258,222-258 18:154,190,154-190 19:244,286,200-324 20:256,294,256-294 21:109,143,0-143 22:122,179,0-179 X:581,630,581-630 Y:116,134,116-134,288-E',
   GRCh38: '1:1217,1251,1217-1432 2:918,960,918-960 3:878,940,878-986 4:482,518,482-518 5:461,514,461-514 6:585,626,585-626 7:581,621,581-621 8:432,472,432-472 9:422,455,422-615 10:380,416,380-416 11:510,558,510-558 12:332,378,332-378 13:165,189,0-189 14:161,182,0-182 15:175,205,0-205 16:353,384,353-470 17:227,274,227-274 18:154,215,154-215 19:242,281,199-319 20:257,304,257-304 21:109,130,0-130 22:137,174,0-174 X:581,638,581-638 Y:103,106,103-106,266-E',
 };
 interface ChromInfo { len: number; cen: [number, number]; blind: [number, number][] }
@@ -52,8 +52,26 @@ const seen = (a: number, z: number, blind: [number, number][]) => {
   for (const [x, y] of m) { const s = Math.max(x, end); if (y > s) n -= y - s; end = Math.max(end, y); }
   return n;
 };
-/** the share of [a, z)'s probe-covered span covered by the intervals (0-based half-open) */
-function coverOf(a: number, z: number, blind: [number, number][], iv: [number, number][]): number {
+/** fewer probes than this on an arm: its span is taken from the cytogenetic bands instead */
+const MIN_ARM_PROBES = 10;
+/** the probes of a chromosome (sorted by start, NaN kept): the positions only are read */
+export interface GroupProbes { start: ArrayLike<number>; end: ArrayLike<number>; lr: ArrayLike<number> }
+/**
+ * The share of [a, z)'s probe-covered span covered by the intervals (0-based half-open): with the patient's probes, the
+ * share of the arm's probes (non-NaN, outside the blind spans, by midpoint) lying in an interval; else the share of the
+ * arm's length outside the blind spans.
+ */
+function coverOf(a: number, z: number, blind: [number, number][], iv: [number, number][], pr?: GroupProbes): number {
+  if (pr) {
+    let tot = 0, got = 0;
+    for (let i = 0; i < pr.start.length; i++) {
+      const m = (pr.start[i] + pr.end[i]) / 2 - 1;
+      if (m < a || m >= z || Number.isNaN(pr.lr[i]) || blind.some(([x, y]) => m >= x && m < y)) continue;
+      tot++;
+      if (iv.some(([x, y]) => m >= x && m < y)) got++;
+    }
+    if (tot >= MIN_ARM_PROBES) return got / tot;
+  }
   const tot = seen(a, z, blind);
   if (tot <= 0) return 0;
   const m = iv.map(([x, y]) => [Math.max(a, x), Math.min(z, y)] as [number, number]).filter(([x, y]) => y > x).sort((p, q) => p[0] - q[0]);
@@ -81,8 +99,11 @@ export interface CnvGroup {
   logRatio: number | null;
   /** the arms covered (8p, 8q; an acrocentric's q arm alone) and the share of each */
   arms: { arm: string; cover: number }[];
-  /** the copy number (the members' own when they agree, else from the log ratio) and the mosaic fraction (< 80 %) */
+  /** the copy number (the members' own when they agree, else from the log ratio) and the mosaic fraction (< 80 %); a
+   * reference mismatch: the stated sex's normal copies (x1), no mosaic */
   copies: number | null; mosaic: number | null;
+  /** a male's whole X near −1, or his Y far above 0: what a normal male gives against a female reference (`MISMATCH_TIP`) */
+  mismatch: boolean;
   /** the copies as the table writes them: x3, x3 mosaic ~29% */
   copiesText: string;
   /** `8 (whole chromosome)`, `4p (whole arm)` */
@@ -95,6 +116,8 @@ export interface CnvGroup {
 
 const WORD: Record<number, string> = { 0: 'nullisomy', 1: 'monosomy', 3: 'trisomy', 4: 'tetrasomy', 5: 'pentasomy', 6: 'hexasomy' };
 const pct = (f: number) => `~${Math.round(f * 100)} %`;
+/** what a group (and its calls) read as a reference mismatch show in place of copy and mosaic estimates */
+export const MISMATCH_TIP = 'A male\'s whole X near log ratio −1 (or his Y far above 0) is what a normal male gives against a female reference. Read against the stated sex, the copy number is x1 (normal): no loss or gain as such, and no mosaic estimate (it assumes a sex-matched reference). Check the sex given and the reference used.';
 const MISMATCH = 'or a sex mismatch with the reference: check the sex given';
 
 /** the words of a group (a suggestion: the lab decides) */
@@ -135,7 +158,11 @@ export function groupSuggestion(g: Pick<CnvGroup, 'chrom' | 'kind' | 'scope' | '
   }
 }
 
-export interface GroupOpts { build: GenomeBuild; sex: CghSex | undefined; eligible: (c: CghCnv) => boolean }
+export interface GroupOpts {
+  build: GenomeBuild; sex: CghSex | undefined; eligible: (c: CghCnv) => boolean;
+  /** the patient's probes by chromosome, when read: an arm's span is then that of its probes */
+  probes?: Map<string, GroupProbes> | null;
+}
 /** the groups of one patient's calls */
 export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
   const out: CnvGroup[] = [];
@@ -151,7 +178,8 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
     let reach = -Infinity;
     for (const c of sorted) { if (c.end <= reach) nested.add(c.id); else reach = c.end; }
     const top = sorted.filter(c => !nested.has(c.id)), iv = top.map(c => [c.start - 1, c.end] as [number, number]);
-    const pc = acro ? 0 : coverOf(0, ci.cen[0], ci.blind, iv), qc = coverOf(ci.cen[1], ci.len, ci.blind, iv);
+    const pr = o.probes?.get(chrom);
+    const pc = acro ? 0 : coverOf(0, ci.cen[0], ci.blind, iv, pr), qc = coverOf(ci.cen[1], ci.len, ci.blind, iv, pr);
     const p = !acro && pc >= GROUP_COVER, q = qc >= GROUP_COVER;
     const scope: CnvGroup['scope'] | null = (p || acro) && q ? 'chr' : p ? 'p' : q ? 'q' : null;
     if (!scope) continue;
@@ -170,13 +198,16 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
     const as: CghCnv = { ...tops[0], id: `grp|${tops[0].sampleKey}|${chrom}|${kind}`, start, end, sizeKb: (end - start + 1) / 1000, probes, logRatio,
       copies: common, copiesHi: null, amp: tops.some(c => c.amp), iscn: null, cytoband: '', genes: [], note: '', classification: '', classRest: '' };
     let copies: number | null = common, mosaic: number | null = null;
-    if (common != null) { const m = mosaicOf(as, o.sex, o.build); mosaic = m?.ok && m.f < MOSAIC_TAG_BELOW ? m.f : null; }
+    // the cases groupSuggestion reads as expected for a male against a female reference: the stated sex's copies, x1
+    const mismatch = o.sex === 'male' && ((n === 'X' && scope === 'chr' && kind === 'loss') || (n === 'Y' && kind === 'gain' && (logRatio ?? 0) >= 1.5));
+    if (mismatch) copies = 1;
+    else if (common != null) { const m = mosaicOf(as, o.sex, o.build); mosaic = m?.ok && m.f < MOSAIC_TAG_BELOW ? m.f : null; }
     else { const e = estCopies(as, o.sex, o.build); copies = e?.n ?? null; mosaic = e?.mosaic ?? null; }
     const arms = [...(!acro && (scope === 'chr' || scope === 'p') ? [{ arm: `${n}p`, cover: pc }] : []), ...(scope !== 'p' ? [{ arm: `${n}q`, cover: qc }] : [])];
     const g = { chrom, kind, scope, copies, mosaic, logRatio };
     out.push({ id: as.id, sampleKey: as.sampleKey, sample: as.sample, chrom, kind, scope, members, nested: new Set([...nested].filter(id => members.some(c => c.id === id))),
-      start, end, spanKb: as.sizeKb, probes, logRatio, arms, copies, mosaic,
-      copiesText: copies == null ? (as.amp ? 'amp' : '') : `x${copies}${mosaic != null ? ` mosaic ${pct(mosaic).replace(' ', '')}` : ''}`,
+      start, end, spanKb: as.sizeKb, probes, logRatio, arms, copies, mosaic, mismatch,
+      copiesText: mismatch ? 'x1 = normal male (female reference?)' : copies == null ? (as.amp ? 'amp' : '') : `x${copies}${mosaic != null ? ` mosaic ${pct(mosaic).replace(' ', '')}` : ''}`,
       label: `${scope === 'chr' ? n : `${n}${scope}`} (${scope === 'chr' ? 'whole chromosome' : 'whole arm'})`, suggestion: groupSuggestion(g, o.sex), as });
   }
   const ORDER = [...Array.from({ length: 22 }, (_, i) => `chr${i + 1}`), 'chrX', 'chrY'];
@@ -185,6 +216,8 @@ export function cnvGroups(cnvs: CghCnv[], o: GroupOpts): CnvGroup[] {
 
 /** the group's ISCN: `(8)x3[0.29]` for a whole chromosome; an arm by its bands (first member's first band, last member's last) */
 export function groupIscn(g: CnvGroup, build: string, sex: CghSex | undefined, bandOf: (c: CghCnv) => string) {
+  // a normal male's X / Y against a female reference: nothing abnormal to write
+  if (g.mismatch) return { text: null, part: null, file: null, differs: false };
   const first = g.members.find(c => c.start === g.start) ?? g.members[0], last = g.members.reduce((a, c) => (c.end > a.end ? c : a), g.members[0]);
   const band = iscnBands(`${bandOf(first)} ${bandOf(last)}`);
   const iscn = callIscn(g.as, build, band, sex, g.scope === 'chr');

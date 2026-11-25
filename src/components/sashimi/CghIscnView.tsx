@@ -1,6 +1,6 @@
 /** The array ISCN shown: a call's (call card, detail, table tooltip) and a patient's line, each with a copy button. */
 import { useState } from 'react';
-import { cgh, useCgh, classOf, activeGroups, type CghState } from './cghStore';
+import { cgh, useCgh, classOf, activeGroups, refMismatch, type CghState } from './cghStore';
 import { groupIscn, type CnvGroup } from './cghGroups';
 import type { CghCnv, CghSample } from './cghIntervals';
 import { callIscn, patientIscn, normalIscn, iscnBandOf, type CallIscn } from './cghIscn';
@@ -9,8 +9,10 @@ const ISCN_OFFERED = ['Pathogenic', 'Likely pathogenic', 'Uncertain significance
 const SHORT: Record<string, string> = { Pathogenic: 'P', 'Likely pathogenic': 'LP', 'Uncertain significance': 'VUS', PIEV: 'PIEV', 'Likely benign': 'LB', Benign: 'B' };
 
 /** a call's ISCN from the state (band: the cytogenetic bands read, at sub-band precision, else the file's; whole chromosome from the topology) */
-export const iscnOfCall = (s: CghState, c: CghCnv, build: string): CallIscn =>
-  callIscn(c, build, iscnBandOf(c, s.ann[c.id]?.band), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr');
+export const iscnOfCall = (s: CghState, c: CghCnv, build: string): CallIscn => refMismatch(s, c)
+  // a call of a group read as a reference mismatch (a normal male's X against a female reference): nothing abnormal to write
+  ? { text: null, part: null, file: c.iscn, differs: false }
+  : callIscn(c, build, iscnBandOf(c, s.ann[c.id]?.band), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr');
 
 /** the tooltip lines of a call's ISCN (ours, the file's when it differs) */
 /** a CNV group's ISCN (bands as the calls': read, else the file's) */

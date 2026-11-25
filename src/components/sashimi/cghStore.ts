@@ -575,20 +575,23 @@ export function passes(s: CghState, c: CghCnv, belowToo = false): boolean {
   return true;
 }
 
-/** every patient's CNV groups (cghGroups.ts) among its analysed calls, by sample key; `active`: those not split back */
-let groupMemo: { files: CghFile[]; sex: CghState['sex']; minProbes: number; minKb: number; out: Map<string, CnvGroup[]> } | null = null;
+/** every patient's CNV groups (cghGroups.ts) among its analysed calls, by sample key; an arm's span from the patient's probes once read */
+let groupMemo: { files: CghFile[]; sex: CghState['sex']; minProbes: number; minKb: number; gens: string; out: Map<string, CnvGroup[]> } | null = null;
 export function groupsOf(s: CghState): Map<string, CnvGroup[]> {
-  const f = s.filter;
-  if (groupMemo && groupMemo.files === s.files && groupMemo.sex === s.sex && groupMemo.minProbes === f.minProbes && groupMemo.minKb === f.minKb) return groupMemo.out;
+  const f = s.filter, keys = s.files.flatMap(fl => fl.samples.map(x => x.key));
+  const gens = keys.map(k => (probeRead.get(k) ? probeGen.get(k) ?? 0 : -1)).join(',');
+  if (groupMemo && groupMemo.files === s.files && groupMemo.sex === s.sex && groupMemo.minProbes === f.minProbes && groupMemo.minKb === f.minKb && groupMemo.gens === gens) return groupMemo.out;
   const out = new Map<string, CnvGroup[]>();
   for (const fl of s.files) for (const x of fl.samples) {
     const sex = s.sex[x.key];
-    const gs = cnvGroups(x.cnvs, { build: fl.build ?? 'GRCh37', sex, eligible: c => isAnalysed(c, f.minProbes, f.minKb) && !hiddenBySex(c, sex) && !c.suppressed });
+    const gs = cnvGroups(x.cnvs, { build: fl.build ?? 'GRCh37', sex, probes: probeRead.get(x.key)?.byChrom, eligible: c => isAnalysed(c, f.minProbes, f.minKb) && !hiddenBySex(c, sex) && !c.suppressed });
     if (gs.length) out.set(x.key, gs);
   }
-  groupMemo = { files: s.files, sex: s.sex, minProbes: f.minProbes, minKb: f.minKb, out };
+  groupMemo = { files: s.files, sex: s.sex, minProbes: f.minProbes, minKb: f.minKb, gens, out };
   return out;
 }
+/** a call of a group read as a reference mismatch (a male's whole X near −1…): no copy or mosaic estimate assuming a sex-matched reference */
+export const refMismatch = (s: CghState, c: CghCnv) => !!groupsOf(s).get(c.sampleKey)?.some(g => g.mismatch && g.members.some(m => m.id === c.id));
 /** the groups in force (not split back), and the one each call belongs to */
 export function activeGroups(s: CghState): { list: CnvGroup[]; byCall: Map<string, CnvGroup> } {
   const list = [...groupsOf(s).values()].flat().filter(g => !s.ungrouped[g.id]), byCall = new Map<string, CnvGroup>();

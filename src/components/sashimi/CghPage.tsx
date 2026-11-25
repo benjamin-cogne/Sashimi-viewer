@@ -11,7 +11,8 @@ import { segmentColors } from './svColors';
 import { chromLength } from '../../standalone/assembly';
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { CghFrame, CghProbeDialog, CghExamplesMenu } from './CghPanel';
-import { cgh, useCgh, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
+import { cgh, useCgh, refMismatch, CGH_ACCEPT, CGH_FILES_TEXT } from './cghStore';
+import { MISMATCH_TIP } from './cghGroups';
 import type { CghCnv, CghFile } from './cghIntervals';
 import { bandOfCall } from './cghAnnotate';
 import { clinGenTrack } from './CghClinGenTrack';
@@ -79,13 +80,24 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const full = useMemo<SvGeneLoaders | null>(() => (loaders ? { ...loaders, fallback: [] } : null), [loaders]);
   const rec = drawn?.parsed.rec;
   const colors = useMemo(() => (rec ? segmentColors(rec) : new Map<number, string>()), [rec]);
-  // the call drawn, while its patient is on the list
-  const c = drawn && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
+  // the call window follows the tab: a patient's tab shows that patient's last call (or none); All patients keeps the call clicked
+  const last = useRef(new Map<string, Drawn>());
+  useEffect(() => { if (drawn) last.current.set(drawn.cnv.sampleKey, drawn); }, [drawn]);
+  const tab0 = useRef(s.sample);
+  useEffect(() => {
+    if (tab0.current === s.sample) return;
+    tab0.current = s.sample;
+    if (s.sample == null || drawn?.cnv.sampleKey === s.sample) return;
+    const k = last.current.get(s.sample), m = k && (k.cnv.fromProbes || s.files.some(f => f.samples.some(x => x.cnvs.some(y => y.id === k.cnv.id)))) ? k : undefined;
+    setDrawn(m ?? null); setError(null); cgh.setShown(m?.cnv.id ?? null);
+  }, [s.sample]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the call drawn, while its patient is on the list (and is the tab's, before the effect above has run)
+  const c = drawn && (s.sample == null || drawn.cnv.sampleKey === s.sample) && s.files.some(f => f.samples.some(x => x.key === drawn.cnv.sampleKey)) ? drawn.cnv : undefined;
   // a male's chrX and chrY outside the PARs (of the call's build): one copy, the call on it (no other homologue)
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY') && !(parOf(drawn?.build)[c.chrom] ?? []).some(([a, b]) => c.start >= a && c.end <= b);
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
   // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
-  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, est = c ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
+  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, mm = !!c && refMismatch(s, c), est = c && !mm ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
   // Esc: what is open beyond the base view (told to the store), folded when the store says so
   const busy = useRef(false);
   busy.current = (genome && s.files.length > 0) || !!c || !!error;
@@ -93,7 +105,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const reset0 = useRef(s.viewReset);
   useEffect(() => {
     if (s.viewReset === reset0.current) return;
-    reset0.current = s.viewReset; setGenome(false); setDrawn(null); setError(null);
+    reset0.current = s.viewReset; setGenome(false); setDrawn(null); setError(null); last.current.clear();
   }, [s.viewReset]);
   return (
     <div className="fixed inset-0 z-[72] bg-page overflow-y-auto text-slate-900" style={{ fontFamily: FONT }} data-cgh-page
@@ -128,8 +140,9 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
               {!iscn && band && <span className="font-semibold">{c.chrom.replace(/^chr/, '')}{band.replace(/\s+/g, '')}</span>}
               {iscn
                 ? <span title="Array ISCN as in ISCN 2024, written from the band (the cytogenetic bands at sub-band precision, else the file's), the positions and the copy number (the file's, else from the log ratio), with the mosaic fraction when the log ratio says mosaic; the file's own ISCN beside when it differs"><CallIscnText i={isc!} /></span>
-                : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">{c.fromProbes ? <i>({c.kind}, from probes: not in the file, not exported)</i> : `(${c.kind}, no ISCN in the file)`}</span></span>}
+                : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">{c.fromProbes ? <i>({c.kind}, from probes: not in the file, not exported)</i> : mm ? `(${c.kind}, no ISCN: a normal male's X / Y against a female reference?)` : `(${c.kind}, no ISCN in the file)`}</span></span>}
               <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} {c.probes != null ? ` · ${c.probes} probes` : ''}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
+              {mm && <span className="font-semibold text-violet-800" title={MISMATCH_TIP} data-cgh-mismatch>copies x1? (male; female reference?)</span>}
               {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>copies {est.text}</span>}
               {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>

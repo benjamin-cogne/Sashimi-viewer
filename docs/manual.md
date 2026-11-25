@@ -216,7 +216,8 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 
 **Array-CGH.** The SV browser's **Array-CGH ▸** button opens a page of its own, one level down. Esc
 first clears the view (no call selected, its detail and call window closed, the whole genome folded back to its strip;
-filters, tab, sort and the table's scroll kept); Esc again, or **← SV browser**, asks *Leave Array-CGH and go back to the
+filters, tab, sort and the table's scroll kept). The call window follows the tab: a patient's tab shows that patient's
+last call clicked, or none; *All patients* keeps the call clicked; Esc again, or **← SV browser**, asks *Leave Array-CGH and go back to the
 SV browser?* (**Cancel** focused, Esc = Cancel; it counts the patients with unexported changes). The samples, classes and
 notes stay while the tab is open; export to keep them in a file. An open menu, the quick guide and the import / column
 questions take Esc first; in a search or note field Esc only leaves the field. **Examples ▾** (on the empty page and in the frame's bar) adds
@@ -224,7 +225,7 @@ invented patients through the import question, beside any patient loaded (× on 
 (22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
 EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint), each with its
 invented probes' log ratios (a `CGH_Log_Ratio.txt` written when loaded: about 60k probes on GRCh37, noise SD 0.15, the
-calls' probes at their mean log ratio; EXAMPLE-DEL22Q11's probes also carry a small 3p14.2 loss the table does not list,
+calls' probes at their mean log ratio; a sex-matched reference: a male's X and Y around 0, no chrY probe for a female; EXAMPLE-DEL22Q11's probes also carry a small 3p14.2 loss the table does not list,
 a probe call *not in the file*), EXAMPLE-PROBES-ONLY, a probe file alone (7q11.23 loss, 15q11.2 gain): a
 probes-only patient, and EXAMPLE-MOSAIC-T12 (a mosaic trisomy 12 as 12p and 12q gains with a nested call: a CNV
 group). *All (five)* adds them together. **? Quick guide**, in the page's bar, is an interactive tour on
@@ -432,13 +433,15 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
 - **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
   gnomAD LOEUF (v2.1.1 on GRCh37).
 - **CNV groups**: when several calls of one patient, all losses or all gains, together cover a whole chromosome arm or
-  a whole chromosome (≥ 90 % of the span carrying probes: the centromere, heterochromatin, the acrocentric p arms and
-  the PARs left out; small gaps between calls tolerated), they are shown as one outlined block: a summary row (the span,
+  a whole chromosome (≥ 90 % of the arm's probes when the patient has a probe file; without one, ≥ 90 % of the arm's
+  length outside the centromere, heterochromatin (`gvar`), stalks, the acrocentric p arms and the PARs; small gaps between calls tolerated), they are shown as one outlined block: a summary row (the span,
   the probes and the mean log ratio weighted by probes, calls nested inside a larger one listed but not counted twice,
   the copies and mosaic fraction, the arms covered, the ISCN such as `arr[GRCh37] (8)x3[0.29]` or an arm by its
   bands) with a **suggestion** in words (*trisomy 8*, *mosaic trisomy 8 (~29 %)*, *partial monosomy 4p*; on X and Y
   read against the sex given, a sex mismatch with the reference named: a female's whole-X loss near −0.9 reads
-  *monosomy X (45,X) — or a sex mismatch*, a male's whole-X gain *XXY?*), then its calls as usual rows. The group has
+  *monosomy X (45,X) — or a sex mismatch*, a male's whole-X gain *XXY?*; a male's whole-X loss near −0.9, or his Y far
+  above 0, is what a normal male gives against a female reference: the group and its calls then show *x1 = normal male
+  (female reference?)*, a *female ref.?* tag, no mosaic fraction and no ISCN, since those assume a sex-matched reference), then its calls as usual rows. The group has
   its own class and note (**→ calls** gives the class to its calls); a classified group replaces its calls in the
   patient's ISCN. **ungroup** splits it back for this session (**group** restores it). Sorting and filters keep its
   calls together; it is shown when one of them passes. The whole genome outlines its bars. The export adds a column

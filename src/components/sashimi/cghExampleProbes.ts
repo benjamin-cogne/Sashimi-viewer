@@ -2,7 +2,8 @@
  * Invented probe-level log ratios for the built-in examples (cghExamples.ts), written as a CytoGenomics CGH_Log_Ratio.txt
  * at load time: no embedded data, a seeded random generator (same file at every load). About 60k probes over the GRCh37
  * chromosomes (like a 60K array: none in the centromeres, the acrocentric p arms nor chrY's heterochromatin), Gaussian
- * noise (SD 0.15). Each event gets exactly its call's number of probes, evenly spaced from the call's start to its stop,
+ * noise (SD 0.15). Hybridised against a sex-matched reference: a male's X and Y lie around 0 like the autosomes; a female has
+ * no chrY probe written (no Y DNA: CytoGenomics' ratios there are noise, not data). Each event gets exactly its call's number of probes, evenly spaced from the call's start to its stop,
  * their mean set to the call's mean log ratio, so the file's calls and the probes agree. Invented data only.
  */
 import { chromLength } from '../../standalone/assembly';
@@ -29,7 +30,7 @@ function rng(name: string) {
 }
 const inGap = (c: string, p: number) => (GAPS[c] ?? []).some(([a, b]) => p >= a * 1e6 && p <= b * 1e6);
 
-/** the CGH_Log_Ratio.txt of an invented sample: its events, its sex (a female's chrY probes are noise: cross-hybridisation) */
+/** the CGH_Log_Ratio.txt of an invented sample: its events, its sex (a sex-matched reference; no chrY probe for a female) */
 export function exampleProbeFile(sample: string, events: ProbeEvent[], male: boolean): string {
   const { rnd, gauss } = rng(sample);
   const len = (c: string) => chromLength('GRCh37', c) ?? 0;
@@ -40,6 +41,7 @@ export function exampleProbeFile(sample: string, events: ProbeEvent[], male: boo
   const out = ['AMADID\t000000\thg19', `Probe Name\tChrName\tStart\tStop\tFeatureNum\tDescription\tName of Gene\tNormalized log ratio(${sample})`];
   let k = 0;
   for (const c of CHROMS) {
+    if (c === 'Y' && !male) continue;
     const evs = events.filter(e => e[0] === 'chr' + c || e[0] === c);
     // an event within 1 Mb of an end is terminal: no backbone probe beyond it
     const lo = Math.min(Infinity, ...evs.filter(e => e[1] < 1e6).map(e => e[1])), hi = Math.max(-Infinity, ...evs.filter(e => e[2] > len(c) - 1e6).map(e => e[2]));
@@ -47,7 +49,7 @@ export function exampleProbeFile(sample: string, events: ProbeEvent[], male: boo
     for (let p = EDGE + rnd() * step; p < len(c) - EDGE; p += step * (0.6 + 0.8 * rnd())) {
       const s = Math.round(p);
       if (inGap(c, s) || (lo < Infinity && s < lo) || (hi > -Infinity && s > hi) || evs.some(e => s + PROBE - 1 >= e[1] && s <= e[2])) continue;
-      ps.push({ s, v: c === 'Y' && !male ? gauss() * 0.3 : rnd() < 0.003 ? NaN : gauss() * SD });
+      ps.push({ s, v: rnd() < 0.003 ? NaN : gauss() * SD });
     }
     // each event: exactly its probes, first at its start, last ending at its stop, their mean the call's
     for (const [, a, b, n, lr] of evs) {
