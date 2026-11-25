@@ -188,7 +188,7 @@ export function CghProbePanel({ c, at, chromLen, segs, calls, onCall, getBands }
         <label className="inline-flex items-center gap-1" title="Moving median over this many probes (dark blue line)">median of
           <select value={k} onChange={e => setK(Number(e.target.value))} aria-label="Probes in the moving median" className="h-[22px] rounded border border-slate-200 bg-white text-[11px] outline-none cursor-pointer">{[3, 7, 15].map(n => <option key={n}>{n}</option>)}</select> probes</label>
         {c && <span className="text-slate-500" title="The call's mean log ratio as the file gives it (orange segment), and the mean of the probes it spans">
-          call: {fileMean != null ? <>{c.fromProbes ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>}
+          call: {fileMean != null ? <>{c.fromProbes || c.id.startsWith('pc|') ? 'segment' : 'file'} <b className="text-slate-800">{fileMean.toFixed(2)}</b></> : 'no log ratio in the file'}{probeMean.mean != null ? <> · probes' mean <b className="text-slate-800">{probeMean.mean.toFixed(2)}</b> ({probeMean.n})</> : ''}</span>}
         <DotsToggle />
         <span className="text-slate-400">· {c ? 'own window (not synced with the browser) · ' : ''}dashed: ±0.2 · clipped at ±{CLIP} (▲▼ beyond){segs ? <> · <span className="text-fuchsia-700">purple</span>: probe-call segments</> : ''}</span>
       </div>

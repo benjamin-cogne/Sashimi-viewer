@@ -7,7 +7,7 @@
 import type { GenomeBuild } from '../../standalone/ensembl';
 import { decodeText } from './cghFormats';
 import { cghBuild, cghChrom, leafOf } from './cghIntervals';
-import { norm, splitDelimited } from './cghMapping';
+import { norm, splitDelimited, lrColumnSample } from './cghMapping';
 
 export interface CghProbeChrom { start: Uint32Array; end: Uint32Array; lr: Float32Array; name: string[] }
 export interface CghProbes {
@@ -87,16 +87,7 @@ function parseBySpec(bytes: Uint8Array, sp: ProbeSpec): CghProbes {
   return sorted(acc, sp.sample, sp.build, n, true);
 }
 
-/** a header cell naming a log-ratio column: the sample it names ('' for none), else null */
-export function lrColumnSample(h: string): string | null {
-  const t = h.trim().replace(/^"|"$/g, '');
-  const pre = t.match(/^(?:normali[sz]ed\s*)?(?:log\s*r\s*ratio|log\s*2?\s*[-_]?\s*ratio|log2|lrr)\s*[([]\s*(.+?)\s*[)\]]$/i);
-  if (pre) return pre[1];
-  if (/^(lr|value|log2\s*copy\s*ratio)$/i.test(t)) return '';
-  const suf = t.match(/^(.*?)[\s._:|-]*(log\s*r\s*ratio|weighted\s*log\s*2\s*ratio|log\s*2?\s*[-_]?\s*ratio|log\s*2\s*r|log2|logr|lrr|l2r)$/i);
-  if (!suf) return null;
-  return /^(normali[sz]ed|mean|smoothed|weighted|raw|cn|probe|segmented|seg)?$/i.test(suf[1].trim()) ? '' : suf[1].trim();
-}
+export { lrColumnSample };
 const SYN = {
   chrom: ['chromosome', 'chrom', 'chr', 'chrname', 'chromosomename', 'seqnames', 'seqname', 'contig'],
   start: ['start', 'position', 'pos', 'startposition', 'chromstart', 'chrstart', 'physicalposition', 'maploc', 'locstart', 'coordinate'],
@@ -163,17 +154,20 @@ const PROBE_MAPS_KEY = 'sashimi.cghProbeMaps';
 /** what is kept: the columns' indexes and the options; never a row, never a sample name typed */
 export interface StoredProbeMap { sig: string; delim: string; chrom: number; start: number; end: number; lr: number[]; name: number; zeroBased: boolean; build: GenomeBuild | null }
 const loadProbeMaps = (): StoredProbeMap[] => { try { const v = JSON.parse(localStorage.getItem(PROBE_MAPS_KEY) ?? '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
-const sigOf = (cells: string[]) => cells.map(norm).join('|');
+/** a header's signature: the log-ratio columns' names left out (they name the sample: never stored, and the mapping fits the next sample's file) */
+const sigOf = (cells: string[], lr: number[]) => cells.map((c, j) => (lr.includes(j) ? '*' : norm(c))).join('|');
+/** the signature stored before the log-ratio columns were masked (still recognised; replaced when the mapping is saved again) */
+const legacySig = (cells: string[]) => cells.map(norm).join('|');
 export function rememberProbeMap(header: string[], m: Omit<StoredProbeMap, 'sig'>) {
-  const sig = sigOf(header);
-  try { localStorage.setItem(PROBE_MAPS_KEY, JSON.stringify([{ ...m, sig }, ...loadProbeMaps().filter(x => x.sig !== sig)].slice(0, 20))); } catch { /* storage blocked */ }
+  const sig = sigOf(header, m.lr);
+  try { localStorage.setItem(PROBE_MAPS_KEY, JSON.stringify([{ ...m, sig }, ...loadProbeMaps().filter(x => x.sig !== sig && x.sig !== legacySig(header))].slice(0, 20))); } catch { /* storage blocked */ }
 }
 /** the sample a log-ratio column is named for: the name in its header, else the header itself when there are several, else the file's */
 export const sampleOfColumn = (h: string, several: boolean, fileName: string) => lrColumnSample(h) || (several ? h.trim() : '') || baseName(fileName);
 function findProbeMap(lines: string[], fileName: string): ProbeSpec[] | null {
   for (const m of loadProbeMaps()) {
     if (!m?.delim || !Array.isArray(m.lr)) continue;
-    const hi = lines.findIndex(l => l.includes(m.delim) && sigOf(splitDelimited(l, m.delim)) === m.sig);
+    const hi = lines.findIndex(l => { if (!l.includes(m.delim)) return false; const c = splitDelimited(l, m.delim); return sigOf(c, m.lr) === m.sig || legacySig(c) === m.sig; });
     if (hi < 0) continue;
     const raw = splitDelimited(lines[hi], m.delim);
     return specsOf(lines, hi, m.delim, raw, { ...m, layout: 'columns chosen before', build: m.build ?? undefined }, m.lr.map(j => ({ j, s: sampleOfColumn(raw[j] ?? '', m.lr.length > 1, fileName) })), fileName);

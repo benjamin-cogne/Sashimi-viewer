@@ -97,7 +97,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
   const one = !!c && s.sex[c.sampleKey] === 'male' && (c.chrom === 'chrX' || c.chrom === 'chrY') && !(parOf(drawn?.build)[c.chrom] ?? []).some(([a, b]) => c.start >= a && c.end <= b);
   const band = c ? bandOfCall(c, s.ann[c.id]) : '', isc = c && drawn ? iscnOfCall(s, c, drawn.build) : null, iscn = isc?.text ?? isc?.file ?? null;
   // the probes of the call's patient (read on first view) and its copy number from the log ratio when the file gives none
-  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, mm = !!c && refMismatch(s, c), est = c && !mm ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
+  const probes = c && cgh.hasProbes(c.sampleKey) ? cgh.probes(c.sampleKey) : null, mm = c ? refMismatch(s, c) : null, est = c && !mm ? estCopies(c, s.sex[c.sampleKey], drawn?.build) : null;
   // Esc: what is open beyond the base view (told to the store), folded when the store says so
   const busy = useRef(false);
   busy.current = (genome && s.files.length > 0) || !!c || !!error;
@@ -142,7 +142,7 @@ export default function CghPage({ loadersFor, onBack }: { loadersFor: (b: Genome
                 ? <span title="Array ISCN as in ISCN 2024, written from the band (the cytogenetic bands at sub-band precision, else the file's), the positions and the copy number (the file's, else from the log ratio), with the mosaic fraction when the log ratio says mosaic; the file's own ISCN beside when it differs"><CallIscnText i={isc!} /></span>
                 : <span className="font-mono text-[12px] text-slate-800" title="The file gives no ISCN, and not both the band and the copy number to write one">{c.chrom}:{c.start.toLocaleString('en-US')}-{c.end.toLocaleString('en-US')} <span className="font-sans text-slate-500">{c.fromProbes ? <i>({c.kind}, from probes: not in the file, not exported)</i> : mm ? `(${c.kind}, no ISCN: a normal male's X / Y against a female reference?)` : `(${c.kind}, no ISCN in the file)`}</span></span>}
               <span className="text-slate-500">· {c.sizeKb >= 1000 ? `${(c.sizeKb / 1000).toFixed(2)} Mb` : `${c.sizeKb.toFixed(1)} kb`} {c.probes != null ? ` · ${c.probes} probes` : ''}{c.logRatio != null ? ` · log ratio ${c.logRatio.toFixed(2)}` : ''}{c.pval != null ? ` · p ${c.pval.toExponential(1)}` : ''}{one ? ' · drawn with one copy (male)' : c.copies === 0 ? ' · drawn homozygous' : ''}{c.kind === 'gain' ? ' · extra copy drawn in tandem' : ''}</span>
-              {mm && <span className="font-semibold text-violet-800" title={MISMATCH_TIP} data-cgh-mismatch>copies x1? (male; female reference?)</span>}
+              {mm && <span className="font-semibold text-violet-800" title={MISMATCH_TIP} data-cgh-mismatch>{mm === 'top' ? 'copies x1? (male; female reference?)' : 'female reference? (no copy estimate)'}</span>}
               {est && <span className="font-semibold text-slate-700" title={estTip(est, c.logRatio!)} data-cgh-est>copies {est.text}</span>}
               {probes?.dlrs != null && <span className="text-slate-500" title={DLRS_TIP} data-cgh-dlrs>· DLRS <b className="text-slate-800">{probes.dlrs.toFixed(2)}</b> ({dlrsWord(probes.dlrs)})</span>}
             </div>

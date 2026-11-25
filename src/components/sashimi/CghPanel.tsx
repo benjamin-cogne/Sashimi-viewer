@@ -332,7 +332,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     let text: string;
     if (isProbeOnly(fl)) {
       const bands = await bandsOf(fl), band = (c: CghCnv) => s.ann[c.id]?.band ?? bands.get(c.id);
-      text = exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => band(c) || bandOfCall(c, s.ann[c.id]), copies: c => (refMismatch(s, c) ? 'x1 = normal male (female reference?)' : estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? ''),
+      text = exportProbeCalls(fl, s.probeOpts, new Date(), { band: c => band(c) || bandOfCall(c, s.ann[c.id]), copies: c => (refMismatch(s, c) ? (refMismatch(s, c) === 'top' ? 'x1 = normal male (female reference?)' : '') : estCopies(c, s.sex[c.sampleKey], fl.build)?.text ?? ''),
         iscn: c => callIscn(c, fl.build ?? 'GRCh37', iscnBandOf(c, band(c)), s.sex[c.sampleKey], s.ann[c.id]?.topo?.span === 'chr').text ?? '', cls: c => s.classes[c.id] ?? '', note: c => noteOf(s, c), group: groupText });
     } else text = exportCghFile(fl, c => s.classes[c.id] ?? c.classification, c => noteOf(s, c), iscn, groupText);
     const a = document.createElement('a');
@@ -353,7 +353,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
     const applied = !!cls && memberCls.every(x => x === cls);
     const sx = s.sex[g.sampleKey];
     return [
-      <tr key={g.id} data-cgh-group={g.id} className={`bg-violet-50/70 ${GRP_TOP}`}>
+      <tr key={g.id} data-cgh-group={g.id} className={`bg-violet-50 ${GRP_TOP}`}>
         {withSample && <td className="px-1.5 py-1 text-slate-600 whitespace-nowrap">{g.sample}{sx ? ` ${SEX_MARK[sx]}` : ''}</td>}
         <td className="px-1.5 py-1 whitespace-nowrap font-semibold text-violet-800" title="CNV group: calls of one direction covering a whole arm or chromosome"><span className="mr-1 px-1 rounded bg-violet-600 text-white text-[9.5px] font-bold align-middle">GROUP</span>{g.chrom.replace(/^chr/, '')}{g.scope === 'chr' ? '' : g.scope}</td>
         <td className="px-1.5 py-1 font-mono text-[10.5px] text-slate-700 whitespace-nowrap" title="From the first call's start to the last call's end">{g.chrom}:{fmt(g.start)}-{fmt(g.end)}</td>
@@ -383,7 +383,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
           <button onClick={() => cgh.setUngrouped(g.id, true)} data-cgh-ungroup className="text-violet-700 font-medium hover:underline" title="Split the group back into its calls (this session); “group” makes it again">ungroup</button>
         </td>
       </tr>,
-      groupNote === g.id && <tr key={`${g.id}-note`} className={`bg-violet-50/70 ${GRP_SIDE}`}><td colSpan={nCols} className="px-2 py-1">
+      groupNote === g.id && <tr key={`${g.id}-note`} className={`bg-violet-50 ${GRP_SIDE}`}><td colSpan={nCols} className="px-2 py-1">
         <textarea autoFocus value={note} onChange={e => cgh.setGroupNote(g, e.target.value)} rows={1} placeholder="Note on the CNV group" className="w-full max-w-[640px] rounded border border-slate-200 px-1.5 py-0.5 text-[11.5px] outline-none focus:border-accent-300" /></td></tr>,
     ];
   };
@@ -496,7 +496,7 @@ export function CghFrame({ onShow, dropping, loadersFor }: { onShow: (c: CghCnv,
             {items.map(it => {
               if ('regroup' in it) {
                 const g = it.regroup;
-                return <tr key={`regroup-${g.id}`} data-cgh-regroup={g.id} className="border-b border-slate-100 bg-violet-50/40"><td colSpan={nCols} className="px-2 py-0.5 text-[11px] text-slate-500">
+                return <tr key={`regroup-${g.id}`} data-cgh-regroup={g.id} className="border-b border-slate-100 bg-violet-50"><td colSpan={nCols} className="px-2 py-0.5 text-[11px] text-slate-500">
                   CNV group {g.label}, split into its {g.members.length} calls below ({g.suggestion.split(' — ')[0]}) · <button className="text-violet-700 font-semibold hover:underline" onClick={() => cgh.setUngrouped(g.id, false)} title="Show these calls as one CNV group again">group</button>
                 </td></tr>;
               }
@@ -624,21 +624,22 @@ function RetryCtl({ col, groups }: { col: RetryCol; groups: RetryGroup[] }) {
 }
 
 /** the small amber tag of a call whose log ratio says a share of the cells only carries it */
-function MosaicTag({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null; mm?: boolean }) {
+function MosaicTag({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null; mm?: 'top' | 'nested' | null }) {
   if (mm) return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-violet-300 bg-white text-violet-700 leading-[15px] align-middle" title={MISMATCH_TIP} data-cgh-mismatch>female ref.?</span>;
   const m = mosaicOf(c, sex, build);
   if (!m?.ok || m.f >= MOSAIC_TAG_BELOW) return null;
   return <span className="ml-1 inline-flex items-center rounded-full px-1.5 text-[9.5px] font-bold border border-slate-300 bg-white text-slate-600 leading-[15px] align-middle" title="Fraction of cells estimated from the mean log ratio (AChro-Puce calculator, July 2025): indicative, see the call's detail">mosaic ~{Math.round(m.f * 100)}%</span>;
 }
 /** the copy number of the table's Type cell: the file's, else the one from the log ratio (tooltip), else the type */
-function EstCn({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null; mm?: boolean }) {
-  if (mm && c.copies == null) return <span title={MISMATCH_TIP} data-cgh-est>x1?</span>;
+function EstCn({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild | null; mm?: 'top' | 'nested' | null }) {
+  // a nested call of a reference-mismatch group: no copy number (its log ratio is read against a female reference)
+  if (mm && c.copies == null) return mm === 'top' ? <span title={MISMATCH_TIP} data-cgh-est>x1?</span> : null;
   const e = estCopies(c, sex, build);
   return e ? <span title={estTip(e, c.logRatio!)} data-cgh-est>x{e.n}{e.text.includes('+') ? '+' : ''}</span> : <>{copyText(c)}</>;
 }
 /** the call's detail line: expected and observed log ratio, and the fraction of cells it gives */
-function MosaicLine({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild; mm?: boolean }) {
-  if (mm && c.logRatio != null) return <div className="mb-1 text-[11px]" data-cgh-mismatch-line><span className="font-semibold text-slate-900">Log ratio</span> observed <b>{c.logRatio.toFixed(2)}</b> · <span className="text-violet-800">{MISMATCH_TIP}</span></div>;
+function MosaicLine({ c, sex, build, mm }: { c: CghCnv; sex: CghSex | undefined; build: GenomeBuild; mm?: 'top' | 'nested' | null }) {
+  if (mm && c.logRatio != null) return <div className="mb-1 text-[11px]" data-cgh-mismatch-line><span className="font-semibold text-slate-900">Log ratio</span> observed <b>{c.logRatio.toFixed(2)}</b> · <span className="text-violet-800">{MISMATCH_TIP}{mm === 'nested' ? ' This call is nested in the group: no copy number is estimated for it.' : ''}</span></div>;
   const m = mosaicOf(c, sex, build), e = estCopies(c, sex, build);
   if (!m) return null;
   const pc = (x: number) => `${Math.round(x * 100)} %`;

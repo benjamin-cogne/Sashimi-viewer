@@ -591,7 +591,10 @@ export function groupsOf(s: CghState): Map<string, CnvGroup[]> {
   return out;
 }
 /** a call of a group read as a reference mismatch (a male's whole X near −1…): no copy or mosaic estimate assuming a sex-matched reference */
-export const refMismatch = (s: CghState, c: CghCnv) => !!groupsOf(s).get(c.sampleKey)?.some(g => g.mismatch && g.members.some(m => m.id === c.id));
+export function refMismatch(s: CghState, c: CghCnv): 'top' | 'nested' | null {
+  const g = groupsOf(s).get(c.sampleKey)?.find(x => x.mismatch && x.members.some(m => m.id === c.id));
+  return g ? (g.nested.has(c.id) ? 'nested' : 'top') : null;
+}
 /** the groups in force (not split back), and the one each call belongs to */
 export function activeGroups(s: CghState): { list: CnvGroup[]; byCall: Map<string, CnvGroup> } {
   const list = [...groupsOf(s).values()].flat().filter(g => !s.ungrouped[g.id]), byCall = new Map<string, CnvGroup>();

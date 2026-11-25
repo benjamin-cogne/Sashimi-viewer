@@ -78,7 +78,7 @@ export function callLines(s: CghState, c: CghCnv): string[] {
   return [
     `${c.chrom}:${fmt(c.start)}-${fmt(c.end)} · ${sizeText(c.sizeKb)} · ${c.kind}`,
     `${c.probes ?? '?'} probes${c.logRatio != null ? ` · mean log ratio ${c.logRatio.toFixed(2)}` : ''}`,
-    mm ? 'copies x1? — a normal male against a female reference?' : c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
+    mm ? (mm === 'top' ? 'copies x1? — a normal male against a female reference?' : 'no copy estimate (nested; female reference?)') : c.copies != null ? `copies x${c.copies}${c.copiesHi != null ? `~${c.copiesHi}` : ''} (file)` : est ? `copies ${est.text}` : 'copies not given',
     c.fromProbes ? 'from probes: not in the file, not exported' : `class: ${classOf(s, c).trim() || 'none'} · priority: ${lv ? LEVEL_STYLE[lv].label : 'not read yet'}`,
     ...(gr ? [`CNV group ${gr.label}: ${gr.suggestion}`] : []),
   ];
