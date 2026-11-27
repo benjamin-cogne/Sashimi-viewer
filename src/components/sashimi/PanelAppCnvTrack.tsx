@@ -121,7 +121,7 @@ function tip(r: PanelCnvRegion, p: Place, build: GenomeBuild): string {
 type State = { data: PanelCnvData | null; error: string | null };
 function Track({ items, build, state, lifting, x0, none }: { items: Item[]; build: GenomeBuild; state: State; lifting: boolean; x0: number; none: string }) {
   const lx = (it: Item) => Math.max(it.a, x0) + 2;
-  const note = state.error ? `PanelApp Australia unreachable (${state.error}): turn on the ClinGen CNV regions track instead`
+  const note = state.error ? `PanelApp Australia unreachable (${state.error}): the ClinGen CNV regions track (embedded, no request) still shows the curated regions`
     : !state.data ? `Loading PanelApp Australia panel ${PANELAPP_CNV.id}…`
     : lifting && !items.length ? 'Lifting the regions over to GRCh37 (Ensembl)…'
     : !items.length ? none : '';
@@ -207,9 +207,10 @@ export function usePanelAppCnvTrack(build: GenomeBuild): SvExtraTrack {
   }, [build, state, lifts]);
 }
 
-/** The known-CNV tracks of every browser: PanelApp Australia (shown) and ClinGen (a toggle away). `clinGenOn`: ClinGen shown
- * by default too (the array-CGH page), under its own id so that its on / off choice is kept apart from the other browsers' */
+/** The known-CNV tracks of every browser: PanelApp Australia and ClinGen, both shown by default (each a toggle away from
+ * hidden). `clinGenOn`: the array-CGH page's browser, whose ClinGen on / off choice is kept under its own id, apart from
+ * the other browsers' */
 export function useCnvRegionTracks(build: GenomeBuild, { clinGenOn = false }: { clinGenOn?: boolean } = {}): SvExtraTrack[] {
   const panelApp = usePanelAppCnvTrack(build), clinGen = useClinGenTrack(build);
-  return useMemo(() => [panelApp, clinGenOn ? { ...clinGen, id: `${clinGen.id}.cghPage`, defaultOn: true } : { ...clinGen, defaultOn: false }], [panelApp, clinGen, clinGenOn]);
+  return useMemo(() => [panelApp, clinGenOn ? { ...clinGen, id: `${clinGen.id}.cghPage`, defaultOn: true } : { ...clinGen, defaultOn: true }], [panelApp, clinGen, clinGenOn]);
 }
