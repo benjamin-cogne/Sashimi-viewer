@@ -539,6 +539,15 @@ of them is named like a human chromosome; a file whose header names a human buil
   hg38 RefSeq GTF (830 MB, 4.9 million lines): the file opens in under 0.1 s, a window's genes take ~0.1 s, the names
   ~20 s in Chromium, and ~50 MB stay in memory, against ~50 s and ~270 MB to read it whole. A large bgzipped file
   given without its index is read whole, with a note saying how to index it; an index given afterwards replaces it.
+- **Each annotation file is also a track** under the ruler, on any build: every entity of the file in the window, of any
+  type (genes, repeat_region, enhancer, regions of interest, BED lines), in the file's colour (BED `itemRgb`, GFF3
+  `color=`), else genes in the gene colours (same strand / antisense of the gene shown) and other types in a colour of
+  their own. *unfold* gives each transcript its row (folded: one row per gene, its transcripts' exons merged); *hide*
+  removes the track and the **⋯** menu shows it again; its grip moves it among the other panels. Hover an entity for its
+  type, coordinates, strand, score and attributes; click it to zoom to it. Up to 10 rows folded, 40 unfolded, a note says
+  how many more; windows over 10 Mb are not drawn. GFF3 rows that span a whole sequence (`region`, `chromosome`…) are
+  left out. Sessions keep each track's visibility, folding and place; HTML exports carry the entities of each view's
+  window (20,000 at most per view).
 - A locus with no gene opens as the region itself, without a model.
 - The annotations of the human genome are off: SNPs, ClinVar, gnomAD, GTEx, PanelApp, STR catalogue, cytobands and
   lift-over. The SV browser keeps its own human build.

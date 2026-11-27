@@ -109,6 +109,8 @@ const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
 const GENELESS_MAX_BP = 1_000_000;
 /** a custom genome's reference bases are embedded in an export for view windows up to this size */
 const EXPORT_REFERENCE_MAX_BP = 5_000_000;
+/** at most this many entities of the annotation tracks are embedded per view */
+const EXPORT_ANN_MAX_ITEMS = 20_000;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
 type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
@@ -778,6 +780,8 @@ function App() {
     setBusy(true); setError(null);
     let nReads = 0, nReadSets = 0;
     const skipped: string[] = [];
+    /** views whose annotation tracks were cut */
+    const annCut: string[] = [];
     let done = 0, total = 1;
     const progress = (step: string) => setExportProgress({ title: 'Exporting HTML…', step, done, total });
     try {
@@ -801,6 +805,13 @@ function App() {
         // a view opened on a region without a gene has no model to embed
         const transcript = parseLocus(st.gene.name, ds.contigs?.()) ? null : await ds.getTranscript(st.gene.name, st.gene.id, hint);
         let allTranscripts: EmbeddedView['allTranscripts']; if (transcript) try { allTranscripts = await ds.getAllTranscripts(st.gene.name, st.gene.id, hint); } catch { /* optional */ }
+        // the annotation tracks over the window (every entity of each file), at most EXPORT_ANN_MAX_ITEMS
+        let annotationTracks: EmbeddedView['annotationTracks'];
+        if (ds.getAnnotationTracks && annotations.length) {
+          const all = await ds.getAnnotationTracks(st.gene.chrom, ws, we).catch(() => [] as NonNullable<EmbeddedView['annotationTracks']>);
+          let room = EXPORT_ANN_MAX_ITEMS;
+          annotationTracks = all.map(tr => { const items = tr.items.slice(0, Math.max(0, room)); room -= items.length; if (items.length < tr.items.length) annCut.push(`${t.label}: ${tr.file} (${(tr.items.length - items.length).toLocaleString('en-US')} entities past the first ${EXPORT_ANN_MAX_ITEMS.toLocaleString('en-US')})`); return { ...tr, items }; });
+        }
         // a custom genome's bases go with the page: the reader has no FASTA and no API serves them
         let referenceSeq: EmbeddedView['referenceSeq'];
         if (build === 'custom' && fasta && we - ws <= EXPORT_REFERENCE_MAX_BP) {
@@ -906,7 +917,7 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, ...(transcript ? { transcript } : {}), allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, ...(referenceSeq ? { referenceSeq } : {}), minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, ...(transcript ? { transcript } : {}), allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, ...(referenceSeq ? { referenceSeq } : {}), ...(annotationTracks?.length ? { annotationTracks } : {}), minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -923,13 +934,14 @@ function App() {
       setNotes([
         `Exported ${name} (${(html.length / 1048576).toFixed(1)} MB): ${evs.length} view${evs.length === 1 ? '' : 's'}, ${samples.length} sample${samples.length === 1 ? '' : 's'}${nReadSets ? `, ${nReads.toLocaleString('en-US')} reads in ${nReadSets} reads track${nReadSets === 1 ? '' : 's'} (with reference bases and mismatches; read names replaced by numbers)` : ''}. The file opens in any browser without the alignment files.`,
         ...(skipped.length ? [`Reads not exported for ${skipped.join('; ')}`] : []),
+        ...(annCut.length ? [`Annotation tracks cut in ${annCut.join('; ')}: zoom the view in to embed all its entities`] : []),
       ]);
     } catch (e: any) {
       setError(`Export failed: ${e?.message || String(e)}`);
     }
     setExportProgress(null);
     setBusy(false);
-  }, [build, samples, fasta, sessionName, ds, currentViews]);
+  }, [build, samples, fasta, annotations, sessionName, ds, currentViews]);
   const viewsWithReads = views.filter(v => (v.id === activeId ? viewerStateRef.current?.reads : stateOfTab(v).reads)).length;
 
   // ---- Every view on one SVG page: each tab is shown in turn, its plot serialised once loaded, then the current view comes back ----

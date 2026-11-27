@@ -85,6 +85,7 @@ export function buildSession(args: {
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
     samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
+    hiddenAnnTracks: state.hiddenAnnTracks?.length ? state.hiddenAnnTracks : undefined, expandedAnnTracks: state.expandedAnnTracks?.length ? state.expandedAnnTracks : undefined,
     consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, rnaVariants: state.rnaVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands, readsColor: state.readsColor, minReadLength: state.minReadLength,
     // the panel order names its samples by name (ids are the page's own, renumbered at each load)
     panelOrder: state.panelOrder?.length ? state.panelOrder.map(k => (k.startsWith('s:') ? `s:${nameOf(Number(k.slice(2))) ?? k.slice(2)}` : k)) : undefined,
@@ -136,6 +137,8 @@ export function parseSession(text: string): SessionFile {
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
     labelScales: v.labelScales && typeof v.labelScales === 'object' ? Object.fromEntries(Object.entries(v.labelScales).filter(([, n]) => typeof n === 'number' && Number.isFinite(n) && n > 0)) as Record<string, number> : undefined,
     hiddenTranscripts: Array.isArray(v.hiddenTranscripts) ? v.hiddenTranscripts.filter((x: any) => typeof x === 'string') : undefined,
+    hiddenAnnTracks: Array.isArray(v.hiddenAnnTracks) ? v.hiddenAnnTracks.filter((x: any) => typeof x === 'string') : undefined,
+    expandedAnnTracks: Array.isArray(v.expandedAnnTracks) ? v.expandedAnnTracks.filter((x: any) => typeof x === 'string') : undefined,
   } : null;
   const gene = parseGene(raw.gene);
   const viewer = parseViewer(raw.viewer);

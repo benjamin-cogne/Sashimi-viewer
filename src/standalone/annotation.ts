@@ -44,7 +44,27 @@ interface ATx {
   cdsStart: number | null; cdsEnd: number | null;
   biotype: string; canonical: boolean;
 }
-interface AGene { key: string; id: string; name: string; chrom: string; strand: 1 | -1; start: number; end: number; biotype: string; txs: ATx[] }
+/** What a track shows of an entity besides its model: its type, colour, score, attributes, and no strand ('.'). */
+interface Extra { type?: string; color?: string; score?: number; attrs?: string; unstranded?: boolean }
+interface AGene extends Extra { key: string; id: string; name: string; chrom: string; strand: 1 | -1; start: number; end: number; biotype: string; txs: ATx[] }
+
+/**
+ * An entity of an annotation file as its track draws it (0-based half-open, on the viewer's chromosome): a gene with
+ * its transcripts, or any other feature (a GFF3 repeat_region, enhancer, region of interest; a BED line) as one
+ * transcript of its blocks.
+ */
+export interface TrackItem {
+  key: string; name: string; type: string;
+  /** 0: no strand given ('.') */
+  strand: 1 | -1 | 0;
+  start: number; end: number;
+  color?: string; score?: number; attrs?: string;
+  /** the transcript drawn when the track is folded (pickTx: canonical tag, else longest CDS, else longest) */
+  shown: number;
+  txs: { id: string; name: string; biotype: string; exons: [number, number][]; cdsStart: number | null; cdsEnd: number | null }[];
+}
+/** One file's entities over a window. */
+export interface TrackData { file: string; format: AnnotationFormat; items: TrackItem[] }
 
 /** What a file held, for its chip. */
 export interface AnnotationFileInfo {
@@ -91,7 +111,7 @@ function merge(list: [number, number][]): [number, number][] {
   return out;
 }
 
-interface Feat { id: string | null; parents: string[]; type: string; chrom: string; start: number; end: number; strand: 1 | -1; attrs: Map<string, string> }
+interface Feat { id: string | null; parents: string[]; type: string; chrom: string; start: number; end: number; strand: 1 | -1; attrs: Map<string, string>; score?: number; raw?: string; unstranded?: boolean }
 const TX_TYPE = /^(mRNA|transcript|primary_transcript|pseudogenic_transcript|[a-zA-Z_]*RNA|[a-zA-Z_]*_transcript)$/;
 const EXON_TYPE = /^(exon|pseudogenic_exon|noncoding_exon)$/;
 const PART_TYPE = /^(CDS|five_prime_UTR|three_prime_UTR|UTR|5'UTR|3'UTR|five_prime_utr|three_prime_utr|start_codon|stop_codon)$/;
@@ -108,16 +128,31 @@ function txFrom(id: string, name: string, chrom: string, strand: 1 | -1, exonKid
   return { id, name, chrom, strand, exons, cdsStart, cdsEnd, biotype: biotype ?? (cdsOnly.length ? 'protein_coding' : 'non_coding'), canonical };
 }
 
-function geneOf(key: string, id: string, name: string, txs: ATx[], biotype?: string): AGene {
+function geneOf(key: string, id: string, name: string, txs: ATx[], biotype?: string, extra: Extra = {}): AGene {
   const t0 = txs[0];
   return {
-    key, id, name, chrom: t0.chrom, strand: t0.strand, txs,
+    ...extra, key, id, name, chrom: t0.chrom, strand: t0.strand, txs,
     start: Math.min(...txs.map(t => t.exons[0][0])), end: Math.max(...txs.map(t => t.exons[t.exons.length - 1][1])),
     biotype: biotype ?? (txs.some(t => t.cdsStart != null) ? 'protein_coding' : t0.biotype),
   };
 }
 
 type Lines = AsyncIterable<string> | Iterable<string>;
+/** the attributes shown in a track's tooltip: at most this many characters */
+const ATTRS_MAX = 400;
+const scoreOf = (x: string | undefined) => { const v = x == null || x === '.' ? NaN : Number(x); return Number.isFinite(v) ? v : undefined; };
+/** a colour as CSS: an itemRgb / GFF3 `color` "r,g,b", or a #hex / CSS name kept as given */
+function cssColor(x: string | undefined): string | undefined {
+  if (!x || x === '0' || x === '.') return undefined;
+  const m = /^\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*$/.exec(x);
+  if (m) return `rgb(${+m[1]},${+m[2]},${+m[3]})`;
+  return /^(#[0-9a-f]{3,8}|[a-z]{3,20})$/i.test(x.trim()) ? x.trim() : undefined;
+}
+/** the type, colour, score and attributes of a GFF3 / GTF feature (its root's, for a gene) */
+const extraOf = (f: Feat | null | undefined): Extra => (f ? {
+  type: f.type, color: cssColor(f.attrs.get('color') ?? f.attrs.get('colour')), score: f.score,
+  attrs: f.raw ? f.raw.slice(0, ATTRS_MAX) : undefined, unstranded: f.unstranded || undefined,
+} : {});
 const yieldToUi = (): Promise<void> => {
   const s = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
   return s?.yield ? s.yield() : new Promise<void>(r => { setTimeout(r, 0); });
@@ -135,7 +170,8 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[
     const s = parseInt(c[3]), e = parseInt(c[4]);
     if (!(s > 0) || !(e >= s)) { info.skipped++; continue; }
     const attrs = gffAttrs(c[8]);
-    feats.push({ id: attrs.get('ID') ?? null, parents: (attrs.get('Parent') ?? '').split(',').filter(Boolean), type: c[2], chrom: decode(c[0]), start: s - 1, end: e, strand: strandOf(c[6]), attrs });
+    feats.push({ id: attrs.get('ID') ?? null, parents: (attrs.get('Parent') ?? '').split(',').filter(Boolean), type: c[2], chrom: decode(c[0]), start: s - 1, end: e, strand: strandOf(c[6]), attrs,
+      score: scoreOf(c[5]), raw: decode(c[8]), unstranded: c[6] !== '+' && c[6] !== '-' });
   }
   const byId = new Map<string, Feat>();
   for (const f of feats) if (f.id && !byId.has(f.id)) byId.set(f.id, f);
@@ -145,6 +181,8 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[
   const isTx = (f: Feat) => TX_TYPE.test(f.type) || childrenOf(f).some(k => EXON_TYPE.test(k.type) || k.type === 'CDS');
   // genes: features holding transcripts, or transcripts without a parent
   const genes = new Map<string, { gene: Feat | null; txs: ATx[] }>();
+  /** lone features without an ID, by their key */
+  const lone = new Map<string, Feat>();
   const addTx = (geneKey: string, gene: Feat | null, tx: ATx) => { const g = genes.get(geneKey); if (g) g.txs.push(tx); else genes.set(geneKey, { gene, txs: [tx] }); };
   for (const f of feats) {
     if (!isTx(f) || EXON_TYPE.test(f.type) || PART_TYPE.test(f.type)) continue;
@@ -164,19 +202,22 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[
     if (f.parents.length || childrenOf(f).length || SKIP_LONE.test(f.type) || EXON_TYPE.test(f.type) || PART_TYPE.test(f.type)) continue;
     if (f.id && genes.has(f.id)) continue;
     const name = geneNameOf(f.attrs, `${f.chrom}:${f.start + 1}-${f.end}`);
+    if (!f.id) lone.set(`${name}@${f.chrom}:${f.start}`, f);
     addTx(f.id ?? `${name}@${f.chrom}:${f.start}`, f, { id: f.id ?? name, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(f.attrs) ?? f.type, canonical: false });
   }
   const out: AGene[] = [];
   for (const [key, { gene, txs }] of genes) {
     const name = gene ? geneNameOf(gene.attrs, key) : txs[0].name;
-    out.push(geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined));
+    // a gene, or a transcript with no gene above it, or a lone feature: the track shows its type and attributes
+    const root = gene ?? byId.get(key) ?? null;
+    out.push(geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined, extraOf(root ?? lone.get(key))));
   }
   return out;
 }
 
 async function parseGtf(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
   // transcripts and genes are told apart by their contig too: one ID placed on several (chrX / chrY PAR, alt contigs)
-  const txRows = new Map<string, { id: string; gene: string; chrom: string; strand: 1 | -1; exon: Feat[]; part: Feat[]; attrs: Map<string, string>; span: [number, number] | null }>();
+  const txRows = new Map<string, { id: string; raw?: string; gene: string; chrom: string; strand: 1 | -1; exon: Feat[]; part: Feat[]; attrs: Map<string, string>; span: [number, number] | null }>();
   const geneAttrs = new Map<string, { attrs: Map<string, string>; f: Feat }>();
   for await (const line of lines) {
     info.lines++;
@@ -188,13 +229,13 @@ async function parseGtf(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]
     if (!(s > 0) || !(e >= s)) { info.skipped++; continue; }
     const attrs = gtfAttrs(c[8]);
     const at = `\t${c[0]}`;
-    const f: Feat = { id: null, parents: [], type: c[2], chrom: c[0], start: s - 1, end: e, strand: strandOf(c[6]), attrs };
+    const f: Feat = { id: null, parents: [], type: c[2], chrom: c[0], start: s - 1, end: e, strand: strandOf(c[6]), attrs, score: scoreOf(c[5]), raw: c[8], unstranded: c[6] !== '+' && c[6] !== '-' };
     const gid = attrs.get('gene_id') ?? attrs.get('gene_name') ?? '';
     const tid = attrs.get('transcript_id');
     if (c[2] === 'gene') { if (gid && !geneAttrs.has(gid + at)) geneAttrs.set(gid + at, { attrs, f }); continue; }
     if (!tid) { if (gid && !geneAttrs.has(gid + at)) geneAttrs.set(gid + at, { attrs, f }); continue; }
     let t = txRows.get(tid + at);
-    if (!t) txRows.set(tid + at, t = { id: tid, gene: (gid || tid) + at, chrom: c[0], strand: f.strand, exon: [], part: [], attrs, span: null });
+    if (!t) txRows.set(tid + at, t = { id: tid, raw: c[8], gene: (gid || tid) + at, chrom: c[0], strand: f.strand, exon: [], part: [], attrs, span: null });
     if (c[2] === 'transcript') { t.attrs = new Map([...t.attrs, ...attrs]); t.span = [f.start, f.end]; }
     else if (EXON_TYPE.test(c[2])) t.exon.push(f);
     else if (PART_TYPE.test(c[2]) || /^(UTR|five_prime_utr|three_prime_utr)$/i.test(c[2])) t.part.push(f);
@@ -210,13 +251,15 @@ async function parseGtf(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]
   for (const [gk, txs] of byGene) {
     const gid = gk.slice(0, gk.lastIndexOf('\t')), key = `${gid}@${txs[0].chrom}`;
     const ga = geneAttrs.get(gk)?.attrs, ta = txRows.get(`${txs[0].id}\t${txs[0].chrom}`)?.attrs;
-    out.push(geneOf(key, gid, ga?.get('gene_name') ?? ta?.get('gene_name') ?? gid, txs, ga ? biotypeAttr(ga) : undefined));
+    const gf = geneAttrs.get(gk)?.f;
+    out.push(geneOf(key, gid, ga?.get('gene_name') ?? ta?.get('gene_name') ?? gid, txs, ga ? biotypeAttr(ga) : undefined,
+      { ...extraOf(gf), type: 'gene', attrs: (gf?.raw ?? txRows.get(`${txs[0].id}\t${txs[0].chrom}`)?.raw)?.slice(0, ATTRS_MAX) }));
   }
   // genes without transcript rows: one exon over the gene
   for (const [gk, { attrs, f }] of geneAttrs) if (!byGene.has(gk)) {
     const gid = gk.slice(0, gk.lastIndexOf('\t'));
     const name = attrs.get('gene_name') ?? gid;
-    out.push(geneOf(`${gid}@${f.chrom}`, gid, name, [{ id: gid, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(attrs) ?? 'gene', canonical: false }]));
+    out.push(geneOf(`${gid}@${f.chrom}`, gid, name, [{ id: gid, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(attrs) ?? 'gene', canonical: false }], undefined, extraOf(f)));
   }
   return out;
 }
@@ -240,7 +283,9 @@ async function parseBed(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]
     const ts = parseInt(c[6]), te = parseInt(c[7]);
     const coding = ts >= s && te > ts && te <= e;
     const key = `${name}@${chrom}:${s}`;
-    out.push(geneOf(key, name, name, [{ id: name, name, chrom, strand, exons, cdsStart: coding ? ts : null, cdsEnd: coding ? te : null, biotype: coding ? 'protein_coding' : 'feature', canonical: false }]));
+    const extra: Extra = { type: 'bed', color: cssColor(c[8]), score: scoreOf(c[4]), unstranded: c[5] !== '+' && c[5] !== '-' || undefined,
+      attrs: c.length > 12 ? c.slice(12).join('\t').slice(0, ATTRS_MAX) : undefined };
+    out.push(geneOf(key, name, name, [{ id: name, name, chrom, strand, exons, cdsStart: coding ? ts : null, cdsEnd: coding ? te : null, biotype: coding ? 'protein_coding' : 'feature', canonical: false }], undefined, extra));
   }
   return out;
 }
@@ -254,6 +299,9 @@ async function parse(format: AnnotationFormat, lines: Lines, info: AnnotationFil
   const chrom = (c: string) => { let o = chroms.get(c); if (o == null) chroms.set(c, o = own(c)); return o; };
   for (const g of genes) {
     g.key = own(g.key); g.id = own(g.id); g.name = own(g.name); g.chrom = chrom(g.chrom); g.biotype = own(g.biotype);
+    if (g.type) g.type = own(g.type);
+    if (g.color) g.color = own(g.color);
+    if (g.attrs) g.attrs = own(g.attrs);
     for (const t of g.txs) { t.id = own(t.id); t.name = own(t.name); t.chrom = chrom(t.chrom); t.biotype = own(t.biotype); }
   }
   return genes;
@@ -538,6 +586,24 @@ export class Annotation {
       }
     }
     return out;
+  }
+
+  /** the file names, in order: one track each */
+  get trackFiles(): string[] { return this.files.map(f => f.info.file); }
+  /** every entity of each file overlapping [start, end) 0-based of a viewer chromosome, file by file (no name merged) */
+  async trackItems(chrom: string, start: number, end: number): Promise<TrackData[]> {
+    const per = await this.genesIn(chrom, start, end);
+    return this.files.map((f, fi) => ({
+      file: f.info.file, format: f.info.format,
+      items: per[fi].map((g): TrackItem => {
+        const picked = pickTx(g).tx;
+        return {
+          key: g.key, name: g.name, type: g.type ?? (f.info.format === 'bed' ? 'bed' : 'gene'), strand: g.unstranded ? 0 : g.strand,
+          start: g.start, end: g.end, color: g.color, score: g.score, attrs: g.attrs, shown: Math.max(0, g.txs.indexOf(picked)),
+          txs: g.txs.map(t => ({ id: t.id, name: t.name, biotype: t.biotype, exons: t.exons.map(e => [e[0], e[1]] as [number, number]), cdsStart: t.cdsStart, cdsEnd: t.cdsEnd })),
+        };
+      }).sort((a, b) => a.start - b.start),
+    }));
   }
 
   /** names starting with the text (then containing it), for the gene box */

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { serializePlotSvg } from './sashimi/svgExport';
 import type { ElsewhereLink, LibraryStrand, LibraryType, StructuralEvidence } from './sashimi/types';
 import { READS_WINDOW_CHOICES_BP, readsWindowOf, type SashimiDataSource } from './sashimi/datasource';
+import type { TrackData as AnnTrackData, TrackItem } from '../standalone/annotation';
 import type { TranscriptData, SampleCoverage, CoverageRun, JunctionArc, BoundarySpanning, BoundaryHint, ReadsResponse, AlignedRead, ReadGroup, VariantSite, AllTranscripts, TranscriptModel, GeneModel, ExonUsageResponse, CommonSnp, GtexTissue, KnownVariant, RegionHint, UnphasedSite, SvArc, DiscordantArc } from './sashimi/types';
 import { findPairEvent, findSvEvent, svMergeTolerance } from '../standalone/svmerge';
 import { Q_COLORS, binomialHalf, readEvidence, siteChecks, worstLevel, type QCheck, type QLevel, type ReadEvidence, type SiteObs } from './sashimi/siteQuality';
@@ -131,6 +132,10 @@ export interface ViewerSettings {
   labelScales?: Record<string, number>;
   /** transcript models removed from the "All transcripts" list by the user, in removal order (undo restores the last) */
   hiddenTranscripts?: string[];
+  /** annotation files (by name) whose track is hidden; absent = every track shown */
+  hiddenAnnTracks?: string[];
+  /** annotation files (by name) whose track shows every transcript on its own row; absent = folded (one row per gene) */
+  expandedAnnTracks?: string[];
   /** long reads (ONT, PacBio): draw mismatches and indels only at called variant sites (default on) */
   consensusMode?: boolean;
   /** no longer used (the long-read minimum indel size was removed: Consensus mode draws indels only at called sites); ignored in old sessions */
@@ -416,6 +421,20 @@ const TRACK_GAP = 10;       // gap between panels (transcript, variants, reads)
 const SASHIMI_GAP = 4;      // gap between consecutive sample tracks, kept small so the samples read as one group
 const TRANSCRIPT_H = 78;
 const NEIGHBOUR_ROW_H = 22;    // one row per neighbouring gene drawn under the queried gene
+/** annotation tracks (one per GFF3 / GTF / BED file): header, rows, rows at most folded / unfolded, widest window read */
+const ANN_HEAD_H = 18, ANN_ROW_H = 18, ANN_MAX_ROWS = 10, ANN_MAX_ROWS_EXPANDED = 40, ANN_MAX_WINDOW = 10_000_000;
+/** colours of entities that are not genes and carry none of their own, by type */
+const ANN_PALETTE = ['#0f766e', '#b45309', '#be185d', '#1d4ed8', '#4d7c0f', '#9333ea'];
+const GENE_LIKE = /^(gene|mRNA|transcript|[a-zA-Z_]*RNA|pseudogene|[a-zA-Z_]*_gene_segment)$/;
+const annTypeColor = (type: string) => { let h = 0; for (let i = 0; i < type.length; i++) h = (h * 31 + type.charCodeAt(i)) >>> 0; return ANN_PALETTE[h % ANN_PALETTE.length]; };
+/** blocks of several transcripts as one sorted list of disjoint intervals */
+const mergeBlocks = (list: [number, number][]): [number, number][] => {
+  const out: [number, number][] = [];
+  for (const e of [...list].sort((a, b) => a[0] - b[0])) { const l = out[out.length - 1]; if (l && e[0] <= l[1]) l[1] = Math.max(l[1], e[1]); else out.push([e[0], e[1]]); }
+  return out;
+};
+/** what one row of an annotation track draws: an entity folded (its transcripts merged), or one of its transcripts */
+interface AnnUnit { item: TrackItem; tx: number | null; start: number; end: number; blocks: [number, number][]; cdsStart: number | null; cdsEnd: number | null; label: string }
 /** DNA samples only: the header line of the gene panel, above the gene rows (the queried gene drawn as one of them) */
 const DNA_TX_HEAD_H = 22;
 const QUERY_GENE_ID = '__queried_gene__';
@@ -1293,6 +1312,8 @@ export default function SashimiViewer({
   }), []);
   /** Transcript models removed from the "All transcripts" list, in removal order; undo restores the last one. */
   const [hiddenTranscripts, setHiddenTranscripts] = useState<string[]>(() => [...(init.hiddenTranscripts ?? [])]);
+  const [hiddenAnnTracks, setHiddenAnnTracks] = useState<string[]>(() => [...(init.hiddenAnnTracks ?? [])]);
+  const [expandedAnnTracks, setExpandedAnnTracks] = useState<string[]>(() => [...(init.expandedAnnTracks ?? [])]);
   const hideTranscript = useCallback((id: string) => setHiddenTranscripts(prev => (prev.includes(id) ? prev : [...prev, id])), []);
   const undoHideTranscript = useCallback(() => setHiddenTranscripts(prev => prev.slice(0, -1)), []);
   /** Arc under the pointer (track:junction), which shows the hide button on its pill. */
@@ -1860,6 +1881,70 @@ export default function SashimiViewer({
   /** DNA samples only: a header line, then the gene rows (the queried gene among them) */
   const transcriptHeadH = dnaOnly && tx ? DNA_TX_HEAD_H : TRANSCRIPT_H;
   const transcriptPanelH = transcriptHeadH + neighbourRows.length * NEIGHBOUR_ROW_H;
+
+  // ---- Annotation tracks: one per annotation file of the page (GFF3 / GTF / BED), every entity of the window ----
+  const annFiles = useMemo(() => ds.annotationTrackFiles?.() ?? [], [ds]);
+  const [annData, setAnnData] = useState<{ chrom: string; start: number; end: number; tracks: AnnTrackData[] } | null>(null);
+  const [annStatus, setAnnStatus] = useState<{ loading?: boolean; error?: string; tooWide?: boolean }>({});
+  const annSeq = useRef(0);
+  const annShown = annFiles.some(f => !hiddenAnnTracks.includes(f));
+  useEffect(() => {
+    if (!annShown || !ds.getAnnotationTracks) return;
+    if (viewEnd - viewStart > ANN_MAX_WINDOW) { setAnnStatus(st => (st.tooWide ? st : { tooWide: true })); return; }
+    if (annData && annData.chrom === currentChrom && annData.start <= viewStart && annData.end >= viewEnd) { setAnnStatus(st => (st.loading || st.error || st.tooWide ? {} : st)); return; }
+    // the window and as much again on each side (panning stays drawn), read once the view settles
+    const seq = ++annSeq.current;
+    const margin = Math.min(viewEnd - viewStart, ANN_MAX_WINDOW / 2);
+    const s0 = Math.max(0, viewStart - margin), e0 = viewEnd + margin;
+    const timer = window.setTimeout(() => {
+      setAnnStatus({ loading: true });
+      ds.getAnnotationTracks!(currentChrom, s0, e0)
+        .then(tracks => { if (seq === annSeq.current) { setAnnData({ chrom: currentChrom, start: s0, end: e0, tracks }); setAnnStatus({}); } })
+        .catch(e => { if (seq === annSeq.current) setAnnStatus({ error: e?.message || String(e) }); });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [annShown, currentChrom, viewStart, viewEnd, annData]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** each track's rows: entities (folded) or transcripts (unfolded) packed left to right with room for their names */
+  const annLayout = useMemo(() => {
+    const plotRight = PLOT_LEFT + plotWidth;
+    const out = new Map<string, { rows: AnnUnit[][]; total: number; dropped: number }>();
+    for (const f of annFiles) {
+      const td = annData?.chrom === currentChrom ? annData.tracks.find(t => t.file === f) : undefined;
+      const expanded = expandedAnnTracks.includes(f);
+      const units: AnnUnit[] = [];
+      let total = 0;
+      for (const it of td?.items ?? []) {
+        if (it.end <= viewStart || it.start >= viewEnd) continue;
+        total++;
+        if (expanded && it.txs.length > 1) {
+          it.txs.forEach((t, i) => units.push({ item: it, tx: i, start: t.exons[0][0], end: t.exons[t.exons.length - 1][1], blocks: t.exons, cdsStart: t.cdsStart, cdsEnd: t.cdsEnd, label: `${it.name} · ${t.name}` }));
+        } else {
+          const t = it.txs[it.shown] ?? it.txs[0];
+          units.push({ item: it, tx: null, start: it.start, end: it.end, blocks: it.txs.length > 1 ? mergeBlocks(it.txs.flatMap(x => x.exons)) : t?.exons ?? [[it.start, it.end]], cdsStart: t?.cdsStart ?? null, cdsEnd: t?.cdsEnd ?? null, label: it.name });
+        }
+      }
+      const maxRows = expanded ? ANN_MAX_ROWS_EXPANDED : ANN_MAX_ROWS;
+      const rows: { items: AnnUnit[]; spans: [number, number][] }[] = [];
+      let dropped = 0;
+      for (const u of units) {
+        const a = scale.x(u.start), b = scale.x(u.end);
+        const left = Math.max(PLOT_LEFT, Math.min(a, b)), right = Math.min(plotRight, Math.max(a, b));
+        const lw = Math.min(u.label.length, 40) * 5.6 + 10;
+        // the name beside the entity (its blocks stay visible), inside it only when neither side has room
+        const span: [number, number] = right + 4 + lw <= plotRight ? [left - 2, right + lw + 6] : left - lw - 4 >= PLOT_LEFT ? [left - lw - 6, right + 2] : [left - 2, right + 2];
+        let row = rows.find(r => r.spans.every(([s0, e0]) => span[1] < s0 || span[0] > e0));
+        if (!row) { if (rows.length >= maxRows) { dropped++; continue; } row = { items: [], spans: [] }; rows.push(row); }
+        row.items.push(u); row.spans.push(span);
+      }
+      out.set(f, { rows: rows.map(r => r.items), total, dropped });
+    }
+    return out;
+  }, [annFiles, annData, currentChrom, viewStart, viewEnd, expandedAnnTracks, scale, plotWidth]);
+  const annPanelH = (f: string) => {
+    if (hiddenAnnTracks.includes(f)) return 0;
+    const L = annLayout.get(f);
+    return ANN_HEAD_H + Math.max(1, L?.rows.length ?? 0) * ANN_ROW_H + (L?.dropped ? 12 : 0) + 4;
+  };
 
   /**
    * Which gene model a junction belongs to. The queried gene is tried first; when it does not
@@ -4189,13 +4274,13 @@ export default function SashimiViewer({
   const seqPanelH = !seqRows ? 0 : seqRows.drawn ? seqRows.aaRowH + seqRows.revRowH + seqRows.seqRowH + 2 : SEQ_NOTE_H;
   const snpPanelH = showSnps ? SNP_PANEL_H : 0;
   /** the annotation panels' heights, by their key in the panel order (0: not shown, no room taken) */
-  const annotH: Record<string, number> = { tx: transcriptPanelH, seq: seqPanelH, known: knownPanelH, snps: snpPanelH, alt: altPanelH };
+  const annotH: Record<string, number> = { tx: transcriptPanelH, seq: seqPanelH, known: knownPanelH, snps: snpPanelH, alt: altPanelH, ...Object.fromEntries(annFiles.map(f => [`ann:${f}`, annPanelH(f)])) };
   /**
    * The panels under the ruler in the order drawn: the stored order (panels dragged by their grips) of those shown, each
    * one it does not name at its default place, after the panel that comes before it by default.
    */
   const orderKeys = useMemo(() => {
-    const def = [...ANNOT_KEYS, ...displayTracks.map(panelKeyOf)];
+    const def = [...ANNOT_KEYS, ...annFiles.map(f => `ann:${f}`), ...displayTracks.map(panelKeyOf)];
     const present = new Set(def);
     const out = panelOrder.filter(k => present.has(k));
     const have = new Set(out);
@@ -4206,7 +4291,7 @@ export default function SashimiViewer({
       out.splice(at, 0, k); have.add(k);
     });
     return out;
-  }, [panelOrder, displayTracks]);
+  }, [panelOrder, displayTracks, annFiles]);
   /**
    * Each sample's colour: by its place among the sample tracks as they are drawn (panels dragged, samples added or made
    * primary included), so that the second track on screen is never orange or yellow (see TRACK_COLORS). Groups and
@@ -4755,7 +4840,7 @@ export default function SashimiViewer({
 
   /** Each panel shown, in its order, with its extent (a sample with its reads track): what the grips move. */
   const panelSpans = orderKeys.map(k => {
-    if (k in annotH) return annotH[k] ? { key: k, top: annotY[k], bottom: annotY[k] + annotH[k], name: ANNOT_NAMES[k] ?? k } : null;
+    if (k in annotH) return annotH[k] ? { key: k, top: annotY[k], bottom: annotY[k] + annotH[k], name: ANNOT_NAMES[k] ?? (k.startsWith('ann:') ? `the track of ${k.slice(4)}` : k) } : null;
     const L = layouts.find(l => panelKeyOf(l.track) === k);
     if (!L) return null;
     const rt = readsPlacements.find(p => p.sid === L.track.sampleId);
@@ -6150,6 +6235,84 @@ export default function SashimiViewer({
   };
 
   /** One row of neighbouring genes: exons (CDS tall, UTR short), a line with chevrons in the gene's own direction, and a name pill. */
+  /** One annotation file's track: a header (file, count, fold / unfold, hide), then its entities, row by row. */
+  const renderAnnTrack = (file: string, yOff: number, fi: number) => {
+    const h = annotH[`ann:${file}`];
+    const L = annLayout.get(file) ?? { rows: [], total: 0, dropped: 0 };
+    const plotRight = PLOT_LEFT + plotWidth;
+    const expanded = expandedAnnTracks.includes(file);
+    const status = annStatus.tooWide ? `zoom in below ${formatBp(ANN_MAX_WINDOW)} to draw its entities`
+      : annStatus.error ? annStatus.error
+      : !(annData && annData.chrom === currentChrom && annData.start <= viewStart && annData.end >= viewEnd) ? 'loading…'
+      : `${L.total.toLocaleString('en-US')} entit${L.total === 1 ? 'y' : 'ies'} in view${L.total ? ' · hover for details, click to zoom to one' : ''}`;
+    const els: JSX.Element[] = [];
+    L.rows.forEach((row, ri) => row.forEach((u, ui) => {
+      const it = u.item, mid = yOff + ANN_HEAD_H + ri * ANN_ROW_H + ANN_ROW_H / 2;
+      const color = it.color ?? (GENE_LIKE.test(it.type) ? (tx && it.strand !== 0 && it.strand !== tx.strand ? ANTISENSE_COLOR : SAME_SENSE_COLOR) : annTypeColor(it.type));
+      const parts: JSX.Element[] = [];
+      const xa0 = scale.x(u.start), xb0 = scale.x(u.end);
+      const left = Math.max(PLOT_LEFT, Math.min(xa0, xb0)), right = Math.min(plotRight, Math.max(xa0, xb0));
+      if (u.blocks.length > 1 && right > left) parts.push(<line key="l" x1={left} y1={mid} x2={right} y2={mid} stroke={color} strokeWidth={1.2} opacity={0.8} />);
+      const toRight = (it.strand > 0) !== reverse;
+      const chevron = (ax: number, stroke: string, k: string) => parts.push(<path key={k} d={toRight ? `M${ax - 2.5},${mid - 3} L${ax + 2.5},${mid} L${ax - 2.5},${mid + 3}` : `M${ax + 2.5},${mid - 3} L${ax - 2.5},${mid} L${ax + 2.5},${mid + 3}`} fill="none" stroke={stroke} strokeWidth={1.2} />);
+      if (it.strand !== 0 && u.blocks.length > 1) for (let ax = left + 22; ax < right - 6; ax += 48) chevron(ax, color, `a${ax}`);
+      const box = (s0: number, e0: number, hh: number, k: string) => {
+        const xa = scale.x(s0), xb = scale.x(e0);
+        const l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+        if (r < l) return;
+        parts.push(<rect key={k} x={l} y={mid - hh / 2} width={Math.max(1, r - l)} height={hh} fill={color} rx={1} />);
+      };
+      u.blocks.forEach(([bs, be], k) => {
+        if (u.cdsStart == null || u.cdsEnd == null) { box(bs, be, 10, `x${k}`); return; }
+        const cs = Math.max(bs, u.cdsStart), ce = Math.min(be, u.cdsEnd);
+        if (ce > cs) box(cs, ce, 12, `c${k}`);
+        if (bs < Math.min(be, u.cdsStart)) box(bs, Math.min(be, u.cdsStart), 6, `u5${k}`);
+        if (Math.max(bs, u.cdsEnd) < be) box(Math.max(bs, u.cdsEnd), be, 6, `u3${k}`);
+      });
+      // one block with a strand (a BED line, a repeat): white chevrons on it
+      if (it.strand !== 0 && u.blocks.length === 1) for (let ax = left + 10; ax < right - 6; ax += 30) chevron(ax, '#fff', `w${ax}`);
+      const name = u.label.length > 40 ? `${u.label.slice(0, 39)}…` : u.label;
+      const lw = name.length * 5.6 + 10;
+      const lx = right + 4 + lw <= plotRight ? right + 4 : left - lw - 4 >= PLOT_LEFT ? left - lw - 4 : Math.max(PLOT_LEFT + 3, Math.min(left, plotRight - lw - 3));
+      const t = u.tx != null ? it.txs[u.tx] : it.txs[it.shown];
+      const nEx = u.blocks.length;
+      const title = `${it.name}${u.tx != null ? ` · ${t.name}` : ''} · ${it.type}${t && t.biotype && t.biotype !== it.type && it.type !== 'bed' ? ` (${t.biotype})` : ''}\n` +
+        `${currentChrom}:${(u.start + 1).toLocaleString('en-US')}-${u.end.toLocaleString('en-US')} · ${formatBp(u.end - u.start)} · ${it.strand > 0 ? '+ strand' : it.strand < 0 ? '− strand' : 'no strand'}${it.score != null ? ` · score ${it.score}` : ''}\n` +
+        (it.txs.length > 1 ? (u.tx != null ? `${nEx} exon${nEx === 1 ? '' : 's'} · one of ${it.txs.length} transcripts` : `${it.txs.length} transcripts, their exons merged (unfold the track for each)`) : nEx > 1 ? `${nEx} exons${u.cdsStart != null ? ' · coding' : ''}` : '') +
+        (it.attrs ? `\n${it.attrs.replace(/;\s*/g, '; ')}` : '') + `\n${file}`;
+      els.push(
+        <g key={`${ri}-${ui}-${it.key}-${u.tx ?? 'f'}`} style={{ cursor: 'zoom-in' }}
+          onClick={e => { e.stopPropagation(); void goToLocus({ chrom: currentChrom, start: u.start + 1, end: u.end }, Math.round((u.end - u.start) * 0.1)); }}>
+          <title>{title}</title>
+          <rect x={Math.min(left, lx) - 2} y={mid - ANN_ROW_H / 2} width={Math.max(right, lx + lw) - Math.min(left, lx) + 4} height={ANN_ROW_H} fill="transparent" />
+          {parts}
+          <rect x={lx} y={mid - 7} width={lw} height={14} rx={3} fill={INK.bg} opacity={0.92} stroke={color} strokeWidth={0.6} />
+          <text x={lx + 5} y={mid + 3.5} fill={color} fontSize={9} fontWeight={700}>{name}</text>
+        </g>,
+      );
+    }));
+    return (
+      <g key={`ann-${file}`} fontFamily={FONT}>
+        <defs><clipPath id={`sashimi-clip-ann-${fi}`}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} /></clipPath></defs>
+        <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
+        <text x={PLOT_LEFT + 8} y={yOff + 13} fontSize={10}>
+          <tspan fill={INK.text} fontWeight={700}>{file}</tspan>
+          <tspan fill={annStatus.error ? UNIQUE_COLOR : INK.muted}>{'  '}{status}</tspan>
+          <tspan fill={INK.muted}>{'  ·  '}</tspan>
+          <tspan fill="#0c625b" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setExpandedAnnTracks(p => (expanded ? p.filter(x => x !== file) : [...p, file])); }}>
+            {expanded ? 'fold' : 'unfold'}<title>{expanded ? 'One row per gene, its transcripts merged' : 'One row per transcript'}</title>
+          </tspan>
+          <tspan fill={INK.muted}>{'  ·  '}</tspan>
+          <tspan fill="#0c625b" fontWeight={600} textDecoration="underline" style={{ cursor: 'pointer' }} onClick={e => { e.stopPropagation(); setHiddenAnnTracks(p => [...p, file]); }}>
+            hide<title>Hide this track (the ⋯ menu shows it again; saved with the session)</title>
+          </tspan>
+        </text>
+        <g clipPath={`url(#sashimi-clip-ann-${fi})`}>{els}</g>
+        {L.dropped > 0 && <text x={PLOT_LEFT + 8} y={yOff + h - 5} fontSize={9} fill={INK.muted}>{`+${L.dropped.toLocaleString('en-US')} more not drawn (${expanded ? ANN_MAX_ROWS_EXPANDED : ANN_MAX_ROWS} rows at most): zoom in${expanded ? ' or fold the track' : ''}`}</text>}
+      </g>
+    );
+  };
+
   const renderNeighbourRow = (row: NeighbourModel[], top: number) => {
     const mid = top + NEIGHBOUR_ROW_H / 2 + 1;
     return row.map(m => {
@@ -6951,14 +7114,14 @@ export default function SashimiViewer({
       equalIntrons, intronWidth, allTranscripts: showAllTx, commonSnps: showSnps, snpMinAf, depthAxis, minMapq,
       reads: showReads, readsAll, readsSample: readsSampleId, collapseReads, minVafPct,
       minJunctionReads: minJunctionCount, minJunctionReadsSet: minReadsSet, minUsagePct, arcLabels: arcLabel, intronRetention: includeRetention,
-      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, clipMarks: showClipMarks, coverageHeight: (coverageAuto ? manualCoverageH.current : coverageH) === COVERAGE_H_DEFAULT ? undefined : coverageAuto ? manualCoverageH.current : coverageH, coverageAuto: coverageAuto || undefined, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, minReadLength: minReadLength ?? undefined, panelOrder: panelOrder.length ? panelOrder : undefined,
+      viewMode, groups: groups.map(g => ({ name: g.name, sampleIds: [...g.sampleIds], color: g.color })), knownVariants: showKnown, hiddenJunctions: hiddenArcs, labelScales, hiddenTranscripts, hiddenAnnTracks: hiddenAnnTracks.length ? hiddenAnnTracks : undefined, expandedAnnTracks: expandedAnnTracks.length ? expandedAnnTracks : undefined, consensusMode, longReadMinVafPct, coverageVariants, rnaVariants, methylation: showMethyl, methylIslands, coverage: showCoverage, pairs: showPairs, haplotypes, phaseSource, readsGroup, clippedBases: showClipped, insertedBases: showInserted, clipMarks: showClipMarks, coverageHeight: (coverageAuto ? manualCoverageH.current : coverageH) === COVERAGE_H_DEFAULT ? undefined : coverageAuto ? manualCoverageH.current : coverageH, coverageAuto: coverageAuto || undefined, readsWindow, secondary: showSecondary, strands: showStrands, readsColor: readsColor === 'none' ? undefined : readsColor, minReadLength: minReadLength ?? undefined, panelOrder: panelOrder.length ? panelOrder : undefined,
       transcriptId: transcript?.model_kind === 'chosen' ? transcript.transcript_id : undefined,
       shownSamples: shownKey ? shownKey.split(',').map(Number) : sampleId > 0 ? [] : undefined,   // none: no file yet
       gene: { name: currentGeneName, id: currentGeneId, chrom: currentChrom, start: currentGeneStart + 1, end: currentGeneEnd },
       view: { chrom: currentChrom, start: viewStart + 1, end: viewEnd },
       mark: locusMark ? { start: locusMark.start + 1, end: locusMark.end } : null,
     });
-  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, showClipMarks, coverageH, coverageAuto, readsWindow, showSecondary, showStrands, readsColor, minReadLength, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
+  }, [equalIntrons, intronWidth, showAllTx, showSnps, snpMinAf, depthAxis, minMapq, showReads, readsAll, readsSampleId, collapseReads, minVafPct, minJunctionCount, minReadsSet, minUsagePct, arcLabel, includeRetention, viewMode, groups, showKnown, hiddenArcs, labelScales, hiddenTranscripts, hiddenAnnTracks, expandedAnnTracks, consensusMode, minIndelBp, longReadMinVafPct, coverageVariants, rnaVariants, showMethyl, methylIslands, showCoverage, showPairs, haplotypes, phaseSource, readsGroup, showClipped, showInserted, showClipMarks, coverageH, coverageAuto, readsWindow, showSecondary, showStrands, readsColor, minReadLength, panelOrder, transcript, currentGeneName, currentGeneId, currentChrom, currentGeneStart, currentGeneEnd, viewStart, viewEnd, locusMark, shownKey, sampleId]);
 
   const t = {
     bg: 'bg-white', text: 'text-gray-900', muted: 'text-gray-500', border: 'border-gray-200',
@@ -7117,6 +7280,11 @@ export default function SashimiViewer({
                 <>
                   {!hideSamplePicker && <MenuItem icon="grid" label="Sample groups…" hint="Create and edit the groups of the pooled view" onClick={() => { close(); setShowGroupsDialog(true); }} />}
                   <MenuItem icon="image" label="Export this view as SVG" hint="Vector, publication-ready" onClick={() => { close(); exportSvg(); }} />
+                  {annFiles.map(f => {
+                    const hidden = hiddenAnnTracks.includes(f);
+                    return <MenuItem key={f} icon="tx" label={`${hidden ? 'Show' : 'Hide'} the track of ${f}`} hint="Every entity of the annotation file in the window"
+                      onClick={() => { close(); setHiddenAnnTracks(p => (hidden ? p.filter(x => x !== f) : [...p, f])); }} />;
+                  })}
                 </>
               )}
             </Popover>
@@ -7466,6 +7634,7 @@ export default function SashimiViewer({
           {knownPanelH > 0 && renderKnown(knownY)}
           {showSnps && renderSnps(snpY)}
           {showAllTx && renderAltTranscripts(altY)}
+          {annFiles.map((f, fi) => (annotH[`ann:${f}`] ? renderAnnTrack(f, annotY[`ann:${f}`] ?? RULER_H, fi) : null))}
           {layouts.map(renderTrack)}
           {readsPlacements.map(p => <g key={`reads-${p.sid}`} transform={`translate(0, ${p.y})`}>{p.rt.el}</g>)}
 

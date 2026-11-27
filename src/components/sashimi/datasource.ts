@@ -1,3 +1,4 @@
+import type { TrackData } from '../../standalone/annotation';
 import type { ClinvarVariant } from './clinvar';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import type { MethylWindow } from '../../standalone/methylation';
@@ -119,6 +120,10 @@ export interface SashimiDataSource {
   getRandomSample(runId: number, excludeId: number): Promise<SampleRef>;
   /** A custom genome's contigs (the locus box reads their names); null on a human build, or before they are read. */
   contigs?(): { name: string; length: number }[] | null;
+  /** The user's annotation files, by name: one track each under the ruler (absent: none). */
+  annotationTrackFiles?(): string[];
+  /** Every entity of each annotation file overlapping a 0-based half-open window, file by file. */
+  getAnnotationTracks?(chrom: string, start: number, end: number): Promise<TrackData[]>;
   /** Gene names of the user's annotation files starting with a typed prefix (the gene box). */
   suggestGenes?(prefix: string, n?: number): string[];
   /** Genes overlapping a 1-based inclusive region with their canonical transcript, `exclude` (name or id) left out. */

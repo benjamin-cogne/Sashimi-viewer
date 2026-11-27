@@ -12,6 +12,7 @@
  * the original files, which the reader can still add. Gene lookups, common SNPs and GTEx go to the network as usual
  * when it is available.
  */
+import type { TrackData } from './annotation';
 import { addSiteHaplotypesFromReads } from './haplotypes';
 import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
@@ -102,6 +103,8 @@ export interface EmbeddedView {
   window: { chrom: string; start: number; end: number };
   /** the reference bases of the window (a custom genome: its FASTA stays with the sender, and no API serves it); version 5 */
   referenceSeq?: { chrom: string; start: number; seq: string };
+  /** each annotation file's entities over the window, for its track (version 5) */
+  annotationTracks?: TrackData[];
   /** minimum MAPQ of the alignments counted (0 = all) */
   minMapq?: number;
   /** secondary alignments counted (the view's Secondary filter on) */
@@ -344,6 +347,26 @@ export class EmbeddedDataSource extends LocalDataSource {
   private viewsOfGene(geneName: string, geneId?: string) {
     const n = geneName.toUpperCase();
     return this.payload.views.filter(v => v.gene.name.toUpperCase() === n || (geneId && v.gene.id === geneId) || v.transcript?.gene_name.toUpperCase() === n);
+  }
+  /** the annotation files of the views, then the reader's own */
+  override annotationTrackFiles(): string[] {
+    const out: string[] = [];
+    for (const v of this.payload.views) for (const t of v.annotationTracks ?? []) if (!out.includes(t.file)) out.push(t.file);
+    for (const f of super.annotationTrackFiles()) if (!out.includes(f)) out.push(f);
+    return out;
+  }
+  /** the entities the views carry (the view holding the window, else every view's overlapping it), then the reader's files */
+  override async getAnnotationTracks(chrom: string, start: number, end: number): Promise<TrackData[]> {
+    const views = this.payload.views.filter(v => v.annotationTracks && sameChrom(v.window.chrom, chrom) && v.window.end > start && v.window.start < end);
+    const holding = views.find(v => v.window.start <= start && v.window.end >= end);
+    const byFile = new Map<string, TrackData>();
+    for (const v of holding ? [holding] : views) for (const t of v.annotationTracks!) {
+      const have = byFile.get(t.file) ?? { file: t.file, format: t.format, items: [] };
+      for (const it of t.items) if (it.end > start && it.start < end && !have.items.some(x => x.key === it.key && x.start === it.start)) have.items.push(it);
+      byFile.set(t.file, have);
+    }
+    for (const t of await super.getAnnotationTracks(chrom, start, end)) if (!byFile.has(t.file)) byFile.set(t.file, t);
+    return [...byFile.values()].map(t => ({ ...t, items: [...t.items].sort((a, b) => a.start - b.start) }));
   }
   /** the contigs of the samples' headers, else those the views stand on (their windows: the page has no header) */
   override async getContigs(): Promise<{ name: string; length: number }[]> {

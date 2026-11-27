@@ -23,7 +23,7 @@ import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
 import type { GenomeBuild, Assembly } from './ensembl';
 import { humanBuild } from './ensembl';
-import type { Annotation } from './annotation';
+import type { Annotation, TrackData } from './annotation';
 import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getClinvar } from './ucsc';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
@@ -415,6 +415,8 @@ export class LocalDataSource implements SashimiDataSource {
     // a human build shows chr-prefixed names whatever the files say; a custom genome the reference's own spelling
     this.annotation.setReferenceNames(human ? null : this.contigNames(), human ? (c => (/^chr/i.test(c) ? c : `chr${c}`)) : undefined);
   }
+  annotationTrackFiles(): string[] { return this.annotation?.trackFiles ?? []; }
+  async getAnnotationTracks(chrom: string, start: number, end: number): Promise<TrackData[]> { return this.annotation ? this.annotation.trackItems(chrom, start, end) : []; }
   /** gene names of the annotation files matching a typed prefix */
   suggestGenes(prefix: string, n?: number): string[] { return this.annotation?.suggest(prefix, n) ?? []; }
   /** the build when it is a human one; else the error of a feature only human builds have */
