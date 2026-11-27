@@ -50,7 +50,12 @@ jobs:
       - name: Create the release and attach the viewer
         env:
           GH_TOKEN: ${{ github.token }}
+        # a release written by hand before the tag's build (its notes) gets the viewer attached, its notes kept
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/sashimi-viewer.html \
-            --title "Sashimi viewer $GITHUB_REF_NAME" \
-            --generate-notes
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/sashimi-viewer.html --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/sashimi-viewer.html \
+              --title "Sashimi viewer $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
