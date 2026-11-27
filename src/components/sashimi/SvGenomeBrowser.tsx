@@ -214,7 +214,7 @@ const store = {
  * defaults each time it opens. The gene panel (PanelApp or a file) is kept across openings.
  */
 const SV_SETTING_KEYS = ['sashimi.svColorBy', 'sashimi.svNear', 'sashimi.svDgv', 'sashimi.svAchro', 'sashimi.svClinvarSv', 'sashimi.svClinvarSnv',
-  'sashimi.svClinvarSvMode', 'sashimi.svClinvarSnvMode', 'sashimi.svGeneFilter', 'sashimi.svDomains',
+  'sashimi.svClinvarSvMode', 'sashimi.svClinvarSvMatch', 'sashimi.svClinvarSnvMode', 'sashimi.svGeneFilter', 'sashimi.svDomains',
   'sashimi.svExtra.panelAppCnv', 'sashimi.svExtra.cghClinGen', 'sashimi.svExtra.cghClinGen.cghPage'];
 export function resetSvBrowserSettings(): void { for (const k of SV_SETTING_KEYS) store.set(k, null); }
 const toPanel = (p: LoadedPanel): GenePanel => ({ source: p.source, id: p.id, name: p.name, version: p.version, genes: new Map(p.genes.map(g => [g.symbol.toUpperCase(), g])) });
@@ -388,6 +388,8 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   const svgUid = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   const sid = (k: string) => `svb-${svgUid}-${k}`;
   const [clinSvForce, setClinSvForce] = useState<'auto' | 'all'>(() => (store.get<string>('sashimi.svClinvarSvMode') === 'all' ? 'all' : 'auto'));
+  /** with an event of losses / gains: the ClinVar SVs matching one of them only (same type, reciprocal overlap ≥ RO_MATCH), or every one */
+  const [clinSvMatchOnly, setClinSvMatchOnly] = useState(() => store.get<boolean>('sashimi.svClinvarSvMatch') ?? true);
   /** ClinVar SNVs summed per gene (by default) or each variant on its own */
   const [clinSnvMode, setClinSnvMode] = useState<'gene' | 'each'>(() => (store.get<string>('sashimi.svClinvarSnvMode') === 'each' ? 'each' : 'gene'));
   /** the genes drawn: in the panel, of some modes of inheritance, under a LOEUF, changed by the SV (kept) */
@@ -1017,7 +1019,10 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   // under the profile; expanded, every SV a bar in lanes
   const clinSvShown = showClinSv && !!loaders.getClinvar;
   const clinMatch = (v: ClinvarVariant) => cnv.some(c => (c.ev.kind === 'loss' ? v.kind === 'loss' : v.kind === 'gain') && clinOverlap(c.ev, v) >= RO_MATCH);
-  const clinSvInView = clinSvShown ? clinSvView.list.filter(v => refX(v.end) >= X0 && refX(v.start) <= X1) : [];
+  // an event with losses or gains: by default only the ClinVar SVs that are the same event (same type, ≥ RO_MATCH reciprocal)
+  const clinSvFiltered = clinSvMatchOnly && cnv.length > 0;
+  const clinSvList = clinSvFiltered ? clinSvView.list.filter(clinMatch) : clinSvView.list;
+  const clinSvInView = clinSvShown ? clinSvList.filter(v => refX(v.end) >= X0 && refX(v.start) <= X1) : [];
   // the most SVs overlapping over one point of the view (at the drawing's resolution)
   const clinSvStack = (() => {
     const n = Math.ceil(PW / CLIN_AGG_BIN), d = new Int32Array(n + 1);
@@ -1045,7 +1050,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
   let clinSvHidden = 0;
   if (clinSvShown) {
     const ends: number[] = [];
-    for (const v of [...(clinSvAll ? clinSvView.list : clinAgg?.matched ?? [])].sort((p, q) => p.start - q.start)) {
+    for (const v of [...(clinSvAll ? clinSvList : clinAgg?.matched ?? [])].sort((p, q) => p.start - q.start)) {
       const a = refX(v.start), b = Math.max(refX(v.end), a + 2);
       if (b < X0 || a > X1) continue;
       let lane = ends.findIndex(e => e + 2 < a);
@@ -1399,8 +1404,13 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
         {yClinSv >= 0 && clinSvInView.length > 0 && clinSvStack > CLIN_SV_STACK_MAX && <text x={14} y={yClinSv + 20} fontSize={9.5} fill={C.accent} style={{ cursor: 'pointer' }}
           onClick={e => { e.stopPropagation(); const v = clinSvForce === 'all' ? 'auto' : 'all'; setClinSvForce(v); store.set('sashimi.svClinvarSvMode', v); }}>
           {clinSvAll ? `▾ summary` : `▸ all SVs (${clinSvInView.length})`}<title>{clinSvAll ? `Sum the SVs up (up to ${clinSvStack} lie over one point): how many cover each point (losses above, gains below), the ones matching the event as bars` : 'Every ClinVar SV in view, one bar each'}</title></text>}
-        {yClinSv >= 0 && clinSvHidden > 0 && <text x={14} y={yClinSv + 32} fontSize={9.5} fill={C.lost}>+{clinSvHidden} SV not drawn<tspan x={14} dy={11}>(zoom in)</tspan><title>{`${clinSvHidden} ClinVar SVs find no free lane among the ${CLIN_SV_MAX_LANES} at their place: zoom in to see them`}</title></text>}
+        {yClinSv >= 0 && clinSvHidden > 0 && <text x={14} y={yClinSv + 20 + (clinSvInView.length > 0 && clinSvStack > CLIN_SV_STACK_MAX ? 12 : 0)} fontSize={9.5} fill={C.lost}>+{clinSvHidden} SV not drawn<tspan x={14} dy={11}>(zoom in)</tspan><title>{`${clinSvHidden} ClinVar SVs find no free lane among the ${CLIN_SV_MAX_LANES} at their place: zoom in to see them`}</title></text>}
         {yClinSv >= 0 && <text x={14} y={yClinSv + 8} fontWeight={600} fill={C.text}>ClinVar SV<title>ClinVar variants of 50 bp or more classified pathogenic or likely pathogenic (UCSC track clinvarCnv)</title></text>}
+        {yClinSv >= 0 && cnv.length > 0 && <text x={14} y={yClinSv + 20 + (clinSvInView.length > 0 && clinSvStack > CLIN_SV_STACK_MAX ? 12 : 0) + (clinSvHidden > 0 ? 23 : 0)} fontSize={9.5} fill={C.accent} style={{ cursor: 'pointer' }}
+          onClick={e => { e.stopPropagation(); const v = !clinSvMatchOnly; setClinSvMatchOnly(v); store.set('sashimi.svClinvarSvMatch', v); }}>
+          {clinSvMatchOnly ? `matching (${clinSvList.length}/${clinSvView.list.length})` : '▸ matching only'}<title>{clinSvMatchOnly
+            ? `Only the ClinVar SVs that are the same event as a loss or gain of the rebuilt chromosome: same type (a loss for a loss, a gain for a gain) and a reciprocal overlap of ${Math.round(RO_MATCH * 100)} % or more (the shared part is at least ${Math.round(RO_MATCH * 100)} % of each). Click to show every pathogenic / likely pathogenic ClinVar SV of the view.`
+            : `Every ClinVar SV of the view. Click to keep only those of the same type with a reciprocal overlap of ${Math.round(RO_MATCH * 100)} % or more with a loss or gain of the event.`}</title></text>}
         {yClinSnv >= 0 && <g fontSize={9} pointerEvents="none">
           <text x={14} y={yClinSnv + 8}><tspan fill={CLIN_EFFECT_COLOR.lof}>● LoF</tspan><tspan fill={C.faint}> · </tspan><tspan fill={CLIN_LOF_ESC}>● NMD escape</tspan></text>
           <text x={14} y={yClinSnv + snvH - 2} fill={CLIN_EFFECT_COLOR.missense}>▼ missense</text></g>}
@@ -1504,7 +1514,7 @@ export default function SvGenomeBrowser({ rec: eventRec, chrom, window: eventWin
             </g>
           );
         })}
-        {yClinSv >= 0 && !clinSvItems.length && !clinAgg && <text x={X0 + 6} y={yClinSv + 8} fontSize={9.5} fill={C.faint}>{span > CLIN_SV_MAX_SPAN ? `zoom in below ${kb(CLIN_SV_MAX_SPAN)} to see the ClinVar SVs` : clinSvView.loading ? 'loading ClinVar…' : clinSvView.error ? `ClinVar unavailable: ${clinSvView.error}` : 'no pathogenic or likely pathogenic ClinVar SV here'}</text>}
+        {yClinSv >= 0 && !clinSvItems.length && !clinAgg && <text x={X0 + 6} y={yClinSv + 8} fontSize={9.5} fill={C.faint}>{span > CLIN_SV_MAX_SPAN ? `zoom in below ${kb(CLIN_SV_MAX_SPAN)} to see the ClinVar SVs` : clinSvView.loading ? 'loading ClinVar…' : clinSvView.error ? `ClinVar unavailable: ${clinSvView.error}` : clinSvFiltered && clinSvView.list.length ? `no ClinVar SV of the same type overlapping a loss or gain by ${Math.round(RO_MATCH * 100)} % or more (${clinSvView.list.length} other${clinSvView.list.length === 1 ? '' : 's'}: click “matching” beside the track name to show them)` : 'no pathogenic or likely pathogenic ClinVar SV here'}</text>}
         {/* ClinVar SNVs, mirrored: ▲ loss of function above the line, ● missense below, ◆ in frame and other on it */}
         {yClinSnv >= 0 && <line x1={X0} x2={X1} y1={yClinSnv + snvH / 2} y2={yClinSnv + snvH / 2} stroke={C.line} strokeWidth={1} />}
         {yClinSnv >= 0 && clinSnvSum && clinSnvSum.bins.map(b => {
