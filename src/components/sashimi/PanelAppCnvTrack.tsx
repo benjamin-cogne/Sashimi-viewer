@@ -207,8 +207,9 @@ export function usePanelAppCnvTrack(build: GenomeBuild): SvExtraTrack {
   }, [build, state, lifts]);
 }
 
-/** The known-CNV tracks of every browser: PanelApp Australia (shown) and ClinGen (a toggle away). */
-export function useCnvRegionTracks(build: GenomeBuild): SvExtraTrack[] {
+/** The known-CNV tracks of every browser: PanelApp Australia (shown) and ClinGen (a toggle away). `clinGenOn`: ClinGen shown
+ * by default too (the array-CGH page), under its own id so that its on / off choice is kept apart from the other browsers' */
+export function useCnvRegionTracks(build: GenomeBuild, { clinGenOn = false }: { clinGenOn?: boolean } = {}): SvExtraTrack[] {
   const panelApp = usePanelAppCnvTrack(build), clinGen = useClinGenTrack(build);
-  return useMemo(() => [panelApp, { ...clinGen, defaultOn: false }], [panelApp, clinGen]);
+  return useMemo(() => [panelApp, clinGenOn ? { ...clinGen, id: `${clinGen.id}.cghPage`, defaultOn: true } : { ...clinGen, defaultOn: false }], [panelApp, clinGen, clinGenOn]);
 }

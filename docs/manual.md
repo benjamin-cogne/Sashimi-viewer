@@ -223,19 +223,60 @@ or stutter, not decided). Categories: FMR1 by ACMG (≤ 44, 45–54, 55–200, >
 36–39, ≥ 40), others by STRchive. Under 20 spanning reads an amber banner warns and reads stopping inside count as
 **lower bounds**: long alleles are spanned less often. Evidence, not a diagnostic call.
 
-**Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down (**← SV browser** or
-Esc to go back; the samples stay while the tab is open). **Examples ▾** (on the empty page and in the frame's bar) adds
+**Array-CGH.** (Implemented by Wallid Deb, CHU Nantes: [wallid.deb@chu-nantes.fr](mailto:wallid.deb@chu-nantes.fr).) The SV browser's **Array-CGH ▸** button opens a page of its own, one level down. Esc
+first clears the view (no call selected, its detail and call window closed, the whole genome folded back to its strip;
+filters, tab, sort and the table's scroll kept). The call window follows the tab: a patient's tab shows that patient's
+last call clicked, or none; *All patients* keeps the call clicked; Esc again, or **← SV browser**, asks *Leave Array-CGH and go back to the
+SV browser?* (**Cancel** focused, Esc = Cancel; it counts the patients with unexported changes). The samples, classes and
+notes stay while the tab is open; export to keep them in a file. An open menu, the quick guide and the import / column
+questions take Esc first; in a search or note field Esc only leaves the field. **Examples ▾** (on the empty page and in the frame's bar) adds
 invented patients through the import question, beside any patient loaded (× on a tab takes one off): EXAMPLE-DEL22Q11
 (22q11.2 LCR22A-D deletion, HIGH), EXAMPLE-PIEV-DUP (1q21.1 distal duplication, AChro-Puce PIEV, MODERATE),
-EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint). **? Quick guide**,
-in the page's bar, is an interactive tour on these examples (added if missing): each of its 15 steps outlines a part of
-the page and explains it, and the tour does the actions itself (loads the examples, Analyse, opens More filters and the
-calls it talks about): only **Next** to click; **Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
+EXAMPLE-DER (terminal 16q24.3 loss breaking inside ANKRD11 and terminal 9p24.3 gain: the der() hint), each with its
+invented probes' log ratios (a `CGH_Log_Ratio.txt` written when loaded: about 60k probes on GRCh37, noise SD 0.15, the
+calls' probes at their mean log ratio; a sex-matched reference: a male's X and Y around 0, no chrY probe for a female; EXAMPLE-DEL22Q11's probes also carry a small 3p14.2 loss the table does not list,
+a probe call *not in the file*), EXAMPLE-PROBES-ONLY, a probe file alone (7q11.23 loss, 15q11.2 gain): a
+probes-only patient, and EXAMPLE-MOSAIC-T12 (a mosaic trisomy 12 as 12p and 12q gains with a nested call: a CNV
+group). *All (five)* adds them together. **? Quick guide**, in the page's bar, is an interactive tour on
+these examples (added if missing). Its 27 steps: input files (interval tables, the automated workflow zip with
+`CGH_Log_Ratio.txt`, other probe tables, the column dialog), the examples, the import question (DLRS, minimums, sex),
+patients' tabs, filters, More filters, priority, why this priority, the browser below, the call's ISCN (copy), the
+call's probe panel, the der() hint, a gene cut, a PIEV CNV, classify and note, the patient's ISCN card (classes, normal
+result by sex), a CNV group, the whole genome (layouts, call bars, probe calls in purple), a chromosome (probes, moving median,
+ideogram, zoom and slider), the log-ratio range buttons and *show probes*, the probe calls (*n not in the file*), the
+probes-only patient (banner, `.probe-calls.txt` export), the lab benign list, retry, export, the ⓘ methods (DLRS,
+detection, disclaimer) and Esc. Each step outlines its target, dims the rest of the page and puts its box beside it,
+never over it, with a pointer toward it; the box slides to its new place rather than jumping, keeps its place while a
+target is redrawn, and goes to the bottom centre only when the target cannot be found. The tour does the actions itself
+(loads the examples, Analyse, opens filters, calls, tabs, the whole genome and a chromosome): only **Next** to click;
+**Back**, ← → as well; the box can be dragged by its title; Esc or *Skip tour* ends it, not the page. **Add samples**, or drop files on the page: interval tables
 exported per sample by Agilent CytoGenomics (`.txt`: `Genome hg19`, `Record Name`, then Chromosome, Start, Stop,
 Cytoband, Gene Name, Size(kb), Type, #Probes, Mean Log Ratio, ISCN, Suppress, Classification; columns found by their
 header), BED files (chrom, start, end, a name saying `del` / `dup`, `loss` / `gain` or `x1` / `x3`), or **zip files**,
-one patient each: the interval tables and BED files inside are read (one nested zip level; other files skipped, a file
-already added is not added twice), the patient named by the table's Record Name, else by the zip. The page then asks the
+one patient each: the interval tables and BED files inside are found by their content and read (one nested zip level; a file
+already added is not added twice), the patient named by the table's Record Name, else by the zip. The other files of an
+automated export (images, XML, QC tables…) are left aside, said in one line of the question (*ignored: n other files*);
+a table whose columns are not recognised is only asked about when the zip holds no table read by itself (its probe file then waits with it and goes to the table once its columns are chosen, also when they are changed later with *columns…*). The probes' log
+ratios (`CGH_Log_Ratio.txt`: `Probe Name`, `ChrName`, `Start`, `Stop`, …, `Normalized log ratio(<sample>)`) are kept in
+memory with the zip's patient (read on first view); dropped alone, the file goes with the loaded
+sample of that name, else it makes a **probes-only** patient (see *Probes only* below).
+**Other probe files.** A probe-level table of another layout works the same way, one patient per log-ratio column. It is
+recognised by its header (tab, `;` or `,`; `#` comments or `key: value` lines before it allowed): a chromosome column
+(`Chr`, `ChrName`, `Chromosome`, `chrom`…), a position (`Position`, `Start`, `pos`…, with `Stop` / `End` if any) and
+log-ratio column(s) (`LogRatio`, `Log2Ratio`, `log2`, `logR`, `LRR`, `Log R Ratio`, `log_ratio`, `value`…), at least
+2,000 rows and no column of a calls table (type, size, number of probes, `num.mark`, `seg.mean`). Agilent
+Feature Extraction-like tables, Illumina final reports (`<sample>.Log R Ratio`), Affymetrix ChAS-like tables (`Log2Ratio`
+taken rather than `WeightedLog2Ratio`), CNVkit `.cnr` and DNAcopy / CBS inputs are read so. The sample is named by its
+column (`S1.Log R Ratio`, `log2(S1)`), else by a `Sample:` line, else by the file name; several columns make several
+patients. Chromosomes 1-22, X, Y with or without `chr`, 23 = X, 24 = Y; MT, XY and others left out; positions read as
+1-based (CNVkit and `chromStart` as 0-based, moved to 1-based: the question says which); empty, NA, NaN, null cells kept
+as missing probes; unsorted rows sorted; the build from a header line naming hg19 / hg38 (else GRCh37, said). A long
+table whose columns are not recognised opens the column dialog, which first asks what the table holds: **Calls** or
+**Probe log ratios (one row per probe)** (chosen first for 2,000 rows or more). In probe mode it asks the chromosome, the
+position or start (end optional), one log-ratio column per sample (each named, its column's name by default), the probe
+name (optional), 0-based positions and the build when the file states none; it reads only the first rows, then the whole
+file is read in the background. The columns are remembered by the header's column names (never a row or a sample name).
+The page then asks the
 **minimum number of probes** (3 by default) and a minimum size: smaller calls, or calls with fewer probes, are not
 analysed, neither listed nor annotated (a BED, without probe counts, is filtered on its size only). The size is set
 with a log-scale slider (*any* at its left end, then 10 kb to 5 Mb) or typed with its unit (bp, kb, Mb; a value outside
@@ -247,11 +288,12 @@ listed (lighter, tagged *1 probe*) and annotated on demand; *− hide them* fold
 each patient's **sex** (read from a `Gender` / `Sex` header line when there is one; changed later in the patient's tab,
 marked ♂ / ♀ on it). A male's chrX and chrY are drawn with one copy.
 
-A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and the type (or copy number, ISCN, log ratio), with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
+A table whose columns are not recognised (a CSV with `;` or `,`, French headers, other names, or no header row: its columns are then named *column 1, 2…*) is not refused: a **column mapping** dialog asks which column is the chromosome, start, end (or the **position in one column**, or an ISCN) and what the call is: a **type**, or one or several **log-ratio** columns (separate gain / loss columns, as Amplification / Gain / Loss / Deletion, each row taking the non-zero one, typed by the column's name when it says gain or loss), or a **copy number** (or an ISCN); the dialog names what is missing. With no type, the type comes from the copy number (below 2 a loss, above a gain; 1 is normal on a male's X outside the pseudo-autosomal regions, the sex read from a `Gender` header line, and on a Y; a chrX row at x1 is kept as a loss and one at x2 as a gain, with or without a sex in the file (said in the import question when there is none), and the one normal for the patient's current sex is not listed, so correcting the sex brings it back; a range, x2~3 or a male's X x1~2, is a gain when it reaches above the normal number, else a loss, never normal), else from the log ratio's sign; a row with neither (log ratio 0 or empty), or with the normal copy number, is skipped and counted in the import question. This is also the way in for interval tables, interval-based reports, BED or VCF files laid out otherwise, with the delimiter, header row and columns guessed from the names and the cells, and a preview; Type values that say neither loss nor gain get a choice (loss / gain / ignore). The choice is remembered in this browser by the header's column names (and the Type words given loss or gain) only, and only when the chosen header row looks like one (mostly words, no numbers or positions: else the dialog says it is not remembered), and **columns…** in the probe question re-opens it for any file. An exported mapped file keeps its delimiter, with Classification and Comment in its own or added columns.
 
 Files read (also inside zips):
 
 - **Text tables** (`.txt`, `.tsv`, `.csv`, a CytoGenomics `.xls` that is text): tab, `;` or `,`; UTF-8 with or without BOM, UTF-16 LE / BE (BOM, or recognised by its NUL bytes), else Windows-1252; CR LF, LF or CR alone; blank lines, trailing delimiters, quoted fields holding delimiters or line breaks.
+- **CytoGenomics interval-based report** (*IntervalBasedReport*, often named `.xls` but tab-separated text; or an `.xlsx`), read without the mapping dialog: `Key: value` header lines (`Genome: hg19` gives GRCh37, `hg38` GRCh38; without a `Genome:` line, another header line naming the build, else GRCh37, said in the import question), the header `AberrationNo, Chr, Cytoband, Start, Stop, #Probes, Amplification, Gain, Loss, Deletion, pval, Gene Names`, then a line holding a sample's name before its calls (several samples possible; else the sample of `Array Design Info`). Each call's log ratio is the non-zero one of the four columns (the largest in absolute value if several), its type the column's (Amplification / Gain: gain; Loss / Deletion: loss), else the sign; the p-value is shown in the call's line above the browser. No copy number is given: no ISCN is written. Exported as it came, with Classification and Comment columns added.
 - **`.xlsx`**: the first worksheet (shared and inline strings, numbers), read as a table; exported as tab-separated text (`.classified.txt`), never as `.xlsx`. An Excel 97-2003 binary `.xls` is refused: save it as `.xlsx`, `.csv` or tab-separated text.
 - **BED**: `chr1`, `1`, `CHR1`, `Chr1`, `23` / `24` for X / Y; a 4th column saying the type (a BED of three columns is refused with that reason).
 - **SV / CNV VCF** (`.vcf`, `.vcf.gz`): SVTYPE DEL / DUP / CNV (or ALT `<DEL>`, `<DUP>`, `<CNn>`) with END or SVLEN; the copy number from the first sample's CN; BND / INV / INS skipped and counted, records the sample does not carry (GT 0/0) skipped; the first sample read (a note when there are more); the build from `##reference` / `##contig`; no probe count, as for a BED. Exported with the class and the note in INFO (`CGH_CLASS`, `CGH_NOTE`, percent-encoded), read back on the next load.
@@ -261,9 +303,11 @@ Files read (also inside zips):
 The calls are listed in one table with **one tab per patient**, and an **All patients** tab with the sample as a column.
 Filters: probes, losses / gains, size, classified or not, suppressed calls, a gene (the file's Gene Name or the RefSeq genes read for the call), a band (`16p11`) or a chromosome;
 order by position or by priority. Each row, on one line: band (a BED's read from the cytogenetic bands), position, size,
-copy number from the ISCN (x0, x1, x3, amp), probes and mean log ratio, then what the call holds, read on the file's
-build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls sideways, the classification and the
-links staying on the right.
+copy number from the ISCN (x0, x1, x3, amp), probes, mean log ratio (*Log R*, with the mosaic estimate), then what the
+call holds, read on the file's build (GRCh37) by the SV browser's own routes. On a narrow screen the table scrolls
+sideways, the classification and the links staying on the right. A column's width is set by dragging the right border
+of its header (all columns then keep fixed widths, longer text cut with …); a double-click on a border goes back to
+automatic widths; the widths are kept in the browser (column names and pixels only).
 
 **Mosaicism.** For a call with a log ratio and a one-copy change (x1 loss, x3 gain; a male's chrX / chrY outside the PARs: x0 / x2), the
 fraction of cells is estimated from the mean log ratio with the AChro-Puce calculator's formulas (<https://acpa-achropuce.com/calcul-du-mosaicisme/>, July 2025): a small amber
@@ -271,11 +315,101 @@ fraction of cells is estimated from the mean log ratio with the AChro-Puce calcu
 estimated fraction. Indicative only (no biological variability); chrX / chrY
 outside the PARs need the sex.
 
+**Copy number from the log ratio.** A call with a log ratio but no copy number (the interval-based report) gets one
+from it: the n whose expected log2(n / 2) is nearest (x0 taken at −2, x1 −1, x3 +0.58, x4 +1; a loss is x0 below −1.5,
+a gain x4 from +0.79; a male's X and a Y: normal 1, so x0 or x2), written as any copy number (*del x1* in the table's
+Type cell, *copies x1* above the browser and in the call's detail, and in the ISCN). A one-copy change carried by fewer
+than 80 % of cells by the AChro-Puce estimate (an autosomal loss above −0.74, a gain below +0.49) is shown *mosaic ~n%*,
+its ISCN with the fraction in brackets; that is the only uncertainty shown.
+
+**ISCN.** Each call's array ISCN follows the array ISCN of ISCN 2024: `arr[GRCh37] 22q11.21(18,894,835_21,505,417)x1`,
+bands from pter to qter (one band written once) at the finest resolution of the build's cytogenetic bands (UCSC, e.g.
+`7q11.23` where the file says `7q11`; the file's band only when the bands cannot be read or the call is not annotated), positions with thousands commas, the copy number (the file's, else from
+the log ratio), a mosaic fraction in brackets (`x1[0.48]`), a whole chromosome as `(21)x3`. It stands on the call's card
+above the browser and in its detail (each with *copy*), and in the row's tooltip; when the file gives its own ISCN and
+it differs (positions, bands, copies, mosaic), the file's is shown beside it, marked *differs*. A patient's tab has a
+**Patient ISCN** line (*copy*): its calls of the chosen classes (*from* P / LP / VUS by default, also PIEV, LB, B; kept in
+the browser) joined by commas, chromosomes 1-22, X, Y then position. It is a small card titled *ISCN — patient*, under the
+filters and above the table, with the line (*copy*), a sentence saying which classes it is built from (chips with full names
+in tooltips) and, when no call of the ticked classes exists, the laboratory's normal result for the patient's sex:
+`arr (1-22,X)x2` (female) or `arr (X,Y)x1,(1-22)x2` (male); with the sex not given, no line (*Set the patient's sex to
+write the normal result*). Nothing in *All patients*. Inheritance (dn, mat, pat) is not written.
+
+**Disclaimer.** Copy numbers are inferred from the log ratio with the thresholds stated. All numbers, calls and
+nomenclature must be checked in the dedicated analysis software; the authors cannot be held responsible for any
+misinterpretation of these data.
+
+**Log ratio (probes).** When the patient's `CGH_Log_Ratio.txt` came with the calls, the call clicked shows, above the
+browser, its probes: one dot per probe of the window (black within ±0.2, red above, green below; NaN left out), the
+log ratio over ±1 by default (small buttons stacked left of the log-ratio axis: ±0.5 / ±1 / ±2, ⊖ further out to ±8,
+⊕ back in: one setting for this panel, the whole genome and the chromosome view, kept in the browser; a probe beyond the range is a small triangle at the edge;
+the colours stay at ±0.2) with guide lines and the ±0.2 thresholds dashed, a moving median over 3, 7 or 15
+probes (dark blue), the call shaded with its mean log ratio (the file's; the probes' mean is written beside, over the
+probes whose midpoint lies within the call, ends included: the file's number of probes). *show probes* off hides the
+dots and keeps the median line, segments, call shading and bars (one setting for the three views, kept in the browser). The window
+opens centred on the call with half its size on each side (at least 100 kb), as does the browser below, both centred
+again at each call clicked; its own buttons (⊖ ⊕ ← →, a slider along the chromosome, a drag of the plot, Ctrl / ⌘ +
+wheel to zoom, *whole chromosome*, *call*: back to that view) are not synced with the browser's. Hovering a dot gives the probe's name, position and log ratio; hovering the call's shading away from the
+dots, the call's characteristics (sample, position, size, type, probes, mean log ratio, copies, class, priority; *from
+probes* for a probe call). The **DLRS** (derivative
+log ratio spread: the standard deviation of the differences between consecutive probes, divided by √2) is given per
+patient in the import question and beside the call (Agilent guidance: below 0.2 excellent, 0.2 to 0.3 good, above 0.3
+poor). The probe file is read on first use, off the page in a background worker (61,000 probes: about a tenth of a second; *reading…* in the import question meanwhile).
+
+**Probe calls.** A second opinion beside the file's calls, for each patient with probes: copy-number events detected
+from the probes themselves, by circular binary segmentation (Olshen et al., *Biostatistics* 2004) with a fixed
+threshold instead of permutations (about half a second for 61,000 probes, in a background worker: the page stays usable; a chromosome of more than 10,000 probes, as on 180k or 1M arrays, is searched first between blocks then exactly around the best one, at its ends and over every arc of up to two blocks, so a short event inside a block is still found and a 1M-probe array takes seconds, not hours; if the probe calls fail, *probe calls failed* and the reason are shown on the patient's *Probe calls* line). A segment is an event
+when it holds at least 3 probes and its mean log ratio is at least ±0.25; adjacent segments of one direction are merged
+(a lone stray probe does not cut a gain in two). chrY is read only for a patient said male (its PAR probes are the chrX
+ones; the PARs of the file's build, GRCh37 or GRCh38). Under the filters, *Probe calls* gives per patient *▸ n not in the file*: the events no file call matches (same
+type, reciprocal overlap ≥ 50 %), listed in grey italics *from probes* with position, size, probes, mean log ratio and
+the copies estimated from it; a click draws one like a call (probe panel and browser). The file's calls carry no mark
+(they are made from the same probes). *settings ▾* changes the fewest probes, the |log ratio| and the sensitivity (high / normal /
+low: the segmentation threshold 6 / 8 / 10), kept in the browser. The segments are the thin purple line of the probe
+panel. Probe calls are never exported: a call worth keeping is made in CytoGenomics.
+
+**Probes only.** A `CGH_Log_Ratio.txt` (or another probe file, above) added with no loaded patient of its name (alone, or in a zip without a call table)
+makes a patient of its own, named from its `Normalized log ratio(<name>)` header (else the file name), on the build of
+its AMADID line (hg19 / hg38). Its calls are its probe calls with the current settings, recomputed when the settings or
+the sex change (a class or a note stays on a call whose position is unchanged); they are the patient's table rows, with
+*Probes*, *Log R* (the segment's mean), copies from the log ratio (mosaic tag), the band from the UCSC bands, then the
+usual annotation, priority, ISCN, classification, note, filters, series, whole genome and probe panel. The question
+shows the patient *probes only*, with its sex, the detection *settings* and the DLRS; its tab carries a *probes only*
+tag and a banner: *Calls detected from the probes by this page (CBS), not by CytoGenomics: to confirm in the dedicated
+software.* Its export is a new tab-separated file, `<name>.probe-calls.txt`: header lines (source probe file, build,
+detection settings, date), then Chromosome, Start, Stop, Cytoband, Size(kb), Type, #Probes, Mean Log Ratio, Copies,
+ISCN, Classification, Comment; the UCSC bands are read for every call before writing (a header line counts the rows left without one). A table of the same patient added later takes its probes and replaces the probes-only
+patient when its question is accepted: the question says so, and that the classes and notes given to the probe calls are
+not carried over (Cancel to export them first).
+
+**Whole genome.** Under the table, where the call's window stands, the *Whole genome* panel shows one patient (the tab's;
+in *All patients* a patient list in the panel): chromosomes 1-22, X, Y, sizes from their GRCh37 lengths, every probe
+drawn as one mark per pixel cell (same colours as the probe panel, the log-ratio range of the probe panel, a probe beyond
+it a triangle at the edge), the median of each pixel line as a dark blue line (the only line drawn when *show probes* is off; in *vertical*, the range
+buttons stand at the foot of the first column, by the log-ratio axis), the patient's calls listed by the filters
+(loss red, gain blue) and its probe calls (purple) as bars. *horizontal*: the chromosomes side by side, the bars above.
+*vertical* (as CytoGenomics' genome view): one column per chromosome, position going down from pter, heights from the
+lengths, log ratio across (−range left, + right), the bars beside each column; one row, or two when the panel is narrower
+than 1,000 px; the layout is kept in the browser. A male's X and Y lie near −1: not normalised. A click on a call bar opens the call; on a chromosome elsewhere
+opens it in the panel, always horizontal and drawn as the call's probe panel is (the same code: every probe as a dot, the
+moving median of 3 / 7 / 15 probes (3 by default, one setting for every probe plot), the probe-call segments, ⊖ ⊕ ← →, slider, drag, Ctrl / ⌘ + wheel), with the call bars above
+the plot and the chromosome's **ideogram** under it (the SV browser's bands and colours, band names where they fit, the
+centromere marked *cen*, the window boxed: a click or a drag on it moves the window; the call's probe panel has one too);
+← → beside the name for the neighbours, *whole genome* back; a click on a call bar opens the call as its row
+does. Hovering gives a probe's name, position and log ratio, or a call's characteristics. A patient
+without a probe file (an interval table, a BED, a VCF, the examples) gets a short panel instead: its listed calls as
+bars over the chromosomes drawn to scale, a click on a bar opening the call; no log-ratio axis, range or layout, no
+chromosome view. Without a probe file there is also no probe panel, no *Probe calls* line and no DLRS; a table column the
+files leave empty (*Probes*, *Log R* for a BED) and the minimum of probes, when no file gives a count, are not shown. Once a call is opened the panel folds to a strip *▸ Whole genome — patient*;
+opened again, it folds the call's window into a strip *▸ Call — …* in turn (one of the two at a time). The page's ⓘ panel
+describes the methods (DLRS, probe calls, copy number, mosaic, ISCN, this view, the disclaimer) under *Methods*,
+saying, when no probe file is loaded, that the probe methods do not apply.
+
 **Series.** With several patients loaded, the *Series* column counts, for each call, the **other** patients having a call of the same type on the same
 chromosome with a reciprocal overlap of at least 70 % (every call of every patient counts, whatever the tab and the minimums): *2/3* = 2 of the 3 other
 patients; the tooltip and the call's detail name them with their overlap. The *series* filter (in *More filters*) compares that number of other patients
 to a value: *any*, *=*, *≥*, *≤*, *>*, *<* and a number (*= 0*: in no other patient; *≥ 2*: in at least 2 others). Not written to the export.
-A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26A0657 loaded twice (file A, file B)*).
+A sample name loaded twice (trimmed, any case) is one patient: never its own recurrence, and the import question says so (*26X0001 loaded twice (file A, file B)*).
 
 - **AChro-Puce**: the recurrent CNVs of the network's sheets matched as in the SV browser (their GRCh37 coordinates, or
   their critical genes); a region the sheets place by its gene only (2p16.3, NRXN1) is matched when the call takes exons
@@ -307,6 +441,20 @@ A sample name loaded twice (trimmed, any case) is one patient: never its own rec
   AD, AR, AD/AR, XLR, XLD), then amber, then red (counted).
 - **Dosage**: the ClinGen haploinsufficiency (losses) or triplosensitivity (gains) scores of 3 and 2, and the lowest
   gnomAD LOEUF (v2.1.1 on GRCh37).
+- **CNV groups**: when several calls of one patient, all losses or all gains, together cover a whole chromosome arm or
+  a whole chromosome (≥ 90 % of the arm's probes when the patient has a probe file; without one, ≥ 90 % of the arm's
+  length outside the centromere, heterochromatin (`gvar`), stalks, the acrocentric p arms and the PARs; small gaps between calls tolerated), they are shown as one outlined block: a summary row (the span,
+  the probes and the mean log ratio weighted by probes, calls nested inside a larger one listed but not counted twice,
+  the copies and mosaic fraction, the arms covered, the ISCN such as `arr[GRCh37] (8)x3[0.29]` or an arm by its
+  bands) with a **suggestion** in words (*trisomy 8*, *mosaic trisomy 8 (~29 %)*, *partial monosomy 4p*; on X and Y
+  read against the sex given, a sex mismatch with the reference named: a female's whole-X loss near −0.9 reads
+  *monosomy X (45,X) — or a sex mismatch*, a male's whole-X gain *XXY?*; a male's whole-X loss near −0.9, or his Y far
+  above 0, is what a normal male gives against a female reference: the group and its calls then show *x1 = normal male
+  (female reference?)*, a *female ref.?* tag, no mosaic fraction and no ISCN, since those assume a sex-matched reference), then its calls as usual rows. The group has
+  its own class and note (**→ calls** gives the class to its calls); a classified group replaces its calls in the
+  patient's ISCN. **ungroup** splits it back for this session (**group** restores it). Sorting and filters keep its
+  calls together; it is shown when one of them passes. The whole genome outlines its bars. The export adds a column
+  *CNV group (Sashimi viewer)* to each call of a group (VCF: INFO `CGH_GROUP`). A suggestion, never a class.
 - **Priority**, a proposal for the order of review, not a class: **HIGH**, **MODERATE**, **LOW** or *none*, the highest
   level among the rules the call meets (listed under the table and in `src/components/sashimi/cghScore.ts`). Losses:
   HIGH for exons of a gene with a ClinGen HI score of 3 (the whole gene, its 5′ coding end, or coding exons beyond the
@@ -343,16 +491,18 @@ clinGenHaplo / clinGenTriplo and the ClinGen FTP BED files, read 2026-11-20): no
 the dosage regions live. A gain is drawn as a
 tandem duplication (the array gives the copy number, not where the extra copy lies), a loss of both copies (x0) as
 homozygous; the call is shaded through the tracks, its breakpoints in bold, and the card above the browser gives its
-array ISCN on one line (the file's; written from the band and the copy number when the file gives both but no ISCN,
-else the positions alone: no copy number is assumed). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
+array ISCN on one line (see *ISCN* above; the positions alone when there is no band). Each row has its **classification**, from one list: Benign, Likely benign, Uncertain
 significance, Likely pathogenic, Pathogenic, PIEV, Male Reference, Female Reference, NS (non significant: recurring
 technical artifact / atypical log ratio); a class already written in the file is read into that list when its words are
 recognised (*probablement pathogène*, *bénin*, *non significatif*, *témoin féminin*…). The **✎** of a row opens a
 **note** on the call. Each row also links to the call's **CNV-Hub** page
 (`cnvhub.net/CNV/Result/hg19-chr1-72523846-72667555-loss`, Dijon University Hospital's platform; hg19 only, the address
 carries the call's position and type). Classes and notes are kept in the tab only: **Export classified table** writes
-each file of the tab back unchanged but for its Classification column and a Comment column holding the notes (added
-after the last column when the table has none; a BED gets both as two last columns); the button is marked • while
+each file of the tab back unchanged but for its Classification column (a class the file already had and left as it is
+is written as it was, not in the list's words; mixed line endings kept) and a Comment column holding the notes (added
+after the last column when the table has none; a BED gets them and the ISCN as three last columns), plus an ISCN column,
+named *ISCN (Sashimi viewer)*, when the file has none (a CytoGenomics interval table keeps its own; a VCF: INFO `CGH_ISCN`; read
+back, that column is not taken for the file's own ISCN and is rewritten at the next export); the button is marked • while
 the patients listed have classes or notes not exported, and closing the tab with any not exported asks first.
 With several files in the tab, the button opens a list: one **export** per file (one download, its patients marked exported) and **export all**, one file after another a moment apart, each marked as its download starts (the browser may ask to allow several downloads).
 

@@ -7,6 +7,19 @@ import type { GenomeBuild } from '../../standalone/ensembl';
 
 export const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
 
+/** a header cell naming a log-ratio column: the sample it names ('' for none), else null */
+export function lrColumnSample(h: string): string | null {
+  const t = h.trim().replace(/^"|"$/g, '');
+  const pre = t.match(/^(?:normali[sz]ed\s*)?(?:log\s*r\s*ratio|log\s*2?\s*[-_]?\s*ratio|log2|lrr)\s*[([]\s*(.+?)\s*[)\]]$/i);
+  if (pre) return pre[1];
+  if (/^(lr|value|log2\s*copy\s*ratio)$/i.test(t)) return '';
+  const suf = t.match(/^(.*?)[\s._:|-]*(log\s*r\s*ratio|weighted\s*log\s*2\s*ratio|log\s*2?\s*[-_]?\s*ratio|log\s*2\s*r|log2|logr|lrr|l2r)$/i);
+  if (!suf) return null;
+  return /^(normali[sz]ed|mean|smoothed|weighted|raw|cn|probe|segmented|seg)?$/i.test(suf[1].trim()) ? '' : suf[1].trim();
+}
+/** a header cell with the sample it names left out (`Normalized log ratio(S1)` → `Normalized log ratio()`): a remembered header holds no sample name */
+const maskSample = (cell: string) => { const x = lrColumnSample(cell); return x ? cell.replace(x, '') : cell; };
+
 export type Field = 'chrom' | 'start' | 'stop' | 'pos' | 'band' | 'genes' | 'size' | 'type' | 'copies' | 'probes' | 'lr' | 'iscn' | 'sup' | 'cls' | 'note' | 'sample';
 /** the column index of each field, -1 when the table has none */
 export type ColMap = Record<Field, number>;
@@ -27,7 +40,9 @@ export interface MapOpts {
   /** a Type value neither recognised nor in typeMap is ignored (the mapping dialog's default), else read from the copy number / log ratio */
   ignoreOtherTypes?: boolean;
 }
-export interface MapSpec { cols: ColMap; opts: MapOpts }
+/** `lrMore`: further log-ratio columns (gain / loss ones, as Amplification / Gain / Loss / Deletion), merged with `lr`: the
+ * non-zero value; absent in mappings saved before it */
+export interface MapSpec { cols: ColMap; opts: MapOpts; lrMore?: number[] }
 /** thrown by the automatic reading when a table looks delimited but its columns are not recognised */
 export class NeedsMapping extends Error {}
 
@@ -163,8 +178,15 @@ const SYN: Record<Field, string[]> = {
  * The columns by their names, loosely (English and French synonyms, then a name beginning with one), then by their
  * cells (`rows`: a region in one cell, an ISCN, a chromosome followed by two positions, a type); one column, one field.
  */
+/** the name of the ISCN column added by this page at export (read back, it is not the file's own ISCN) */
+export const OWN_ISCN_HEADER = 'ISCN (Sashimi viewer)';
+export const isOwnIscnHeader = (h: string) => /^\s*iscn\s*\(\s*sashimi viewer\s*\)\s*$/i.test(h);
+/** the CNV group column added at export (cghGroups.ts): never guessed, rewritten at the next export */
+export const OWN_GROUP_HEADER = 'CNV group (Sashimi viewer)';
+export const isOwnGroupHeader = (h: string) => /^\s*cnv group\s*\(\s*sashimi viewer\s*\)\s*$/i.test(h);
 export function guessCols(header: string[], rows: string[][] = []): ColMap {
-  const h = header.map(norm), cols = noCols(), used = new Set<number>();
+  // the ISCN column this page added at an export is not the file's own: never guessed (it is rewritten at the next export)
+  const h = header.map(norm), cols = noCols(), used = new Set<number>(header.flatMap((x, j) => (isOwnIscnHeader(x) || isOwnGroupHeader(x) ? [j] : [])));
   for (const pass of [0, 1]) for (const f of FIELDS) {
     if (cols[f] >= 0) continue;
     for (const s of SYN[f]) {
@@ -191,6 +213,22 @@ export function guessCols(header: string[], rows: string[][] = []): ColMap {
     if (j != null) take('type', j);
   }
   return cols;
+}
+/** log-ratio columns besides `cols.lr`: unused columns holding numbers, named like one (log, lr, ratio), or named gain, loss,
+ * amplification, deletion with values within ±5; the first goes to `cols.lr` when it has none */
+export function guessLrMore(header: string[], rows: string[][], cols: ColMap): { cols: ColMap; lrMore: number[] } {
+  const used = new Set(FIELDS.map(f => cols[f]).filter(i => i >= 0)), more: number[] = [], sample = rows.slice(0, 30);
+  const numeric = (j: number) => { const v = sample.map(r => (r[j] ?? '').trim()).filter(Boolean); return v.length > 0 && v.filter(isNum).length / v.length >= 0.8; };
+  header.forEach((h, j) => {
+    const n = norm(h);
+    // a name saying log ratio is enough; one saying only gain / loss (a count, a size?) needs values a log ratio can take (|v| ≤ 5)
+    const lrName = /log|^l2r|^lr|ratio/.test(n);
+    if (used.has(j) || !(lrName || /^(amplification|gain|loss|deletion|dup|del)/.test(n)) || !numeric(j)) return;
+    if (lrName || sample.every(r => { const v = parseNum(r[j]); return v == null || Math.abs(v) <= 5; })) more.push(j);
+  });
+  const c = { ...cols };
+  if (c.lr < 0 && more.length) c.lr = more.shift()!;
+  return { cols: c, lrMore: more };
 }
 /** the columns of an interval table as the software exports it: by exact name (the header already normalised) */
 export function autoCols(head: string[]): ColMap {
@@ -225,12 +263,14 @@ const MAPS_KEY = 'sashimi.cghColumnMaps';
 const MAPS_MAX = 20;
 interface Stored { sig: string; spec: MapSpec }
 const loadMaps = (): Stored[] => { try { const v = JSON.parse(localStorage.getItem(MAPS_KEY) ?? '[]'); return Array.isArray(v) ? v : []; } catch { return []; } };
-const sigOf = (cells: string[]) => cells.map(norm).join('|');
+const sigOf = (cells: string[]) => cells.map(c => norm(maskSample(c))).join('|');
+/** the signature stored before sample names were masked (still recognised; replaced when the mapping is saved again) */
+const legacySig = (cells: string[]) => cells.map(norm).join('|');
 export function rememberMap(header: string[], spec: MapSpec) {
   // a data row taken for the header would store a patient's values, and match nothing anyway
   if (header.filter(h => h.trim()).length < 3 || !looksLikeHeader(header)) return;
-  const sig = sigOf(header);
-  try { localStorage.setItem(MAPS_KEY, JSON.stringify([{ sig, spec }, ...loadMaps().filter(m => m.sig !== sig)].slice(0, MAPS_MAX))); } catch { /* storage blocked */ }
+  const sig = sigOf(header), old = legacySig(header);
+  try { localStorage.setItem(MAPS_KEY, JSON.stringify([{ sig, spec }, ...loadMaps().filter(m => m.sig !== sig && m.sig !== old)].slice(0, MAPS_MAX))); } catch { /* storage blocked */ }
 }
 /** the mapping remembered for a header found in the first lines (its line given), else null */
 export function findMap(lines: string[]): { spec: MapSpec; row: number } | null {
@@ -239,7 +279,9 @@ export function findMap(lines: string[]): { spec: MapSpec; row: number } | null 
   for (const m of maps) {
     if (!m?.spec?.opts?.delim) continue;
     for (let i = 0; i < Math.min(lines.length, 40); i++) {
-      if (lines[i].includes(m.spec.opts.delim) && sigOf(splitDelimited(lines[i], m.spec.opts.delim)) === m.sig) return { spec: m.spec, row: i };
+      if (!lines[i].includes(m.spec.opts.delim)) continue;
+      const c = splitDelimited(lines[i], m.spec.opts.delim);
+      if (sigOf(c) === m.sig || legacySig(c) === m.sig) return { spec: m.spec, row: i };
     }
   }
   return null;

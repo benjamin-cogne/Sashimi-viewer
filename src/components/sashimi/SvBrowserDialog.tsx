@@ -197,16 +197,33 @@ export default function SvBrowserDialog({ build: sessionBuild, loaders: sessionL
   };
 
   useEffect(() => {
+    // whether a menu of the array-CGH page was open when Esc was pressed (seen before the menu closes itself), or a field typed in
+    let cghMenu = false, cghField: HTMLElement | null = null;
+    const onCapture = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      cghMenu = !!document.querySelector('[data-cgh-page] [aria-haspopup][aria-expanded="true"]');
+      const t = e.target as HTMLElement | null;
+      cghField = t?.closest?.('[data-cgh-page]') && (t.tagName === 'TEXTAREA' || t.isContentEditable
+        || (t.tagName === 'INPUT' && !/^(checkbox|radio|file|range|button|submit|reset|color)$/i.test((t as HTMLInputElement).type))) ? t : null;
+      // left here: some fields (the note, the minimum size) keep their keys from the page
+      const g = cgh.get();
+      if (cghField && g.open && !g.pending && !g.toMap.length && !g.help && !g.leaving) cghField.blur();
+    };
     const onKey = (e: KeyboardEvent) => {
       // Esc goes up one level: the array-CGH questions (they answer it themselves), the array-CGH page, then this page
       if (e.key !== 'Escape') return;
       const g = cgh.get();
-      if (g.pending || g.toMap.length || g.help) return;
-      if (g.open) { cgh.setOpen(false); return; }
+      if (g.pending || g.toMap.length || g.help || g.leaving) return;
+      // a menu open on the array-CGH page closes itself first (its own Esc), the page stays
+      if (g.open && cghMenu) return;
+      // a field typed in on the page (search, note): Esc leaves the field only
+      if (g.open && cghField) return;
+      // the page: its view cleared first (no call, the whole genome folded), then the question to leave it
+      if (g.open) { cgh.escape(); return; }
       close();
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onCapture, true); window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onCapture, true); window.removeEventListener('keydown', onKey); };
   }, [onClose, build]); // eslint-disable-line react-hooks/exhaustive-deps
   // a link's search runs once, at the start
   useEffect(() => { if (initial?.text.trim()) void draw(initial.text, build); }, []); // eslint-disable-line react-hooks/exhaustive-deps
