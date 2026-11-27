@@ -47,7 +47,7 @@ export interface SessionFile {
   knownVariants?: { text: string; label: string }[];
 }
 /** An annotation file, by name (and path in the run folder) and size. */
-export interface SessionAnnotation { file: string; size: number; path?: string }
+export interface SessionAnnotation { file: string; size: number; path?: string; /** its tabix index (.tbi / .csi) */ index?: string; indexPath?: string }
 /** One registered view: the region and the full set of options it was left with. */
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
 
@@ -65,7 +65,7 @@ export function buildSession(args: {
   folder?: string | null;
   samples: SampleLike[];
   fasta?: { fa: Named; fai: Named; gzi?: Named; path?: string; indexPath?: string; gziPath?: string };
-  annotations?: { file: Named; path?: string }[];
+  annotations?: { file: Named; path?: string; index?: Named; indexPath?: string }[];
   /** the viewer's latest state (gene, window, options); null when no gene is open */
   state: ViewerState | null;
   /** every registered view with its own state (the active one included) */
@@ -95,7 +95,7 @@ export function buildSession(args: {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
     samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
     fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name, path: fasta.path, indexPath: fasta.indexPath, gziPath: fasta.gziPath, size: fasta.fa.size } : null,
-    annotations: args.annotations?.length ? args.annotations.map(a => ({ file: a.file.name, size: a.file.size ?? 0, path: a.path })) : undefined,
+    annotations: args.annotations?.length ? args.annotations.map(a => ({ file: a.file.name, size: a.file.size ?? 0, path: a.path, index: a.index?.name, indexPath: a.indexPath })) : undefined,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
     views: views && views.length ? views : undefined,
@@ -147,7 +147,7 @@ export function parseSession(text: string): SessionFile {
     ? raw.knownVariants.filter((k: any) => k && typeof k.text === 'string' && k.text.trim()).map((k: any) => ({ text: String(k.text), label: typeof k.label === 'string' ? k.label : '' }))
     : undefined;
   return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null,
-    annotations: Array.isArray(raw.annotations) ? raw.annotations.filter((a: any) => a && typeof a.file === 'string').map((a: any) => ({ file: String(a.file), size: Number(a.size) || 0, path: typeof a.path === 'string' ? a.path : undefined })) : undefined,
+    annotations: Array.isArray(raw.annotations) ? raw.annotations.filter((a: any) => a && typeof a.file === 'string').map((a: any) => ({ file: String(a.file), size: Number(a.size) || 0, path: typeof a.path === 'string' ? a.path : undefined, index: typeof a.index === 'string' ? a.index : undefined, indexPath: typeof a.indexPath === 'string' ? a.indexPath : undefined })) : undefined,
     gene, viewer, views: views?.length ? views : undefined, activeView, knownVariants: knownVariants?.length ? knownVariants : undefined };
 }
 

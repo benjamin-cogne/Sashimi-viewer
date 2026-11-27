@@ -20,7 +20,8 @@ import { exportedCall, thresholdAt, type MethylWindow } from './methylation';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeMethyl, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2, type EmbeddedPhase, type EncodedMethyl } from './embedded';
 import { isHumanBuild, humanBuild, type GenomeBuild, type Assembly } from './ensembl';
-import { ANNOTATION_EXT, loadAnnotation, type AnnotationFileInfo } from './annotation';
+import { ANNOTATION_EXT, ANNOTATION_INDEX_EXT, loadAnnotation, type AnnotationFileInfo } from './annotation';
+import { scanNamesInWorker } from './annotationWorkerClient';
 import { assemblyOfHeader } from './assembly';
 import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
@@ -145,7 +146,11 @@ const sameSample = (a: { file: File; index: File; path?: string }, b: { file: Fi
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
 /** A reference FASTA with its index (and the .gzi of a bgzipped one), and their paths in the run folder when known. */
 type FastaFiles = { fa: File; fai: File; gzi?: File; path?: string; indexPath?: string; gziPath?: string };
-function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: FastaFiles; fastaMissing?: string; annotations: PathedFile[] } {
+/** An annotation file (gene models) and its tabix index when given with it, with their run-folder paths. */
+type AnnotFiles = { file: File; path?: string; index?: File; indexPath?: string };
+/** a bgzipped annotation file larger than this, given without its index, gets a note on indexing it */
+const ANNOT_INDEX_HINT_BYTES = 30 * 1024 * 1024;
+function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: FastaFiles; fastaMissing?: string; annotations: AnnotFiles[]; annotationIndexes: PathedFile[] } {
   const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
   const dirOf = (x: PathedFile) => (x.path ? x.path.slice(0, x.path.lastIndexOf('/') + 1) : '');
   const byKey = new Map(items.map(x => [`${dirOf(x)}|${x.file.name.toLowerCase()}`, x]));
@@ -186,8 +191,13 @@ function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unm
   if (ok) fasta = { fa: ok.x.file, fai: ok.fai!.file, gzi: ok.gzi?.file, path: ok.x.path, indexPath: ok.fai!.path, gziPath: ok.gzi?.path };
   else if (fas.length) fastaMissing = fas[0].x.file.name;
   // annotation files (gene models): GFF3, GTF, BED, plain or gzipped; a registered file kind keeps its own extensions
-  const annotations = items.filter(x => ANNOTATION_EXT.test(x.file.name) && !fileKindOf(x.file.name));
-  return { samples, unmatched, fasta, fastaMissing, annotations };
+  // with its tabix index (x.gtf.gz.tbi or .csi) in its folder: read by region
+  const annotations = items.filter(x => ANNOTATION_EXT.test(x.file.name) && !fileKindOf(x.file.name)).map((x): AnnotFiles => {
+    const idx = /\.gz$/i.test(x.file.name) ? lookupIn(dirOf(x), `${x.file.name}.tbi`) ?? lookupIn(dirOf(x), `${x.file.name}.csi`) : undefined;
+    return { file: x.file, path: x.path, index: idx?.file, indexPath: idx?.path };
+  });
+  const annotationIndexes = items.filter(x => ANNOTATION_INDEX_EXT.test(x.file.name));
+  return { samples, unmatched, fasta, fastaMissing, annotations, annotationIndexes };
 }
 
 /** The project mark (docs/logo): three exons, canonical arcs, and a dashed red arc skipping the middle exon. */
@@ -223,7 +233,7 @@ function App() {
   const fastaRef = useRef(fasta);
   fastaRef.current = fasta;
   /** annotation files giving the gene models (GFF3, GTF, BED), in order, what each held, and whether they are being read */
-  const [annotations, setAnnotations] = useState<{ file: File; path?: string }[]>([]);
+  const [annotations, setAnnotations] = useState<AnnotFiles[]>([]);
   const annotationsRef = useRef(annotations);
   const [annotInfo, setAnnotInfo] = useState<AnnotationFileInfo[]>([]);
   const [annotLoading, setAnnotLoading] = useState(false);
@@ -342,20 +352,25 @@ function App() {
   (window as any).__sashimiDs = ds; // for debugging from the console
 
   /** Reads the annotation files (the page's gene models from then on) and says what each held. */
-  const applyAnnotations = useCallback(async (list: { file: File; path?: string }[]) => {
+  const applyAnnotations = useCallback(async (list: AnnotFiles[]) => {
     setAnnotations(list); annotationsRef.current = list;
     if (!list.length) { ds.setAnnotation(null); setAnnotInfo([]); return; }
     setAnnotLoading(true);
     try {
-      const { annotation, errors } = await loadAnnotation(list.map(a => a.file));
+      const { annotation, errors } = await loadAnnotation(list.map(a => ({ file: a.file, index: a.index })), { scan: scanNamesInWorker });
       if (annotationsRef.current !== list) return;   // other files given meanwhile
+      // an indexed file's names are read in the background: its chip follows
+      annotation.onChange = () => { if (annotationsRef.current === kept) setAnnotInfo(annotation.infos.map(i => ({ ...i, indexed: i.indexed && { ...i.indexed } }))); };
       const kept = list.filter(a => annotation.infos.some(i => i.file === a.file.name));
       setAnnotations(kept); annotationsRef.current = kept;
       ds.setAnnotation(annotation.files.length ? annotation : null);
       await ds.getContigs();
       setAnnotInfo(annotation.infos.map(i => ({ ...i })));
       setNotes(n => [...n,
-        ...annotation.infos.map(i => `Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} gene${i.genes === 1 ? '' : 's'}, ${i.transcripts.toLocaleString('en-US')} transcript${i.transcripts === 1 ? '' : 's'}${i.skipped ? `, ${i.skipped.toLocaleString('en-US')} line${i.skipped === 1 ? '' : 's'} not read` : ''}.`),
+        ...annotation.infos.map(i => (i.indexed
+          ? `Gene models from ${i.file} (${i.format.toUpperCase()}), read through its index ${i.indexed.index}: the genes of a window are read when it is drawn; names to search by are being read in the background.`
+          : `Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} gene${i.genes === 1 ? '' : 's'}, ${i.transcripts.toLocaleString('en-US')} transcript${i.transcripts === 1 ? '' : 's'}${i.skipped ? `, ${i.skipped.toLocaleString('en-US')} line${i.skipped === 1 ? '' : 's'} not read` : ''}.`)),
+        ...kept.filter(a => !a.index && /\.gz$/i.test(a.file.name) && a.file.size > ANNOT_INDEX_HINT_BYTES).map(a => `${a.file.name} is large and was read whole into memory: bgzipped with its tabix index (sort -k1,1 -k4,4n | bgzip, then tabix -p ${/\.bed/i.test(a.file.name) ? 'bed' : 'gff'}), given together, it is read by region instead.`),
         ...errors.map(e => `Annotation file not read: ${e}`)]);
     } catch (e: any) {
       setError(`Could not read the annotation files: ${e?.message || e}`);
@@ -365,7 +380,13 @@ function App() {
 
   const addFiles = useCallback((list: FileList | File[] | PathedFile[], opts: { bedFromFolder?: boolean } = {}) => {
     const files = Array.from(list as ArrayLike<File | PathedFile>);
-    const { samples: paired, unmatched, fasta: fa, fastaMissing, annotations: annots } = pairFiles(files);
+    const { samples: paired, unmatched, fasta: fa, fastaMissing, annotations: annots, annotationIndexes } = pairFiles(files);
+    // an index given on its own after its file: the file is read again through it
+    for (const x of annotationIndexes) {
+      const stem = x.file.name.replace(/\.(tbi|csi)$/i, '');
+      const have = annotationsRef.current.find(a => a.file.name === stem && !a.index);
+      if (have && !annots.some(a => a.file.name === stem)) annots.push({ ...have, index: x.file, indexPath: x.path });
+    }
     const msgs: string[] = [];
     // BED files of a run folder are mostly capture targets: they become gene models only when given on their own
     const folderBeds = opts.bedFromFolder ? [] : annots.filter(a => a.path && /\.bed(\.gz)?$/i.test(a.file.name));
@@ -373,7 +394,7 @@ function App() {
     if (folderBeds.length) msgs.push(`${folderBeds.length} BED file${folderBeds.length === 1 ? '' : 's'} of the folder (${folderBeds.slice(0, 3).map(a => a.file.name).join(', ')}${folderBeds.length > 3 ? '…' : ''}) not read as gene models: add ${folderBeds.length === 1 ? 'it' : 'them'} with Files… to use ${folderBeds.length === 1 ? 'it' : 'them'} so.`);
     if (newAnnots.length) {
       const now = annotationsRef.current.filter(a => !newAnnots.some(b => b.file.name === a.file.name));
-      void applyAnnotations([...now, ...newAnnots.map(a => ({ file: a.file, path: a.path }))]);
+      void applyAnnotations([...now, ...newAnnots]);
     }
     // a file already loaded is not added again (a session reopening its files while they arrive by another way)
     const have = samplesRef.current;
@@ -741,7 +762,7 @@ function App() {
     const { tabs, activeIndex } = currentViews();
     const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, annotations, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
     if (hasFileSystemAccess()) {
-      const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : []), ...annotations.map(a => a.file)]
+      const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : []), ...annotations.flatMap(a => (a.index ? [a.file, a.index] : [a.file]))]
         .map(f => ({ name: f.name, size: f.size, handle: fileHandlesRef.current.get(f.name)! })).filter(e => e.handle);
       rememberFiles(entries);
     }
@@ -1010,7 +1031,10 @@ function App() {
       extra.push({ file: sf.file, path: sf.path, size: sf.size }, { file: sf.index, path: sf.indexPath });
       if (sf.gzi) extra.push({ file: sf.gzi, path: sf.gziPath });
     }
-    for (const a of session.annotations ?? []) if (!annotationsRef.current.some(x => x.file.name === a.file)) extra.push(a);
+    for (const a of session.annotations ?? []) if (!annotationsRef.current.some(x => x.file.name === a.file)) {
+      extra.push({ file: a.file, path: a.path, size: a.size });
+      if (a.index) extra.push({ file: a.index, path: a.indexPath });
+    }
     if (!missing.length && !extra.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
@@ -1219,8 +1243,10 @@ function App() {
                 const off = i.unmatched.length > 0, none = off && i.unmatched.length === i.contigs.length;
                 return (
                   <span key={i.file} className={`group inline-flex items-center gap-1 h-7 pl-2.5 pr-1.5 rounded-full text-[12px] border whitespace-nowrap ${off ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-sky-50 border-sky-200 text-sky-800'}`}
-                    title={`Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} genes, ${i.transcripts.toLocaleString('en-US')} transcripts on ${i.contigs.length.toLocaleString('en-US')} sequence${i.contigs.length === 1 ? '' : 's'}${i.skipped ? `; ${i.skipped.toLocaleString('en-US')} lines not read` : ''}.${off ? ` ${none ? 'None' : `${i.unmatched.length} (${i.unmatched.slice(0, 5).join(', ')}${i.unmatched.length > 5 ? '…' : ''})`} of its sequence names ${none ? 'is' : 'are'} in the reference: their genes cannot be placed.` : ''}${build !== 'custom' ? ' On a human build its genes come before RefSeq\'s.' : ''}`}>
-                    genes · {i.file} · {i.genes.toLocaleString('en-US')}
+                    title={`Gene models from ${i.file} (${i.format.toUpperCase()}${i.indexed ? `, read by region through ${i.indexed.index}` : ''}): ${i.genes.toLocaleString('en-US')} genes, ${i.transcripts.toLocaleString('en-US')} transcripts on ${i.contigs.length.toLocaleString('en-US')} sequence${i.contigs.length === 1 ? '' : 's'}${i.skipped ? `; ${i.skipped.toLocaleString('en-US')} lines not read` : ''}.${off ? ` ${none ? 'None' : `${i.unmatched.length} (${i.unmatched.slice(0, 5).join(', ')}${i.unmatched.length > 5 ? '…' : ''})`} of its sequence names ${none ? 'is' : 'are'} in the reference: their genes cannot be placed.` : ''}${build !== 'custom' ? ' On a human build its genes come before RefSeq\'s.' : ''}`}>
+                    genes · {i.file} · {i.indexed && !i.indexed.namesReady
+                      ? <span className={i.indexed.error ? 'text-red-600' : 'animate-pulse'} title={i.indexed.error ? `The names could not be read: ${i.indexed.error}. Windows still show the genes.` : 'Indexed: windows show their genes now; the names to search by are being read'}>{i.indexed.error ? 'names failed' : `indexed · names ${Math.round(100 * i.indexed.namesRead)} %`}</span>
+                      : <>{i.genes.toLocaleString('en-US')}{i.indexed ? ' · indexed' : ''}</>}
                     <button onClick={() => removeAnnotation(i.file)} className="text-slate-400 hover:text-red-500" title="Remove these gene models" aria-label="Remove"><Icon name="x" size={13} /></button>
                   </span>
                 );
@@ -1234,7 +1260,7 @@ function App() {
                     <MenuItem icon="folder" label={runFolder ? `Run folder · ${runFolder.name}` : 'Run folder…'} onClick={() => { close(); void chooseFolder(); }}
                       hint="Every BAM/CRAM (with its index) and FASTA inside it is listed; sessions record the files by their path in it"
                       title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files." />
-                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi), gene models (GFF3, GTF, BED)" onClick={() => { close(); void chooseFiles(); }}
+                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi), gene models (GFF3, GTF, BED; a large one bgzipped with its .tbi)" onClick={() => { close(); void chooseFiles(); }}
                       title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" />
                     <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. They stay on this computer.</div>
                   </>
@@ -1308,7 +1334,7 @@ function App() {
           </div>
         </div>
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
-        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi', '.gff', '.gff3', '.gtf', '.bed'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi', '.gff', '.gff3', '.gtf', '.bed', '.tbi', '.csi'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
         {!panelHidden && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 pb-2.5">
             {views.length > 1 && (

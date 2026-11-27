@@ -70,7 +70,7 @@ export function GeneSuggest({ value, onChange, local = [], files, remote = true,
               <span className="font-semibold text-[12.5px] text-slate-900 shrink-0">{s.symbol}</span>
               <span className="flex-1 min-w-0 truncate text-[11.5px] text-slate-500">
                 {s.via ? <span className="text-amber-700">{s.via.kind === 'previous' ? 'previously' : 'alias'} {s.via.text} · </span> : null}
-                {s.name ?? (s.local ? 'opened in this page before' : '')}
+                {s.name ?? (s.file ? 'in your annotation files' : s.local ? 'opened in this page before' : '')}
               </span>
               {s.location && <span className="shrink-0 text-[11px] font-mono text-slate-400">{s.location}</span>}
             </button>

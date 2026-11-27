@@ -16,6 +16,8 @@ export interface GeneSuggestion {
   via?: { kind: 'alias' | 'previous'; text: string };
   /** the page knows it (a view, a recent search) */
   local?: boolean;
+  /** from the user's annotation files */
+  file?: boolean;
 }
 
 /** suggestions start from this many letters, and at most this many are listed */
@@ -95,7 +97,7 @@ export async function suggestGenes(text: string, local: string[], signal?: Abort
   for (const g of mine) {
     const up = g.toUpperCase();
     if (seen.has(up)) continue;
-    seen.add(up); out.push({ symbol: g, local: true });
+    seen.add(up); out.push({ symbol: g, local: true, file: true });
   }
   for (const g of [...local, ...(remoteOn ? recentGenes() : [])]) {
     const up = g.toUpperCase();

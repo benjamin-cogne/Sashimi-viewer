@@ -15,14 +15,27 @@
  *   exons.
  * Coordinates are kept 0-based half-open here; the outputs follow the shapes of ucsc.ts (1-based inclusive, except the
  * SvTranscript of a window, 0-based).
+ *
+ * A large file (a whole human GTF is ~1 GB of text) is better given bgzipped with its tabix index (.tbi or .csi;
+ * `sort -k1,1 -k4,4n x.gtf | bgzip > x.gtf.gz && tabix -p gff x.gtf.gz`, `-p bed` for a BED): it is then never held
+ * in memory. The genes of a window are read from the index when the window is drawn (the rows reaching past the
+ * window widen the read to the genes' whole span), and the names to find genes by come from one pass over the file in
+ * a worker (annotationScan.ts), while the windows already work.
  */
 import type { TranscriptData, AllTranscripts, TranscriptModel, GeneModel, RegionHint } from '../components/sashimi/types';
 import type { SvTranscript } from '../components/sashimi/svGenes';
 import { resolveContig } from '../components/sashimi/geometry';
+import { TabixIndexedFile } from '@gmod/tabix';
+import { BlobFile } from 'generic-filehandle2';
+import { readLines, isGzipped, formatOf, scanNames, own, SKIP_LONE, type AnnotationFormat, type GeneLoc, type NameIndex } from './annotationScan';
 export { resolveContig };
+export type { AnnotationFormat };
 
-export type AnnotationFormat = 'gff3' | 'gtf' | 'bed';
 export const ANNOTATION_EXT = /\.(gff3?|gtf|bed)(\.gz)?$/i;
+/** the tabix index of a bgzipped annotation file */
+export const ANNOTATION_INDEX_EXT = /\.(gff3?|gtf|bed)\.gz\.(tbi|csi)$/i;
+/** a gene's rows read from an index reach at most this far past the window asked */
+const MAX_GENE_SPAN = 10_000_000;
 
 interface ATx {
   id: string; name: string; chrom: string; strand: 1 | -1;
@@ -36,54 +49,10 @@ interface AGene { key: string; id: string; name: string; chrom: string; strand: 
 /** What a file held, for its chip. */
 export interface AnnotationFileInfo {
   file: string; format: AnnotationFormat; genes: number; transcripts: number; lines: number; skipped: number;
+  /** read through its tabix index (a bgzipped file with its .tbi / .csi): windows from the index, names from a pass */
+  indexed?: { index: string; namesRead: number; namesReady: boolean; error?: string };
   /** contigs of the file, and those the reference does not hold (set once the reference's names are known) */
   contigs: string[]; unmatched: string[];
-}
-
-// ======================== reading ========================
-
-const yieldToUi = (): Promise<void> => {
-  const s = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
-  return s?.yield ? s.yield() : new Promise<void>(r => { setTimeout(r, 0); });
-};
-
-/** The file's lines, inflated as a stream when gzipped (a bgzipped file's blocks too), decoded as UTF-8. */
-async function* readLines(file: Blob, gz: boolean): AsyncGenerator<string> {
-  let stream: ReadableStream<Uint8Array> = file.stream();
-  if (gz) stream = stream.pipeThrough(new DecompressionStream('gzip') as unknown as ReadableWritablePair<Uint8Array, Uint8Array>);
-  const reader = stream.pipeThrough(new TextDecoderStream() as unknown as ReadableWritablePair<string, Uint8Array>).getReader();
-  let rest = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    const parts = (rest + value).split('\n');
-    rest = parts.pop() ?? '';
-    for (const p of parts) yield p.endsWith('\r') ? p.slice(0, -1) : p;
-  }
-  if (rest) yield rest;
-}
-
-async function isGzipped(file: Blob, name: string): Promise<boolean> {
-  if (/\.gz$/i.test(name)) return true;
-  const b = new Uint8Array(await file.slice(0, 2).arrayBuffer());
-  return b[0] === 0x1f && b[1] === 0x8b;
-}
-
-/** The format from the name; a `.gff` is sniffed (key=value attributes: GFF3; key "value"; : GTF). */
-async function formatOf(file: Blob, name: string, gz: boolean): Promise<AnnotationFormat> {
-  const n = name.replace(/\.gz$/i, '').toLowerCase();
-  if (n.endsWith('.gtf')) return 'gtf';
-  if (n.endsWith('.bed')) return 'bed';
-  if (n.endsWith('.gff3')) return 'gff3';
-  let k = 0;
-  for await (const line of readLines(file, gz)) {
-    if (!line || line.startsWith('#')) continue;
-    const col = line.split('\t')[8] ?? '';
-    if (/^\s*\w+\s+"/.test(col)) return 'gtf';
-    if (/=/.test(col)) return 'gff3';
-    if (++k > 50) break;
-  }
-  return 'gff3';
 }
 
 // ======================== parsers ========================
@@ -126,7 +95,6 @@ interface Feat { id: string | null; parents: string[]; type: string; chrom: stri
 const TX_TYPE = /^(mRNA|transcript|primary_transcript|pseudogenic_transcript|[a-zA-Z_]*RNA|[a-zA-Z_]*_transcript)$/;
 const EXON_TYPE = /^(exon|pseudogenic_exon|noncoding_exon)$/;
 const PART_TYPE = /^(CDS|five_prime_UTR|three_prime_UTR|UTR|5'UTR|3'UTR|five_prime_utr|three_prime_utr|start_codon|stop_codon)$/;
-const SKIP_LONE = /^(region|chromosome|contig|supercontig|scaffold|source|databank_entry|sequence_assembly|match|match_part|cDNA_match|biological_region)$/i;
 const geneNameOf = (a: Map<string, string>, fallback: string) => a.get('Name') ?? a.get('gene_name') ?? a.get('gene') ?? a.get('locus_tag') ?? a.get('ID') ?? fallback;
 
 /** One transcript from its exon and part children (0-based half-open). */
@@ -149,9 +117,15 @@ function geneOf(key: string, id: string, name: string, txs: ATx[], biotype?: str
   };
 }
 
-async function parseGff3(file: Blob, gz: boolean, info: AnnotationFileInfo): Promise<AGene[]> {
+type Lines = AsyncIterable<string> | Iterable<string>;
+const yieldToUi = (): Promise<void> => {
+  const s = (globalThis as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+  return s?.yield ? s.yield() : new Promise<void>(r => { setTimeout(r, 0); });
+};
+
+async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
   const feats: Feat[] = [];
-  for await (const line of readLines(file, gz)) {
+  for await (const line of lines) {
     info.lines++;
     if (info.lines % 50000 === 0) await yieldToUi();
     if (line.startsWith('##FASTA')) break;
@@ -200,10 +174,11 @@ async function parseGff3(file: Blob, gz: boolean, info: AnnotationFileInfo): Pro
   return out;
 }
 
-async function parseGtf(file: Blob, gz: boolean, info: AnnotationFileInfo): Promise<AGene[]> {
-  const txRows = new Map<string, { gene: string; chrom: string; strand: 1 | -1; exon: Feat[]; part: Feat[]; attrs: Map<string, string>; span: [number, number] | null }>();
+async function parseGtf(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
+  // transcripts and genes are told apart by their contig too: one ID placed on several (chrX / chrY PAR, alt contigs)
+  const txRows = new Map<string, { id: string; gene: string; chrom: string; strand: 1 | -1; exon: Feat[]; part: Feat[]; attrs: Map<string, string>; span: [number, number] | null }>();
   const geneAttrs = new Map<string, { attrs: Map<string, string>; f: Feat }>();
-  for await (const line of readLines(file, gz)) {
+  for await (const line of lines) {
     info.lines++;
     if (info.lines % 50000 === 0) await yieldToUi();
     if (!line || line.startsWith('#')) continue;
@@ -212,39 +187,43 @@ async function parseGtf(file: Blob, gz: boolean, info: AnnotationFileInfo): Prom
     const s = parseInt(c[3]), e = parseInt(c[4]);
     if (!(s > 0) || !(e >= s)) { info.skipped++; continue; }
     const attrs = gtfAttrs(c[8]);
+    const at = `\t${c[0]}`;
     const f: Feat = { id: null, parents: [], type: c[2], chrom: c[0], start: s - 1, end: e, strand: strandOf(c[6]), attrs };
     const gid = attrs.get('gene_id') ?? attrs.get('gene_name') ?? '';
     const tid = attrs.get('transcript_id');
-    if (c[2] === 'gene') { if (gid && !geneAttrs.has(gid)) geneAttrs.set(gid, { attrs, f }); continue; }
-    if (!tid) { if (gid && !geneAttrs.has(gid)) geneAttrs.set(gid, { attrs, f }); continue; }
-    let t = txRows.get(tid);
-    if (!t) txRows.set(tid, t = { gene: gid || tid, chrom: c[0], strand: f.strand, exon: [], part: [], attrs, span: null });
+    if (c[2] === 'gene') { if (gid && !geneAttrs.has(gid + at)) geneAttrs.set(gid + at, { attrs, f }); continue; }
+    if (!tid) { if (gid && !geneAttrs.has(gid + at)) geneAttrs.set(gid + at, { attrs, f }); continue; }
+    let t = txRows.get(tid + at);
+    if (!t) txRows.set(tid + at, t = { id: tid, gene: (gid || tid) + at, chrom: c[0], strand: f.strand, exon: [], part: [], attrs, span: null });
     if (c[2] === 'transcript') { t.attrs = new Map([...t.attrs, ...attrs]); t.span = [f.start, f.end]; }
     else if (EXON_TYPE.test(c[2])) t.exon.push(f);
     else if (PART_TYPE.test(c[2]) || /^(UTR|five_prime_utr|three_prime_utr)$/i.test(c[2])) t.part.push(f);
   }
   const byGene = new Map<string, ATx[]>();
-  for (const [tid, t] of txRows) {
+  for (const t of txRows.values()) {
+    const tid = t.id;
     const tx = txFrom(tid, t.attrs.get('transcript_name') ?? tid, t.chrom, t.strand, t.exon, t.part, t.span, biotypeAttr(t.attrs), isCanonical(t.attrs));
     if (!tx.exons.length) continue;
     const l = byGene.get(t.gene); if (l) l.push(tx); else byGene.set(t.gene, [tx]);
   }
   const out: AGene[] = [];
-  for (const [gid, txs] of byGene) {
-    const ga = geneAttrs.get(gid)?.attrs, ta = txRows.get(txs[0].id)?.attrs;
-    out.push(geneOf(gid, gid, ga?.get('gene_name') ?? ta?.get('gene_name') ?? gid, txs, ga ? biotypeAttr(ga) : undefined));
+  for (const [gk, txs] of byGene) {
+    const gid = gk.slice(0, gk.lastIndexOf('\t')), key = `${gid}@${txs[0].chrom}`;
+    const ga = geneAttrs.get(gk)?.attrs, ta = txRows.get(`${txs[0].id}\t${txs[0].chrom}`)?.attrs;
+    out.push(geneOf(key, gid, ga?.get('gene_name') ?? ta?.get('gene_name') ?? gid, txs, ga ? biotypeAttr(ga) : undefined));
   }
   // genes without transcript rows: one exon over the gene
-  for (const [gid, { attrs, f }] of geneAttrs) if (!byGene.has(gid)) {
+  for (const [gk, { attrs, f }] of geneAttrs) if (!byGene.has(gk)) {
+    const gid = gk.slice(0, gk.lastIndexOf('\t'));
     const name = attrs.get('gene_name') ?? gid;
-    out.push(geneOf(gid, gid, name, [{ id: gid, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(attrs) ?? 'gene', canonical: false }]));
+    out.push(geneOf(`${gid}@${f.chrom}`, gid, name, [{ id: gid, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(attrs) ?? 'gene', canonical: false }]));
   }
   return out;
 }
 
-async function parseBed(file: Blob, gz: boolean, info: AnnotationFileInfo): Promise<AGene[]> {
+async function parseBed(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
   const out: AGene[] = [];
-  for await (const line of readLines(file, gz)) {
+  for await (const line of lines) {
     info.lines++;
     if (info.lines % 50000 === 0) await yieldToUi();
     if (!line.trim() || /^(track|browser)\b/.test(line) || line.startsWith('#')) continue;
@@ -266,45 +245,165 @@ async function parseBed(file: Blob, gz: boolean, info: AnnotationFileInfo): Prom
   return out;
 }
 
-// ======================== index ========================
+// ======================== sources: a file in memory, or read through its index ========================
 
-class FileIndex {
-  readonly byChrom = new Map<string, { genes: AGene[]; maxEnd: number[] }>();
-  readonly byName = new Map<string, AGene[]>();
-  constructor(readonly info: AnnotationFileInfo, genes: AGene[]) {
-    const per = new Map<string, AGene[]>();
-    for (const g of genes) {
-      const l = per.get(g.chrom); if (l) l.push(g); else per.set(g.chrom, [g]);
-      const keys = new Set([g.name, g.id, ...g.txs.flatMap(t => [t.id, t.name])].map(k => k.toUpperCase()));
-      for (const k of keys) { const l2 = this.byName.get(k); if (l2) l2.push(g); else this.byName.set(k, [g]); }
-    }
-    for (const [c, gs] of per) {
-      gs.sort((a, b) => a.start - b.start);
-      const maxEnd: number[] = []; let m = 0;
-      for (const g of gs) { m = Math.max(m, g.end); maxEnd.push(m); }
-      this.byChrom.set(c, { genes: gs, maxEnd });
-    }
-    info.genes = genes.length; info.transcripts = genes.reduce((n, g) => n + g.txs.length, 0); info.contigs = [...per.keys()];
+/** the genes of some lines, their strings copied out of the text read (`own`) so that it can go */
+async function parse(format: AnnotationFormat, lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
+  const genes = await (format === 'gtf' ? parseGtf(lines, info) : format === 'bed' ? parseBed(lines, info) : parseGff3(lines, info));
+  const chroms = new Map<string, string>();
+  const chrom = (c: string) => { let o = chroms.get(c); if (o == null) chroms.set(c, o = own(c)); return o; };
+  for (const g of genes) {
+    g.key = own(g.key); g.id = own(g.id); g.name = own(g.name); g.chrom = chrom(g.chrom); g.biotype = own(g.biotype);
+    for (const t of g.txs) { t.id = own(t.id); t.name = own(t.name); t.chrom = chrom(t.chrom); t.biotype = own(t.biotype); }
   }
-  /** genes of a contig (the file's spelling) overlapping [start, end) 0-based */
-  overlapping(chrom: string, start: number, end: number): AGene[] {
-    const c = this.byChrom.get(chrom);
-    if (!c) return [];
-    let lo = 0, hi = c.genes.length;
-    while (lo < hi) { const mid = (lo + hi) >> 1; if (c.genes[mid].start < end) lo = mid + 1; else hi = mid; }
-    const out: AGene[] = [];
-    for (let i = lo - 1; i >= 0 && c.maxEnd[i] > start; i--) if (c.genes[i].end > start) out.push(c.genes[i]);
+  return genes;
+}
+/** the names a gene is found by: its name, ID, its transcripts' IDs and names (upper case) */
+const keysOf = (g: AGene) => new Set([g.name, g.id, ...g.txs.flatMap(t => [t.id, t.name])].map(k => k.toUpperCase()));
+
+/** Intervals sorted by start with the running maximum of their ends: what overlaps a window, by bisection. */
+class Intervals<T extends { start: number; end: number }> {
+  private items: T[]; private maxEnd: number[] = [];
+  constructor(items: T[]) {
+    this.items = items.sort((a, b) => a.start - b.start);
+    let m = 0;
+    for (const g of this.items) { m = Math.max(m, g.end); this.maxEnd.push(m); }
+  }
+  overlapping(start: number, end: number): T[] {
+    let lo = 0, hi = this.items.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (this.items[mid].start < end) lo = mid + 1; else hi = mid; }
+    const out: T[] = [];
+    for (let i = lo - 1; i >= 0 && this.maxEnd[i] > start; i--) if (this.items[i].end > start) out.push(this.items[i]);
     return out.reverse();
   }
 }
+const byChrom = <T extends { chrom: string; start: number; end: number }>(items: Iterable<T>) => {
+  const per = new Map<string, T[]>();
+  for (const g of items) { const l = per.get(g.chrom); if (l) l.push(g); else per.set(g.chrom, [g]); }
+  return new Map([...per].map(([c, l]) => [c, new Intervals(l)]));
+};
 
-/** Reads one annotation file into an index. */
-export async function loadAnnotationFile(file: File): Promise<FileIndex> {
-  const gz = await isGzipped(file, file.name);
-  const format = await formatOf(file, file.name, gz);
-  const info: AnnotationFileInfo = { file: file.name, format, genes: 0, transcripts: 0, lines: 0, skipped: 0, contigs: [], unmatched: [] };
-  const genes = format === 'gtf' ? await parseGtf(file, gz, info) : format === 'bed' ? await parseBed(file, gz, info) : await parseGff3(file, gz, info);
-  return new FileIndex(info, genes);
+/** One annotation file, as the page asks it. Contigs are the file's spelling. */
+interface GeneSource {
+  readonly info: AnnotationFileInfo;
+  /** genes known by this name (upper case); several when the name is on several contigs */
+  byName(q: string): Promise<AGene[]>;
+  /** genes of a contig overlapping [start, end) 0-based, whole */
+  overlapping(chrom: string, start: number, end: number): Promise<AGene[]>;
+  /** [name searched (upper case), gene name shown] of every gene, for the suggestions; none while not read */
+  nameEntries(): Iterable<[string, string]>;
+}
+
+/** A file read whole: every gene in memory. */
+class FileIndex implements GeneSource {
+  private chroms: Map<string, Intervals<AGene>>;
+  private names = new Map<string, AGene[]>();
+  constructor(readonly info: AnnotationFileInfo, genes: AGene[]) {
+    for (const g of genes) for (const k of keysOf(g)) { const l = this.names.get(k); if (l) l.push(g); else this.names.set(k, [g]); }
+    this.chroms = byChrom(genes);
+    info.genes = genes.length; info.transcripts = genes.reduce((n, g) => n + g.txs.length, 0); info.contigs = [...this.chroms.keys()];
+  }
+  async byName(q: string) { return this.names.get(q) ?? []; }
+  async overlapping(chrom: string, start: number, end: number) { return this.chroms.get(chrom)?.overlapping(start, end) ?? []; }
+  *nameEntries(): Iterable<[string, string]> { for (const [k, gs] of this.names) yield [k, gs[0].name]; }
+}
+
+/** How a name index is built: in a worker (annotationWorkerClient.ts), or here. */
+export type NameScanner = (file: Blob, gz: boolean, format: AnnotationFormat, onProgress?: (fraction: number) => void) => Promise<NameIndex>;
+
+/** A bgzipped file with its tabix index: the genes of a window read when asked, names from one pass over the file. */
+class TabixSource implements GeneSource {
+  private tbx: TabixIndexedFile;
+  private names: Map<string, number[]> | null = null;
+  private locs: GeneLoc[] = [];
+  private locsByChrom = new Map<string, Intervals<GeneLoc & { i: number }>>();
+  /** the genes of the last windows read (key chrom:start-end) */
+  private cache = new Map<string, Promise<AGene[]>>();
+  constructor(readonly info: AnnotationFileInfo, file: File, index: File) {
+    const fh = new BlobFile(index);
+    this.tbx = new TabixIndexedFile({ filehandle: new BlobFile(file), ...(/\.csi$/i.test(index.name) ? { csiFilehandle: fh } : { tbiFilehandle: fh }) });
+  }
+  async open(): Promise<void> {
+    const meta = await this.tbx.getMetadata();
+    this.info.contigs = [...meta.refIdToName];
+  }
+  /** builds the name index; `onChange` is told as it goes */
+  async readNames(file: File, scan: NameScanner, onChange: () => void): Promise<void> {
+    const ix = this.info.indexed!;
+    try {
+      const idx = await scan(file, true, this.info.format, f => { ix.namesRead = f; onChange(); });
+      this.locs = idx.locs;
+      const names = new Map<string, number[]>();
+      for (const [k, i] of idx.keys) { const l = names.get(k); if (l) l.push(i); else names.set(k, [i]); }
+      this.names = names;
+      this.locsByChrom = byChrom(idx.locs.map((l, i) => ({ ...l, i })));
+      Object.assign(this.info, { genes: idx.genes, transcripts: idx.transcripts, lines: idx.lines });
+      ix.namesRead = 1; ix.namesReady = true;
+    } catch (e) {
+      ix.error = (e as Error)?.message || String(e);
+    }
+    onChange();
+  }
+  private async lines(chrom: string, start: number, end: number): Promise<string[]> {
+    const out: string[] = [];
+    await this.tbx.getLines(chrom, Math.max(0, start), end, { lineCallback: l => { out.push(l); } });
+    return out;
+  }
+  /** the span a gene's rows cover: those of the rows read (gene and transcript rows give it whole) and the name index's */
+  private reach(chrom: string, start: number, end: number, rows: string[]): [number, number] {
+    let lo = start, hi = end;
+    for (const g of this.locsByChrom.get(chrom)?.overlapping(start, end) ?? []) { lo = Math.min(lo, g.start); hi = Math.max(hi, g.end); }
+    if (this.info.format !== 'bed') for (const r of rows) {
+      const c = r.split('\t', 5);
+      if (SKIP_LONE.test(c[2] ?? '')) continue;
+      const s = +c[3] - 1, e = +c[4];
+      if (s >= 0 && e > s) { lo = Math.min(lo, s); hi = Math.max(hi, e); }
+    }
+    return [Math.max(lo, start - MAX_GENE_SPAN), Math.min(hi, end + MAX_GENE_SPAN)];
+  }
+  overlapping(chrom: string, start: number, end: number): Promise<AGene[]> {
+    if (!this.info.contigs.includes(chrom)) return Promise.resolve([]);
+    const key = `${chrom}:${start}-${end}`;
+    let p = this.cache.get(key);
+    if (!p) {
+      p = (async () => {
+        let rows = await this.lines(chrom, start, end);
+        let [lo, hi] = this.reach(chrom, start, end, rows);
+        // the rows of the genes reaching past the window, until no row read reaches further (twice at most)
+        for (let k = 0; k < 2 && (lo < start || hi > end); k++) {
+          rows = await this.lines(chrom, lo, hi);
+          const [lo2, hi2] = this.reach(chrom, lo, hi, rows);
+          if (lo2 >= lo && hi2 <= hi) break;
+          [lo, hi] = [lo2, hi2];
+        }
+        const scratch: AnnotationFileInfo = { ...this.info, lines: 0, skipped: 0 };
+        const genes = await parse(this.info.format, rows, scratch);
+        return genes.filter(g => g.chrom === chrom && g.end > start && g.start < end);
+      })();
+      this.cache.set(key, p);
+      p.catch(() => this.cache.delete(key));
+      if (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value!);
+    }
+    return p;
+  }
+  async byName(q: string): Promise<AGene[]> {
+    const hits = this.names?.get(q);
+    if (!hits) return [];
+    const out: AGene[] = [];
+    for (const i of hits) {
+      const l = this.locs[i];
+      const genes = await this.overlapping(l.chrom, l.start, l.end);
+      // the gene the name stands for: known by it, else the one named as the index says, else the one covering most of it
+      const ov = (g: AGene) => Math.min(g.end, l.end) - Math.max(g.start, l.start);
+      const g = genes.find(x => keysOf(x).has(q)) ?? genes.find(x => x.name === l.name) ?? [...genes].sort((a, b) => ov(b) - ov(a))[0];
+      if (g && !out.includes(g)) out.push(g);
+    }
+    return out;
+  }
+  *nameEntries(): Iterable<[string, string]> {
+    if (!this.names) return;
+    for (const [k, is] of this.names) yield [k, this.locs[is[0]].name];
+  }
 }
 
 // ======================== the annotation of a page: its files, in order ========================
@@ -321,9 +420,11 @@ function pickTx(g: AGene): { tx: ATx; kind: 'canonical' | 'longest' } {
 }
 
 export class Annotation {
-  readonly files: FileIndex[];
+  readonly files: GeneSource[];
   private toRef = new Map<string, string>();
-  constructor(files: FileIndex[]) { this.files = files; }
+  /** told when a file's state changes (an index's names read) */
+  onChange: (() => void) | null = null;
+  constructor(files: GeneSource[]) { this.files = files; }
 
   get infos(): AnnotationFileInfo[] { return this.files.map(f => f.info); }
   get label(): string { return this.files.map(f => f.info.file).join(', '); }
@@ -344,18 +445,19 @@ export class Annotation {
   }
   private refChrom(c: string): string { return this.toRef.get(c) ?? c; }
   /** the file contig names a viewer chromosome stands for */
-  private fileChroms(f: FileIndex, chrom: string): string[] {
-    const out: string[] = [];
-    for (const c of f.byChrom.keys()) if (this.refChrom(c) === chrom || resolveContig([c], chrom)) out.push(c);
-    return out;
+  private fileChroms(f: GeneSource, chrom: string): string[] {
+    return f.info.contigs.filter(c => this.refChrom(c) === chrom || resolveContig([c], chrom));
   }
 
   /** a gene by gene name, gene id, transcript id or ID (case-insensitive); the copy nearest the hint when several */
-  find(query: string, hint?: RegionHint): { gene: AGene; file: FileIndex; tx?: ATx } | null {
+  async find(query: string, hint?: RegionHint): Promise<{ gene: AGene; file: GeneSource; tx?: ATx } | null> {
     const q = query.trim().toUpperCase();
     for (const f of this.files) {
-      const list = f.byName.get(q);
-      if (!list?.length) continue;
+      let list = await f.byName(q);
+      // where the gene is known (a view reopened, a neighbour clicked): its window, whose genes are read whatever the
+      // name index (an indexed file's may still be being read)
+      if (!list.length && hint) list = (await Promise.all(this.fileChroms(f, hint.chrom).map(c => f.overlapping(c, hint.start - 1, hint.end)))).flat().filter(g => keysOf(g).has(q));
+      if (!list.length) continue;
       let gene = list[0];
       if (hint && list.length > 1) {
         const d = (g: AGene) => (this.refChrom(g.chrom) === hint.chrom || resolveContig([g.chrom], hint.chrom) ? Math.abs((g.start + g.end) / 2 - (hint.start + hint.end) / 2) : Infinity);
@@ -369,8 +471,8 @@ export class Annotation {
     return null;
   }
 
-  transcript(query: string, hint?: RegionHint): TranscriptData | null {
-    const hit = this.find(query, hint);
+  async transcript(query: string, hint?: RegionHint): Promise<TranscriptData | null> {
+    const hit = await this.find(query, hint);
     if (!hit) return null;
     const { gene: g, file } = hit;
     const { tx: t, kind } = hit.tx ? { tx: hit.tx, kind: 'chosen' as const } : pickTx(g);
@@ -384,8 +486,8 @@ export class Annotation {
     };
   }
 
-  allTranscripts(query: string, hint?: RegionHint): AllTranscripts | null {
-    const hit = this.find(query, hint);
+  async allTranscripts(query: string, hint?: RegionHint): Promise<AllTranscripts | null> {
+    const hit = await this.find(query, hint);
     if (!hit) return null;
     const { gene: g, file } = hit, picked = pickTx(g).tx;
     const models = g.txs.map((t): TranscriptModel => ({
@@ -396,13 +498,18 @@ export class Annotation {
     return { gene_name: g.name, chrom: this.refChrom(g.chrom), strand: g.strand, source: 'file', source_label: file.info.file, transcripts: models };
   }
 
+  /** every file's genes overlapping [start, end) 0-based of a viewer chromosome, file by file */
+  private async genesIn(chrom: string, start: number, end: number): Promise<AGene[][]> {
+    return Promise.all(this.files.map(async f => (await Promise.all(this.fileChroms(f, chrom).map(c => f.overlapping(c, start, end)))).flat()));
+  }
+
   /** genes overlapping [start, end] 1-based inclusive, with their shown model and the other exons merged */
-  regionGenes(chrom: string, start: number, end: number, exclude?: string): GeneModel[] {
+  async regionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> {
     // a gene of a later file with the name of an earlier one's is left out: the first file wins
     const out: GeneModel[] = [], seen = new Set<string>(), names = new Set<string>();
-    this.files.forEach((f, fi) => {
+    (await this.genesIn(chrom, start - 1, end)).forEach((genes, fi) => {
       const mine = new Set<string>();
-      for (const fc of this.fileChroms(f, chrom)) for (const g of f.overlapping(fc, start - 1, end)) {
+      for (const g of genes) {
         const nm = g.name.toUpperCase();
         if (seen.has(`${fi}|${g.key}`) || names.has(nm) || (exclude && (nm === exclude.toUpperCase() || g.id === exclude))) continue;
         seen.add(`${fi}|${g.key}`); mine.add(nm);
@@ -420,9 +527,9 @@ export class Annotation {
   }
 
   /** coding transcripts overlapping [start, end) 0-based (the SV browser's models) */
-  regionTranscripts(chrom: string, start: number, end: number): SvTranscript[] {
+  async regionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> {
     const out: SvTranscript[] = [];
-    for (const f of this.files) for (const fc of this.fileChroms(f, chrom)) for (const g of f.overlapping(fc, start, end)) {
+    for (const genes of await this.genesIn(chrom, start, end)) for (const g of genes) {
       const picked = pickTx(g);
       for (const t of g.txs) {
         if (t.cdsStart == null) continue;
@@ -438,24 +545,49 @@ export class Annotation {
     const q = text.trim().toUpperCase();
     if (!q) return [];
     const starts: string[] = [], contains: string[] = [], seen = new Set<string>();
-    for (const f of this.files) for (const [k, gs] of f.byName) {
-      const name = gs[0].name;
+    for (const f of this.files) for (const [k, name] of f.nameEntries()) {
       if (seen.has(name)) continue;
       const nm = name.toUpperCase();
       if (nm.startsWith(q)) { seen.add(name); starts.push(name); }
-      else if (k.startsWith(q) || nm.includes(q)) { seen.add(name); contains.push(name); }
-      if (starts.length >= n) break;
+      else if (contains.length < 4 * n && (k.startsWith(q) || nm.includes(q))) { seen.add(name); contains.push(name); }
+      if (starts.length >= 4 * n) break;
     }
     const cmp = (a: string, b: string) => a.length - b.length || a.localeCompare(b, undefined, { numeric: true });
     return [...starts.sort(cmp), ...contains.sort(cmp)].slice(0, n);
   }
 }
 
-/** Reads every file; a file that fails is reported, the others kept. */
-export async function loadAnnotation(files: File[]): Promise<{ annotation: Annotation; errors: string[] }> {
-  const ok: FileIndex[] = [], errors: string[] = [];
-  for (const f of files) {
-    try { ok.push(await loadAnnotationFile(f)); } catch (e) { errors.push(`${f.name}: ${(e as Error).message || e}`); }
+/** An annotation file, and its tabix index when it has one. */
+export interface AnnotationInput { file: File; index?: File }
+
+/** Reads one file: whole into memory, or opened through its index (names then read in the background). */
+async function loadOne(a: AnnotationInput, scan: NameScanner, onChange: () => void): Promise<GeneSource> {
+  const { file, index } = a;
+  const gz = await isGzipped(file, file.name);
+  const format = await formatOf(file, file.name, gz);
+  const info: AnnotationFileInfo = { file: file.name, format, genes: 0, transcripts: 0, lines: 0, skipped: 0, contigs: [], unmatched: [] };
+  if (index) {
+    if (!gz) throw new Error(`${index.name} indexes a bgzipped file: ${file.name} is not compressed`);
+    info.indexed = { index: index.name, namesRead: 0, namesReady: false };
+    const src = new TabixSource(info, file, index);
+    await src.open();
+    void src.readNames(file, scan, onChange);
+    return src;
   }
-  return { annotation: new Annotation(ok), errors };
+  return new FileIndex(info, await parse(format, readLines(file, gz), info));
+}
+
+/**
+ * Reads every file; a file that fails is reported, the others kept. `scan` builds the name index of an indexed file
+ * (a worker's, by default here on the page); `onChange` is told as those indexes progress.
+ */
+export async function loadAnnotation(inputs: (AnnotationInput | File)[], opts: { scan?: NameScanner } = {}): Promise<{ annotation: Annotation; errors: string[] }> {
+  const ok: GeneSource[] = [], errors: string[] = [];
+  const annotation = new Annotation(ok);
+  const changed = () => annotation.onChange?.();
+  for (const x of inputs) {
+    const a = x instanceof Blob ? { file: x } : x;
+    try { ok.push(await loadOne(a, opts.scan ?? scanNames, changed)); } catch (e) { errors.push(`${a.file.name}: ${(e as Error).message || e}`); }
+  }
+  return { annotation, errors };
 }

@@ -424,7 +424,10 @@ export class LocalDataSource implements SashimiDataSource {
     return b;
   }
   private noModel(geneName: string): Error {
-    return new Error(`No gene model for ${geneName} in ${this.annotation?.files.length ? this.annotation.label : 'the annotation: add a GFF3, GTF or BED file'}`);
+    // an indexed file finds genes by name once its names are read (a pass over the file, in the background)
+    const reading = this.annotation?.infos.filter(i => i.indexed && !i.indexed.namesReady && !i.indexed.error) ?? [];
+    const wait = reading.length ? ` (the names of ${reading.map(i => `${i.file} are still being read, ${Math.round(100 * i.indexed!.namesRead)} %`).join('; ')}: retry in a moment, or type its coordinates)` : '';
+    return new Error(`No gene model for ${geneName} in ${this.annotation?.files.length ? this.annotation.label : 'the annotation: add a GFF3, GTF or BED file'}${wait}`);
   }
 
   /** Variants handed over by the page URL (deep link), drawn on every sample. */
@@ -955,14 +958,16 @@ export class LocalDataSource implements SashimiDataSource {
     return o.kind === 'bam' ? assemblyOfHeader('', (o.bam.indexToChr || []).map(r => ({ name: r.refName, length: r.length }))) : null;
   }
   async getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> {
-    const m = this.annotation?.transcript(geneName, hint) ?? (geneId ? this.annotation?.transcript(geneId, hint) : null);
+    const a = this.annotation;
+    const m = a ? (await a.transcript(geneName, hint)) ?? (geneId ? await a.transcript(geneId, hint) : null) : null;
     if (m) return m;
     const b = humanBuild(this.reference.build);
     if (!b) throw this.noModel(geneName);
     return getTranscript(b, geneName, geneId, hint);
   }
   async getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> {
-    const m = this.annotation?.allTranscripts(geneName, hint) ?? (geneId ? this.annotation?.allTranscripts(geneId, hint) : null);
+    const a = this.annotation;
+    const m = a ? (await a.allTranscripts(geneName, hint)) ?? (geneId ? await a.allTranscripts(geneId, hint) : null) : null;
     if (m) return m;
     const b = humanBuild(this.reference.build);
     if (!b) throw this.noModel(geneName);
@@ -970,7 +975,7 @@ export class LocalDataSource implements SashimiDataSource {
   }
   async getRunSamples(): Promise<SampleRef[]> { return this.list(); }
   async getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> {
-    const mine = this.annotation?.regionGenes(chrom, start, end, exclude) ?? [];
+    const mine = (await this.annotation?.regionGenes(chrom, start, end, exclude)) ?? [];
     const b = humanBuild(this.reference.build);
     if (!b) return mine;
     const theirs = await getRegionGenes(b, chrom, start, end, exclude);
@@ -980,7 +985,7 @@ export class LocalDataSource implements SashimiDataSource {
     return [...mine, ...theirs.filter(g => !names.has(g.gene_name.toUpperCase()))].sort((x, y) => x.start - y.start);
   }
   async getRegionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> {
-    const mine = this.annotation?.regionTranscripts(chrom, start, end) ?? [];
+    const mine = (await this.annotation?.regionTranscripts(chrom, start, end)) ?? [];
     const b = humanBuild(this.reference.build);
     if (!b) return mine;
     const theirs = await getRegionTranscripts(b, chrom, start, end);

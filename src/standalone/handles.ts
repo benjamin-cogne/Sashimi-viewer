@@ -78,12 +78,12 @@ export async function pickFolder(): Promise<FSDirHandle> {
 export async function pickFiles(): Promise<{ file: File; handle: FSHandle }[]> {
   const handles: FSHandle[] = await (window as any).showOpenFilePicker({
     multiple: true,
-    types: [{ description: 'Alignments, indexes, reference, gene models', accept: { 'application/octet-stream': ['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi', '.gff', '.gff3', '.gtf', '.bed'] } }],
+    types: [{ description: 'Alignments, indexes, reference, gene models', accept: { 'application/octet-stream': ['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi', '.gff', '.gff3', '.gtf', '.bed', '.tbi', '.csi'] } }],
   });
   return Promise.all(handles.map(async h => ({ file: await h.getFile(), handle: h })));
 }
 
-const KEEP = /\.(bam|bai|cram|crai|fa|fasta|fna|fai|gzi|gz|gff|gff3|gtf|bed)$/i;
+const KEEP = /\.(bam|bai|cram|crai|fa|fasta|fna|fai|gzi|gz|gff|gff3|gtf|bed|tbi|csi)$/i;
 /** a file the viewer reads: alignments, indexes, reference, gene models, and the files of registered kinds (asked each time: plugins register at load) */
 const keep = (name: string) => KEEP.test(name) || kindExtensions().some(x => name.toLowerCase().endsWith(x));
 /**

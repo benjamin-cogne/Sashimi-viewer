@@ -526,6 +526,19 @@ of them is named like a human chromosome; a file whose header names a human buil
   it), amber when some of its sequence names are not in the reference (exact, then `chr` added or dropped, `M`/`MT`,
   then case). BED files found inside a run folder are not read as genes (they are mostly capture targets): add them on
   their own.
+- **Large files** (a whole-genome GTF or GFF3: GENCODE, Ensembl, RefSeq, hundreds of MB of text) are best given
+  bgzipped with their **tabix index**, the two together:
+  ```
+  (grep '^#' x.gtf; grep -v '^#' x.gtf | sort -k1,1 -k4,4n -S 2G) | bgzip > x.gtf.gz
+  tabix -p gff x.gtf.gz          # x.gtf.gz.tbi (-C for a .csi, for contigs over 512 Mb); -p bed for a BED
+  ```
+  The file is then never loaded: the genes of a window are read from the index when it is drawn (the rows of a gene
+  reaching past the window bring its whole span, so a window inside DMD shows all of DMD), and the names to search by
+  are read once in the background, in a worker (the chip shows *indexed · names 45 %*; windows and coordinates work
+  meanwhile, and a gene already known, a view reopened or a neighbour clicked, is found from its window). On the UCSC
+  hg38 RefSeq GTF (830 MB, 4.9 million lines): the file opens in under 0.1 s, a window's genes take ~0.1 s, the names
+  ~20 s in Chromium, and ~50 MB stay in memory, against ~50 s and ~270 MB to read it whole. A large bgzipped file
+  given without its index is read whole, with a note saying how to index it; an index given afterwards replaces it.
 - A locus with no gene opens as the region itself, without a model.
 - The annotations of the human genome are off: SNPs, ClinVar, gnomAD, GTEx, PanelApp, STR catalogue, cytobands and
   lift-over. The SV browser keeps its own human build.
@@ -533,8 +546,8 @@ of them is named like a human chromosome; a file whose header names a human buil
 On **GRCh38 / GRCh37** the same files can be added: their genes come first (searched by name, drawn as neighbours),
 then RefSeq's.
 
-Sessions keep the genome, the FASTA and the annotation files (by name and run-folder path; Chromium reopens them like
-the samples). An HTML export of a custom genome carries the gene models of its views and the reference bases of their
+Sessions keep the genome, the FASTA and the annotation files with their indexes (by name and run-folder path; Chromium
+reopens them like the samples). An HTML export of a custom genome carries the gene models of its views and the reference bases of their
 windows (up to 5 Mb each), so it opens offline.
 
 ## Privacy
