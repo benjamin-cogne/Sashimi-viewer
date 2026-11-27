@@ -481,6 +481,9 @@ or cut, HI, TS, LOEUF and pLI, PanelApp rating, modes and diseases) with the rul
 as `DEL` / `DUP` on the file's build (a file stating no build is read as GRCh37), in the SV browser's own browser with
 its tracks (genes on the rebuilt chromosome, DGV Gold, ClinVar SV / SNV, AChro-Puce, PanelApp, and **ClinGen CNV
 regions**; the same browser as the SV browser's and the SV cartoon's, the event shaded through the tracks in all three).
+**ClinVar SV** (in every browser): with an event of losses or gains, only the pathogenic / likely pathogenic ClinVar SVs
+that are the same event are drawn: same type (a loss for a loss, a gain for a gain) and a reciprocal overlap of 50 % or
+more (the shared part at least half of each); *matching (n/m)* beside the track name shows all m, and back.
 **ClinGen CNV regions** (its own toggle, on by default here as in the SV browser and the SV cartoon, beside the PanelApp CNV regions): the ClinGen dosage regions
 scored HI 3 (red) or TS 3 (blue; both: half and half), click one for its ClinGen page; folded by default; *▸ show recurrent CNVs / LCRs* under them adds the regions of the ClinGen recurrent
 CNV list v2.0 (hatched orange) and its breakpoint / LCR segments (thin grey, named: BP1-BP4, LCR22A-H, ...), so one sees
