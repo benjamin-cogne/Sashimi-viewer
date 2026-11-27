@@ -133,7 +133,7 @@ export interface Isoform {
  * carry their own). The blocks are put in transcription order, unless `inOrder` says they already are (a fusion
  * transcript, whose 3′ partner may lie upstream of the 5′ one, on the other strand or on another chromosome).
  */
-export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' | 'cdsStart' | 'cdsEnd'> & { chrom?: string }, seqAt: (start: number, end: number, chrom?: string) => string, inOrder = false): Isoform {
+export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' | 'cdsStart' | 'cdsEnd' | 'translTable'> & { chrom?: string }, seqAt: (start: number, end: number, chrom?: string) => string, inOrder = false): Isoform {
   const plus = tx.strand > 0;
   const fwd = (b: Block) => (b.strand ?? tx.strand) > 0;
   const ordered = inOrder ? blocksGenomic : plus ? [...blocksGenomic].sort((a, b) => a.start - b.start) : [...blocksGenomic].sort((a, b) => b.start - a.start);
@@ -169,7 +169,7 @@ export function buildIsoform(blocksGenomic: Block[], tx: Pick<TxModel, 'strand' 
   let protein = '', stopIndex: number | null = null;
   if (cdsStart != null) {
     for (let i = cdsStart; i + 3 <= mrna.length; i += 3) {
-      const aa = translateCodon(mrna.slice(i, i + 3));
+      const aa = translateCodon(mrna.slice(i, i + 3), tx.translTable);
       if (aa === '*') { stopIndex = i; break; }
       protein += aa;
     }

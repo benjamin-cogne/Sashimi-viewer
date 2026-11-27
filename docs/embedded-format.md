@@ -20,6 +20,14 @@ ignores it. Version 3 of the export writes
 the streams of columnar version 4 (below), version 4 of the export those of columnar version 5, and
 both read every earlier one.
 
+Version 5 of the export adds, for a custom genome (`build: "custom"`: any FASTA, gene models from the user's GFF3 / GTF /
+BED files), `views[i].referenceSeq: { chrom, start, seq }`, the reference bases of the view's window (0-based start,
+upper case), since no API serves them to the reader; and `views[i].transcript` may be absent, for a view of a region
+without a gene. Earlier readers ignore the first and need the second. `views[i].annotationTracks: [{ file, format,
+items }]` holds each annotation file's entities over the window, for its track (`TrackItem` in
+`src/standalone/annotation.ts`: name, type, strand, 0-based span, colour, score, attributes, transcripts with their
+exons and CDS).
+
 Each view also says which alignments its counts hold: `minMapq` (the minimum MAPQ, 0 for all; pages
 written before it hold `uniqueOnly: true`, read as MAPQ ≥ 30) and `secondary: true` when the secondary
 alignments were counted. The coverage and junctions answer only a request with the same filters; the

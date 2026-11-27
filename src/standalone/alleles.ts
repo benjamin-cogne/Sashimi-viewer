@@ -289,7 +289,8 @@ export class AlleleState {
   /** the haplotags met (a phased file) */
   groups = new HapGroups();
   /** `secondary`: secondary alignments (0x100) counted too */
-  constructor(readonly chrom: string, readonly secondary = false) {}
+  /** `minLength`: only the reads at least this long counted (readFilter.ts), 0 every read */
+  constructor(readonly chrom: string, readonly secondary = false, readonly minLength = 0) {}
   get empty(): boolean { return this.pe <= this.ps; }
   get bytes(): number { return this.owned.bytes + this.spill.bytes; }
   covers(start: number, end: number): boolean { return !this.empty && this.ps <= start && this.pe >= end; }

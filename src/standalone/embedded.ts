@@ -12,21 +12,23 @@
  * the original files, which the reader can still add. Gene lookups, common SNPs and GTEx go to the network as usual
  * when it is available.
  */
+import type { TrackData } from './annotation';
 import { addSiteHaplotypesFromReads } from './haplotypes';
 import type { AlignedRead, PhaseResult, Breakpoint, AllTranscripts, BoundaryHint, BoundarySpanning, ExonUsageResponse, GeneModel, KnownVariant, LibraryEvidence, ReadsResponse, RegionHint, SampleCoverage, StructuralEvidence, TranscriptData } from '../components/sashimi/types';
 import type { CoverageOptions, ReadsOptions, SampleRef, VariantScan, VariantScanOptions } from '../components/sashimi/datasource';
 import { LocalDataSource, type LocalSample, type ReferenceChoice } from './localSource';
 import { READS_PHASE_CAP, answerReads, supportAndCap, thinFragments } from './readsWindow';
+import { minLengthOf } from './readFilter';
 import { keepFlags, keepFlagsWith, rawOfRead, structuralEvidence } from './alignments';
 import { mapqThreshold } from './coverage';
 import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCoverageColumns, encodeReads as encodeReadsColumns, decodeReads as decodeReadsColumns, toBase64, fromBase64, type ReadsPayload } from './columnar';
 import type { SessionFile } from './session';
 import type { MethylWindow } from './methylation';
 import type { SampleKind } from './fileKinds';
-import type { GenomeBuild } from './ensembl';
+import type { Assembly } from './ensembl';
 
 export const EMBEDDED_APP = 'sashimi-viewer-export';
-export const EMBEDDED_VERSION = 4;
+export const EMBEDDED_VERSION = 5;
 export const EMBEDDED_TAG_ID = 'sashimi-embedded';
 
 /** Coverage of one sample over one window, compact: run lengths and depths instead of one object per run. */
@@ -92,20 +94,29 @@ export interface EncodedReads {
 export interface EmbeddedView {
   label: string;
   gene: { name: string; id?: string; chrom: string; start: number; end: number };
-  transcript: TranscriptData;
+  /** the gene model shown; absent for a view of a region without a gene (version 5) */
+  transcript?: TranscriptData;
   allTranscripts?: AllTranscripts;
   /** neighbouring genes of the window (the queried gene left out) */
   regionGenes?: GeneModel[];
   /** the window fetched (0-based half-open), the view plus margins */
   window: { chrom: string; start: number; end: number };
+  /** the reference bases of the window (a custom genome: its FASTA stays with the sender, and no API serves it); version 5 */
+  referenceSeq?: { chrom: string; start: number; seq: string };
+  /** each annotation file's entities over the window, for its track (version 5) */
+  annotationTracks?: TrackData[];
   /** minimum MAPQ of the alignments counted (0 = all) */
   minMapq?: number;
   /** secondary alignments counted (the view's Secondary filter on) */
   secondary?: boolean;
+  /** only the reads at least this long counted (the view's Minimum read length filter), bp */
+  minReadLength?: number;
   /** pages exported before the MAPQ threshold: NH:1, or MAPQ ≥ 30 without NH */
   uniqueOnly?: boolean;
   /** by sample id; the JSON form of version 1 exports or the columnar form of version 2 */
   coverage: Record<string, EncodedCoverage | EncodedCoverageV2>;
+  /** why a view carries no reads: '*' for every sample (reads track off, view wider than its reads window), else by sample id (an error) */
+  readsNotExported?: Record<string, string>;
   /** reads by sample id, for views exported with their reads track on */
   reads?: Record<string, EncodedReads | EncodedReadsV2>;
   /** CpG methylation by sample id (long-read DNA samples), for views exported with their Methylation layer on */
@@ -158,7 +169,7 @@ export interface EmbeddedExport {
   app: typeof EMBEDDED_APP;
   version: number;
   saved: string;
-  build: GenomeBuild;
+  build: Assembly;
   samples: { id: number; name: string; kind: SampleKind; file: string; index: string; library?: LibraryEvidence }[];
   /** the session (views, options, groups) to restore; its sample names match `samples` */
   session: SessionFile;
@@ -335,11 +346,63 @@ export class EmbeddedDataSource extends LocalDataSource {
   }
   private viewsOfGene(geneName: string, geneId?: string) {
     const n = geneName.toUpperCase();
-    return this.payload.views.filter(v => v.gene.name.toUpperCase() === n || (geneId && v.gene.id === geneId) || v.transcript.gene_name.toUpperCase() === n);
+    return this.payload.views.filter(v => v.gene.name.toUpperCase() === n || (geneId && v.gene.id === geneId) || v.transcript?.gene_name.toUpperCase() === n);
+  }
+  /** the annotation files of the views, then the reader's own */
+  override annotationTrackFiles(): string[] {
+    const out: string[] = [];
+    for (const v of this.payload.views) for (const t of v.annotationTracks ?? []) if (!out.includes(t.file)) out.push(t.file);
+    for (const f of super.annotationTrackFiles()) if (!out.includes(f)) out.push(f);
+    return out;
+  }
+  /** the entities the views carry (the view holding the window, else every view's overlapping it), then the reader's files */
+  override async getAnnotationTracks(chrom: string, start: number, end: number): Promise<TrackData[]> {
+    const views = this.payload.views.filter(v => v.annotationTracks && sameChrom(v.window.chrom, chrom) && v.window.end > start && v.window.start < end);
+    const holding = views.find(v => v.window.start <= start && v.window.end >= end);
+    const byFile = new Map<string, TrackData>();
+    for (const v of holding ? [holding] : views) for (const t of v.annotationTracks!) {
+      const have = byFile.get(t.file) ?? { file: t.file, format: t.format, items: [] };
+      for (const it of t.items) if (it.end > start && it.start < end && !have.items.some(x => x.key === it.key && x.start === it.start)) have.items.push(it);
+      byFile.set(t.file, have);
+    }
+    for (const t of await super.getAnnotationTracks(chrom, start, end)) if (!byFile.has(t.file)) byFile.set(t.file, t);
+    return [...byFile.values()].map(t => ({ ...t, items: [...t.items].sort((a, b) => a.start - b.start) }));
+  }
+  /** the contigs of the samples' headers, else those the views stand on (their windows: the page has no header) */
+  override async getContigs(): Promise<{ name: string; length: number }[]> {
+    const own = await super.getContigs();
+    if (own.length || this.reference.build !== 'custom') return own;
+    const ends = new Map<string, number>();
+    for (const v of this.payload.views) ends.set(v.window.chrom, Math.max(ends.get(v.window.chrom) ?? 0, v.window.end, v.referenceSeq ? v.referenceSeq.start + v.referenceSeq.seq.length : 0));
+    const list = [...ends].map(([name, length]) => ({ name, length }));
+    this.setContigList(list);
+    return list;
+  }
+  /** the bases of a view's window that holds the request; else the reader's FASTA or the APIs (a human build) */
+  override async getReferenceSeq(chrom: string, start: number, end: number): Promise<string | null> {
+    for (const v of this.payload.views) {
+      const r = v.referenceSeq;
+      if (r && sameChrom(r.chrom, chrom) && r.start <= start && r.start + r.seq.length >= end) { this.lastReferenceSource = 'fasta'; return r.seq.slice(start - r.start, end - r.start); }
+    }
+    const s = await super.getReferenceSeq(chrom, start, end);
+    if (s != null) return s;
+    // a request wider than the windows exported (the viewer asks for margins): their bases where they reach, N elsewhere
+    const out = new Array<string>(end - start).fill('N');
+    let any = false;
+    for (const v of this.payload.views) {
+      const r = v.referenceSeq;
+      if (!r || !sameChrom(r.chrom, chrom)) continue;
+      const lo = Math.max(start, r.start), hi = Math.min(end, r.start + r.seq.length);
+      for (let i = lo; i < hi; i++) out[i - start] = r.seq[i - r.start];
+      if (hi > lo) any = true;
+    }
+    if (!any) return null;
+    this.lastReferenceSource = 'fasta';
+    return out.join('');
   }
   override async getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> {
-    const v = this.viewsOfGene(geneName, geneId)[0];
-    if (v) return structuredClone(v.transcript);
+    const v = this.viewsOfGene(geneName, geneId).find(x => x.transcript);
+    if (v?.transcript) return structuredClone(v.transcript);
     return super.getTranscript(geneName, geneId, hint);
   }
   override async getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> {
@@ -361,7 +424,7 @@ export class EmbeddedDataSource extends LocalDataSource {
    * when none of them can answer.
    */
   private pickView(chrom: string, start: number, end: number, windowOf: (v: EmbeddedView) => { start: number; end: number } | undefined,
-    minMapq: number, secondary: boolean, looser = false, wants?: (v: EmbeddedView) => boolean): { vi: number; exact: boolean; mismatch?: string } {
+    minMapq: number, secondary: boolean, minLength: number, looser = false, wants?: (v: EmbeddedView) => boolean): { vi: number; exact: boolean; mismatch?: string } {
     const want = mapqThreshold(minMapq);
     let best = { vi: -1, exact: false, ov: 0, has: false };
     const other: string[] = [];
@@ -370,9 +433,9 @@ export class EmbeddedDataSource extends LocalDataSource {
       if (!w || !sameChrom(v.window.chrom, chrom)) return;
       const ov = Math.min(w.end, end) - Math.max(w.start, start);
       if (ov <= 0) return;
-      const q = viewMapq(v), sec = !!v.secondary;
-      const exact = q === want && sec === secondary;
-      if (!exact && !(looser && q <= want && (sec || !secondary))) { other.push(filterText(q, sec)); return; }
+      const q = viewMapq(v), sec = !!v.secondary, len = v.minReadLength ?? 0;
+      const exact = q === want && sec === secondary && len === minLength;
+      if (!exact && !(looser && q <= want && (sec || !secondary) && len <= minLength)) { other.push(filterText(q, sec, len)); return; }
       const has = !!wants?.(v);
       if (best.vi < 0 || (exact && !best.exact) || (exact === best.exact && (ov > best.ov || (ov === best.ov && has && !best.has)))) best = { vi, exact, ov, has };
     });
@@ -383,7 +446,7 @@ export class EmbeddedDataSource extends LocalDataSource {
     const name = this.names.get(sampleId)!;
     const core = opts?.core ?? { start, end };
     // the counts were made with the view's filters: only a view exported with the request's answers
-    const { vi: bestVi, mismatch } = this.pickView(chrom, core.start, core.end, v => v.coverage[String(sampleId)]?.window, minMapq, !!opts?.secondary, false, v => !!opts?.strands && !!(v.coverage[String(sampleId)] as EncodedCoverageV2).strands);
+    const { vi: bestVi, mismatch } = this.pickView(chrom, core.start, core.end, v => v.coverage[String(sampleId)]?.window, minMapq, !!opts?.secondary, opts?.minReadLength && opts.minReadLength > 0 ? opts.minReadLength : 0, false, v => !!opts?.strands && !!(v.coverage[String(sampleId)] as EncodedCoverageV2).strands);
     if (bestVi < 0 && mismatch) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `this window was exported with ${mismatch}: set the filters back to it to see it, or add the alignment file` };
     if (bestVi < 0) return { sample_id: sampleId, sample_name: name, coverage: [], junctions: [], window: { start, end }, error: `not in this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see it` };
     const b = this.payload.views[bestVi].coverage[String(sampleId)];
@@ -422,9 +485,14 @@ export class EmbeddedDataSource extends LocalDataSource {
     // the exported reads window overlapping the request the most, exported with the request's filters or looser ones (the
     // reads keep their MAPQ and flags: they are filtered here)
     const phasedAsk = mode === 'reads' && !opts?.support && !!opts?.phase;
-    const { vi: bestVi, exact, mismatch } = this.pickView(chrom, start, end, v => v.reads?.[String(sampleId)]?.window, minMapq, !!opts?.secondary, true, v => phasedAsk && !!v.phase?.[String(sampleId)]);
+    const { vi: bestVi, exact, mismatch } = this.pickView(chrom, start, end, v => v.reads?.[String(sampleId)]?.window, minMapq, !!opts?.secondary, minLengthOf(opts) ?? 0, true, v => phasedAsk && !!v.phase?.[String(sampleId)]);
     if (bestVi < 0 && mismatch) throw new Error(`The reads of this window were exported with ${mismatch}: set the filters back to it to see them, or add the alignment files`);
-    if (bestVi < 0) throw new Error(`The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
+    if (bestVi < 0) {
+      // a view over this window that says why its reads are missing
+      const why = this.payload.views.find(v => sameChrom(v.window.chrom, chrom) && v.window.end > start && v.window.start < end && (v.readsNotExported?.[String(sampleId)] || v.readsNotExported?.['*']));
+      const reason = why ? why.readsNotExported![String(sampleId)] ?? why.readsNotExported!['*'] : null;
+      throw new Error(reason ? `The reads of this window were not exported: ${reason}. Add the alignment files to see them` : `The reads of this window are not part of this exported file (${chrom}:${(start + 1).toLocaleString('en-US')}-${end.toLocaleString('en-US')}); add the alignment files to see them`);
+    }
     const best = await this.decodedReads(bestVi, sampleId);
     const collapsed = mode === 'collapsed';
     const support = !collapsed ? opts?.support : undefined;
@@ -433,11 +501,12 @@ export class EmbeddedDataSource extends LocalDataSource {
     const phased = !collapsed && !support && !!opts?.phase;
     const q = mapqThreshold(minMapq), sec = !!opts?.secondary;
     const inWindow = best.reads.filter(r => r.e > start && r.s < end && (exact || (r.q >= q && keepFlagsWith(r.f, sec))));
-    const { reads, total, mates } = supportAndCap(inWindow, chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support);
+    const minLength = minLengthOf(opts);
+    const { reads, total, mates } = supportAndCap(inWindow, chrom, phased ? Math.max(READS_PHASE_CAP, maxReads) : maxReads, collapsed, support, minLength);
     const base = { sample_id: sampleId, sample_name: name, total, shown: reads.length - mates, ...(support ? { supporting: { mates } } : {}), reference: best.reference, reference_source: best.reference_source };
     // the phasing exported with the view, for a window within the one it phased and while its thresholds are the
     // reader's (the reads carry their `ph` / `pb`); elsewhere the embedded reads are phased again
-    const stored = phased && exact ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
+    const stored = phased && exact && !minLength ? this.payload.views[bestVi].phase?.[String(sampleId)] : undefined;
     if (stored && (!stored.window || (stored.window.start <= start && stored.window.end >= end)) && stored.minVaf === minVaf && (stored.longReadMinIndel ?? 1) === (opts?.longReadMinIndel ?? 1) && (stored.longReadMinVaf ?? 0.2) === (opts?.longReadMinVaf ?? 0.2))
     {
       // the sites of every read phased, `maxReads` of them drawn, as the live page draws them
@@ -473,7 +542,7 @@ export class EmbeddedDataSource extends LocalDataSource {
 
 /** The MAPQ threshold a view was exported with (pages before the threshold: "unique only" as MAPQ ≥ 30, as sessions read it). */
 const viewMapq = (v: EmbeddedView) => mapqThreshold(v.minMapq ?? (v.uniqueOnly ? 30 : 0));
-const filterText = (q: number, secondary: boolean) => `${q ? `MAPQ ≥ ${q}` : 'every MAPQ'}${secondary ? ' and the secondary alignments' : ''}`;
+const filterText = (q: number, secondary: boolean, minLength = 0) => `${q ? `MAPQ ≥ ${q}` : 'every MAPQ'}${secondary ? ' and the secondary alignments' : ''}${minLength ? `, reads ≥ ${minLength.toLocaleString('en-US')} bp` : ''}`;
 /**
  * Names for the reads of one exported stream: the stream numbers them, and the two mates of a pair (linked by `mk`, the
  * window start and the lower stream index) take one name, as in the file, so that pair phasing joins them; the view's

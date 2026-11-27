@@ -7,7 +7,7 @@
  * window, and every viewer option (groups and reads track refer to samples by name).
  */
 import type { ViewerSettings, ViewerState } from '../components/SashimiViewer';
-import type { GenomeBuild } from './ensembl';
+import type { Assembly } from './ensembl';
 import type { LibraryEvidence, StrandEvidence } from '../components/sashimi/types';
 import type { SampleKind } from './fileKinds';
 
@@ -29,12 +29,15 @@ export interface SessionFile {
   app: typeof SESSION_APP;
   version: number;
   saved: string;
-  build: GenomeBuild;
+  /** a human build, or 'custom' (any genome: the FASTA and the annotation files below) */
+  build: Assembly;
   /** the run folder the sample paths are relative to (its name only; Chromium remembers the folder itself) */
   folder: string | null;
   /** in display order: the first sample is the primary one */
   samples: SessionSample[];
-  fasta: { file: string; index: string; gzi?: string } | null;
+  fasta: { file: string; index: string; gzi?: string; /** relative to the run folder, when known */ path?: string; indexPath?: string; gziPath?: string; size?: number } | null;
+  /** annotation files giving the gene models (GFF3, GTF, BED), in order: the first wins on a name */
+  annotations?: SessionAnnotation[];
   gene: SessionGene | null;
   viewer: SessionViewer | null;
   /** every registered view (tab), in order; `gene` / `viewer` above describe the active one (older readers use them) */
@@ -43,6 +46,8 @@ export interface SessionFile {
   /** variants of interest entered in the header (notation as typed, label shown), drawn on every view */
   knownVariants?: { text: string; label: string }[];
 }
+/** An annotation file, by name (and path in the run folder) and size. */
+export interface SessionAnnotation { file: string; size: number; path?: string; /** its tabix index (.tbi / .csi) */ index?: string; indexPath?: string }
 /** One registered view: the region and the full set of options it was left with. */
 export interface SessionView { label: string; gene: SessionGene; viewer: SessionViewer | null }
 
@@ -54,11 +59,13 @@ export function defaultSessionName(geneName?: string | null): string {
   return `sashimi-session${geneName ? `-${geneName.replace(/[^\w.-]+/g, '_')}` : ''}-${day}.json`;
 }
 
+type Named = { name: string; size?: number };
 export function buildSession(args: {
-  build: GenomeBuild;
+  build: Assembly;
   folder?: string | null;
   samples: SampleLike[];
-  fasta?: { fa: { name: string }; fai: { name: string }; gzi?: { name: string } };
+  fasta?: { fa: Named; fai: Named; gzi?: Named; path?: string; indexPath?: string; gziPath?: string };
+  annotations?: { file: Named; path?: string; index?: Named; indexPath?: string }[];
   /** the viewer's latest state (gene, window, options); null when no gene is open */
   state: ViewerState | null;
   /** every registered view with its own state (the active one included) */
@@ -78,7 +85,8 @@ export function buildSession(args: {
     groups: state.groups.map(g => ({ name: g.name, samples: g.sampleIds.map(nameOf).filter((n): n is string => !!n), color: g.color })),
     samples: state.shownSamples ? state.shownSamples.map(nameOf).filter((n): n is string => !!n) : undefined,
     knownVariants: state.knownVariants, hiddenJunctions: state.hiddenJunctions ?? [], labelScales: state.labelScales && Object.keys(state.labelScales).length ? state.labelScales : undefined, hiddenTranscripts: state.hiddenTranscripts?.length ? state.hiddenTranscripts : undefined, transcriptId: state.transcriptId,
-    consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, rnaVariants: state.rnaVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands, readsColor: state.readsColor,
+    hiddenAnnTracks: state.hiddenAnnTracks?.length ? state.hiddenAnnTracks : undefined, expandedAnnTracks: state.expandedAnnTracks?.length ? state.expandedAnnTracks : undefined,
+    consensusMode: state.consensusMode, longReadMinVafPct: state.longReadMinVafPct, coverageVariants: state.coverageVariants, rnaVariants: state.rnaVariants, methylation: state.methylation, methylIslands: state.methylIslands, pairs: state.pairs, haplotypes: state.haplotypes, phaseSource: state.phaseSource, readsGroup: state.readsGroup, clippedBases: state.clippedBases, insertedBases: state.insertedBases, readsWindow: state.readsWindow, secondary: state.secondary, strands: state.strands, readsColor: state.readsColor, minReadLength: state.minReadLength,
     // the panel order names its samples by name (ids are the page's own, renumbered at each load)
     panelOrder: state.panelOrder?.length ? state.panelOrder.map(k => (k.startsWith('s:') ? `s:${nameOf(Number(k.slice(2))) ?? k.slice(2)}` : k)) : undefined,
   });
@@ -87,7 +95,8 @@ export function buildSession(args: {
   return {
     app: SESSION_APP, version: SESSION_VERSION, saved: new Date().toISOString(), build, folder,
     samples: samples.map(s => ({ name: s.name, file: s.file.name, index: s.index.name, size: s.file.size, kind: s.kind, path: s.path, indexPath: s.indexPath, library: s.lib && (s.lib.type !== 'unknown' || s.lib.strand) ? s.lib : undefined })),
-    fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name } : null,
+    fasta: fasta ? { file: fasta.fa.name, index: fasta.fai.name, gzi: fasta.gzi?.name, path: fasta.path, indexPath: fasta.indexPath, gziPath: fasta.gziPath, size: fasta.fa.size } : null,
+    annotations: args.annotations?.length ? args.annotations.map(a => ({ file: a.file.name, size: a.file.size ?? 0, path: a.path, index: a.index?.name, indexPath: a.indexPath })) : undefined,
     gene: state ? geneOf(state) : null,
     viewer: state ? viewerOf(state) : null,
     views: views && views.length ? views : undefined,
@@ -103,7 +112,7 @@ export function parseSession(text: string): SessionFile {
   if (!raw || raw.app !== SESSION_APP) throw new Error('not a Sashimi viewer session file (missing "app": "sashimi-viewer")');
   if (typeof raw.version !== 'number' || raw.version > SESSION_VERSION) throw new Error(`session version ${raw.version} is newer than this viewer (${SESSION_VERSION})`);
   if (!Array.isArray(raw.samples)) throw new Error('session has no "samples" list');
-  const build: GenomeBuild = raw.build === 'GRCh37' ? 'GRCh37' : 'GRCh38';
+  const build: Assembly = raw.build === 'GRCh37' ? 'GRCh37' : raw.build === 'custom' ? 'custom' : 'GRCh38';
   const samples: SessionSample[] = raw.samples
     .filter((s: any) => s && typeof s.file === 'string')
     .map((s: any) => ({ name: String(s.name || s.file), file: String(s.file), index: String(s.index || ''), size: Number(s.size) || 0, kind: typeof s.kind === 'string' && /^[a-z0-9_-]+$/.test(s.kind) ? s.kind : 'bam',
@@ -128,6 +137,8 @@ export function parseSession(text: string): SessionFile {
     hiddenJunctions: Array.isArray(v.hiddenJunctions) ? v.hiddenJunctions.filter((x: any) => typeof x === 'string') : [],
     labelScales: v.labelScales && typeof v.labelScales === 'object' ? Object.fromEntries(Object.entries(v.labelScales).filter(([, n]) => typeof n === 'number' && Number.isFinite(n) && n > 0)) as Record<string, number> : undefined,
     hiddenTranscripts: Array.isArray(v.hiddenTranscripts) ? v.hiddenTranscripts.filter((x: any) => typeof x === 'string') : undefined,
+    hiddenAnnTracks: Array.isArray(v.hiddenAnnTracks) ? v.hiddenAnnTracks.filter((x: any) => typeof x === 'string') : undefined,
+    expandedAnnTracks: Array.isArray(v.expandedAnnTracks) ? v.expandedAnnTracks.filter((x: any) => typeof x === 'string') : undefined,
   } : null;
   const gene = parseGene(raw.gene);
   const viewer = parseViewer(raw.viewer);
@@ -138,7 +149,9 @@ export function parseSession(text: string): SessionFile {
   const knownVariants = Array.isArray(raw.knownVariants)
     ? raw.knownVariants.filter((k: any) => k && typeof k.text === 'string' && k.text.trim()).map((k: any) => ({ text: String(k.text), label: typeof k.label === 'string' ? k.label : '' }))
     : undefined;
-  return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null, gene, viewer, views: views?.length ? views : undefined, activeView, knownVariants: knownVariants?.length ? knownVariants : undefined };
+  return { app: SESSION_APP, version: raw.version, saved: String(raw.saved || ''), build, folder: typeof raw.folder === 'string' ? raw.folder : null, samples, fasta: raw.fasta && typeof raw.fasta.file === 'string' ? raw.fasta : null,
+    annotations: Array.isArray(raw.annotations) ? raw.annotations.filter((a: any) => a && typeof a.file === 'string').map((a: any) => ({ file: String(a.file), size: Number(a.size) || 0, path: typeof a.path === 'string' ? a.path : undefined, index: typeof a.index === 'string' ? a.index : undefined, indexPath: typeof a.indexPath === 'string' ? a.indexPath : undefined })) : undefined,
+    gene, viewer, views: views?.length ? views : undefined, activeView, knownVariants: knownVariants?.length ? knownVariants : undefined };
 }
 
 /** Which session samples are present among the loaded files (by relative path, else by file name, else by index name), and which are still missing. */

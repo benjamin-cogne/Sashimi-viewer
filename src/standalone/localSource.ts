@@ -17,11 +17,14 @@ import { OUTWARD_MIN_BP, RESCUE_MIN_CLIP, RESCUE_TOLERANCE_BP, SV_MIN_DELETION, 
 import { CoverageState, Layer, mapqThreshold, packCigar, readSlice, strandSlices, type CoverageSlice } from './coverage';
 import { AlleleLayer, AlleleState, refWindow, sitesFromCounts, type RefWindow } from './alleles';
 import { MethylCounts, MethylState, countRead, cpgSites, methylBlocks, methylWindow, newModScratch, visitReadCalls, type MethylWindow } from './methylation';
-import { arcReadFromCigar, supportsArc } from './arcSupport';
+import { addsMates, minLengthOf, opsReadLength, rawReadLength, supportsRaw } from './readFilter';
 import { nameHash } from './mates';
 import { READS_PHASE_CAP, answerReads, isLongRead } from './readsWindow';
 import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } from './fileKinds';
-import type { GenomeBuild } from './ensembl';
+import type { GenomeBuild, Assembly } from './ensembl';
+import { humanBuild } from './ensembl';
+import type { Annotation, TrackData } from './annotation';
+import { resolveContig } from '../components/sashimi/geometry';
 import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getClinvar } from './ucsc';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
@@ -31,7 +34,7 @@ import { getCommonSnps } from './snps';
 import { getGtexProfile, getGtexTissues } from './gtex';
 
 export interface LocalSample { id: number; name: string; /** 'bam', 'cram', or a registered file kind (fileKinds.ts) */ kind: SampleKind; file: File; index: File; /** paths relative to the run folder, when the files came from one */ path?: string; indexPath?: string; /** a sample of an exported page: no file, its regions are embedded in the page */ embedded?: boolean; /** RNA-seq or genomic DNA, and how that was decided */ lib?: LibraryEvidence; /** the file is being opened (header and index read) */ pending?: boolean; /** the build it was aligned on, from its header (assembly.ts); null: not told */ asm?: AssemblyCall | null }
-export interface ReferenceChoice { build: GenomeBuild; fasta?: { fa: File; fai: File; gzi?: File } }
+export interface ReferenceChoice { build: Assembly; fasta?: { fa: File; fai: File; gzi?: File } }
 
 type Opened =
   | { kind: 'bam'; bam: BamFile; refNames: string[]; header: string }
@@ -195,7 +198,7 @@ const haplotag = (get: (tag: string) => unknown): { hp?: number; ps?: number; pc
 const mateFields = (chromOf: (id: number) => string, mateId: number, matePos: number, tlen: number, sa: unknown) => ({
   tlen, mateChrom: mateId >= 0 ? chromOf(mateId) : '', matePos: mateId >= 0 ? matePos : undefined, sa: typeof sa === 'string' ? sa : null,
 });
-/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence so the clip can be placed by realignment or rescued at a known breakpoint. */
+/** A CIGAR with a soft clip of RESCUE_MIN_CLIP bases or more: the light structural scan decodes this record's sequence (split reads' too) so the clip can be placed by realignment or rescued at a known breakpoint. */
 const CLIP_RE = new RegExp(`(?:^|[A-Z=])(\\d+)S`, 'g');
 const bigClip = (cigar: string) => { CLIP_RE.lastIndex = 0; let m: RegExpExecArray | null; while ((m = CLIP_RE.exec(cigar))) if (parseInt(m[1]) >= RESCUE_MIN_CLIP) return true; return false; };
 /** Widest insertion checked as a tandem copy (the reference read around the window grows by as much). */
@@ -221,7 +224,9 @@ const BAM_VIEW: RecordView<any> = {
   hap: r => haplotag(t => r.getTag(t)),
   raw: (r, light, structural, refNames) => {
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(r.CIGAR)) || bigInsertion(r.CIGAR)));
+    // split reads (SA tag) too: their bases are the signature of the junction they cross, and a read whose clipped part
+    // was aligned elsewhere at MAPQ 0 is rescued as a clipped read (alignments.ts rescueClipEnds)
+    const withSeq = !light || (structural && (bigClip(r.CIGAR) || bigInsertion(r.CIGAR)));
     // the name ties the parts of a split read, and the two mates of a pair, together: kept in the light structural scan
     return { name: light && !structural ? '' : r.name, start: r.start, cigar: r.CIGAR, seq: withSeq ? r.seq : '', qual: light ? null : r.qual, flags: r.flags, mapq: r.mq ?? 255, nh: tagNumber(r.getTag('NH')),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -251,7 +256,7 @@ const CRAM_VIEW: RecordView<any> = {
     const qual = r.qualityScores ?? null;
     const cigar = cramCigar(feats, r.readLength, r.lengthOnRef ?? 0);
     const sa = structural ? r.getTag('SA') : undefined;
-    const withSeq = !light || (structural && ((typeof sa !== 'string' && bigClip(cigar)) || bigInsertion(cigar)));
+    const withSeq = !light || (structural && (bigClip(cigar) || bigInsertion(cigar)));
     return { name: light && !structural ? '' : (r.readName ?? ''), start: r.start, cigar, seq: withSeq ? cramBases(r) : '', qual: light ? null : qual, flags: r.flags, mapq: r.mappingQuality ?? 255, nh: tagNumber(r.getTag('NH')),
       mismatches: light ? undefined : cramMismatches(feats, qual),
       ...(light ? {} : { ...haplotag(tag => r.getTag(tag)), mods: modTags(t => r.getTag(t)) }),
@@ -266,8 +271,11 @@ interface ScanOptions {
   structural?: boolean; signal?: AbortSignal;
   /** secondary alignments (0x100) kept too */
   secondary?: boolean;
-  /** only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling */
-  filter?: (light: RawRead) => boolean;
+  /**
+   * only the records it accepts, tested on their light form (no sequence decoded for the others) before the sampling;
+   * `full` decodes the record whole (bases, qualities, CRAM substitutions) for a test that needs them
+   */
+  filter?: (light: RawRead, full: () => RawRead) => boolean;
   /** sample fragments rather than reads: the two mates of a pair are kept or dropped together (see `scan`) */
   pairs?: boolean;
 }
@@ -286,10 +294,9 @@ const yieldToUi = (): Promise<void> => {
 };
 
 /** The name a file gives `chrom` among its `names`: as asked, or with the "chr" prefix added or dropped; null when absent. */
+/** A sequence name matched to a file's (FASTA, BAM, CRAM): exact, `chr` added or dropped, M / MT, then ignoring case (resolveContig). */
 export function resolveName(names: string[], chrom: string): string | null {
-  if (names.includes(chrom)) return chrom;
-  const alt = chrom.startsWith('chr') ? chrom.slice(3) : `chr${chrom}`;
-  return names.includes(alt) ? alt : null;
+  return resolveContig(names, chrom);
 }
 
 function tagNumber(v: unknown): number | null {
@@ -360,12 +367,71 @@ export class LocalDataSource implements SashimiDataSource {
   setReference(reference: ReferenceChoice) {
     this.reference = reference;
     this.fasta = null;
+    this.contigList = null;
     for (const p of this.providers.values()) p.setReference?.(reference);
     // CRAM decoding depends on the reference: reopen files, and forget what was counted from them
     for (const [id, s] of this.samples) if (s.kind === 'cram') { this.opened.delete(id); this.coverage.delete(id); }
     // mismatches are read against the reference: every sample's allele counts depend on it
     this.alleleStates.clear();
     this.variantScanner?.reference(reference);
+  }
+
+  // ---- custom genome: annotation files and contigs ----
+  /** gene models from the user's annotation files (annotation.ts): the only ones on a custom genome, first on a human build */
+  annotation: Annotation | null = null;
+  setAnnotation(a: Annotation | null): void { this.annotation = a; this.syncAnnotationNames(); }
+  private contigList: { name: string; length: number }[] | null = null;
+  /** a custom genome's contigs as last read (getContigs), for synchronous locus parsing; null on a human build or until read */
+  contigs(): { name: string; length: number }[] | null { return this.reference.build === 'custom' ? this.contigList : null; }
+  /** sets the contigs known (a source that reads them elsewhere: an exported page's views) */
+  protected setContigList(list: { name: string; length: number }[]): void { this.contigList = list; this.syncAnnotationNames(); }
+  private contigNames(): string[] | null { return this.contigList ? this.contigList.map(c => c.name) : null; }
+  /** the reference's contigs: from the FASTA index, else the samples' headers (@SQ), in their order */
+  async getContigs(): Promise<{ name: string; length: number }[]> {
+    const out: { name: string; length: number }[] = [], seen = new Set<string>();
+    const add = (name: string, length: number) => { if (name && !seen.has(name)) { seen.add(name); out.push({ name, length }); } };
+    if (this.reference.fasta) {
+      try {
+        for (const line of (await this.reference.fasta.fai.text()).split('\n')) { const c = line.split('\t'); if (c.length >= 2) add(c[0], +c[1]); }
+      } catch { /* unreadable index: the samples' headers */ }
+    }
+    if (!out.length) for (const [name, seq] of this.annotation?.embeddedSequences ?? []) add(name, seq.length);
+    if (!out.length) for (const s of this.samples.values()) {
+      if (s.embedded || this.providers.has(s.id)) continue;
+      try {
+        const text = await this.headerText(s.id);
+        for (const m of text.matchAll(/^@SQ\t(.*)$/gm)) {
+          const sn = /(?:^|\t)SN:([^\t]+)/.exec(m[1])?.[1], ln = /(?:^|\t)LN:(\d+)/.exec(m[1])?.[1];
+          if (sn) add(sn, ln ? +ln : 0);
+        }
+      } catch { /* a file that cannot be read gives none */ }
+    }
+    this.contigList = out;
+    this.syncAnnotationNames();
+    return out;
+  }
+  private syncAnnotationNames(): void {
+    if (!this.annotation) return;
+    const human = this.reference.build !== 'custom';
+    // a human build shows its chromosomes chr-prefixed whatever the files say (other sequences as written); a custom
+    // genome the reference's own spelling
+    this.annotation.setReferenceNames(human ? null : this.contigNames(), human ? (c => (/^(chr)?([1-9]|1\d|2[0-2]|X|Y|M|MT)$/i.test(c) && !/^chr/i.test(c) ? `chr${c}` : c)) : undefined);
+  }
+  annotationTrackFiles(): string[] { return this.annotation?.trackFiles ?? []; }
+  async getAnnotationTracks(chrom: string, start: number, end: number): Promise<TrackData[]> { return this.annotation ? this.annotation.trackItems(chrom, start, end) : []; }
+  /** gene names of the annotation files matching a typed prefix */
+  suggestGenes(prefix: string, n?: number): string[] { return this.annotation?.suggest(prefix, n) ?? []; }
+  /** the build when it is a human one; else the error of a feature only human builds have */
+  private human(what: string): GenomeBuild {
+    const b = humanBuild(this.reference.build);
+    if (!b) throw new Error(`${what} is not available for a custom genome`);
+    return b;
+  }
+  private noModel(geneName: string): Error {
+    // an indexed file finds genes by name once its names are read (a pass over the file, in the background)
+    const reading = this.annotation?.infos.filter(i => i.indexed && !i.indexed.namesReady && !i.indexed.error) ?? [];
+    const wait = reading.length ? ` (the names of ${reading.map(i => `${i.file} are still being read, ${Math.round(100 * i.indexed!.namesRead)} %`).join('; ')}: retry in a moment, or type its coordinates)` : '';
+    return new Error(`No gene model for ${geneName} in ${this.annotation?.files.length ? this.annotation.label : 'the annotation: add a GFF3, GTF or BED file'}${wait}`);
   }
 
   /** Variants handed over by the page URL (deep link), drawn on every sample. */
@@ -445,7 +511,15 @@ export class LocalDataSource implements SashimiDataSource {
         }
       } catch (e) { console.warn('FASTA read failed, falling back to the UCSC / Ensembl APIs:', e); }
     }
-    const s = await getReference(this.reference.build, chrom, Math.max(0, start), end);
+    // the bases a GFF3 carries after ##FASTA, when no FASTA is given (a plasmid, a bacterium, a virus)
+    const own = !this.reference.fasta ? this.annotation?.embeddedSequences : null;
+    if (own) {
+      const name = resolveContig([...own.keys()], chrom);
+      if (name) { this.lastReferenceSource = 'fasta'; return own.get(name)!.slice(Math.max(0, start), end); }
+    }
+    const build = humanBuild(this.reference.build);
+    if (!build) { this.lastReferenceSource = null; return null; }
+    const s = await getReference(build, chrom, Math.max(0, start), end);
     this.lastReferenceSource = s == null ? null : 'ensembl';
     return s;
   }
@@ -599,7 +673,7 @@ export class LocalDataSource implements SashimiDataSource {
         seen++;
         if (!keepFlagsWith(view.flags(r), secondary)) continue;
         if (minMapq > 0 && view.mapq(r) < mapqThreshold(minMapq)) continue;
-        if (filter && !filter(view.raw(r, true, true, loc.o.refNames))) continue;
+        if (filter && !filter(view.raw(r, true, true, loc.o.refNames), () => view.raw(r, false, true, loc.o.refNames))) continue;
         if (pairs) {
           // a record without a name (a CRAM written without them) is a fragment of its own
           const h = nameHash(view.name(r) || `#${total}`);
@@ -704,12 +778,12 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's allele state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private alleleState(id: number, chrom: string, start: number, end: number, secondary = false): AlleleState {
+  private alleleState(id: number, chrom: string, start: number, end: number, secondary = false, minLength = 0): AlleleState {
     let st = this.alleleStates.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
-    if (!st || st.chrom !== chrom || st.secondary !== secondary || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || st.minLength !== minLength || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > ALLELE_MAX_SPAN)) {
-      st = new AlleleState(chrom, secondary);
+      st = new AlleleState(chrom, secondary, minLength);
       this.alleleStates.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -819,7 +893,7 @@ export class LocalDataSource implements SashimiDataSource {
       const loc = await this.locate(sampleId, chrom);
       if (!loc) return { sites: [], total: 0, long_reads: false };
       const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
-      const st = this.alleleState(sampleId, loc.name, start, end, !!opts?.secondary);
+      const st = this.alleleState(sampleId, loc.name, start, end, !!opts?.secondary, minLengthOf(opts) ?? 0);
       const scratch = { a: new Uint8Array(512) };
       // the reference over the records of the tile about to be counted, fetched before the (synchronous) counting
       let ref: RefWindow | null = null;
@@ -844,6 +918,7 @@ export class LocalDataSource implements SashimiDataSource {
         if (!keepFlagsWith(flags, st.secondary)) return;
         // every read is counted, whatever its MAPQ (a minimum MAPQ is read back from the counts, not scanned again)
         const ops = view.ops(r);
+        if (st.minLength && opsReadLength(ops) < st.minLength) return;
         const n = view.seqCodes(r, scratch);
         const start0 = view.start(r);
         // a phased file: the read's haplotag (HP 1, 2, … within the phase set PS) numbered for the counts
@@ -892,26 +967,60 @@ export class LocalDataSource implements SashimiDataSource {
     const o = await this.open(sampleId);
     return o.kind === 'bam' ? assemblyOfHeader('', (o.bam.indexToChr || []).map(r => ({ name: r.refName, length: r.length }))) : null;
   }
-  getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> { return getTranscript(this.reference.build, geneName, geneId, hint); }
-  getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> { return getAllTranscripts(this.reference.build, geneName, geneId, hint); }
+  async getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> {
+    const a = this.annotation;
+    const m = a ? (await a.transcript(geneName, hint)) ?? (geneId ? await a.transcript(geneId, hint) : null) : null;
+    if (m) return m;
+    const b = humanBuild(this.reference.build);
+    if (!b) throw this.noModel(geneName);
+    return getTranscript(b, geneName, geneId, hint);
+  }
+  async getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> {
+    const a = this.annotation;
+    const m = a ? (await a.allTranscripts(geneName, hint)) ?? (geneId ? await a.allTranscripts(geneId, hint) : null) : null;
+    if (m) return m;
+    const b = humanBuild(this.reference.build);
+    if (!b) throw this.noModel(geneName);
+    return getAllTranscripts(b, geneName, geneId, hint);
+  }
   async getRunSamples(): Promise<SampleRef[]> { return this.list(); }
-  getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> { return getRegionGenes(this.reference.build, chrom, start, end, exclude); }
-  getRegionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> { return getRegionTranscripts(this.reference.build, chrom, start, end); }
+  async getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]> {
+    const mine = (await this.annotation?.regionGenes(chrom, start, end, exclude)) ?? [];
+    const b = humanBuild(this.reference.build);
+    if (!b) return mine;
+    const theirs = await getRegionGenes(b, chrom, start, end, exclude);
+    if (!mine.length) return theirs;
+    // the file's genes win over RefSeq's of the same name
+    const names = new Set(mine.map(g => g.gene_name.toUpperCase()));
+    return [...mine, ...theirs.filter(g => !names.has(g.gene_name.toUpperCase()))].sort((x, y) => x.start - y.start);
+  }
+  async getRegionTranscripts(chrom: string, start: number, end: number): Promise<SvTranscript[]> {
+    const mine = (await this.annotation?.regionTranscripts(chrom, start, end)) ?? [];
+    const b = humanBuild(this.reference.build);
+    if (!b) return mine;
+    const theirs = await getRegionTranscripts(b, chrom, start, end);
+    const genes = new Set(mine.map(t => t.gene.toUpperCase()));
+    return [...mine, ...theirs.filter(t => !genes.has(t.gene.toUpperCase()))];
+  }
   async getGeneAnnotations(chrom: string, start: number, end: number, symbols: string[]): Promise<{ dosage: Map<string, DosageScore>; constraint: Map<string, Constraint>; notes: string[] }> {
-    const build = this.reference.build, notes: string[] = [];
+    const build = humanBuild(this.reference.build), notes: string[] = [];
+    if (!build) return { dosage: new Map(), constraint: new Map(), notes: ['ClinGen dosage and gnomAD constraint: human builds only'] };
     const [dosage, constraint] = await Promise.all([
       getDosageScores(build, chrom, start, end).then(d => { notes.push('ClinGen dosage: UCSC Genome Browser'); return d; }).catch(e => { notes.push(`ClinGen dosage unavailable (${e?.message || e})`); return new Map<string, DosageScore>(); }),
       getConstraint(build, symbols, { chrom, start, end }).then(c => { notes.push(c.source); return c.values as Map<string, Constraint>; }).catch(e => { notes.push(`gnomAD constraint unavailable (${e?.message || e})`); return new Map<string, Constraint>(); }),
     ]);
     return { dosage, constraint, notes };
   }
-  getCytobands(chrom: string) { return getCytobands(this.reference.build, chrom, chromLength(this.reference.build, chrom) ?? 300_000_000); }
-  async getPopulationSvs(chrom: string, start: number, end: number): Promise<PopulationSv[]> {
-    return (await getDgvGold(this.reference.build, chrom, start, end)).map(parseDgvItem).filter((v): v is PopulationSv => !!v);
+  async getCytobands(chrom: string) {
+    const b = humanBuild(this.reference.build);
+    return b ? getCytobands(b, chrom, chromLength(b, chrom) ?? 300_000_000) : [];
   }
-  getClinvar(which: 'sv' | 'snv', chrom: string, start: number, end: number) { return getClinvar(this.reference.build, which, chrom, start, end); }
-  getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.reference.build, model); }
-  getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.reference.build, chrom, start, end); }
+  async getPopulationSvs(chrom: string, start: number, end: number): Promise<PopulationSv[]> {
+    return (await getDgvGold(this.human('DGV'), chrom, start, end)).map(parseDgvItem).filter((v): v is PopulationSv => !!v);
+  }
+  async getClinvar(which: 'sv' | 'snv', chrom: string, start: number, end: number) { return getClinvar(this.human('ClinVar'), which, chrom, start, end); }
+  async getProteinDomains(model: ProteinModelRef): Promise<ProteinDomain[]> { return getProteinDomains(this.human('Protein domains'), model); }
+  async getCommonSnps(chrom: string, start: number, end: number) { return getCommonSnps(this.human('dbSNP'), chrom, start, end); }
   getGtexTissues(): Promise<GtexTissue[]> {
     if (this.reference.build !== 'GRCh38') return Promise.reject(new Error('GTEx tissue tracks need GRCh38 (GTEx v8/v10 are hg38)'));
     return getGtexTissues();
@@ -981,11 +1090,12 @@ export class LocalDataSource implements SashimiDataSource {
    * elsewhere, on the same strand or far away) are kept whole; the others would add nothing to it
    * but their insert size, which the layer histograms instead.
    */
-  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false): void {
+  private countRecord(id: number, layer: Layer, view: RecordView<any>, r: any, seqId: number, refNames: string[], structural: boolean | 'rna', secondary = false, minLength = 0): void {
     const flags = view.flags(r);
     if (!keepFlagsWith(flags, secondary)) return;
     const mapq = view.mapq(r);
     const ops = view.ops(r);
+    if (minLength && opsReadLength(ops) < minLength) return;
     const start = view.start(r);
     const insert = (flags & 1) && (flags & 2) ? Math.abs(view.tlen(r)) : 0;
     layer.add(start, ops, mapq, insert, flags);
@@ -1017,7 +1127,7 @@ export class LocalDataSource implements SashimiDataSource {
   private fill(id: number, st: CoverageState, loc: { o: Opened; name: string; seqId: number }, from: number, to: number, signal?: AbortSignal, onTile?: () => void | Promise<void>): Promise<void> {
     const view: RecordView<any> = loc.o.kind === 'bam' ? BAM_VIEW : CRAM_VIEW;
     return this.fillStretch(id, st, loc, from, to, () => new Layer(st.strands),
-      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary), signal, onTile);
+      (layer, r) => this.countRecord(id, layer, view, r, loc.seqId, loc.o.refNames, st.structural, st.secondary, st.minLength), signal, onTile);
   }
 
   /**
@@ -1083,15 +1193,15 @@ export class LocalDataSource implements SashimiDataSource {
   }
 
   /** The sample's state for a request on `chrom` around [start, end): kept when the request is near it, started over otherwise. */
-  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false, strands = false): CoverageState {
+  private coverageState(id: number, chrom: string, start: number, end: number, structural: boolean | 'rna', secondary = false, strands = false, minLength = 0): CoverageState {
     let st = this.coverage.get(id);
     const gap = Math.max(end - start, COVERAGE_MIN_GAP);
     // records kept for a genomic library include those of an RNA library (split and clipped reads), not the reverse
     // counts made with the strands answer a request without them, not the reverse
-    if (!st || st.chrom !== chrom || st.secondary !== secondary || (strands && !st.strands) || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
+    if (!st || st.chrom !== chrom || st.secondary !== secondary || st.minLength !== minLength || (strands && !st.strands) || (structural && (!st.structural || (structural === true && st.structural === 'rna')))
       || (!st.empty && (start > st.pe + gap || end < st.ps - gap))
       || (!st.empty && Math.max(st.pe, end) - Math.min(st.ps, start) > COVERAGE_MAX_SPAN)) {
-      st = new CoverageState(chrom, structural, secondary, strands);
+      st = new CoverageState(chrom, structural, secondary, strands, minLength);
       this.coverage.set(id, st);
     }
     st.lastUsed = Date.now();
@@ -1129,7 +1239,7 @@ export class LocalDataSource implements SashimiDataSource {
       const core = { start: Math.max(start, Math.min(end, opts?.core?.start ?? start)), end: Math.min(end, Math.max(start, opts?.core?.end ?? end)) };
       if (core.end <= core.start) { core.start = start; core.end = end; }
       const structural = opts?.structural || false;
-      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands);
+      const st = this.coverageState(sampleId, loc.name, start, end, structural, !!opts?.secondary, !!opts?.strands, opts?.minReadLength && opts.minReadLength > 0 ? opts.minReadLength : 0);
       const strandsOf = (w: { start: number; end: number }) => (opts?.strands ? strandSlices(st, minMapq, w.start, w.end, boundaries) : Promise.resolve(undefined));
       const exact = () => ({ start: Math.max(start, st.ps), end: Math.min(end, st.pe) });
       // a partial answer costs a slice of everything counted so far, which on a wide, deep window is ~10⁶ runs: the next
@@ -1230,21 +1340,24 @@ export class LocalDataSource implements SashimiDataSource {
     // fields (mate position, template length) come along so that mates can be drawn linked. Without `support` the
     // sample is drawn by fragment (the name is read for it), so that pair mode shows whole pairs; the supporting reads
     // are sampled as reads, and their mates in the window added afterwards
+    // a length floor and a support filter both apply before the cap (readFilter.ts)
+    const minLength = minLengthOf(opts);
+    const longEnough = (r: RawRead) => !minLength || rawReadLength(r) >= minLength;
     const scanned = await this.scan(sampleId, chrom, start, end, minMapq, cap, false,
-      { structural: true, signal: opts?.signal, filter: support ? r => supportsArc(arcReadFromCigar(r), ownName, support) : undefined, pairs: !support, secondary: !!opts?.secondary });
+      { structural: true, signal: opts?.signal, filter: support ? (r, full) => longEnough(r) && supportsRaw(r, ownName, support, full) : minLength ? longEnough : undefined, pairs: !support, secondary: !!opts?.secondary });
     const total = scanned.total;
     let raw = scanned.kept, mates = 0;
     if (support && raw.length > Math.max(1, maxReads)) {
       const want = Math.max(1, maxReads), step = raw.length / want;
       raw = Array.from({ length: want }, (_, i) => raw[Math.floor(i * step)]);
     }
-    if (support) {
+    if (addsMates(support)) {
       // the mates of the supporting reads, where the window holds them (a second pass, over the names kept)
       const have = new Set(raw.map(r => `${r.name}:${r.start}:${r.flags}`));
       const want = new Set(raw.filter(r => r.flags & 1 && r.matePos != null && r.matePos >= start && r.matePos < end && (!r.mateChrom || r.mateChrom === ownName)).map(r => r.name));
       if (want.size) {
         const extra = await this.scan(sampleId, chrom, start, end, minMapq, Infinity, false,
-          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`), secondary: !!opts?.secondary });
+          { structural: true, signal: opts?.signal, filter: r => want.has(r.name) && !have.has(`${r.name}:${r.start}:${r.flags}`) && longEnough(r), secondary: !!opts?.secondary });
         mates = extra.kept.length;
         raw = [...raw, ...extra.kept].sort((a, b) => a.start - b.start);
       }

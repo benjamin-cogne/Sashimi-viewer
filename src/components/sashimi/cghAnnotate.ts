@@ -12,6 +12,7 @@ import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import { ACHRO_REGIONS, type AchroClass } from './achropuce';
 import { RO_MATCH, type PopulationSv } from './svPopulation';
 import type { CghCnv } from './cghIntervals';
+import { bandSpan } from './cghIscn';
 import { exonsInCall } from './cghExons';
 import { scoreCnv, type RegionHit, type CnvGene, type AchroHit, type GeneView, type PanelView, type Score } from './cghScore';
 import { cgh, type CghState } from './cghStore';
@@ -41,16 +42,10 @@ export interface CnvAnn {
   /** the DGV Gold CNVs of the same type sharing DGV_COVER of the call or more, and those lying inside it whatever their share; not in the priority */
   dgv: DgvHit[];
   dgvError?: string;
-  /** the call's band from the cytogenetic bands (UCSC), when the file gives none (a BED) */
+  /** the call's band from the cytogenetic bands (UCSC, sub-band precision): shown when the file gives none (a BED), always written in the ISCN */
   band?: string;
   /** terminal / whole arm / whole chromosome, from the chromosome length and the cytobands */
   topo?: CnvTopo;
-}
-/** the band of a call, as an interval table writes it: p21.1, or p21.2 - p21.1 */
-function bandOf(bands: { start: number; end: number; name: string }[], s0: number, e0: number): string | undefined {
-  const at = (pos: number) => bands.find(b => b.start <= pos && pos < b.end)?.name;
-  const a = at(s0), z = at(Math.max(s0, e0 - 1));
-  return !a || !z ? undefined : a === z ? a : `${a} - ${z}`;
 }
 /** a call's band: the file's, else the one read from the bands */
 export const bandOfCall = (c: CghCnv, ann?: CnvAnn) => c.cytoband || ann?.band || '';
@@ -224,10 +219,10 @@ const STEPS: Record<CghSource, (c: CghCnv, ld: Loaders, a: CnvAnn, out: { bands?
     try { a.dgv = dgvHits(c.kind, c.start - 1, c.end, await ld.getPopulationSvs(c.chrom, c.start - 1, c.end)); a.dgvError = undefined; delete a.failed.dgv; }
     catch (e) { a.dgvError = msg(e); a.failed.dgv = `DGV Gold (${a.dgvError})`; }
   },
-  // a BED gives no band: read it from the cytogenetic bands (as the browser's ideogram); they also place the call (terminal, arm)
+  // the band at sub-band precision for the ISCN (and for a BED, which gives none): read from the cytogenetic bands (as the browser's ideogram); they also place the call (terminal, arm)
   async bands(c, ld, a, out) {
     if (!ld.getCytobands) return;
-    try { const b = await ld.getCytobands(c.chrom); out.bands = b; if (!c.cytoband) a.band = bandOf(b, c.start - 1, c.end); delete a.failed.bands; }
+    try { const b = await ld.getCytobands(c.chrom); out.bands = b; a.band = bandSpan(b, c.start - 1, c.end); delete a.failed.bands; }
     catch (e) { a.failed.bands = `cytogenetic bands (${msg(e)})`; }
   },
 };

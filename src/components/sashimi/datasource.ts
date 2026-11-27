@@ -1,3 +1,4 @@
+import type { TrackData } from '../../standalone/annotation';
 import type { ClinvarVariant } from './clinvar';
 import type { SvTranscript, DosageScore, Constraint } from './svGenes';
 import type { MethylWindow } from '../../standalone/methylation';
@@ -43,6 +44,8 @@ export interface ReadsOptions {
   phase?: boolean;
   /** secondary alignments (0x100) among the reads too */
   secondary?: boolean;
+  /** only the reads at least this long, as sequenced (readFilter.ts readLength), raw or collapsed; absent or 0: every read */
+  minReadLength?: number;
   /**
    * collapsed mode: the reads split by transcript strand, `strands` naming the gene's under the reverse (dUTP) rule (read
    * 2 of a pair mapped on +, or read 1 or a single read mapped on −, is +). The answer is the gene's strand, phased or
@@ -90,6 +93,8 @@ export interface CoverageOptions {
   structural?: boolean | 'rna';
   /** count secondary alignments (0x100) too, in coverage, junctions and the structural evidence (IGV counts them); default primary and supplementary records only */
   secondary?: boolean;
+  /** count only the reads at least this long, as sequenced (readFilter.ts), in coverage, junctions and the structural evidence; absent or 0: every read */
+  minReadLength?: number;
   /** also split the window by transcript strand (`SampleCoverage.strands`), for a stranded RNA library */
   strands?: boolean;
   /** drops the decoding and the fetch in flight when the caller no longer wants the answer (a pan that moved on); the promise then rejects with an AbortError */
@@ -113,6 +118,14 @@ export interface SashimiDataSource {
   getRunSamples(runId: number): Promise<SampleRef[]>;
   /** One comparison sample to load next to the primary one; may reject when none exists. */
   getRandomSample(runId: number, excludeId: number): Promise<SampleRef>;
+  /** A custom genome's contigs (the locus box reads their names); null on a human build, or before they are read. */
+  contigs?(): { name: string; length: number }[] | null;
+  /** The user's annotation files, by name: one track each under the ruler (absent: none). */
+  annotationTrackFiles?(): string[];
+  /** Every entity of each annotation file overlapping a 0-based half-open window, file by file. */
+  getAnnotationTracks?(chrom: string, start: number, end: number): Promise<TrackData[]>;
+  /** Gene names of the user's annotation files starting with a typed prefix (the gene box). */
+  suggestGenes?(prefix: string, n?: number): string[];
   /** Genes overlapping a 1-based inclusive region with their canonical transcript, `exclude` (name or id) left out. */
   getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]>;
   /**

@@ -70,7 +70,7 @@ export function retentionEffect(start: number, end: number, seq: string, h: Rete
   // codons from the first one holding an intron base: it starts `inCodon` bases before the intron
   let stop: RetentionEffect['stop'] = null;
   for (let i = RETENTION_FLANK - inCodon, c = 1; i + 3 <= t.length; i += 3, c++) {
-    if (translateCodon(t.slice(i, i + 3)) === '*') { stop = { codon: c, inIntron: i < RETENTION_FLANK + L }; break; }
+    if (translateCodon(t.slice(i, i + 3), tx.translTable) === '*') { stop = { codon: c, inIntron: i < RETENTION_FLANK + L }; break; }
   }
   const frame = L % 3 === 0 ? 'in frame' : 'frameshift';
   const last = h.index === h.count - 1;

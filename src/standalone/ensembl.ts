@@ -8,6 +8,11 @@
 import type { TranscriptData, AllTranscripts, TranscriptModel, GeneModel, ProteinDomain } from '../components/sashimi/types';
 
 export type GenomeBuild = 'GRCh38' | 'GRCh37';
+/** The genome the page works on: a human build (gene models, annotations and reference from UCSC / Ensembl), or a custom
+ * genome (any organism or assembly: the reference from the user's FASTA, gene models from their annotation files). */
+export type Assembly = GenomeBuild | 'custom';
+export const isHumanBuild = (a: Assembly | null | undefined): a is GenomeBuild => a === 'GRCh38' || a === 'GRCh37';
+export const humanBuild = (a: Assembly | null | undefined): GenomeBuild | null => (isHumanBuild(a) ? a : null);
 const HOSTS: Record<GenomeBuild, string> = { GRCh38: 'https://rest.ensembl.org', GRCh37: 'https://grch37.rest.ensembl.org' };
 
 async function getJson(url: string): Promise<any> {

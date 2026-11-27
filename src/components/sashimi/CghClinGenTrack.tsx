@@ -1,5 +1,5 @@
 /**
- * The "ClinGen CNV regions" track (SvGenomeBrowser's optional `extraTrack`), the same in every browser: the SV browser,
+ * The "ClinGen CNV regions" track (one of SvGenomeBrowser's `extraTracks`, off by default: PanelAppCnvTrack's useCnvRegionTracks), the same in every browser: the SV browser,
  * the SV cartoon's and the array-CGH page's (useClinGenTrack):
  * HI 3 / TS 3 dosage regions, the recurrent CNV list's regions and its breakpoint / LCR segments, from embedded data.
  */
@@ -9,6 +9,7 @@ import type { SvExtraTrack } from './SvGenomeBrowser';
 import { clinGenOn, recurrentOf, shortName, PIEV_RO, LCR_PAD, type ClinGenDosage, type ClinGenRecurrent } from './cghRecurrent';
 import { CLINGEN_READ, CLINGEN_DOSAGE_EVALUATED } from './cghClinGenData';
 import { ACHRO_COLOR } from './achropuce';
+import { fmtBp as fmt } from './cghIntervals';
 
 const COL = { hi: '#dc2626', ts: '#2563eb', rec: '#ea580c', recText: '#9a3412', lcr: '#94a3b8', text: '#1f2937', faint: '#8796a8', piev: ACHRO_COLOR.PIEV };
 const ROW = 24, LCR_ROW = 19;
@@ -17,7 +18,6 @@ const tagText = (t: ('del' | 'dup')[]) => (t.length === 2 ? 'PIEV' : `PIEV ${t[0
 const tagW = (t: ('del' | 'dup')[]) => (t.length ? (t.length === 2 ? 27 : 44) : 0);
 // rough widths (no canvas measure here): enough to keep labels of one lane apart
 const tw = (s: string, px: number) => s.length * px * 0.56;
-const fmt = (n: number) => n.toLocaleString('en-US');
 const size = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)} Mb` : `${Math.round(n / 1e3)} kb`);
 const pievWord = (r: { piev: ('del' | 'dup')[]; pievName?: string }) => (r.piev.length ? `\nAChro-Puce: ${r.pievName}, PIEV (${r.piev.join(' and ')}): susceptibility, reduced penetrance` : '');
 

@@ -6,8 +6,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { SUGGEST_MIN, looksLikeGene, suggestGenes, type GeneSuggestion } from '../../standalone/geneSuggest';
 
-export function GeneSuggest({ value, onChange, local = [], className, placeholder, title, ariaLabel, width = 340, autoFocus }: {
-  value: string; onChange: (v: string) => void; local?: string[]; className?: string; placeholder?: string; title?: string; ariaLabel?: string; autoFocus?: boolean;
+export function GeneSuggest({ value, onChange, local = [], files, remote = true, className, placeholder, title, ariaLabel, width = 340, autoFocus }: {
+  value: string; onChange: (v: string) => void; local?: string[];
+  /** gene names of the user's annotation files matching the text (listed first) */
+  files?: (q: string) => string[];
+  /** HGNC's names too (a human build); off on a custom genome */
+  remote?: boolean;
+  className?: string; placeholder?: string; title?: string; ariaLabel?: string; autoFocus?: boolean;
   /** width of the list, px */
   width?: number;
 }) {
@@ -21,13 +26,13 @@ export function GeneSuggest({ value, onChange, local = [], className, placeholde
 
   useEffect(() => {
     const q = value.trim();
-    if (!looksLikeGene(q) || q.length < SUGGEST_MIN || picked.current === value) { setList([]); return; }
+    if (q.length < SUGGEST_MIN || picked.current === value || (!looksLikeGene(q) && !files?.(q).length)) { setList([]); return; }
     const ctl = new AbortController();
     const timer = setTimeout(() => {
-      suggestGenes(q, local, ctl.signal).then(l => { if (!ctl.signal.aborted) { setList(l); setActive(-1); } }).catch(() => {});
+      suggestGenes(q, local, ctl.signal, { files, remote }).then(l => { if (!ctl.signal.aborted && picked.current !== value) { setList(l); setActive(-1); } }).catch(() => {});
     }, 180);
     return () => { clearTimeout(timer); ctl.abort(); };
-  }, [value, localKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [value, localKey, remote, files]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pick = (s: GeneSuggestion) => {
     picked.current = s.symbol;
@@ -47,6 +52,8 @@ export function GeneSuggest({ value, onChange, local = [], className, placeholde
         onFocus={() => setOpen(true)}
         onBlur={() => setTimeout(() => setOpen(false), 120)}
         onKeyDown={e => {
+          // the text submitted as typed: no list for it, even one still on its way
+          if (e.key === 'Enter' && !(shown && active >= 0)) { picked.current = value; setOpen(false); setList([]); return; }
           if (!shown) return;
           if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => (a + 1) % list.length); }
           else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => (a <= 0 ? list.length - 1 : a - 1)); }
@@ -63,12 +70,12 @@ export function GeneSuggest({ value, onChange, local = [], className, placeholde
               <span className="font-semibold text-[12.5px] text-slate-900 shrink-0">{s.symbol}</span>
               <span className="flex-1 min-w-0 truncate text-[11.5px] text-slate-500">
                 {s.via ? <span className="text-amber-700">{s.via.kind === 'previous' ? 'previously' : 'alias'} {s.via.text} · </span> : null}
-                {s.name ?? (s.local ? 'opened in this page before' : '')}
+                {s.name ?? (s.file ? 'in your annotation files' : s.local ? 'opened in this page before' : '')}
               </span>
               {s.location && <span className="shrink-0 text-[11px] font-mono text-slate-400">{s.location}</span>}
             </button>
           ))}
-          <div className="px-3 pt-1 pb-0.5 text-[10.5px] text-slate-400 border-t border-slate-100 mt-1">↑ ↓ to choose · Enter to open · gene names from HGNC</div>
+          <div className="px-3 pt-1 pb-0.5 text-[10.5px] text-slate-400 border-t border-slate-100 mt-1">↑ ↓ to choose · Enter to open · {remote ? (files ? 'your annotation files, then HGNC' : 'gene names from HGNC') : 'genes of your annotation files'}</div>
         </div>
       )}
     </span>

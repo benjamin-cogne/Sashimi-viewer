@@ -16,6 +16,8 @@ export interface GeneSuggestion {
   via?: { kind: 'alias' | 'previous'; text: string };
   /** the page knows it (a view, a recent search) */
   local?: boolean;
+  /** from the user's annotation files */
+  file?: boolean;
 }
 
 /** suggestions start from this many letters, and at most this many are listed */
@@ -82,19 +84,28 @@ function parseHgnc(d: unknown, key: string): GeneSuggestion[] {
 }
 
 /** Suggestions for the letters typed: the page's genes starting with them, then HGNC's, SUGGEST_MAX at most. */
-export async function suggestGenes(text: string, local: string[], signal?: AbortSignal): Promise<GeneSuggestion[]> {
+export async function suggestGenes(text: string, local: string[], signal?: AbortSignal,
+  opts: { files?: (q: string) => string[]; remote?: boolean } = {}): Promise<GeneSuggestion[]> {
   const q = text.trim();
-  if (!looksLikeGene(q)) return [];
+  const remoteOn = opts.remote !== false;
+  // the genes of the user's annotation files (their names as typed there: locus tags, IDs), then the page's and the recent ones
+  const mine = q.length >= SUGGEST_MIN ? opts.files?.(q) ?? [] : [];
+  if (!looksLikeGene(q) && !mine.length) return [];
   const key = q.toUpperCase();
   const seen = new Set<string>();
   const out: GeneSuggestion[] = [];
-  for (const g of [...local, ...recentGenes()]) {
+  for (const g of mine) {
+    const up = g.toUpperCase();
+    if (seen.has(up)) continue;
+    seen.add(up); out.push({ symbol: g, local: true, file: true });
+  }
+  for (const g of [...local, ...(remoteOn ? recentGenes() : [])]) {
     const up = g.toUpperCase();
     if (!up.startsWith(key) || seen.has(up)) continue;
     seen.add(up); out.push({ symbol: g, local: true });
   }
   let remote: GeneSuggestion[] = [];
-  try { remote = await hgnc(q, signal); } catch { /* offline, blocked: the page's own genes only */ }
+  if (remoteOn && looksLikeGene(q)) try { remote = await hgnc(q, signal); } catch { /* offline, blocked: the page's own genes only */ }
   for (const r of remote) {
     const up = r.symbol.toUpperCase();
     const mine = out.find(o => o.symbol.toUpperCase() === up);
