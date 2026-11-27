@@ -1880,7 +1880,6 @@ export default function SashimiViewer({
   }, [neighbours, currentChrom, tx, viewStart, viewEnd, scale, plotWidth, dnaOnly]);
   /** DNA samples only: a header line, then the gene rows (the queried gene among them) */
   const transcriptHeadH = dnaOnly && tx ? DNA_TX_HEAD_H : TRANSCRIPT_H;
-  const transcriptPanelH = transcriptHeadH + neighbourRows.length * NEIGHBOUR_ROW_H;
 
   // ---- Annotation tracks: one per annotation file of the page (GFF3 / GTF / BED), every entity of the window ----
   const annFiles = useMemo(() => ds.annotationTrackFiles?.() ?? [], [ds]);
@@ -1905,17 +1904,31 @@ export default function SashimiViewer({
     return () => window.clearTimeout(timer);
   }, [annShown, currentChrom, viewStart, viewEnd, annData]); // eslint-disable-line react-hooks/exhaustive-deps
   /** each track's rows: entities (folded) or transcripts (unfolded) packed left to right with room for their names */
+  /**
+   * The annotation file whose track and the gene model make one panel: the file the model comes from (its track shown),
+   * or, with no model (a region without a gene), the first track shown. The model is drawn on the panel's first row,
+   * the file's other entities under it; the separate gene row and its neighbours are not drawn.
+   */
+  const mergedFile = useMemo(() => {
+    const shown = annFiles.filter(f => !hiddenAnnTracks.includes(f));
+    if (tx?.sourceFile) return shown.includes(tx.sourceFile) ? tx.sourceFile : null;
+    return !tx && transcriptMissing ? shown[0] ?? null : null;
+  }, [annFiles, hiddenAnnTracks, tx, transcriptMissing]);
+  /** the queried gene's entity in the merged file: drawn as the model, its sub-entities on the model's line */
+  const isQueryItem = (it: TrackItem) => !!tx && (it.name === tx.geneName || it.txs.some(t => t.id === tx.transcriptId));
   const annLayout = useMemo(() => {
     const plotRight = PLOT_LEFT + plotWidth;
-    const out = new Map<string, { rows: AnnUnit[][]; total: number; dropped: number }>();
+    const out = new Map<string, { rows: AnnUnit[][]; total: number; dropped: number; query?: TrackItem }>();
     for (const f of annFiles) {
       const td = annData?.chrom === currentChrom ? annData.tracks.find(t => t.file === f) : undefined;
       const expanded = expandedAnnTracks.includes(f);
       const units: AnnUnit[] = [];
-      let total = 0;
+      let total = 0, query: TrackItem | undefined;
       for (const it of td?.items ?? []) {
         if (it.end <= viewStart || it.start >= viewEnd) continue;
         total++;
+        // the model's own gene is the merged panel's first row, not one of its entity rows (DNA only: it stays among them)
+        if (f === mergedFile && !dnaOnly && isQueryItem(it)) { query ??= it; continue; }
         if (expanded && it.txs.length > 1) {
           it.txs.forEach((t, i) => units.push({ item: it, tx: i, start: t.exons[0][0], end: t.exons[t.exons.length - 1][1], blocks: t.exons, cdsStart: t.cdsStart, cdsEnd: t.cdsEnd, label: `${it.name} · ${t.name}` }));
         } else {
@@ -1936,15 +1949,21 @@ export default function SashimiViewer({
         if (!row) { if (rows.length >= maxRows) { dropped++; continue; } row = { items: [], spans: [] }; rows.push(row); }
         row.items.push(u); row.spans.push(span);
       }
-      out.set(f, { rows: rows.map(r => r.items), total, dropped });
+      out.set(f, { rows: rows.map(r => r.items), total, dropped, query });
     }
     return out;
-  }, [annFiles, annData, currentChrom, viewStart, viewEnd, expandedAnnTracks, scale, plotWidth]);
+  }, [annFiles, annData, currentChrom, viewStart, viewEnd, expandedAnnTracks, scale, plotWidth, mergedFile, dnaOnly, tx]); // eslint-disable-line react-hooks/exhaustive-deps
   const annPanelH = (f: string) => {
-    if (hiddenAnnTracks.includes(f)) return 0;
+    if (hiddenAnnTracks.includes(f) || f === mergedFile) return 0;
     const L = annLayout.get(f);
     return ANN_HEAD_H + Math.max(1, L?.rows.length ?? 0) * ANN_ROW_H + (L?.dropped ? 12 : 0) + 4;
   };
+  /** the merged panel: the file's header, the model's row (or a line saying there is none), the file's other entities */
+  const mergedL = mergedFile ? annLayout.get(mergedFile) : undefined;
+  const mergedModelH = !mergedFile ? 0 : tx && !dnaOnly ? TRANSCRIPT_H : !tx ? 18 : 0;
+  const transcriptPanelH = mergedFile
+    ? ANN_HEAD_H + mergedModelH + Math.max(mergedModelH ? 0 : 1, mergedL?.rows.length ?? 0) * ANN_ROW_H + (mergedL?.dropped ? 12 : 0) + 4
+    : transcriptHeadH + neighbourRows.length * NEIGHBOUR_ROW_H;
 
   /**
    * Which gene model a junction belongs to. The queried gene is tried first; when it does not
@@ -4829,7 +4848,8 @@ export default function SashimiViewer({
   // the bottom of the stack: its last sample (in the order drawn) or an annotation panel dragged under the samples
   const lastLayout = layouts.reduce<TrackLayout | null>((m, L) => (!m || L.yOff > m.yOff ? L : m), null);
   const annotBottom = Math.max(RULER_H, ...Object.keys(annotH).map(k => (annotH[k] ? (annotY[k] ?? RULER_H) + annotH[k] + TRACK_GAP : RULER_H)));
-  const lastTrackBottom = Math.max(annotBottom, lastLayout ? lastLayout.yOff + lastLayout.height + TRACK_GAP : RULER_H);
+  // no sample yet: a line under the annotations for the hint that says so
+  const lastTrackBottom = Math.max(annotBottom + (tracks.length ? 0 : 22), lastLayout ? lastLayout.yOff + lastLayout.height + TRACK_GAP : RULER_H);
   /** Each reads track sits right under the coverage track of its sample. */
   const readsPlacements = [...readsTracks].map(([sid, rt]) => {
     const L = layouts.find(l => l.track.sampleId === sid);
@@ -6101,8 +6121,21 @@ export default function SashimiViewer({
   };
 
   const renderTranscript = (yOff: number) => {
-    const midY = yOff + TRANSCRIPT_H / 2 + 8;
+    // merged with the model's annotation file: its header first, the model under it, the file's entities after
+    const top = mergedFile ? yOff + ANN_HEAD_H : yOff;
+    const mergedFi = mergedFile ? annFiles.indexOf(mergedFile) : -1;
+    const mergedRows = () => renderAnnTrack(mergedFile!, yOff, mergedFi, { rowsTop: top + mergedModelH, height: transcriptPanelH });
+    const midY = top + TRANSCRIPT_H / 2 + 8;
     const exonH = 18, utrH = 9;
+    if (mergedFile && (!tx || dnaOnly)) {
+      return (
+        <g fontFamily={FONT}>
+          <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
+          {!tx && <text x={PLOT_LEFT + 8} y={top + 12} fill={INK.muted} fontSize={10}>{`No transcript model for ${currentGeneName}${transcriptMissing ? `: ${transcriptMissing}` : ''}`}</text>}
+          {mergedRows()}
+        </g>
+      );
+    }
     if (!tx) {
       return (
         <text x={PLOT_LEFT + 4} y={yOff + 20} fill={INK.muted} fontSize={11} fontFamily={FONT}>
@@ -6182,26 +6215,27 @@ export default function SashimiViewer({
     return (
       <g fontFamily={FONT}>
         <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
-        <text x={PLOT_LEFT + 8} y={yOff + 14} fontSize={10}>
+        <text x={PLOT_LEFT + 8} y={top + 14} fontSize={10}>
           <tspan fill={INK.text} fontWeight={700}>{tx.geneName}</tspan>
           <tspan fill={INK.muted}>{'  '}{tx.transcriptId} · {modelKindLabel(tx)} · {tx.strand > 0 ? '+' : '−'} strand · {tx.exons.length} exons{tx.cdsStart == null ? ' · non-coding' : ''}</tspan>
         </text>
         {reverse && (
-          <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9.5} fontWeight={700}>
+          <text x={plotRight - 6} y={top + 14} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9.5} fontWeight={700}>
             <title>{`${tx.geneName} is transcribed from the minus strand. The axis is reversed so that the transcript reads 5′→3′ from left to right: genomic positions decrease towards the right, which is the opposite of IGV and of the UCSC browser. Reference bases in the reads track are shown on both strands.`}</title>
             ⚠ antisense gene (− strand): axis reversed, 5′→3′ left to right, genomic positions decrease to the right
           </text>
         )}
         {!reverse && tx.strand < 0 && (
-          <text x={plotRight - 6} y={yOff + 14} textAnchor="end" fill={INK.muted} fontSize={9.5}>
+          <text x={plotRight - 6} y={top + 14} textAnchor="end" fill={INK.muted} fontSize={9.5}>
             <title>{`${tx.geneName} is transcribed from the minus strand. Every shown sample is genomic DNA, so the axis keeps the genomic orientation (positions increase to the right, as in IGV): the transcript reads 3′→5′ from left to right.`}</title>
             − strand gene · genomic orientation, positions increase to the right
           </text>
         )}
-        {neighbourError && <text x={plotRight - 6} y={yOff + (tx.strand < 0 ? 26 : 14)} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
+        {neighbourError && !mergedFile && <text x={plotRight - 6} y={yOff + (tx.strand < 0 ? 26 : 14)} textAnchor="end" fill={UNIQUE_COLOR} fontSize={9}>neighbouring genes unavailable: {neighbourError}</text>}
         <defs><clipPath id="sashimi-clip-tx"><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={transcriptPanelH} /></clipPath></defs>
         <g clipPath="url(#sashimi-clip-tx)">
         {gRight > gLeft && <line x1={gLeft} y1={midY} x2={gRight} y2={midY} stroke={INK.intron} strokeWidth={1.5} />}
+        {mergedL?.query && annChildren(mergedL.query, midY, 'qch', 8)}
         {arrows}
         {/* Intron lengths (equal-intron mode only, where the axis no longer tells) */}
         {axis.kind === 'equal-intron' && introns.map(i => {
@@ -6228,16 +6262,35 @@ export default function SashimiViewer({
             </g>
           );
         })}
-        {neighbourRows.map((row, ri) => renderNeighbourRow(row, yOff + TRANSCRIPT_H + ri * NEIGHBOUR_ROW_H))}
+        {!mergedFile && neighbourRows.map((row, ri) => renderNeighbourRow(row, yOff + TRANSCRIPT_H + ri * NEIGHBOUR_ROW_H))}
         </g>
+        {mergedFile && mergedRows()}
       </g>
     );
   };
 
   /** One row of neighbouring genes: exons (CDS tall, UTR short), a line with chevrons in the gene's own direction, and a name pill. */
+  /** An entity's sub-entities (not its transcripts: a TF binding site, a promoter) as thin boxes on its line, with their tooltip. */
+  const annChildren = (it: TrackItem, mid: number, key: string, hh = 6): JSX.Element[] => {
+    const plotRight = PLOT_LEFT + plotWidth;
+    return (it.children ?? []).map((c, k) => {
+      const xa = scale.x(c.start), xb = scale.x(c.end);
+      const l = Math.max(PLOT_LEFT, Math.min(xa, xb)), r = Math.min(plotRight, Math.max(xa, xb));
+      if (r < l) return null;
+      const color = c.color ?? annTypeColor(c.type);
+      return (
+        <g key={`${key}-${k}`}>
+          <title>{`${c.type} · ${c.name}\n${currentChrom}:${(c.start + 1).toLocaleString('en-US')}-${c.end.toLocaleString('en-US')} · ${formatBp(c.end - c.start)} · ${c.strand > 0 ? '+ strand' : c.strand < 0 ? '− strand' : 'no strand'}\npart of ${it.name}${c.attrs ? `\n${c.attrs.replace(/;\s*/g, '; ')}` : ''}`}</title>
+          <rect x={l} y={mid - hh / 2} width={Math.max(2, r - l)} height={hh} fill={color} rx={1} opacity={0.9} />
+        </g>
+      );
+    }).filter((x): x is JSX.Element => !!x);
+  };
+
   /** One annotation file's track: a header (file, count, fold / unfold, hide), then its entities, row by row. */
-  const renderAnnTrack = (file: string, yOff: number, fi: number) => {
-    const h = annotH[`ann:${file}`];
+  const renderAnnTrack = (file: string, yOff: number, fi: number, merged?: { rowsTop: number; height: number }) => {
+    const h = merged ? merged.height : annotH[`ann:${file}`];
+    const rowsTop = merged ? merged.rowsTop : yOff + ANN_HEAD_H;
     const L = annLayout.get(file) ?? { rows: [], total: 0, dropped: 0 };
     const plotRight = PLOT_LEFT + plotWidth;
     const expanded = expandedAnnTracks.includes(file);
@@ -6247,7 +6300,7 @@ export default function SashimiViewer({
       : `${L.total.toLocaleString('en-US')} entit${L.total === 1 ? 'y' : 'ies'} in view${L.total ? ' · hover for details, click to zoom to one' : ''}`;
     const els: JSX.Element[] = [];
     L.rows.forEach((row, ri) => row.forEach((u, ui) => {
-      const it = u.item, mid = yOff + ANN_HEAD_H + ri * ANN_ROW_H + ANN_ROW_H / 2;
+      const it = u.item, mid = rowsTop + ri * ANN_ROW_H + ANN_ROW_H / 2;
       const color = it.color ?? (GENE_LIKE.test(it.type) ? (tx && it.strand !== 0 && it.strand !== tx.strand ? ANTISENSE_COLOR : SAME_SENSE_COLOR) : annTypeColor(it.type));
       const parts: JSX.Element[] = [];
       const xa0 = scale.x(u.start), xb0 = scale.x(u.end);
@@ -6271,6 +6324,8 @@ export default function SashimiViewer({
       });
       // one block with a strand (a BED line, a repeat): white chevrons on it
       if (it.strand !== 0 && u.blocks.length === 1) for (let ax = left + 10; ax < right - 6; ax += 30) chevron(ax, '#fff', `w${ax}`);
+      // its sub-entities (a TF binding site), on its row
+      if (u.tx == null || u.tx === 0) parts.push(...annChildren(it, mid, `ch${ui}`));
       const name = u.label.length > 40 ? `${u.label.slice(0, 39)}…` : u.label;
       const lw = name.length * 5.6 + 10;
       const lx = right + 4 + lw <= plotRight ? right + 4 : left - lw - 4 >= PLOT_LEFT ? left - lw - 4 : Math.max(PLOT_LEFT + 3, Math.min(left, plotRight - lw - 3));
@@ -6294,7 +6349,7 @@ export default function SashimiViewer({
     return (
       <g key={`ann-${file}`} fontFamily={FONT}>
         <defs><clipPath id={`sashimi-clip-ann-${fi}`}><rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} /></clipPath></defs>
-        <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />
+        {!merged && <rect x={PLOT_LEFT} y={yOff} width={plotWidth} height={h} fill="none" stroke={INK.grid} strokeWidth={1} rx={4} />}
         <text x={PLOT_LEFT + 8} y={yOff + 13} fontSize={10}>
           <tspan fill={INK.text} fontWeight={700}>{file}</tspan>
           <tspan fill={annStatus.error ? UNIQUE_COLOR : INK.muted}>{'  '}{status}</tspan>
@@ -7668,7 +7723,7 @@ export default function SashimiViewer({
           {renderLegend(legendY)}
 
           {tracks.length === 0 && (
-            <text x={PLOT_LEFT + 8} y={RULER_H + 24} fill={INK.muted} fontSize={11}>{sampleId > 0 ? 'Loading coverage…' : 'No alignment yet: add BAM or CRAM files (with their index) to see coverage, junctions and reads here.'}</text>
+            <text x={PLOT_LEFT + 8} y={annotBottom + 12} fill={INK.muted} fontSize={11}>{sampleId > 0 ? 'Loading coverage…' : 'No alignment yet: add BAM or CRAM files (with their index) to see coverage, junctions and reads here.'}</text>
           )}
 
           {/* Hover crosshair */}

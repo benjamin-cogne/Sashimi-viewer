@@ -557,6 +557,11 @@ whose header names a human build added later sets that build back.
   hg38 RefSeq GTF (830 MB, 4.9 million lines): the file opens in under 0.1 s, a window's genes take ~0.1 s, the names
   ~20 s in Chromium, and ~50 MB stay in memory, against ~50 s and ~270 MB to read it whole. A large bgzipped file
   given without its index is read whole, with a note saying how to index it; an index given afterwards replaces it.
+- **The gene model and its file are one panel.** When the gene shown comes from an annotation file (or no gene is shown
+  and a file's track is), the gene row and that file's track are drawn as one panel: the file's header (count,
+  *unfold*, *hide*), the gene's model on the first row (numbered exons, CDS, frameshift signs, click an exon), its
+  sub-entities (a TF binding site, a promoter) on the same line, then the file's other entities. *hide* gives back the
+  usual gene row. A RefSeq model on GRCh38 / GRCh37 keeps its own row, the files their tracks.
 - **Each annotation file is also a track** under the ruler, on any build: every entity of the file in the window, of any
   type (genes, repeat_region, enhancer, regions of interest, BED lines), in the file's colour (BED `itemRgb`, GFF3
   `color=`), else genes in the gene colours (same strand / antisense of the gene shown) and other types in a colour of

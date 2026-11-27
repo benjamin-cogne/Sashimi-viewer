@@ -49,7 +49,9 @@ interface ATx {
 /** What a track shows of an entity besides its model: its type, colour, score, attributes, and no strand ('.'). */
 interface Extra { type?: string; color?: string; score?: number; attrs?: string; unstranded?: boolean;
   /** drawn in the file's track only, never a gene to find or a neighbour (a TF binding site under a gene) */
-  trackOnly?: boolean }
+  trackOnly?: boolean;
+  /** for a track-only entity: the key of the gene it belongs to (it is drawn on that gene's row) */
+  parentKey?: string }
 interface AGene extends Extra { key: string; id: string; name: string;
   /** other names it is found by (locus_tag, gene, Alias, gene_synonym, old_locus_tag) */
   aliases?: string[]; chrom: string; strand: 1 | -1; start: number; end: number; biotype: string; txs: ATx[] }
@@ -68,6 +70,10 @@ export interface TrackItem {
   /** the transcript drawn when the track is folded (pickTx: canonical tag, else longest CDS, else longest) */
   shown: number;
   txs: { id: string; name: string; biotype: string; strand: 1 | -1; exons: [number, number][]; cdsStart: number | null; cdsEnd: number | null }[];
+  /** entities under it that are not its transcripts (a TF binding site, a promoter), drawn on its row */
+  children?: { name: string; type: string; start: number; end: number; strand: 1 | -1 | 0; color?: string; attrs?: string }[];
+  /** while grouping: the key of the gene this one belongs to */
+  parentKey?: string;
 }
 /** One file's entities over a window. */
 export interface TrackData { file: string; format: AnnotationFormat; items: TrackItem[] }
@@ -303,7 +309,7 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo, sequences?: Map
   /** lone features without an ID, by their key */
   const lone = new Map<string, Feat>();
   /** features under a gene that are neither transcripts nor their parts (a TF binding site, a promoter): track only */
-  const trackOnly = new Set<string>();
+  const trackOnly = new Map<string, Feat>();
   const addTx = (geneKey: string, gene: Feat | null, tx: ATx) => { const g = genes.get(geneKey); if (g) g.txs.push(tx); else genes.set(geneKey, { gene, txs: [tx] }); };
   for (const f of feats) {
     if (!isTx(f) || isLeaf(f)) continue;
@@ -326,16 +332,23 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo, sequences?: Map
     const key = f.id ?? `${name}@${f.chrom}:${f.start}`;
     if (genes.has(key)) continue;
     const under = f.parents.some(p => byId.has(p));
-    if (under) trackOnly.add(key);
+    if (under) trackOnly.set(key, f);
     if (!f.id) lone.set(key, f);
     addTx(key, f, { id: f.id ?? name, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(f.attrs) ?? f.type, canonical: false });
   }
+  /** the gene a track-only entity belongs to: the nearest of its ancestors that gave a gene */
+  const parentKeyOf = (f: Feat): string | undefined => {
+    for (const p of f.parents) for (let q: Feat | undefined = byId.get(p), d = 0; q && d < 8; q = q.parents.map(x => byId.get(x)).find(Boolean), d++) {
+      if (q.id && genes.has(q.id) && !trackOnly.has(q.id)) return q.id;
+    }
+    return undefined;
+  };
   const out: AGene[] = [];
   for (const [key, { gene, txs }] of genes) {
     const name = gene ? geneNameOf(gene.attrs, key) : txs[0].name;
     // a gene, or a transcript with no gene above it, or a lone feature: the track shows its type and attributes
     const root = gene ?? byId.get(key) ?? null;
-    const g = geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined, { ...extraOf(root ?? lone.get(key)), ...(trackOnly.has(key) ? { trackOnly: true } : {}) });
+    const g = geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined, { ...extraOf(root ?? lone.get(key)), ...(trackOnly.has(key) ? { trackOnly: true, parentKey: parentKeyOf(trackOnly.get(key)!) } : {}) });
     const al = aliasesOf((gene ?? root ?? lone.get(key))?.attrs).filter(x => x !== name && x !== g.id);
     if (al.length) g.aliases = al;
     out.push(g);
@@ -765,9 +778,22 @@ export class Annotation {
           key: g.key, name: g.name, type: g.type ?? (f.info.format === 'bed' ? 'bed' : 'gene'), strand: g.unstranded ? 0 : g.strand,
           start: g.start, end: g.end, color: g.color, score: g.score, attrs: g.attrs, shown: Math.max(0, g.txs.indexOf(picked)),
           txs: g.txs.map(t => ({ id: t.id, name: t.name, biotype: t.biotype, strand: t.strand, exons: t.exons.map(e => [e[0], e[1]] as [number, number]), cdsStart: t.cdsStart, cdsEnd: t.cdsEnd })),
+          ...(g.parentKey ? { parentKey: g.parentKey } : {}),
         };
       }).sort((a, b) => a.start - b.start),
-    }));
+    })).map(t => {
+      // an entity under a gene of the window (a TF binding site) goes with that gene; the gene reaches over it
+      const byKey = new Map(t.items.map(i => [i.key, i]));
+      const items: TrackItem[] = [];
+      for (const it of t.items) {
+        const parent = it.parentKey ? byKey.get(it.parentKey) : undefined;
+        if (!parent || parent === it) { items.push(it); continue; }
+        (parent.children ??= []).push({ name: it.name, type: it.type, start: it.start, end: it.end, strand: it.strand, color: it.color, attrs: it.attrs });
+        parent.start = Math.min(parent.start, it.start); parent.end = Math.max(parent.end, it.end);
+      }
+      for (const it of items) delete it.parentKey;
+      return { ...t, items: items.sort((a, b) => a.start - b.start) };
+    });
   }
 
   /** names starting with the text (then containing it), for the gene box */
