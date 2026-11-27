@@ -98,7 +98,9 @@ export interface SvCartoonProps {
 
 export default function SvCartoon({ chrom, window: win, candidates, initialSelected, sample, controls, models, build, geneLoaders, loadJoint, onClose }: SvCartoonProps) {
   /** the browser below as everywhere else: its known CNV region tracks, PanelApp Australia and ClinGen (GRCh37 or GRCh38) */
-  const cnvTracks = useCnvRegionTracks(build === 'GRCh37' ? 'GRCh37' : 'GRCh38');
+  const humanCnvTracks = useCnvRegionTracks(build === 'GRCh37' ? 'GRCh37' : 'GRCh38');
+  // the known CNV regions (PanelApp, ClinGen) are of the human genome: none on a custom one
+  const cnvTracks = useMemo(() => (build === 'GRCh38' || build === 'GRCh37' ? humanCnvTracks : []), [build, humanCnvTracks]);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSelected));
   const [zygosity, setZygosity] = useState<'het' | 'hom'>('het');
   // copies of the chromosome outside the event: diploid by default, haploid on Y; on X the last choice for this sample

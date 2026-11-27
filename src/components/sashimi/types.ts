@@ -6,18 +6,20 @@
 export interface TranscriptData {
   gene_name: string; transcript_id: string; translation_id?: string | null; is_mane_select?: boolean;
   /** how the displayed model was chosen: MANE Select, RefSeq Select / Ensembl canonical, or the longest CDS / transcript */
-  model_kind?: 'mane' | 'canonical' | 'longest' | 'chosen'; biotype?: string; source?: 'refseq' | 'ensembl'; chrom: string; strand: number;
+  model_kind?: 'mane' | 'canonical' | 'longest' | 'chosen'; biotype?: string; source?: 'refseq' | 'ensembl' | 'file';
+  /** the annotation file the model comes from (source 'file') */
+  source_label?: string; chrom: string; strand: number;
   start: number; end: number; exons: { start: number; end: number; rank: number }[];
   /** Genomic CDS bounds (1-based inclusive); null/undefined for non-coding transcripts. */
   cds_start?: number | null; cds_end?: number | null;
 }
 /** One transcript model of a gene (RefSeq or Ensembl), 1-based inclusive coordinates. */
 export interface TranscriptModel {
-  id: string; name: string; source: 'refseq' | 'ensembl'; biotype: string;
+  id: string; name: string; source: 'refseq' | 'ensembl' | 'file'; biotype: string;
   start: number; end: number; strand: number; exons: { start: number; end: number }[];
   cds_start?: number | null; cds_end?: number | null; is_mane: boolean; is_canonical: boolean;
 }
-export interface AllTranscripts { gene_name: string; chrom: string; strand: number; source: 'refseq' | 'ensembl'; transcripts: TranscriptModel[] }
+export interface AllTranscripts { gene_name: string; chrom: string; strand: number; source: 'refseq' | 'ensembl' | 'file'; /** the annotation file (source 'file') */ source_label?: string; transcripts: TranscriptModel[] }
 
 /** Run-length encoded coverage: 0-based half-open [start, end) at constant depth. */
 export interface CoverageRun { start: number; end: number; depth: number; }

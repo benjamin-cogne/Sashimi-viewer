@@ -19,7 +19,9 @@ import { READS_PHASE_CAP } from './readsWindow';
 import { exportedCall, thresholdAt, type MethylWindow } from './methylation';
 import { fileKindOf, kindExtensions, kindLabel, type SampleKind } from './fileKinds';
 import { EMBEDDED_APP, EMBEDDED_VERSION, EmbeddedDataSource, buildExportHtml, embeddedSamples, encodeCoverageV2, encodeMethyl, encodeReadsV2, pageIsUnbuilt, readEmbedded, type EmbeddedExport, type EmbeddedView, type EncodedCoverage, type EncodedCoverageV2, type EncodedReadsV2, type EmbeddedPhase, type EncodedMethyl } from './embedded';
-import type { GenomeBuild } from './ensembl';
+import { isHumanBuild, humanBuild, type GenomeBuild, type Assembly } from './ensembl';
+import { ANNOTATION_EXT, loadAnnotation, type AnnotationFileInfo } from './annotation';
+import { assemblyOfHeader } from './assembly';
 import { liftRange, liftSegments } from './liftover';
 import { parseCdna, parseExonQuery, parseLocus, toTxModel } from '../components/sashimi/geometry';
 import { attachVariantWorker } from './variantClient';
@@ -70,7 +72,7 @@ interface ViewTab {
 const searchKey = (o: Opened) => (o.mark ? `l:${o.chrom.replace(/^chr/i, '').toUpperCase()}:${o.mark.start}-${o.mark.end}` : `g:${o.geneName.toUpperCase()}`);
 const fmtLocus = (chrom: string, start: number, end: number) => `${chrom}:${start.toLocaleString('en-US')}${end > start ? `-${end.toLocaleString('en-US')}` : ''}`;
 /** Tab label: the gene, with the searched locus when there is one (the window itself is in the tooltip). */
-const labelOf = (o: Opened) => `${o.geneName}${o.mark ? ` · ${fmtLocus(o.chrom, o.mark.start, o.mark.end)}` : ''}`;
+const labelOf = (o: Opened) => { const at = o.mark ? fmtLocus(o.chrom, o.mark.start, o.mark.end) : ''; return at && at !== o.geneName ? `${o.geneName} · ${at}` : o.geneName; };
 /** A tab's state: what its viewer last reported, else (a tab loaded from a session or an export and never opened yet) its region with the options it will start with. */
 const stateOfTab = (t: ViewTab): ViewerState => t.state ?? {
   ...DEFAULT_VIEWER_SETTINGS, ...(t.settings ?? {}),
@@ -102,6 +104,10 @@ const strandTitle = (e: StrandEvidence | undefined) => `${!e ? 'Library orientat
 const ALIGN_EXT = /\.(bam|cram)$/i;
 const INDEX_EXT = /\.(bai|crai)$/i;
 const FASTA_EXT = /\.(fa|fasta|fna)(\.gz)?$/i;
+/** a region opened without a gene (a whole contig typed by name): at most this much of it is shown at first */
+const GENELESS_MAX_BP = 1_000_000;
+/** a custom genome's reference bases are embedded in an export for view windows up to this size */
+const EXPORT_REFERENCE_MAX_BP = 5_000_000;
 
 /** Pair alignment files with their indexes by name (case-insensitive, Windows tools often shout): x.bam + x.bam.bai or x.bai. */
 type PairedSample = { name: string; kind: SampleKind; file: File; index: File; path?: string; indexPath?: string };
@@ -137,13 +143,13 @@ const sameSample = (a: { file: File; index: File; path?: string }, b: { file: Fi
   a.path && b.path ? a.path === b.path : a.file.name === b.file.name && a.file.size === b.file.size && a.index.name === b.index.name;
 
 /** Pairs alignments with their index (same directory when the files carry relative paths) and finds the reference FASTA. */
-function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: { fa: File; fai: File; gzi?: File }; fastaMissing?: string } {
+/** A reference FASTA with its index (and the .gzi of a bgzipped one), and their paths in the run folder when known. */
+type FastaFiles = { fa: File; fai: File; gzi?: File; path?: string; indexPath?: string; gziPath?: string };
+function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unmatched: string[]; fasta?: FastaFiles; fastaMissing?: string; annotations: PathedFile[] } {
   const items: PathedFile[] = input.map(x => (x instanceof File ? { file: x } : x));
-  const files = items.map(x => x.file);
   const dirOf = (x: PathedFile) => (x.path ? x.path.slice(0, x.path.lastIndexOf('/') + 1) : '');
   const byKey = new Map(items.map(x => [`${dirOf(x)}|${x.file.name.toLowerCase()}`, x]));
   const lookupIn = (dir: string, n: string) => byKey.get(`${dir}|${n.toLowerCase()}`);
-  const lookup = (n: string) => lookupIn('', n)?.file;
   const samples: PairedSample[] = [];
   const unmatched: string[] = [];
   const taken = new Set<string>();
@@ -170,15 +176,18 @@ function pairFiles(input: (File | PathedFile)[]): { samples: PairedSample[]; unm
     if (idx) samples.push({ name: stem, kind, file: f, index: idx.file, path: x.path, indexPath: idx.path });
     else unmatched.push(f.name);
   }
-  let fasta: { fa: File; fai: File; gzi?: File } | undefined, fastaMissing: string | undefined;
-  const fa = files.find(f => FASTA_EXT.test(f.name));
-  if (fa) {
-    const fai = lookup(`${fa.name}.fai`);
-    const gzi = lookup(`${fa.name}.gzi`);
-    if (fai && (!fa.name.toLowerCase().endsWith('.gz') || gzi)) fasta = { fa, fai, gzi };
-    else fastaMissing = fa.name;
-  }
-  return { samples, unmatched, fasta, fastaMissing };
+  // the FASTA with its index next to it (in its own folder), the first one indexed when there are several
+  let fasta: FastaFiles | undefined, fastaMissing: string | undefined;
+  const fas = items.filter(x => FASTA_EXT.test(x.file.name)).map(x => {
+    const near = (n: string) => lookupIn(dirOf(x), n) ?? lookupIn('', n);
+    return { x, fai: near(`${x.file.name}.fai`), gzi: near(`${x.file.name}.gzi`) };
+  });
+  const ok = fas.find(c => c.fai && (!c.x.file.name.toLowerCase().endsWith('.gz') || c.gzi));
+  if (ok) fasta = { fa: ok.x.file, fai: ok.fai!.file, gzi: ok.gzi?.file, path: ok.x.path, indexPath: ok.fai!.path, gziPath: ok.gzi?.path };
+  else if (fas.length) fastaMissing = fas[0].x.file.name;
+  // annotation files (gene models): GFF3, GTF, BED, plain or gzipped; a registered file kind keeps its own extensions
+  const annotations = items.filter(x => ANNOTATION_EXT.test(x.file.name) && !fileKindOf(x.file.name));
+  return { samples, unmatched, fasta, fastaMissing, annotations };
 }
 
 /** The project mark (docs/logo): three exons, canonical arcs, and a dashed red arc skipping the middle exon. */
@@ -198,7 +207,7 @@ function Logo({ size = 28 }: { size?: number }) {
 }
 
 function App() {
-  const [build, setBuild] = useState<GenomeBuild>(EMBEDDED?.build ?? LINK?.build ?? 'GRCh38');
+  const [build, setBuild] = useState<Assembly>(EMBEDDED?.build ?? LINK?.build ?? 'GRCh38');
   /** the other build whose coordinates the views show too (a second line over the ruler), or none */
   const [liftTo, setLiftTo] = useState<GenomeBuild | null>(null);
   /** the build switch clicked while views are open: what to do is asked first */
@@ -210,7 +219,14 @@ function App() {
   const samplesRef = useRef(samples);
   samplesRef.current = samples;
   const [renaming, setRenaming] = useState<{ id: number; value: string } | null>(null);
-  const [fasta, setFasta] = useState<{ fa: File; fai: File; gzi?: File } | undefined>();
+  const [fasta, setFasta] = useState<FastaFiles | undefined>();
+  const fastaRef = useRef(fasta);
+  fastaRef.current = fasta;
+  /** annotation files giving the gene models (GFF3, GTF, BED), in order, what each held, and whether they are being read */
+  const [annotations, setAnnotations] = useState<{ file: File; path?: string }[]>([]);
+  const annotationsRef = useRef(annotations);
+  const [annotInfo, setAnnotInfo] = useState<AnnotationFileInfo[]>([]);
+  const [annotLoading, setAnnotLoading] = useState(false);
   const [notes, setNotes] = useState<string[]>([]);
   /** What the page is doing with a folder or files that were just given, before their chips exist (listing a folder, reading a drop, reopening a session's folder). */
   const [intake, setIntake] = useState<string | null>(null);
@@ -325,10 +341,40 @@ function App() {
   }, []);
   (window as any).__sashimiDs = ds; // for debugging from the console
 
-  const addFiles = useCallback((list: FileList | File[] | PathedFile[]) => {
+  /** Reads the annotation files (the page's gene models from then on) and says what each held. */
+  const applyAnnotations = useCallback(async (list: { file: File; path?: string }[]) => {
+    setAnnotations(list); annotationsRef.current = list;
+    if (!list.length) { ds.setAnnotation(null); setAnnotInfo([]); return; }
+    setAnnotLoading(true);
+    try {
+      const { annotation, errors } = await loadAnnotation(list.map(a => a.file));
+      if (annotationsRef.current !== list) return;   // other files given meanwhile
+      const kept = list.filter(a => annotation.infos.some(i => i.file === a.file.name));
+      setAnnotations(kept); annotationsRef.current = kept;
+      ds.setAnnotation(annotation.files.length ? annotation : null);
+      await ds.getContigs();
+      setAnnotInfo(annotation.infos.map(i => ({ ...i })));
+      setNotes(n => [...n,
+        ...annotation.infos.map(i => `Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} gene${i.genes === 1 ? '' : 's'}, ${i.transcripts.toLocaleString('en-US')} transcript${i.transcripts === 1 ? '' : 's'}${i.skipped ? `, ${i.skipped.toLocaleString('en-US')} line${i.skipped === 1 ? '' : 's'} not read` : ''}.`),
+        ...errors.map(e => `Annotation file not read: ${e}`)]);
+    } catch (e: any) {
+      setError(`Could not read the annotation files: ${e?.message || e}`);
+    } finally { setAnnotLoading(false); }
+  }, [ds]);
+  const removeAnnotation = useCallback((name: string) => { void applyAnnotations(annotationsRef.current.filter(a => a.file.name !== name)); }, [applyAnnotations]);
+
+  const addFiles = useCallback((list: FileList | File[] | PathedFile[], opts: { bedFromFolder?: boolean } = {}) => {
     const files = Array.from(list as ArrayLike<File | PathedFile>);
-    const { samples: paired, unmatched, fasta: fa, fastaMissing } = pairFiles(files);
+    const { samples: paired, unmatched, fasta: fa, fastaMissing, annotations: annots } = pairFiles(files);
     const msgs: string[] = [];
+    // BED files of a run folder are mostly capture targets: they become gene models only when given on their own
+    const folderBeds = opts.bedFromFolder ? [] : annots.filter(a => a.path && /\.bed(\.gz)?$/i.test(a.file.name));
+    const newAnnots = annots.filter(a => !folderBeds.includes(a));
+    if (folderBeds.length) msgs.push(`${folderBeds.length} BED file${folderBeds.length === 1 ? '' : 's'} of the folder (${folderBeds.slice(0, 3).map(a => a.file.name).join(', ')}${folderBeds.length > 3 ? '…' : ''}) not read as gene models: add ${folderBeds.length === 1 ? 'it' : 'them'} with Files… to use ${folderBeds.length === 1 ? 'it' : 'them'} so.`);
+    if (newAnnots.length) {
+      const now = annotationsRef.current.filter(a => !newAnnots.some(b => b.file.name === a.file.name));
+      void applyAnnotations([...now, ...newAnnots.map(a => ({ file: a.file, path: a.path }))]);
+    }
     // a file already loaded is not added again (a session reopening its files while they arrive by another way)
     const have = samplesRef.current;
     const found = paired.filter(s => !have.some(x => !x.embedded && sameSample(x, s)));
@@ -348,7 +394,7 @@ function App() {
     if (fa) { setFasta(fa); ds.setReference({ build, fasta: fa }); msgs.push(`Reference FASTA: ${fa.fa.name}`); }
     if (fastaMissing) msgs.push(`${fastaMissing} needs its .fai index${fastaMissing.toLowerCase().endsWith('.gz') ? ' and .gzi' : ''}`);
     setNotes(msgs);
-  }, [ds, build]);
+  }, [ds, build, applyAnnotations]);
 
   /** A folder given through the Chromium picker or the folder input, or dropped: its files carry relative paths. */
   const addFolder = useCallback((name: string | null, handle: FSDirHandle | null, files: PathedFile[]) => {
@@ -480,9 +526,9 @@ function App() {
   }, [knownLocus, knownLabel, knownVars, setKnown]);
   const removeKnown = useCallback((id: string) => setKnown(knownVars.filter(v => v.id !== id)), [knownVars, setKnown]);
 
-  const changeBuild = (b: GenomeBuild) => { setBuild(b); ds.setReference({ build: b, fasta }); if (liftTo === b) setLiftTo(null); };
-  /** The files whose header says another build than the page's, and the build they share when they agree. */
-  const asmOther = samples.filter(s => s.asm && (s.asm.build ? s.asm.build !== build : !!s.asm.other));
+  const changeBuild = (b: Assembly) => { setBuild(b); ds.setReference({ build: b, fasta: fastaRef.current }); if (liftTo === b || !isHumanBuild(b)) setLiftTo(null); };
+  /** The files whose header says another build than the page's, and the build they share when they agree (a custom genome: none asked). */
+  const asmOther = build === 'custom' ? [] : samples.filter(s => s.asm && (s.asm.build ? s.asm.build !== build : !!s.asm.other));
   const filesBuild = (() => { const b = new Set(samples.map(s => s.asm?.build).filter(Boolean)); return b.size === 1 ? [...b][0] as GenomeBuild : null; })();
   // The first file that tells its build sets the page's, while nothing is open and the build was not chosen by hand
   useEffect(() => {
@@ -492,16 +538,43 @@ function App() {
     const s = samples.find(x => x.asm?.build === filesBuild);
     setNotes(n => [...n, `Genome build set to ${filesBuild} from the files' headers${s ? ` (${s.name}: ${s.asm!.note})` : ''}.`]);
   }, [filesBuild]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The reference's contigs (FASTA index, else the samples' headers) are read again when the files or the build change:
+  // a custom genome's locus box reads their names, the annotation's contigs are matched to them. A genome no human
+  // build matches sets Custom, while the build was not chosen by hand and nothing is open.
+  const sampleKey = samples.map(s => `${s.id}:${s.asm === undefined ? '?' : s.asm?.build ?? s.asm?.other ?? '-'}`).join(',');
+  useEffect(() => {
+    let off = false;
+    void ds.getContigs().then(contigs => {
+      if (off) return;
+      if (ds.annotation) setAnnotInfo(ds.annotation.infos.map(i => ({ ...i })));
+      if (buildChosen.current || views.length || build === 'custom' || !contigs.length) return;
+      // the samples' headers first (a FASTA may hold a few human sequences, cut short): decided once each has been read,
+      // and a human build named by any of them keeps the page human
+      if (samples.some(s => s.asm === undefined || s.asm?.build || s.asm?.other)) return;
+      const call = assemblyOfHeader('', contigs);
+      if (call?.build || call?.other) return;
+      // sequences named as human chromosomes (a stretch of chr1 cut from GRCh38 keeps its coordinates): left human,
+      // Custom stays one click away
+      if (contigs.some(c => /^(chr)?([1-9]|1\d|2[0-2]|X|Y|M|MT)$/i.test(c.name))) return;
+      // not chosen by hand: a file whose header names a human build added later still sets it
+      changeBuild('custom');
+      const where = fasta ? `the FASTA ${fasta.fa.name}` : "the files' headers";
+      setNotes(n => [...n, `Genome set to Custom: the sequences of ${where} (${contigs.slice(0, 3).map(c => c.name).join(', ')}${contigs.length > 3 ? `… ${contigs.length.toLocaleString('en-US')} in all` : ''}) are of no human build the page knows. Gene models come from your GFF3 / GTF / BED files; the annotations of the human genome are off.`]);
+    }).catch(() => { /* unreadable index or header: nothing decided */ });
+    return () => { off = true; };
+  }, [ds, fasta, build, sampleKey]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The build switch: straight away while no view is open, else the choice is asked (keep the views and add the other coordinates, or switch everything). */
-  const requestBuild = (b: GenomeBuild) => {
+  const requestBuild = (b: Assembly) => {
     if (b === build) return;
-    if (!views.length) { buildChosen.current = true; changeBuild(b); return; }
+    // to or from a custom genome there is no liftover: the views keep their coordinates
+    if (!views.length || !isHumanBuild(b) || !isHumanBuild(build)) { buildChosen.current = true; changeBuild(b); return; }
     setBuildAsk(b);
   };
   /** The views keep their build; `b`'s coordinates are drawn over the ruler. */
-  const liftover = useMemo(() => (liftTo && liftTo !== build ? {
-    from: build, to: liftTo,
-    segments: (chrom: string, start: number, end: number, signal: AbortSignal) => liftSegments(build, liftTo, chrom, start, end, signal),
+  const liftFrom = humanBuild(build);
+  const liftover = useMemo(() => (liftTo && liftFrom && liftTo !== liftFrom ? {
+    from: liftFrom, to: liftTo,
+    segments: (chrom: string, start: number, end: number, signal: AbortSignal) => liftSegments(liftFrom, liftTo, chrom, start, end, signal),
     onRemove: () => setLiftTo(null),
   } : null), [build, liftTo]);
   /**
@@ -510,7 +583,8 @@ function App() {
    * name. For files aligned on `b` (a page whose build was wrong).
    */
   const switchAnnotation = useCallback(async (b: GenomeBuild) => {
-    const from = build;
+    const from = humanBuild(build);
+    if (!from) { changeBuild(b); return; }
     setBuildAsk(null); setBusy(true); setError(null);
     const tabs = snapshot(views);
     const failed: string[] = [];
@@ -607,34 +681,41 @@ function App() {
     searching.current = { q, seq };
     const latest = () => searchSeq.current === seq;
     try {
-      const locus = parseLocus(q);
+      const locus = parseLocus(q, ds.contigs?.());
       if (locus) {
         // coordinates: open the gene at the locus (coding first, largest overlap) and show the locus itself
-        const genes = await ds.getRegionGenes(locus.chrom, locus.start, locus.end);
+        const genes = await ds.getRegionGenes(locus.chrom, locus.start, locus.end).catch(e => { if (isHumanBuild(build)) throw e; return []; });
         const ov = (g: { start: number; end: number }) => Math.min(g.end, locus.end) - Math.max(g.start, locus.start);
         const best = [...genes].sort((a, b) => Number(b.biotype === 'protein_coding') - Number(a.biotype === 'protein_coding') || ov(b) - ov(a))[0];
-        if (!best) throw new Error(`no RefSeq gene at ${q}`);
         if (!latest()) return;
         const point = locus.start === locus.end;
-        openSearched({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view: { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end }, mark: { start: locus.start, end: locus.end } }, force);
+        // a whole contig typed by its name: its first megabase-or-two shown, nothing marked
+        const whole = !point && !/:/.test(q) ? Math.min(locus.end, locus.start + GENELESS_MAX_BP - 1) : null;
+        const view = whole ? { start: locus.start, end: whole } : { start: point ? Math.max(1, locus.start - 500) : locus.start, end: point ? locus.start + 500 : locus.end };
+        const mark = whole ? null : { start: locus.start, end: locus.end };
+        if (best) openSearched({ geneName: best.gene_name, chrom: locus.chrom, start: best.start, end: best.end, view, mark }, force);
+        // no gene there: the region itself, drawn without a gene model
+        else openSearched({ geneName: fmtLocus(locus.chrom, view.start, view.end), chrom: locus.chrom, start: view.start, end: view.end, view, mark }, force);
       } else {
         const t = await ds.getTranscript(q, q.toUpperCase().startsWith('ENSG') ? q : undefined);
         if (!latest()) return;
         openSearched({ geneName: t.gene_name, chrom: t.chrom, start: t.start, end: t.end }, force);
       }
     } catch (e: any) {
-      if (latest()) setError(`Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
+      if (latest()) setError(build === 'custom'
+        ? `Gene lookup failed: ${e.message}. On a custom genome genes come from your annotation files (GFF3, GTF, BED); coordinates are read on the FASTA's sequence names (contig:start-end).`
+        : `Gene lookup failed: ${e.message}. Check the symbol, the genome build and that api.genome.ucsc.edu (or rest.ensembl.org) is reachable.`);
     } finally {
       // a superseded search leaves the box to the one that replaced it
       if (latest()) { searching.current = null; setBusy(false); }
     }
-  }, [gene, ds, openLink, openSearched]);
+  }, [gene, ds, openLink, openSearched, build]);
 
   // Options the viewer starts with: a reopened tab's snapshot or a loaded session, else the live options of the
   // viewer being remounted (a sample added, the build changed)
   const viewerInit: Partial<ViewerSettings> | undefined = pendingSettingsRef.current ?? (viewerStateRef.current ? { ...viewerStateRef.current } : undefined);
   // order-independent: promoting another sample to primary keeps the viewer (and its view) mounted
-  const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${sessionSeq}`, [activeId, opened, samples, build, fasta, sessionSeq]);
+  const viewerKey = useMemo(() => `${activeId}|${opened?.geneName}|${opened?.view ? `${opened.view.start}-${opened.view.end}` : ''}|${opened?.mark ? `${opened.mark.start}-${opened.mark.end}` : ''}|${[...samples.map(s => s.id)].sort((a, b) => a - b).join(',')}|${build}|${fasta?.fa.name || ''}|${annotInfo.map(i => i.file).join(',')}|${sessionSeq}`, [activeId, opened, samples, build, fasta, annotInfo, sessionSeq]);
   /**
    * Where the viewer starts when it is mounted. A tab opened or reopened (or a loaded session) starts at its region. The
    * same tab's viewer remounted (a sample added or removed, the build or the FASTA changed) starts where it was: its gene,
@@ -658,9 +739,9 @@ function App() {
   // ---- Save / load a session (JSON) ----
   const saveSession = useCallback(() => {
     const { tabs, activeIndex } = currentViews();
-    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
+    const session = buildSession({ build, folder: runFolder?.name ?? null, samples, fasta, annotations, state: opened ? viewerStateRef.current : null, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
     if (hasFileSystemAccess()) {
-      const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : [])]
+      const entries = [...samples.flatMap(s => [s.file, s.index]), ...(fasta ? [fasta.fa, fasta.fai, ...(fasta.gzi ? [fasta.gzi] : [])] : []), ...annotations.map(a => a.file)]
         .map(f => ({ name: f.name, size: f.size, handle: fileHandlesRef.current.get(f.name)! })).filter(e => e.handle);
       rememberFiles(entries);
     }
@@ -669,7 +750,7 @@ function App() {
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setNotes([`Session saved as ${name} (${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}). Files are recorded by name: add them again when loading.`]);
-  }, [build, samples, fasta, opened, sessionName, runFolder, currentViews]);
+  }, [build, samples, fasta, annotations, opened, sessionName, runFolder, currentViews]);
 
   // ---- Export: this page with the data of every view embedded, for a reader without the alignment files ----
   const exportHtml = useCallback(async (opts: ExportOptions) => {
@@ -685,7 +766,7 @@ function App() {
       const dnaSamples = samples.filter(s => s.lib?.type === 'dna');
       total = 1 + tabs.reduce((n, t) => n + 1 + samples.length + (t.state!.reads && t.state!.view.end - t.state!.view.start + 1 <= readsWindowOfView(t.state!) ? samples.length : 0) + (t.state!.methylation ? dnaSamples.length : 0), 0);
       progress('Preparing…');
-      const session = buildSession({ build, folder: null, samples, fasta, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
+      const session = buildSession({ build, folder: null, samples, fasta, annotations, state: tabs[activeIndex].state, views: tabs.map(t => ({ label: t.label, state: t.state! })), activeView: activeIndex, knownVariants: knownVars });
       const evs: EmbeddedView[] = [];
       for (const t of tabs) {
         const st = t.state!;
@@ -696,12 +777,19 @@ function App() {
         const margin = opts.window === 'view' ? 0 : opts.window === 'margin' ? Math.floor(span / 2) : Math.min(span, Math.max(0, Math.floor((MAX_FETCH_BP - span) / 2)));
         const ws = Math.max(0, vs - margin), we = ve + margin;
         const hint = { chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end };
-        const transcript = await ds.getTranscript(st.gene.name, st.gene.id, hint);
-        let allTranscripts: EmbeddedView['allTranscripts']; try { allTranscripts = await ds.getAllTranscripts(st.gene.name, st.gene.id, hint); } catch { /* optional */ }
-        let regionGenes: EmbeddedView['regionGenes']; try { regionGenes = await ds.getRegionGenes(st.gene.chrom, ws + 1, we, transcript.gene_name); } catch { /* optional */ }
+        // a view opened on a region without a gene has no model to embed
+        const transcript = parseLocus(st.gene.name, ds.contigs?.()) ? null : await ds.getTranscript(st.gene.name, st.gene.id, hint);
+        let allTranscripts: EmbeddedView['allTranscripts']; if (transcript) try { allTranscripts = await ds.getAllTranscripts(st.gene.name, st.gene.id, hint); } catch { /* optional */ }
+        // a custom genome's bases go with the page: the reader has no FASTA and no API serves them
+        let referenceSeq: EmbeddedView['referenceSeq'];
+        if (build === 'custom' && fasta && we - ws <= EXPORT_REFERENCE_MAX_BP) {
+          const seq = await ds.getReferenceSeq(st.gene.chrom, ws, we).catch(() => null);
+          if (seq) referenceSeq = { chrom: st.gene.chrom, start: ws, seq };
+        }
+        let regionGenes: EmbeddedView['regionGenes']; try { regionGenes = await ds.getRegionGenes(st.gene.chrom, ws + 1, we, transcript?.gene_name); } catch { /* optional */ }
         // boundary-spanning reads are counted at every exon boundary of every model, so the reader may pick any reference transcript
         const intronStarts = new Set<number>(), intronEnds = new Set<number>();
-        const exonSets = [toTxModel(transcript).exons.map(e => ({ start: e.start, end: e.end })), ...(allTranscripts?.transcripts ?? []).map(m => m.exons.map(e => ({ start: e.start - 1, end: e.end })))];
+        const exonSets = [...(transcript ? [toTxModel(transcript).exons.map(e => ({ start: e.start, end: e.end }))] : []), ...(allTranscripts?.transcripts ?? []).map(m => m.exons.map(e => ({ start: e.start - 1, end: e.end })))];
         for (const ex of exonSets) { const sorted = [...ex].sort((a, b) => a.start - b.start); for (let i = 0; i + 1 < sorted.length; i++) { intronStarts.add(sorted[i].end); intronEnds.add(sorted[i + 1].start); } }
         const coverage: Record<string, EncodedCoverage | EncodedCoverageV2> = {};
         done++;
@@ -797,7 +885,7 @@ function App() {
             }
           }
         }
-        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, transcript, allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
+        evs.push({ label: t.label, gene: { name: st.gene.name, id: st.gene.id, chrom: st.gene.chrom, start: st.gene.start, end: st.gene.end }, ...(transcript ? { transcript } : {}), allTranscripts, regionGenes, window: { chrom: st.gene.chrom, start: ws, end: we }, ...(referenceSeq ? { referenceSeq } : {}), minMapq: st.minMapq, ...(st.secondary ? { secondary: true } : {}), ...(st.minReadLength ? { minReadLength: st.minReadLength } : {}), coverage, reads, ...(Object.keys(readsNotExported).length ? { readsNotExported } : {}), ...(phase ? { phase } : {}), ...(methylation ? { methylation } : {}) });
       }
       const payload: EmbeddedExport = {
         app: EMBEDDED_APP, version: EMBEDDED_VERSION, saved: new Date().toISOString(), build,
@@ -901,10 +989,12 @@ function App() {
     setActiveId(act?.id ?? null);
     if (act) setGene(act.opened.geneName);
     // the session's FASTA, when it had one and another (or none) is loaded: the bases then come from the web APIs
-    const faNote = session.fasta && !EMBEDDED && fasta?.fa.name !== session.fasta.file
-      ? ` The session used the reference ${session.fasta.file}, not loaded here: add it (with ${session.fasta.index}) for the same bases, else they come from the UCSC / Ensembl APIs.` : '';
-    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.${faNote}`]);
-  }, [samples, ds, fasta]);
+    const faNote = session.fasta && !EMBEDDED && fastaRef.current?.fa.name !== session.fasta.file
+      ? ` The session used the reference ${session.fasta.file}, not loaded here: add it (with ${session.fasta.index}) for the same bases${session.build === 'custom' ? '' : ', else they come from the UCSC / Ensembl APIs'}.` : '';
+    const annMissing = EMBEDDED ? [] : (session.annotations ?? []).filter(a => !annotationsRef.current.some(x => x.file.name === a.file)).map(a => a.file);
+    const annNote = annMissing.length ? ` Its gene models ${annMissing.join(', ')} ${annMissing.length === 1 ? 'is' : 'are'} not loaded here: add ${annMissing.length === 1 ? 'it' : 'them'} for the same genes.` : '';
+    setNotes([`Session loaded: ${matched.length}/${session.samples.length} sample${session.samples.length === 1 ? '' : 's'}, ${tabs.length} view${tabs.length === 1 ? '' : 's'}.${faNote}${annNote}`]);
+  }, [samples, ds]);
 
   /**
    * Gets a session's files back by itself (Chromium): from the remembered run folder by relative path, else from
@@ -913,7 +1003,15 @@ function App() {
   const reopenSession = useCallback(async (session: SessionFile, ask: boolean) => {
     if (!hasFileSystemAccess()) { setReopenState(session.folder ? { folder: session.folder, ready: false } : null); return; }
     const { missing } = matchSession(session, samplesRef.current);
-    if (!missing.length) return;
+    // the reference and the gene models of the session, when not loaded: found like the samples (folder, else bookmarks)
+    const extra: { file: string; path?: string; size?: number }[] = [];
+    const sf = session.fasta;
+    if (sf && fastaRef.current?.fa.name !== sf.file) {
+      extra.push({ file: sf.file, path: sf.path, size: sf.size }, { file: sf.index, path: sf.indexPath });
+      if (sf.gzi) extra.push({ file: sf.gzi, path: sf.gziPath });
+    }
+    for (const a of session.annotations ?? []) if (!annotationsRef.current.some(x => x.file.name === a.file)) extra.push(a);
+    if (!missing.length && !extra.length) return;
     const out: PathedFile[] = [];
     let dir: FSDirHandle | null = null, needPermission = false;
     /** files found under the session's name but of another size (another file of that name), or whose bookmark no longer opens */
@@ -951,7 +1049,18 @@ function App() {
         } else needPermission = true;
       } catch { gone.push(m.file); }
     }
-    if (out.length) addFiles(out);
+    for (const e of extra) {
+      let f: File | null = null;
+      if (dir && e.path && !needPermission) f = await fileInFolder(dir, e.path).catch(() => null);
+      if (!f) {
+        try {
+          const h = await recallFile(e.file);
+          if (h && await permitted(h, ask)) { f = await h.getFile(); fileHandlesRef.current.set(e.file, h); }
+        } catch { /* moved or deleted: the note of the loaded session names it */ }
+      }
+      if (f && sameSize(f, e.size ?? 0)) out.push(e.path && dir ? { file: f, path: e.path } : { file: f });
+    }
+    if (out.length) addFiles(out, { bedFromFolder: true });
     const stillMissing = missing.filter(m => !out.some(x => x.file.name === m.file));
     setReopenState(stillMissing.length ? {
       folder: session.folder ?? '', ready: needPermission,
@@ -971,7 +1080,7 @@ function App() {
       const session = parseSession(await file.text());
       setSessionName(file.name); setSessionNameEdited(true);
       buildChosen.current = true;
-      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta }); setLiftTo(null); }
+      if (session.build !== build) { setBuild(session.build); ds.setReference({ build: session.build, fasta: fastaRef.current }); setLiftTo(null); }
       setPendingSession({ file: session, name: file.name });
       void reopenSession(session, true);
     } catch (e: any) {
@@ -997,10 +1106,10 @@ function App() {
 
   // A pending session applies itself as soon as every one of its files is present (or right away when it needs none)
   useEffect(() => {
-    if (!pendingSession) return;
+    if (!pendingSession || annotLoading) return;
     const { missing } = matchSession(pendingSession.file, samples);
     if (!missing.length) applySession(pendingSession.file);
-  }, [pendingSession, samples, applySession]);
+  }, [pendingSession, samples, applySession, annotLoading]);
 
   // genes opened are suggested first in the next searches
   useEffect(() => { if (opened?.geneName) rememberGene(opened.geneName); }, [opened?.geneName]);
@@ -1011,19 +1120,25 @@ function App() {
   /** Drops are accepted anywhere on the page: files, a folder, or a session .json. */
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); void onDropFiles(e.dataTransfer); };
 
+  const suggestFromFiles = useCallback((q: string) => ds.suggestGenes(q), [ds]);
   /** The gene / locus search, with the genome build in it: in the app bar, folded or not. */
   const searchForm = (
     <form onSubmit={e => { e.preventDefault(); open(); }} onKeyDown={e => { if (e.key === 'Enter') forceNewView.current = e.shiftKey; }}
       className="flex items-center gap-2 h-[38px] flex-1 min-w-[300px] max-w-[560px] rounded-xl bg-bar-ctrl border border-bar-line pl-1.5 pr-1 focus-within:border-accent-300 focus-within:ring-2 focus-within:ring-accent-300/30">
-      <Segmented size="sm" onBar prefix="GRCh" label="Genome build" value={build} onChange={requestBuild}
-        title={`Genome build of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other build asks first: its coordinates over the views', or everything moved to it.`}
-        options={(['GRCh38', 'GRCh37'] as GenomeBuild[]).map(b => ({
-          value: b, label: b.slice(4), hint: `${b} / ${b === 'GRCh38' ? 'hg38' : 'hg19'}${liftTo === b && b !== build ? ` · its coordinates shown over the ruler (click for the options)` : ''}${filesBuild === b ? ' · the build of the files' : ''}`,
+      <Segmented size="sm" onBar label="Genome build" value={build} onChange={requestBuild}
+        title={`Genome of the alignments: gene models, coordinates and the reference bases fetched from the network follow it${filesBuild ? ` (the files' headers say ${filesBuild})` : ''}. With views open, the other human build asks first: its coordinates over the views', or everything moved to it. Custom: any genome, its reference from your FASTA and its genes from your GFF3 / GTF / BED files.`}
+        options={(['GRCh38', 'GRCh37', 'custom'] as Assembly[]).map(b => (b === 'custom' ? {
+          value: b, label: 'Custom', hint: 'Any genome (another organism or assembly): the reference from your FASTA, gene models from your GFF3 / GTF / BED files, coordinates on the FASTA\'s sequence names; the annotations of the human genome (dbSNP, ClinVar, GTEx, gnomAD…) are off',
+        } : {
+          value: b, label: b, hint: `${b} / ${b === 'GRCh38' ? 'hg38' : 'hg19'}${liftTo === b && b !== build ? ` · its coordinates shown over the ruler (click for the options)` : ''}${filesBuild === b ? ' · the build of the files' : ''}`,
           dot: liftTo === b && b !== build ? '#0f766e' : undefined,
         }))} />
       <Icon name="search" size={15} className="text-bar-muted" />
-      <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} placeholder="Gene, ENSG or chr:pos…" ariaLabel="Gene or locus"
-        title="A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (HGNC)."
+      <GeneSuggest value={gene} onChange={setGene} local={views.map(v => v.opened.geneName)} files={annotInfo.length ? suggestFromFiles : undefined} remote={build !== 'custom'}
+        placeholder={build === 'custom' ? 'Gene, ID or contig:pos…' : 'Gene, ENSG or chr:pos…'} ariaLabel="Gene or locus"
+        title={build === 'custom'
+          ? 'A gene name or ID of your annotation files, or coordinates on the FASTA\'s sequence names (contig_1:1,000-5,000, or a sequence name alone): the gene at the locus is opened, else the region itself. Names are suggested from your files from the third letter.'
+          : 'A gene symbol, an ENSG id, or coordinates (chr17:43,094,464 or chr17:43,000,000-43,100,000: the gene at the locus is opened). Gene names are suggested from the third letter (your annotation files first, then HGNC).'}
         className="flex-1 min-w-0 bg-transparent outline-none text-sm text-bar-text placeholder:text-bar-muted" />
       <button type="submit" disabled={busy || !gene.trim()} onClick={e => { forceNewView.current = e.shiftKey; }} title="Open the gene or the locus: its view when it has one already, a new one with Shift" className="h-7 px-3 rounded-lg text-xs font-semibold bg-accent-600 text-white disabled:opacity-40 hover:bg-accent-700">{busy ? '…' : 'Open'}</button>
     </form>
@@ -1100,6 +1215,17 @@ function App() {
                 </span>
               ))}
               {fasta && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference FASTA: ${fasta.fa.name}`}>ref · {fasta.fa.name}</span>}
+              {annotInfo.map(i => {
+                const off = i.unmatched.length > 0, none = off && i.unmatched.length === i.contigs.length;
+                return (
+                  <span key={i.file} className={`group inline-flex items-center gap-1 h-7 pl-2.5 pr-1.5 rounded-full text-[12px] border whitespace-nowrap ${off ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-sky-50 border-sky-200 text-sky-800'}`}
+                    title={`Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} genes, ${i.transcripts.toLocaleString('en-US')} transcripts on ${i.contigs.length.toLocaleString('en-US')} sequence${i.contigs.length === 1 ? '' : 's'}${i.skipped ? `; ${i.skipped.toLocaleString('en-US')} lines not read` : ''}.${off ? ` ${none ? 'None' : `${i.unmatched.length} (${i.unmatched.slice(0, 5).join(', ')}${i.unmatched.length > 5 ? '…' : ''})`} of its sequence names ${none ? 'is' : 'are'} in the reference: their genes cannot be placed.` : ''}${build !== 'custom' ? ' On a human build its genes come before RefSeq\'s.' : ''}`}>
+                    genes · {i.file} · {i.genes.toLocaleString('en-US')}
+                    <button onClick={() => removeAnnotation(i.file)} className="text-slate-400 hover:text-red-500" title="Remove these gene models" aria-label="Remove"><Icon name="x" size={13} /></button>
+                  </span>
+                );
+              })}
+              {annotLoading && <span className="inline-flex items-center h-7 px-2.5 rounded-full text-[12px] border border-sky-200 bg-sky-50 text-sky-800 animate-pulse whitespace-nowrap">reading gene models…</span>}
               <Popover width={300} title="Add alignment files, a run folder or a reference FASTA (or drop them anywhere on the page)"
                 buttonClass="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12.5px] border border-dashed border-bar-line text-bar-muted hover:text-bar-text hover:border-accent-300 whitespace-nowrap"
                 button={<><Icon name="plus" size={13} />{samples.length ? 'Add' : 'Add files'}</>}>
@@ -1108,7 +1234,7 @@ function App() {
                     <MenuItem icon="folder" label={runFolder ? `Run folder · ${runFolder.name}` : 'Run folder…'} onClick={() => { close(); void chooseFolder(); }}
                       hint="Every BAM/CRAM (with its index) and FASTA inside it is listed; sessions record the files by their path in it"
                       title="Choose the run folder: every BAM/CRAM (with its index) and FASTA inside it is listed, without being read, and sessions record the files by their path inside this folder. Chrome and Edge remember the folder so a session reopens it after one click. Nothing is uploaded: if the browser's dialog says so, that is its own wording for letting this page read the files." />
-                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" onClick={() => { close(); void chooseFiles(); }}
+                    <MenuItem icon="file" label="Files…" hint="BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi), gene models (GFF3, GTF, BED)" onClick={() => { close(); void chooseFiles(); }}
                       title="Add individual files: BAM/CRAM with their .bai/.crai, a FASTA with its .fai (and .gzi)" />
                     <div className="mx-2.5 mt-1 pt-2 pb-1 border-t border-slate-100 text-[11.5px] text-slate-500">Or drop files, a folder or a session anywhere on the page. They stay on this computer.</div>
                   </>
@@ -1182,7 +1308,7 @@ function App() {
           </div>
         </div>
         <input ref={folderInputRef} type="file" className="hidden" {...({ webkitdirectory: '', directory: '' } as any)} onChange={e => { if (e.target.files) onFolderInput(e.target.files); e.target.value = ''; }} />
-        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
+        <input ref={fileInputRef} type="file" multiple className="hidden" accept={['.bam', '.bai', '.cram', '.crai', ...kindExtensions(), '.fa', '.fasta', '.fna', '.gz', '.fai', '.gzi', '.gff', '.gff3', '.gtf', '.bed'].join(',')} onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = ''; }} />
         {!panelHidden && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 pb-2.5">
             {views.length > 1 && (
@@ -1250,7 +1376,7 @@ function App() {
       {EMBEDDED && (
         <div className="mx-5 mt-2 px-3 py-2 text-xs rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-900">
           <b>Exported viewer</b> ({VERSION_SHORT}) · {EMBEDDED.views.length} view{EMBEDDED.views.length === 1 ? '' : 's'} and {EMBEDDED.samples.length} sample{EMBEDDED.samples.length === 1 ? '' : 's'} embedded{EMBEDDED.saved ? ` on ${EMBEDDED.saved.slice(0, 10)}` : ''}: coverage, junctions and retention counts of each view's window are in this file, the alignment files are not needed for them.
-          Other genes, the reads track and exon depths need the original BAM/CRAM files (add them with the buttons above); gene lookups, common SNPs and GTEx use the network when it is available.
+          Other genes, the reads track and exon depths need the original BAM/CRAM files (add them with the buttons above){EMBEDDED.build === 'custom' ? '; other genes of this custom genome need its annotation files' : '; gene lookups, common SNPs and GTEx use the network when it is available'}.
         </div>
       )}
       {(notes.length > 0 || error || (opened && !samples.length)) && (

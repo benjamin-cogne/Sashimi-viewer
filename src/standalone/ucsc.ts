@@ -273,7 +273,7 @@ export function getTranscript(build: GenomeBuild, geneName: string, geneId?: str
 }
 
 export function getAllTranscripts(build: GenomeBuild, geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> {
-  return withFallback(async () => {
+  return withFallback<AllTranscripts>(async () => {
     const g = await geneModels(build, geneName, geneId, hint);
     return { gene_name: g.symbol, chrom: g.chrom, strand: g.strand, source: 'refseq', transcripts: toModels(g) };
   }, () => ensembl.getAllTranscripts(build, geneName, geneId));

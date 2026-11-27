@@ -117,6 +117,10 @@ export interface SashimiDataSource {
   getRunSamples(runId: number): Promise<SampleRef[]>;
   /** One comparison sample to load next to the primary one; may reject when none exists. */
   getRandomSample(runId: number, excludeId: number): Promise<SampleRef>;
+  /** A custom genome's contigs (the locus box reads their names); null on a human build, or before they are read. */
+  contigs?(): { name: string; length: number }[] | null;
+  /** Gene names of the user's annotation files starting with a typed prefix (the gene box). */
+  suggestGenes?(prefix: string, n?: number): string[];
   /** Genes overlapping a 1-based inclusive region with their canonical transcript, `exclude` (name or id) left out. */
   getRegionGenes(chrom: string, start: number, end: number, exclude?: string): Promise<GeneModel[]>;
   /**

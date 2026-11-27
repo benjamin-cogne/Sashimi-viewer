@@ -28,7 +28,9 @@ No server, no installation, no upload: the files stay on your computer, so it ru
    and press **Open**.
 
 GRCh38 or GRCh37, read from the files' headers. Gene models (RefSeq, MANE Select) come from the UCSC API, or from
-Ensembl when it fails. Reference bases come from the same APIs, or from a FASTA (+ `.fai`) you add. No data is
+Ensembl when it fails. Reference bases come from the same APIs, or from a FASTA (+ `.fai`) you add. Any other genome
+(another organism or assembly) opens as **Custom**: its FASTA gives the bases and the sequence names, your GFF3, GTF or
+BED files the genes, which can also be added on a human build to find your own regions by name. No data is
 kept when the tab closes. The browser only remembers recent gene names, favourite GTEx tissues and, in Chromium,
 a bookmark to the run folder.
 

@@ -508,6 +508,35 @@ here (T2T-CHM13), raises an amber bar. With views open, switching asks:
 
 Lift-over uses Ensembl's assembly map; only the window's coordinates are sent. GTEx is hg38 only.
 
+### Custom genome and your own gene models
+
+**Custom** (third choice of the switch) is for any other genome: another organism, another assembly, a construct.
+It is set by itself when the FASTA's sequences (or, without a FASTA, the BAM headers') match no human build and none
+of them is named like a human chromosome; a file whose header names a human build added later sets that build back.
+- The **FASTA** (`.fa` + `.fai`, bgzipped with `.gzi`) gives the bases (mismatches, CRAM decoding, splice motifs) and
+  the sequence names. Coordinates are typed on them as written there: `NC_045512.2:100-2,000`, `contig_1:5,000`, or a
+  sequence name alone for its first megabase.
+- **Gene models** come from annotation files added with the alignments (*Add › Files…*, or a drop): **GFF3**
+  (gene → mRNA/transcript → exon/CDS; a gene with exons or CDS of its own; a feature with neither parent nor children,
+  a region of interest, is a one-exon model), **GTF** (grouped by `transcript_id` under `gene_id`, the CDS extended by
+  the stop codon) and **BED** 3–12 (column 4 the name, thickStart/thickEnd the CDS, blocks the exons), each plain or
+  gzipped. They are read in the page, line by line, never uploaded. A gene is found by its name, ID or a transcript
+  ID; the model drawn is the one tagged canonical (`Ensembl_canonical`, `MANE_Select`), else the longest CDS, else
+  the longest transcript; *All transcripts* lists the others. Each file is a chip (*genes · file · count*, × removes
+  it), amber when some of its sequence names are not in the reference (exact, then `chr` added or dropped, `M`/`MT`,
+  then case). BED files found inside a run folder are not read as genes (they are mostly capture targets): add them on
+  their own.
+- A locus with no gene opens as the region itself, without a model.
+- The annotations of the human genome are off: SNPs, ClinVar, gnomAD, GTEx, PanelApp, STR catalogue, cytobands and
+  lift-over. The SV browser keeps its own human build.
+
+On **GRCh38 / GRCh37** the same files can be added: their genes come first (searched by name, drawn as neighbours),
+then RefSeq's.
+
+Sessions keep the genome, the FASTA and the annotation files (by name and run-folder path; Chromium reopens them like
+the samples). An HTML export of a custom genome carries the gene models of its views and the reference bases of their
+windows (up to 5 Mb each), so it opens offline.
+
 ## Privacy
 
 BAM/CRAM/FASTA files are read with the browser's File API and decoded on the machine

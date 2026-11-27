@@ -1130,9 +1130,10 @@ const withAlpha = (hex: string, alpha: number) => {
 
 const isEnsemblId = (id: string) => /^ENST/i.test(id);
 /** How the displayed model was chosen, worded for its source (RefSeq via UCSC, or Ensembl as fallback). */
-function modelKindLabel(m: { transcriptId: string; modelKind: string }): string {
-  if (m.modelKind === 'mane') return 'MANE Select';
+function modelKindLabel(m: { transcriptId: string; modelKind: string; sourceFile?: string }): string {
   if (m.modelKind === 'chosen') return 'chosen in the transcript list';
+  if (m.sourceFile) return `${m.modelKind === 'canonical' ? 'tagged canonical' : 'longest CDS, else longest'} in ${m.sourceFile}`;
+  if (m.modelKind === 'mane') return 'MANE Select';
   if (m.modelKind === 'canonical') return isEnsemblId(m.transcriptId) ? 'Ensembl canonical (no MANE Select)' : 'RefSeq Select (no MANE Select)';
   return isEnsemblId(m.transcriptId) ? 'longest CDS (no MANE Select, no canonical flag)' : 'longest CDS (no MANE Select, no RefSeq Select)';
 }
@@ -1353,7 +1354,12 @@ export default function SashimiViewer({
   const minIndelBp = 1;
   const [longReadMinVafPct, setLongReadMinVafPct] = useState(init.longReadMinVafPct ?? 20);
   const [showAllTx, setShowAllTx] = useState(init.allTranscripts ?? false);
-  const [showSnps, setShowSnps] = useState(init.commonSnps ?? false);
+  /** a human build: the annotations of the human genome (dbSNP, GTEx, STRchive, ClinVar, DGV…) apply; not on a custom genome */
+  const human = build === 'GRCh38' || build === 'GRCh37';
+  const [showSnpsAsked, setShowSnps] = useState(init.commonSnps ?? false);
+  const showSnps = showSnpsAsked && human;
+  /** the gene names of the user's annotation files, for the gene box */
+  const suggestFromFiles = useMemo(() => (ds.suggestGenes ? (q: string) => ds.suggestGenes!(q) : undefined), [ds]);
   const [snpMinAf, setSnpMinAf] = useState(init.snpMinAf ?? 0.01);
   const [snps, setSnps] = useState<{ chrom: string; start: number; end: number; list: CommonSnp[] } | null>(null);
   const [snpStatus, setSnpStatus] = useState<{ loading: boolean; error?: string }>({ loading: false });
@@ -1450,10 +1456,10 @@ export default function SashimiViewer({
   const svGeneLoaders = useMemo(() => ({
     getTranscripts: ds.getRegionTranscripts ? (c: string, a: number, b: number) => ds.getRegionTranscripts!(c, a, b) : undefined,
     getAnnotations: ds.getGeneAnnotations ? (c: string, a: number, b: number, sy: string[]) => ds.getGeneAnnotations!(c, a, b, sy) : undefined,
-    getCytobands: ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
-    getPopulationSvs: ds.getPopulationSvs ? (c: string, a: number, b: number) => ds.getPopulationSvs!(c, a, b) : undefined,
-    getClinvar: ds.getClinvar ? (w: 'sv' | 'snv', c: string, a: number, b: number) => ds.getClinvar!(w, c, a, b) : undefined,
-  }), [ds]);
+    getCytobands: human && ds.getCytobands ? (c: string) => ds.getCytobands!(c) : undefined,
+    getPopulationSvs: human && ds.getPopulationSvs ? (c: string, a: number, b: number) => ds.getPopulationSvs!(c, a, b) : undefined,
+    getClinvar: human && ds.getClinvar ? (w: 'sv' | 'snv', c: string, a: number, b: number) => ds.getClinvar!(w, c, a, b) : undefined,
+  }), [ds, human]);
   /** The toolbar chip of the picked arcs: opens the SV cartoon on them, or unpicks them. */
   const svPickedChip = () => svPicked && (
     <span className="inline-flex items-center h-[30px] rounded-[6px] border border-accent-200 bg-accent-50 text-accent-800 text-[12.5px] font-medium overflow-hidden" title="Structural arcs picked with shift-click on one DNA track: they are read as the junctions of one event">
@@ -1559,7 +1565,8 @@ export default function SashimiViewer({
   useEffect(() => {
     let cancelled = false;
     setTranscriptMissing(false);
-    if (parseLocus(currentGeneName)) { setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus'); return; }
+    // a region opened without a gene: its name is its coordinates (a custom genome's contig names may not be known yet)
+    if (parseLocus(currentGeneName, ds.contigs?.()) || (!human && /^\S+:\d[\d,]*-\d[\d,]*$/.test(currentGeneName))) { setTranscript(null); setTranscriptMissing(ds.contigs?.() ? 'no gene model at this locus' : 'no RefSeq gene at this locus'); return; }
     ds.getTranscript(currentGeneName, currentGeneId, hintRef.current)
       .then(t => { if (!cancelled) setTranscript(t); })
       .catch(e => { if (!cancelled) { setTranscript(null); setTranscriptMissing(String(e?.message || e || 'lookup failed').replace(/^.*?(No transcript model|not found)/, '$1')); } });
@@ -2026,13 +2033,14 @@ export default function SashimiViewer({
   /** The known repeat loci (STRchive) of the view, in the view's build: their stretch, 0-based half-open. */
   const strHere = useMemo(() => {
     const out: { entry: StrLocus; start: number; end: number }[] = [];
+    if (!human) return out;
     for (const entry of STR_LOCI) {
       if (chromKeyOf(entry.chrom) !== chromKeyOf(currentChrom)) continue;
       const [start, end] = build === 'GRCh37' ? entry.hg19 : entry.hg38;
       if (end > viewStart && start < viewEnd) out.push({ entry, start, end });
     }
     return out;
-  }, [currentChrom, viewStart, viewEnd, build]);
+  }, [currentChrom, viewStart, viewEnd, build, human]);
   // the sequence strip's bases: the view and as much again on each side, fetched once the view is narrow enough to draw them
   const seqWanted = viewEnd - viewStart <= SEQ_MAX_BP;
   useEffect(() => {
@@ -2971,7 +2979,7 @@ export default function SashimiViewer({
         hintRef.current = undefined;
         setCurrentGeneName(`${locus.chrom}:${locus.start.toLocaleString('en-US')}`);
         setCurrentGeneStart(s); setCurrentGeneEnd(e);
-        setTranscript(null); setTranscriptMissing('no RefSeq gene at this locus');
+        setTranscript(null); setTranscriptMissing(ds.contigs?.() ? 'no gene model at this locus' : 'no RefSeq gene at this locus');
         ax = LINEAR_AXIS;
       }
     }
@@ -2987,7 +2995,7 @@ export default function SashimiViewer({
     setGeneSearchLoading(true);
     setSearchError(null);
     try {
-      const locus = parseLocus(query);
+      const locus = parseLocus(query, ds.contigs?.());
       if (locus) {
         await goToLocus(locus);
         setGeneSearch('');
@@ -6346,7 +6354,7 @@ export default function SashimiViewer({
 
   const renderAltTranscripts = (yOff: number) => {
     const h = altPanelH;
-    const src = altTx?.data.source === 'refseq' ? 'RefSeq (UCSC)' : 'Ensembl';
+    const src = altTx?.data.source === 'file' ? altTx.data.source_label ?? 'annotation file' : altTx?.data.source === 'refseq' ? 'RefSeq (UCSC)' : 'Ensembl';
     const models = altModels || [];
     const manes = new Set<string>();
     for (const ex of tx?.exons || []) { manes.add(`s${ex.start}`); manes.add(`e${ex.end}`); }
@@ -6990,7 +6998,7 @@ export default function SashimiViewer({
             <span className={`inline-flex items-center gap-1.5 h-[30px] pl-2.5 pr-1 rounded-[6px] border bg-white text-slate-400 focus-within:border-accent-300 focus-within:ring-2 focus-within:ring-accent-100 ${searchError ? 'border-red-400' : 'border-slate-200'}`}>
               <Icon name="search" size={14} />
               <GeneSuggest value={geneSearch} onChange={v => { setGeneSearch(v); setSearchError(null); }} width={320}
-                local={[...(neighbours?.models.map(m => m.geneName) ?? []), currentGeneName]}
+                local={[...(neighbours?.models.map(m => m.geneName) ?? []), currentGeneName]} remote={human} files={suggestFromFiles}
                 placeholder="Gene, chr:pos, c.234, exon 12…" ariaLabel="Go to" title={'A gene symbol or an ENSG id; genomic coordinates (chr17:43,094,464 for a 1 kb window, or chr17:43,000,000-43,100,000) — on another chromosome the gene at the locus is opened;\n'
                   + `on ${tx ? tx.transcriptId : 'the transcript in view'}, a c. or n. position (c.234, c.-12, c.*30, c.234+5, c.235-10), a range (c.234_267) or a whole variant (c.234A>G, c.123_125del: the view moves to it, the change is ignored);\n`
                   + `an exon by its number (12, exon 12, exons 3-5), numbered in transcription order as they are drawn${tx ? ` — ${tx.exons.length} in this model` : ''}.\n`
@@ -7057,6 +7065,7 @@ export default function SashimiViewer({
                 </div>
               </Popover>
             )}
+            {human && (
             <Popover width={288} open={showGtexPicker} onOpenChange={setShowGtexPicker} flush label="Add a GTEx tissue"
               title="Add a GTEx tissue as a track: median junction read counts (arcs) over all samples of the tissue, and the usage of each exon (0–1) from those junctions (GTEx v10, v8 when v10 fails; hg38)"
               button={<><Icon name="globe" size={15} />GTEx</>}>
@@ -7093,6 +7102,7 @@ export default function SashimiViewer({
                 );
               })()}
             </Popover>
+            )}
             {onSnapshot && (
               <button onClick={takeSnapshot} disabled={snapshotState === 'busy'}
                 className={`inline-flex items-center gap-1.5 h-[30px] px-2.5 rounded-[6px] border text-[12.5px] font-medium ${snapshotState === 'done' ? 'bg-green-50 border-green-300 text-green-700' : snapshotState === 'error' ? 'bg-red-50 border-red-300 text-red-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
@@ -7194,8 +7204,8 @@ export default function SashimiViewer({
             )}
             <Pill on={showAllTx} onChange={setShowAllTx} label="All transcripts" icon="tx"
               title="Show every transcript model of the gene under the MANE Select track: RefSeq models (NM_/NR_) from the UCSC API, Ensembl transcripts when the UCSC API is unreachable. Exons absent from the displayed model are amber." />
-            <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
-              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />
+            {human && <Pill on={showSnps} onChange={setShowSnps} label="SNPs" icon="snp"
+              title="Track of common human variants under the transcript (dbSNP 155 common via the UCSC API, Ensembl variation as fallback): lollipop height follows the highest allele frequency across frequency projects, SNVs blue, indels amber. Variant sites called from the reads that match a common SNP get a blue ring." />}
             {showSnps && (
               <Segmented size="sm" prefix="AF ≥" label="SNP allele frequency" value={String(snpMinAf)} onChange={v => setSnpMinAf(parseFloat(v))}
                 title="Minimum allele frequency of a common variant to be shown (the highest over the frequency projects: gnomAD, 1000 Genomes, TOPMed…)"

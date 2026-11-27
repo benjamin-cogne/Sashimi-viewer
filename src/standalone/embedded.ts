@@ -24,10 +24,10 @@ import { encodeCoverage as encodeCoverageColumns, decodeCoverage as decodeCovera
 import type { SessionFile } from './session';
 import type { MethylWindow } from './methylation';
 import type { SampleKind } from './fileKinds';
-import type { GenomeBuild } from './ensembl';
+import type { Assembly } from './ensembl';
 
 export const EMBEDDED_APP = 'sashimi-viewer-export';
-export const EMBEDDED_VERSION = 4;
+export const EMBEDDED_VERSION = 5;
 export const EMBEDDED_TAG_ID = 'sashimi-embedded';
 
 /** Coverage of one sample over one window, compact: run lengths and depths instead of one object per run. */
@@ -93,12 +93,15 @@ export interface EncodedReads {
 export interface EmbeddedView {
   label: string;
   gene: { name: string; id?: string; chrom: string; start: number; end: number };
-  transcript: TranscriptData;
+  /** the gene model shown; absent for a view of a region without a gene (version 5) */
+  transcript?: TranscriptData;
   allTranscripts?: AllTranscripts;
   /** neighbouring genes of the window (the queried gene left out) */
   regionGenes?: GeneModel[];
   /** the window fetched (0-based half-open), the view plus margins */
   window: { chrom: string; start: number; end: number };
+  /** the reference bases of the window (a custom genome: its FASTA stays with the sender, and no API serves it); version 5 */
+  referenceSeq?: { chrom: string; start: number; seq: string };
   /** minimum MAPQ of the alignments counted (0 = all) */
   minMapq?: number;
   /** secondary alignments counted (the view's Secondary filter on) */
@@ -163,7 +166,7 @@ export interface EmbeddedExport {
   app: typeof EMBEDDED_APP;
   version: number;
   saved: string;
-  build: GenomeBuild;
+  build: Assembly;
   samples: { id: number; name: string; kind: SampleKind; file: string; index: string; library?: LibraryEvidence }[];
   /** the session (views, options, groups) to restore; its sample names match `samples` */
   session: SessionFile;
@@ -340,11 +343,43 @@ export class EmbeddedDataSource extends LocalDataSource {
   }
   private viewsOfGene(geneName: string, geneId?: string) {
     const n = geneName.toUpperCase();
-    return this.payload.views.filter(v => v.gene.name.toUpperCase() === n || (geneId && v.gene.id === geneId) || v.transcript.gene_name.toUpperCase() === n);
+    return this.payload.views.filter(v => v.gene.name.toUpperCase() === n || (geneId && v.gene.id === geneId) || v.transcript?.gene_name.toUpperCase() === n);
+  }
+  /** the contigs of the samples' headers, else those the views stand on (their windows: the page has no header) */
+  override async getContigs(): Promise<{ name: string; length: number }[]> {
+    const own = await super.getContigs();
+    if (own.length || this.reference.build !== 'custom') return own;
+    const ends = new Map<string, number>();
+    for (const v of this.payload.views) ends.set(v.window.chrom, Math.max(ends.get(v.window.chrom) ?? 0, v.window.end, v.referenceSeq ? v.referenceSeq.start + v.referenceSeq.seq.length : 0));
+    const list = [...ends].map(([name, length]) => ({ name, length }));
+    this.setContigList(list);
+    return list;
+  }
+  /** the bases of a view's window that holds the request; else the reader's FASTA or the APIs (a human build) */
+  override async getReferenceSeq(chrom: string, start: number, end: number): Promise<string | null> {
+    for (const v of this.payload.views) {
+      const r = v.referenceSeq;
+      if (r && sameChrom(r.chrom, chrom) && r.start <= start && r.start + r.seq.length >= end) { this.lastReferenceSource = 'fasta'; return r.seq.slice(start - r.start, end - r.start); }
+    }
+    const s = await super.getReferenceSeq(chrom, start, end);
+    if (s != null) return s;
+    // a request wider than the windows exported (the viewer asks for margins): their bases where they reach, N elsewhere
+    const out = new Array<string>(end - start).fill('N');
+    let any = false;
+    for (const v of this.payload.views) {
+      const r = v.referenceSeq;
+      if (!r || !sameChrom(r.chrom, chrom)) continue;
+      const lo = Math.max(start, r.start), hi = Math.min(end, r.start + r.seq.length);
+      for (let i = lo; i < hi; i++) out[i - start] = r.seq[i - r.start];
+      if (hi > lo) any = true;
+    }
+    if (!any) return null;
+    this.lastReferenceSource = 'fasta';
+    return out.join('');
   }
   override async getTranscript(geneName: string, geneId?: string, hint?: RegionHint): Promise<TranscriptData> {
-    const v = this.viewsOfGene(geneName, geneId)[0];
-    if (v) return structuredClone(v.transcript);
+    const v = this.viewsOfGene(geneName, geneId).find(x => x.transcript);
+    if (v?.transcript) return structuredClone(v.transcript);
     return super.getTranscript(geneName, geneId, hint);
   }
   override async getAllTranscripts(geneName: string, geneId?: string, hint?: RegionHint): Promise<AllTranscripts> {

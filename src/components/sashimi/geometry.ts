@@ -25,6 +25,8 @@ export interface TxModel {
   translationId?: string | null;
   isMane: boolean;
   modelKind: 'mane' | 'canonical' | 'longest' | 'chosen';
+  /** the annotation file the model comes from, when it is the user's (not RefSeq / Ensembl) */
+  sourceFile?: string;
   biotype?: string;
   chrom: string;
   strand: 1 | -1;
@@ -48,6 +50,7 @@ export function toTxModel(t: TranscriptData): TxModel {
     translationId: t.translation_id ?? null,
     isMane: !!t.is_mane_select,
     modelKind: t.model_kind ?? (t.is_mane_select ? 'mane' : 'canonical'),
+    sourceFile: t.source === 'file' ? t.source_label ?? 'annotation file' : undefined,
     biotype: t.biotype,
     chrom: t.chrom,
     strand: t.strand < 0 ? -1 : 1,
@@ -662,23 +665,64 @@ export function niceMax(v: number, floor = 10): number {
   return Math.round(m * mag * 1e6) / 1e6;
 }
 
+/** A contig name matched to a reference's names: exact, `chr` added or dropped, M / MT, then ignoring case. */
+export function resolveContig(names: readonly string[], query: string): string | null {
+  if (names.includes(query)) return query;
+  const bare = query.replace(/^chr/i, '');
+  const mito = /^(M|MT)$/i.test(bare);
+  const cands = [bare, `chr${bare}`, ...(mito ? ['MT', 'chrM', 'M', 'chrMT'] : [])];
+  for (const c of cands) if (names.includes(c)) return c;
+  const low = new Map(names.map(n => [n.toLowerCase(), n]));
+  for (const c of [query, ...cands]) { const n = low.get(c.toLowerCase()); if (n) return n; }
+  return null;
+}
+
+/** A contig of a custom genome, for the locus box. */
+export interface Contig { name: string; length: number }
+
+const LOCUS_NUM = "\\d[\\d,_' ]*(?:\\.\\d+)?";
+const LOCUS_SCALE: Record<string, number> = { bp: 1, kb: 1e3, mb: 1e6 };
+/** `start[-end]` with optional units after a contig name, 1-based inclusive; null when not numbers */
+function locusRange(m: RegExpMatchArray, i: number): { start: number; end: number } | null {
+  const unit = (m[i + 1] || m[i + 3] || '').toLowerCase();
+  const toBp = (raw: string, u: string) => Math.round(Number(raw.replace(/[,_' ]/g, '')) * (LOCUS_SCALE[(u || unit).toLowerCase()] ?? 1));
+  const a = toBp(m[i], m[i + 1] || ''), b = m[i + 2] ? toBp(m[i + 2], m[i + 3] || '') : a;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a < 1 || b < 1) return null;
+  return { start: Math.min(a, b), end: Math.max(a, b) };
+}
+const RANGE = `(${LOCUS_NUM})\\s*(bp|kb|mb)?\\s*(?:(?:-|–|—|\\.\\.)\\s*(${LOCUS_NUM})\\s*(bp|kb|mb)?)?`;
+
 /**
  * Genomic coordinates typed in the search box: `chr17:43,094,464`, `17:43094464-43094500`,
  * `chrX:31.1-31.2 Mb` → 1-based inclusive locus (a single position has start = end), `chr`-prefixed;
  * null when the text is not coordinates (a gene symbol, an accession).
+ *
+ * With the contigs of a custom genome, any of their names is read too, in the reference's own spelling:
+ * `NC_045512.2:100-200`, `contig_1:5,000`, or a bare name for the whole contig (the last `:` before the numbers
+ * splits, so names holding a `:` are read).
  */
-export function parseLocus(text: string): { chrom: string; start: number; end: number } | null {
-  const num = "\\d[\\d,_' ]*(?:\\.\\d+)?";
-  const m = text.trim().match(new RegExp(`^(?:chr)?([0-9]{1,2}|X|Y|MT|M)\\s*:\\s*(${num})\\s*(bp|kb|mb)?\\s*(?:(?:-|–|—|\\.\\.)\\s*(${num})\\s*(bp|kb|mb)?)?$`, 'i'));
-  if (!m) return null;
-  let c = m[1].toUpperCase();
-  if (c === 'MT') c = 'M';
-  const scale: Record<string, number> = { bp: 1, kb: 1e3, mb: 1e6 };
-  const unit = (m[3] || m[5] || '').toLowerCase();
-  const toBp = (raw: string, u: string) => Math.round(Number(raw.replace(/[,_' ]/g, '')) * (scale[(u || unit).toLowerCase()] ?? 1));
-  const a = toBp(m[2], m[3] || ''), b = m[4] ? toBp(m[4], m[5] || '') : a;
-  if (!Number.isFinite(a) || !Number.isFinite(b) || a < 1 || b < 1) return null;
-  return { chrom: `chr${c}`, start: Math.min(a, b), end: Math.max(a, b) };
+export function parseLocus(text: string, contigs?: readonly Contig[] | null): { chrom: string; start: number; end: number } | null {
+  const t = text.trim();
+  const m = t.match(new RegExp(`^(?:chr)?([0-9]{1,2}|X|Y|MT|M)\\s*:\\s*${RANGE}$`, 'i'));
+  const names = contigs?.length ? contigs.map(c => c.name) : null;
+  if (m) {
+    let c = m[1].toUpperCase();
+    if (c === 'MT') c = 'M';
+    const r = locusRange(m, 2);
+    if (!r) return null;
+    if (!names) return { chrom: `chr${c}`, ...r };
+    const name = resolveContig(names, m[1]) ?? resolveContig(names, `chr${c}`);
+    if (name) return { chrom: name, ...r };
+  }
+  if (!names) return null;
+  const g = t.match(new RegExp(`^(.+)\\s*:\\s*${RANGE}$`, 'i'));
+  if (g) {
+    const name = resolveContig(names, g[1].trim()), r = locusRange(g, 2);
+    if (name && r) return { chrom: name, ...r };
+  }
+  const whole = resolveContig(names, t);
+  const len = whole ? contigs!.find(c => c.name === whole)?.length ?? 0 : 0;
+  return whole && len > 0 ? { chrom: whole, start: 1, end: len } : null;
 }
 
 /** One c./n. position as typed: which numbering it belongs to, the number, and the intronic offset. */
