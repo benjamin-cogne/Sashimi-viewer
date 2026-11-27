@@ -371,7 +371,7 @@ function App() {
       setNotes(n => [...n,
         ...annotation.infos.map(i => (i.indexed
           ? `Gene models from ${i.file} (${i.format.toUpperCase()}), read through its index ${i.indexed.index}: the genes of a window are read when it is drawn; names to search by are being read in the background.`
-          : `Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} gene${i.genes === 1 ? '' : 's'}, ${i.transcripts.toLocaleString('en-US')} transcript${i.transcripts === 1 ? '' : 's'}${i.skipped ? `, ${i.skipped.toLocaleString('en-US')} line${i.skipped === 1 ? '' : 's'} not read` : ''}.`)),
+          : `Gene models from ${i.file} (${i.format.toUpperCase()}): ${i.genes.toLocaleString('en-US')} gene${i.genes === 1 ? '' : 's'}, ${i.transcripts.toLocaleString('en-US')} transcript${i.transcripts === 1 ? '' : 's'}${i.skipped ? `, ${i.skipped.toLocaleString('en-US')} line${i.skipped === 1 ? '' : 's'} not read` : ''}.${i.notes?.length ? ` ${i.notes.join('; ')}.` : ''}${i.embedded?.length ? ` It carries the bases of ${i.embedded.length === 1 ? i.embedded[0].name : `${i.embedded.length} sequences`} (##FASTA): the reference${fastaRef.current ? ' when no FASTA is given' : ''}.` : ''}`)),
         ...kept.filter(a => !a.index && /\.gz$/i.test(a.file.name) && a.file.size > ANNOT_INDEX_HINT_BYTES).map(a => `${a.file.name} is large and was read whole into memory: bgzipped with its tabix index (sort -k1,1 -k4,4n | bgzip, then tabix -p ${/\.bed/i.test(a.file.name) ? 'bed' : 'gff'}), given together, it is read by region instead.`),
         ...errors.map(e => `Annotation file not read: ${e}`)]);
     } catch (e: any) {
@@ -576,16 +576,20 @@ function App() {
       if (samples.some(s => s.asm === undefined || s.asm?.build || s.asm?.other)) return;
       const call = assemblyOfHeader('', contigs);
       if (call?.build || call?.other) return;
-      // sequences named as human chromosomes (a stretch of chr1 cut from GRCh38 keeps its coordinates): left human,
-      // Custom stays one click away
-      if (contigs.some(c => /^(chr)?([1-9]|1\d|2[0-2]|X|Y|M|MT)$/i.test(c.name))) return;
+      // a stretch cut from a human build (chr1 of 40 kb keeps its coordinates) stays human, Custom one click away: every
+      // sequence named as a human one, none a whole chromosome. Another genome has other names (chr2L, chrI, contig_1)
+      // or whole chromosomes of other lengths (a mouse's chr1 of 195 Mb).
+      const HUMAN_NAME = /^(chr)?(([1-9]|1\d|2[0-2]|X|Y|M|MT)(_\w+)?|Un_\w+|EBV)$/i;
+      const PRIMARY = /^(chr)?([1-9]|1\d|2[0-2]|X|Y)$/i;
+      if (contigs.every(c => HUMAN_NAME.test(c.name)) && !contigs.some(c => PRIMARY.test(c.name) && c.length > 10_000_000)) return;
       // not chosen by hand: a file whose header names a human build added later still sets it
       changeBuild('custom');
-      const where = fasta ? `the FASTA ${fasta.fa.name}` : "the files' headers";
+      const own = !fasta ? ds.annotation?.infos.find(i => i.embedded?.length) : undefined;
+      const where = fasta ? `the FASTA ${fasta.fa.name}` : own ? `the ##FASTA section of ${own.file}` : "the files' headers";
       setNotes(n => [...n, `Genome set to Custom: the sequences of ${where} (${contigs.slice(0, 3).map(c => c.name).join(', ')}${contigs.length > 3 ? `… ${contigs.length.toLocaleString('en-US')} in all` : ''}) are of no human build the page knows. Gene models come from your GFF3 / GTF / BED files; the annotations of the human genome are off.`]);
     }).catch(() => { /* unreadable index or header: nothing decided */ });
     return () => { off = true; };
-  }, [ds, fasta, build, sampleKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [ds, fasta, build, sampleKey, annotInfo.map(i => i.file).join('|')]); // eslint-disable-line react-hooks/exhaustive-deps
   /** The build switch: straight away while no view is open, else the choice is asked (keep the views and add the other coordinates, or switch everything). */
   const requestBuild = (b: Assembly) => {
     if (b === build) return;
@@ -814,7 +818,7 @@ function App() {
         }
         // a custom genome's bases go with the page: the reader has no FASTA and no API serves them
         let referenceSeq: EmbeddedView['referenceSeq'];
-        if (build === 'custom' && fasta && we - ws <= EXPORT_REFERENCE_MAX_BP) {
+        if (build === 'custom' && (fasta || ds.annotation?.embeddedSequences) && we - ws <= EXPORT_REFERENCE_MAX_BP) {
           const seq = await ds.getReferenceSeq(st.gene.chrom, ws, we).catch(() => null);
           if (seq) referenceSeq = { chrom: st.gene.chrom, start: ws, seq };
         }
@@ -1251,11 +1255,12 @@ function App() {
                 </span>
               ))}
               {fasta && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference FASTA: ${fasta.fa.name}`}>ref · {fasta.fa.name}</span>}
+              {!fasta && (() => { const e = annotInfo.find(i => i.embedded?.length); return e && <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] border bg-emerald-50 border-emerald-200 text-emerald-800 whitespace-nowrap" title={`Reference bases from the ##FASTA section of ${e.file}: ${e.embedded!.map(x => `${x.name} (${x.length.toLocaleString('en-US')} bp)`).join(', ')}`}>ref · ##FASTA of {e.file}</span>; })()}
               {annotInfo.map(i => {
                 const off = i.unmatched.length > 0, none = off && i.unmatched.length === i.contigs.length;
                 return (
                   <span key={i.file} className={`group inline-flex items-center gap-1 h-7 pl-2.5 pr-1.5 rounded-full text-[12px] border whitespace-nowrap ${off ? 'bg-amber-50 border-amber-300 text-amber-900' : 'bg-sky-50 border-sky-200 text-sky-800'}`}
-                    title={`Gene models from ${i.file} (${i.format.toUpperCase()}${i.indexed ? `, read by region through ${i.indexed.index}` : ''}): ${i.genes.toLocaleString('en-US')} genes, ${i.transcripts.toLocaleString('en-US')} transcripts on ${i.contigs.length.toLocaleString('en-US')} sequence${i.contigs.length === 1 ? '' : 's'}${i.skipped ? `; ${i.skipped.toLocaleString('en-US')} lines not read` : ''}.${off ? ` ${none ? 'None' : `${i.unmatched.length} (${i.unmatched.slice(0, 5).join(', ')}${i.unmatched.length > 5 ? '…' : ''})`} of its sequence names ${none ? 'is' : 'are'} in the reference: their genes cannot be placed.` : ''}${build !== 'custom' ? ' On a human build its genes come before RefSeq\'s.' : ''}`}>
+                    title={`Gene models from ${i.file} (${i.format.toUpperCase()}${i.indexed ? `, read by region through ${i.indexed.index}` : ''}): ${i.genes.toLocaleString('en-US')} genes, ${i.transcripts.toLocaleString('en-US')} transcripts on ${i.contigs.length.toLocaleString('en-US')} sequence${i.contigs.length === 1 ? '' : 's'}${i.skipped ? `; ${i.skipped.toLocaleString('en-US')} lines not read` : ''}.${off ? ` ${none ? 'None' : `${i.unmatched.length} (${i.unmatched.slice(0, 5).join(', ')}${i.unmatched.length > 5 ? '…' : ''})`} of its sequence names ${none ? 'is' : 'are'} in the reference: their genes cannot be placed.` : ''}${i.notes?.length ? ` ${i.notes.join('; ')}.` : ''}${i.embedded?.length ? ` Its ##FASTA section gives the reference bases of ${i.embedded.map(e => e.name).slice(0, 5).join(', ')}${fasta ? ' (a FASTA is loaded: it is used instead)' : ''}.` : ''}${build !== 'custom' ? ' On a human build its genes come before RefSeq\'s.' : ''}`}>
                     genes · {i.file} · {i.indexed && !i.indexed.namesReady
                       ? <span className={i.indexed.error ? 'text-red-600' : 'animate-pulse'} title={i.indexed.error ? `The names could not be read: ${i.indexed.error}. Windows still show the genes.` : 'Indexed: windows show their genes now; the names to search by are being read'}>{i.indexed.error ? 'names failed' : `indexed · names ${Math.round(100 * i.indexed.namesRead)} %`}</span>
                       : <>{i.genes.toLocaleString('en-US')}{i.indexed ? ' · indexed' : ''}</>}

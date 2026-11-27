@@ -24,7 +24,7 @@
  */
 import type { TranscriptData, AllTranscripts, TranscriptModel, GeneModel, RegionHint } from '../components/sashimi/types';
 import type { SvTranscript } from '../components/sashimi/svGenes';
-import { resolveContig } from '../components/sashimi/geometry';
+import { resolveContig, isGeneticCode } from '../components/sashimi/geometry';
 import { TabixIndexedFile } from '@gmod/tabix';
 import { BlobFile } from 'generic-filehandle2';
 import { readLines, isGzipped, formatOf, scanNames, own, SKIP_LONE, type AnnotationFormat, type GeneLoc, type NameIndex } from './annotationScan';
@@ -43,10 +43,16 @@ interface ATx {
   exons: [number, number][];
   cdsStart: number | null; cdsEnd: number | null;
   biotype: string; canonical: boolean;
+  /** the genetic code of its CDS (transl_table), when one other than the standard is given */
+  translTable?: number;
 }
 /** What a track shows of an entity besides its model: its type, colour, score, attributes, and no strand ('.'). */
-interface Extra { type?: string; color?: string; score?: number; attrs?: string; unstranded?: boolean }
-interface AGene extends Extra { key: string; id: string; name: string; chrom: string; strand: 1 | -1; start: number; end: number; biotype: string; txs: ATx[] }
+interface Extra { type?: string; color?: string; score?: number; attrs?: string; unstranded?: boolean;
+  /** drawn in the file's track only, never a gene to find or a neighbour (a TF binding site under a gene) */
+  trackOnly?: boolean }
+interface AGene extends Extra { key: string; id: string; name: string;
+  /** other names it is found by (locus_tag, gene, Alias, gene_synonym, old_locus_tag) */
+  aliases?: string[]; chrom: string; strand: 1 | -1; start: number; end: number; biotype: string; txs: ATx[] }
 
 /**
  * An entity of an annotation file as its track draws it (0-based half-open, on the viewer's chromosome): a gene with
@@ -61,7 +67,7 @@ export interface TrackItem {
   color?: string; score?: number; attrs?: string;
   /** the transcript drawn when the track is folded (pickTx: canonical tag, else longest CDS, else longest) */
   shown: number;
-  txs: { id: string; name: string; biotype: string; exons: [number, number][]; cdsStart: number | null; cdsEnd: number | null }[];
+  txs: { id: string; name: string; biotype: string; strand: 1 | -1; exons: [number, number][]; cdsStart: number | null; cdsEnd: number | null }[];
 }
 /** One file's entities over a window. */
 export interface TrackData { file: string; format: AnnotationFormat; items: TrackItem[] }
@@ -69,6 +75,12 @@ export interface TrackData { file: string; format: AnnotationFormat; items: Trac
 /** What a file held, for its chip. */
 export interface AnnotationFileInfo {
   file: string; format: AnnotationFormat; genes: number; transcripts: number; lines: number; skipped: number;
+  /** what reading the file had to make up for (exons without a Parent placed by position…), for its chip */
+  notes?: string[];
+  /** other names of its sequences (a GFF3's region rows: Name=, chromosome=, Alias=), to find them in the reference */
+  aliases?: Record<string, string[]>;
+  /** the sequences of its ##FASTA section, by name and length, when it carries them (bases kept by the source) */
+  embedded?: { name: string; length: number }[];
   /** read through its tabix index (a bgzipped file with its .tbi / .csi): windows from the index, names from a pass */
   indexed?: { index: string; namesRead: number; namesReady: boolean; error?: string };
   /** contigs of the file, and those the reference does not hold (set once the reference's names are known) */
@@ -110,22 +122,49 @@ function merge(list: [number, number][]): [number, number][] {
   }
   return out;
 }
+/**
+ * The blocks of one transcript, sorted: abutting, duplicated or nested ones joined, but two that overlap in part kept
+ * apart, which is how a programmed ribosomal frameshift is written (SARS-CoV-2 ORF1ab: one base read twice).
+ */
+function blocksOf(list: [number, number][]): [number, number][] {
+  const out: [number, number][] = [];
+  for (const e of [...list].sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    const last = out[out.length - 1];
+    if (last && (e[0] === last[1] || e[1] <= last[1] || e[0] === last[0])) last[1] = Math.max(last[1], e[1]);
+    else out.push([e[0], e[1]]);
+  }
+  return out;
+}
 
-interface Feat { id: string | null; parents: string[]; type: string; chrom: string; start: number; end: number; strand: 1 | -1; attrs: Map<string, string>; score?: number; raw?: string; unstranded?: boolean }
+interface Feat { id: string | null; parents: string[]; type: string; chrom: string; start: number; end: number; strand: 1 | -1; attrs: Map<string, string>; score?: number; raw?: string; unstranded?: boolean;
+  /** the CDS phase (GFF3 column 8, GTF frame): bases to skip before the first whole codon */
+  phase?: number }
 const TX_TYPE = /^(mRNA|transcript|primary_transcript|pseudogenic_transcript|[a-zA-Z_]*RNA|[a-zA-Z_]*_transcript)$/;
 const EXON_TYPE = /^(exon|pseudogenic_exon|noncoding_exon)$/;
 const PART_TYPE = /^(CDS|five_prime_UTR|three_prime_UTR|UTR|5'UTR|3'UTR|five_prime_utr|three_prime_utr|start_codon|stop_codon)$/;
+/** parts of a transcript that are not drawn: its introns, and its polyA signals */
+const NOT_ENTITY = /^(intron|polyA_site|polyA_signal_sequence)$/;
+/** the other names a GFF3 gene is known by */
+const aliasesOf = (a: Map<string, string> | undefined): string[] => (a ? [...new Set(['locus_tag', 'gene', 'gene_name', 'Alias', 'gene_synonym', 'old_locus_tag', 'gene_id'].flatMap(k => (a.get(k) ?? '').split(',')).map(x => x.trim()).filter(Boolean))] : []);
 const geneNameOf = (a: Map<string, string>, fallback: string) => a.get('Name') ?? a.get('gene_name') ?? a.get('gene') ?? a.get('locus_tag') ?? a.get('ID') ?? fallback;
 
 /** One transcript from its exon and part children (0-based half-open). */
 function txFrom(id: string, name: string, chrom: string, strand: 1 | -1, exonKids: Feat[], partKids: Feat[], span: [number, number] | null, biotype: string | undefined, canonical: boolean): ATx {
   const cds = partKids.filter(k => k.type === 'CDS' || (k.type === 'stop_codon'));
   const cdsOnly = partKids.filter(k => k.type === 'CDS');
-  let exons = merge(exonKids.map(k => [k.start, k.end] as [number, number]));
-  if (!exons.length) exons = merge(partKids.map(k => [k.start, k.end] as [number, number]));
+  let exons = blocksOf(exonKids.map(k => [k.start, k.end] as [number, number]));
+  if (!exons.length) exons = blocksOf(partKids.map(k => [k.start, k.end] as [number, number]));
   if (!exons.length && span) exons = [span];
-  const cdsStart = cdsOnly.length ? Math.min(...cds.map(k => k.start)) : null, cdsEnd = cdsOnly.length ? Math.max(...cds.map(k => k.end)) : null;
-  return { id, name, chrom, strand, exons, cdsStart, cdsEnd, biotype: biotype ?? (cdsOnly.length ? 'protein_coding' : 'non_coding'), canonical };
+  let cdsStart = cdsOnly.length ? Math.min(...cds.map(k => k.start)) : null, cdsEnd = cdsOnly.length ? Math.max(...cds.map(k => k.end)) : null;
+  // a CDS whose first piece (in the transcript's direction) starts with a phase of 1 or 2 is incomplete at its 5' end:
+  // the bases before its first whole codon are left out, so that the codons are read in their frame
+  if (cdsStart != null && cdsEnd != null) {
+    const first = strand > 0 ? cdsOnly.reduce((a, b) => (b.start < a.start ? b : a)) : cdsOnly.reduce((a, b) => (b.end > a.end ? b : a));
+    const ph = first.phase ?? 0;
+    if (ph > 0 && cdsEnd - cdsStart > ph) { if (strand > 0) cdsStart += ph; else cdsEnd -= ph; }
+  }
+  const tt = Number(cdsOnly.map(k => k.attrs.get('transl_table')).find(Boolean) ?? NaN);
+  return { id, name, chrom, strand, exons, cdsStart, cdsEnd, biotype: biotype ?? (cdsOnly.length ? 'protein_coding' : 'non_coding'), canonical, ...(isGeneticCode(tt) && tt !== 1 ? { translTable: tt } : {}) };
 }
 
 function geneOf(key: string, id: string, name: string, txs: ATx[], biotype?: string, extra: Extra = {}): AGene {
@@ -158,34 +197,116 @@ const yieldToUi = (): Promise<void> => {
   return s?.yield ? s.yield() : new Promise<void>(r => { setTimeout(r, 0); });
 };
 
-async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
+/** the sequences of a GFF3's ##FASTA section are kept up to this many bases in all (a bacterium, a plasmid, a virus) */
+const EMBEDDED_FASTA_MAX = 200_000_000;
+
+async function parseGff3(lines: Lines, info: AnnotationFileInfo, sequences?: Map<string, string>): Promise<AGene[]> {
   const feats: Feat[] = [];
+  let inFasta = false, seqName = '', seqParts: string[] = [], seqTotal = 0;
+  const endSeq = () => { if (sequences && seqName) sequences.set(seqName, seqParts.join('').toUpperCase()); seqName = ''; seqParts = []; };
   for await (const line of lines) {
     info.lines++;
     if (info.lines % 50000 === 0) await yieldToUi();
-    if (line.startsWith('##FASTA')) break;
+    if (inFasta) {
+      // the sequences the file carries after ##FASTA: a reference when no FASTA is given
+      if (!sequences) break;
+      if (line.startsWith('>')) { endSeq(); seqName = line.slice(1).trim().split(/\s+/)[0]; continue; }
+      seqTotal += line.length;
+      if (seqTotal > EMBEDDED_FASTA_MAX) { sequences.clear(); seqName = ''; info.notes = [...(info.notes ?? []), 'its ##FASTA section is too large to keep: add the FASTA with its .fai instead']; break; }
+      if (seqName) seqParts.push(line.trim());
+      continue;
+    }
+    if (line.startsWith('##FASTA')) { inFasta = true; continue; }
     if (!line || line.startsWith('#')) continue;
     const c = line.split('\t');
     if (c.length < 9) { info.skipped++; continue; }
     const s = parseInt(c[3]), e = parseInt(c[4]);
     if (!(s > 0) || !(e >= s)) { info.skipped++; continue; }
     const attrs = gffAttrs(c[8]);
+    // a row spanning a whole sequence names it otherwise (NCBI: ID=NC_000001.11, Name=1, chromosome=1): aliases
+    if (/^(region|chromosome|contig|supercontig|scaffold|source)$/i.test(c[2])) {
+      const al = [attrs.get('Name'), attrs.get('chromosome'), attrs.get('Alias')?.split(',')].flat().filter((x): x is string => !!x && x !== decode(c[0]));
+      if (al.length) { const k = decode(c[0]); info.aliases = { ...(info.aliases ?? {}), [k]: [...new Set([...(info.aliases?.[k] ?? []), ...al])] }; }
+    }
     feats.push({ id: attrs.get('ID') ?? null, parents: (attrs.get('Parent') ?? '').split(',').filter(Boolean), type: c[2], chrom: decode(c[0]), start: s - 1, end: e, strand: strandOf(c[6]), attrs,
-      score: scoreOf(c[5]), raw: decode(c[8]), unstranded: c[6] !== '+' && c[6] !== '-' });
+      score: scoreOf(c[5]), raw: decode(c[8]), unstranded: c[6] !== '+' && c[6] !== '-', phase: /^[012]$/.test(c[7]) ? +c[7] : undefined });
   }
+  endSeq();
   const byId = new Map<string, Feat>();
   for (const f of feats) if (f.id && !byId.has(f.id)) byId.set(f.id, f);
   const kids = new Map<string, Feat[]>();
   for (const f of feats) for (const p of f.parents) { const l = kids.get(p); if (l) l.push(f); else kids.set(p, [f]); }
+  const isLeaf = (f: Feat) => EXON_TYPE.test(f.type) || PART_TYPE.test(f.type);
+  // Exons, CDS, UTRs and codons given without a Parent (or with one the file does not hold), as some tools write them:
+  // each goes to the smallest gene or transcript holding it on its contig and strand, which then has them as its own
+  // exons; those no feature holds make a model of their own, the lines sharing an ID (one discontinuous feature) together.
+  const orphans = feats.filter(f => isLeaf(f) && !f.parents.some(p => byId.has(p)));
+  if (orphans.length) {
+    const holders = byChrom(feats.filter(f => !isLeaf(f) && !SKIP_LONE.test(f.type) && !NOT_ENTITY.test(f.type)));
+    let placed = 0, auto = 0, guessed = 0;
+    const alone = new Map<string, Feat[]>();
+    const sameStrand = (x: Feat, o: Feat) => x.unstranded || o.unstranded || x.strand === o.strand;
+    /** the genes or transcripts holding [start, end) of a contig on a strand, the smallest first */
+    const holding = (o: Feat, start: number, end: number) => (holders.get(o.chrom)?.overlapping(start, end) ?? [])
+      .filter(x => x.start <= start && x.end >= end && sameStrand(x, o))
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start) || Number(TX_TYPE.test(b.type)) - Number(TX_TYPE.test(a.type)));
+    const place = (h: Feat, lines: Feat[]) => {
+      if (!h.id) { h.id = `${h.type}@${h.chrom}:${h.start + 1}`; byId.set(h.id, h); }
+      for (const o of lines) o.parents = [h.id];
+      const l = kids.get(h.id); if (l) l.push(...lines); else kids.set(h.id, [...lines]);
+      placed += lines.length;
+    };
+    const leaveAlone = (o: Feat) => { const k = `${o.id ?? `${o.type}@${o.chrom}:${o.start + 1}`}\t${o.chrom}\t${o.strand}`; const l = alone.get(k); if (l) l.push(o); else alone.set(k, [o]); };
+    // 1. lines sharing an ID are one feature (a CDS in pieces): placed together, in the smallest holder of them all
+    const groups = new Map<string, Feat[]>(), singles: Feat[] = [];
+    for (const o of orphans) {
+      if (!o.id) { singles.push(o); continue; }
+      const k = `${o.id}\t${o.chrom}\t${o.strand}`;
+      const l = groups.get(k); if (l) l.push(o); else groups.set(k, [o]);
+    }
+    for (const g of groups.values()) {
+      if (g.length === 1) { singles.push(g[0]); continue; }
+      const hs = holding(g[0], Math.min(...g.map(x => x.start)), Math.max(...g.map(x => x.end)));
+      if (hs.length) { place(hs[0], g); if (hs.length > 1) guessed += g.length; } else for (const o of g) leaveAlone(o);
+    }
+    // 2. the other lines (exons with an ID each): the holder whose CDS already placed overlaps them, else the smallest
+    // evidence: a CDS piece of the holder sharing the exon's bounds (2), one of them (1), overlapping it (0.5)
+    const evidence = (h: Feat, o: Feat) => {
+      let best = 0;
+      for (const k of h.id ? kids.get(h.id) ?? [] : []) {
+        if (k.type !== 'CDS' || k.start >= o.end || k.end <= o.start) continue;
+        best = Math.max(best, (k.start === o.start ? 1 : 0) + (k.end === o.end ? 1 : 0) || 0.5);
+      }
+      return best;
+    };
+    for (const o of singles) {
+      const hs = holding(o, o.start, o.end);
+      if (!hs.length) { leaveAlone(o); continue; }
+      const scored = hs.map(h => ({ h, e: evidence(h, o) })).sort((x, y) => y.e - x.e);   // stable: the smallest first among equals
+      place(scored[0].h, [o]);
+      if (scored.length > 1 && scored[1].e === scored[0].e) guessed++;
+    }
+    // a model of its own for each group no feature holds: a feature standing for the group, its lines its children
+    for (const group of alone.values()) {
+      const g0 = group[0], id = `${g0.id ?? g0.type}@${g0.chrom}:${g0.start + 1}`;
+      const f: Feat = { ...g0, id, parents: [], type: g0.type === 'CDS' ? 'CDS' : 'transcript', start: Math.min(...group.map(x => x.start)), end: Math.max(...group.map(x => x.end)) };
+      for (const x of group) x.parents = [id];
+      feats.push(f); byId.set(id, f); kids.set(id, group); auto++;
+    }
+    info.notes = [...(info.notes ?? []), placed ? `${placed.toLocaleString('en-US')} exon / CDS line${placed === 1 ? '' : 's'} without a Parent placed in the gene holding ${placed === 1 ? 'it' : 'them'}${guessed ? ` (${guessed.toLocaleString('en-US')} where genes overlap on one strand, placed by best guess: a Parent= on each line makes it certain)` : ''}` : '',
+      auto ? `${auto.toLocaleString('en-US')} group${auto === 1 ? '' : 's'} of exon / CDS lines without a Parent and outside any gene drawn as model${auto === 1 ? '' : 's'} of their own` : ''].filter(Boolean);
+  }
   const childrenOf = (f: Feat) => (f.id ? kids.get(f.id) ?? [] : []);
   const isTx = (f: Feat) => TX_TYPE.test(f.type) || childrenOf(f).some(k => EXON_TYPE.test(k.type) || k.type === 'CDS');
   // genes: features holding transcripts, or transcripts without a parent
   const genes = new Map<string, { gene: Feat | null; txs: ATx[] }>();
   /** lone features without an ID, by their key */
   const lone = new Map<string, Feat>();
+  /** features under a gene that are neither transcripts nor their parts (a TF binding site, a promoter): track only */
+  const trackOnly = new Set<string>();
   const addTx = (geneKey: string, gene: Feat | null, tx: ATx) => { const g = genes.get(geneKey); if (g) g.txs.push(tx); else genes.set(geneKey, { gene, txs: [tx] }); };
   for (const f of feats) {
-    if (!isTx(f) || EXON_TYPE.test(f.type) || PART_TYPE.test(f.type)) continue;
+    if (!isTx(f) || isLeaf(f)) continue;
     const ks = childrenOf(f);
     const exonKids = ks.filter(k => EXON_TYPE.test(k.type)), partKids = ks.filter(k => PART_TYPE.test(k.type));
     const parentGene = f.parents.map(p => byId.get(p)).find((p): p is Feat => !!p);
@@ -197,20 +318,27 @@ async function parseGff3(lines: Lines, info: AnnotationFileInfo): Promise<AGene[
     if (!tx.exons.length) continue;
     addTx(gf.id ?? `${name}@${f.chrom}:${f.start}`, gene, tx);
   }
-  // lone features: neither parent nor children (a region of interest, a gene with no transcript)
+  // features that gave no transcript: those without a parent (a region of interest, a gene whose children are not
+  // transcripts) are a model of one block; those under a gene (not its transcripts) show in the track only
   for (const f of feats) {
-    if (f.parents.length || childrenOf(f).length || SKIP_LONE.test(f.type) || EXON_TYPE.test(f.type) || PART_TYPE.test(f.type)) continue;
-    if (f.id && genes.has(f.id)) continue;
+    if (SKIP_LONE.test(f.type) || NOT_ENTITY.test(f.type) || isLeaf(f) || isTx(f)) continue;
     const name = geneNameOf(f.attrs, `${f.chrom}:${f.start + 1}-${f.end}`);
-    if (!f.id) lone.set(`${name}@${f.chrom}:${f.start}`, f);
-    addTx(f.id ?? `${name}@${f.chrom}:${f.start}`, f, { id: f.id ?? name, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(f.attrs) ?? f.type, canonical: false });
+    const key = f.id ?? `${name}@${f.chrom}:${f.start}`;
+    if (genes.has(key)) continue;
+    const under = f.parents.some(p => byId.has(p));
+    if (under) trackOnly.add(key);
+    if (!f.id) lone.set(key, f);
+    addTx(key, f, { id: f.id ?? name, name, chrom: f.chrom, strand: f.strand, exons: [[f.start, f.end]], cdsStart: null, cdsEnd: null, biotype: biotypeAttr(f.attrs) ?? f.type, canonical: false });
   }
   const out: AGene[] = [];
   for (const [key, { gene, txs }] of genes) {
     const name = gene ? geneNameOf(gene.attrs, key) : txs[0].name;
     // a gene, or a transcript with no gene above it, or a lone feature: the track shows its type and attributes
     const root = gene ?? byId.get(key) ?? null;
-    out.push(geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined, extraOf(root ?? lone.get(key))));
+    const g = geneOf(key, gene?.id ?? key, name, txs, gene ? biotypeAttr(gene.attrs) : undefined, { ...extraOf(root ?? lone.get(key)), ...(trackOnly.has(key) ? { trackOnly: true } : {}) });
+    const al = aliasesOf((gene ?? root ?? lone.get(key))?.attrs).filter(x => x !== name && x !== g.id);
+    if (al.length) g.aliases = al;
+    out.push(g);
   }
   return out;
 }
@@ -229,7 +357,7 @@ async function parseGtf(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]
     if (!(s > 0) || !(e >= s)) { info.skipped++; continue; }
     const attrs = gtfAttrs(c[8]);
     const at = `\t${c[0]}`;
-    const f: Feat = { id: null, parents: [], type: c[2], chrom: c[0], start: s - 1, end: e, strand: strandOf(c[6]), attrs, score: scoreOf(c[5]), raw: c[8], unstranded: c[6] !== '+' && c[6] !== '-' };
+    const f: Feat = { id: null, parents: [], type: c[2], chrom: c[0], start: s - 1, end: e, strand: strandOf(c[6]), attrs, score: scoreOf(c[5]), raw: c[8], unstranded: c[6] !== '+' && c[6] !== '-', phase: /^[012]$/.test(c[7]) ? +c[7] : undefined };
     const gid = attrs.get('gene_id') ?? attrs.get('gene_name') ?? '';
     const tid = attrs.get('transcript_id');
     if (c[2] === 'gene') { if (gid && !geneAttrs.has(gid + at)) geneAttrs.set(gid + at, { attrs, f }); continue; }
@@ -293,8 +421,8 @@ async function parseBed(lines: Lines, info: AnnotationFileInfo): Promise<AGene[]
 // ======================== sources: a file in memory, or read through its index ========================
 
 /** the genes of some lines, their strings copied out of the text read (`own`) so that it can go */
-async function parse(format: AnnotationFormat, lines: Lines, info: AnnotationFileInfo): Promise<AGene[]> {
-  const genes = await (format === 'gtf' ? parseGtf(lines, info) : format === 'bed' ? parseBed(lines, info) : parseGff3(lines, info));
+async function parse(format: AnnotationFormat, lines: Lines, info: AnnotationFileInfo, sequences?: Map<string, string>): Promise<AGene[]> {
+  const genes = await (format === 'gtf' ? parseGtf(lines, info) : format === 'bed' ? parseBed(lines, info) : parseGff3(lines, info, sequences));
   const chroms = new Map<string, string>();
   const chrom = (c: string) => { let o = chroms.get(c); if (o == null) chroms.set(c, o = own(c)); return o; };
   for (const g of genes) {
@@ -302,12 +430,13 @@ async function parse(format: AnnotationFormat, lines: Lines, info: AnnotationFil
     if (g.type) g.type = own(g.type);
     if (g.color) g.color = own(g.color);
     if (g.attrs) g.attrs = own(g.attrs);
+    if (g.aliases) g.aliases = g.aliases.map(own);
     for (const t of g.txs) { t.id = own(t.id); t.name = own(t.name); t.chrom = chrom(t.chrom); t.biotype = own(t.biotype); }
   }
   return genes;
 }
 /** the names a gene is found by: its name, ID, its transcripts' IDs and names (upper case) */
-const keysOf = (g: AGene) => new Set([g.name, g.id, ...g.txs.flatMap(t => [t.id, t.name])].map(k => k.toUpperCase()));
+const keysOf = (g: AGene) => new Set([g.name, g.id, ...(g.aliases ?? []), ...g.txs.flatMap(t => [t.id, t.name])].map(k => k.toUpperCase()));
 
 /** Intervals sorted by start with the running maximum of their ends: what overlaps a window, by bisection. */
 class Intervals<T extends { start: number; end: number }> {
@@ -340,16 +469,20 @@ interface GeneSource {
   overlapping(chrom: string, start: number, end: number): Promise<AGene[]>;
   /** [name searched (upper case), gene name shown] of every gene, for the suggestions; none while not read */
   nameEntries(): Iterable<[string, string]>;
+  /** the bases of a GFF3's ##FASTA section, by sequence name */
+  readonly sequences?: Map<string, string>;
 }
 
 /** A file read whole: every gene in memory. */
 class FileIndex implements GeneSource {
   private chroms: Map<string, Intervals<AGene>>;
   private names = new Map<string, AGene[]>();
-  constructor(readonly info: AnnotationFileInfo, genes: AGene[]) {
-    for (const g of genes) for (const k of keysOf(g)) { const l = this.names.get(k); if (l) l.push(g); else this.names.set(k, [g]); }
+  constructor(readonly info: AnnotationFileInfo, genes: AGene[], readonly sequences?: Map<string, string>) {
+    if (sequences?.size) info.embedded = [...sequences].map(([name, seq]) => ({ name, length: seq.length }));
+    for (const g of genes) if (!g.trackOnly) for (const k of keysOf(g)) { const l = this.names.get(k); if (l) l.push(g); else this.names.set(k, [g]); }
     this.chroms = byChrom(genes);
-    info.genes = genes.length; info.transcripts = genes.reduce((n, g) => n + g.txs.length, 0); info.contigs = [...this.chroms.keys()];
+    const found = genes.filter(g => !g.trackOnly);
+    info.genes = found.length; info.transcripts = found.reduce((n, g) => n + g.txs.length, 0); info.contigs = [...this.chroms.keys()];
   }
   async byName(q: string) { return this.names.get(q) ?? []; }
   async overlapping(chrom: string, start: number, end: number) { return this.chroms.get(chrom)?.overlapping(start, end) ?? []; }
@@ -371,9 +504,29 @@ class TabixSource implements GeneSource {
     const fh = new BlobFile(index);
     this.tbx = new TabixIndexedFile({ filehandle: new BlobFile(file), ...(/\.csi$/i.test(index.name) ? { csiFilehandle: fh } : { tbiFilehandle: fh }) });
   }
+  /** the index's sequence names as the file writes them (GFF3 escapes some characters), by their decoded name */
+  private raw = new Map<string, string>();
   async open(): Promise<void> {
     const meta = await this.tbx.getMetadata();
-    this.info.contigs = [...meta.refIdToName];
+    const dec = (n: string) => (this.info.format === 'gff3' ? (() => { try { return decodeURIComponent(n); } catch { return n; } })() : n);
+    for (const n of meta.refIdToName) this.raw.set(dec(n), n);
+    this.info.contigs = [...this.raw.keys()];
+    // the other names of each sequence (a GFF3's region row, at its start: Name=1, chromosome=1), read from the index
+    if (this.info.format === 'gff3' && this.raw.size <= 2000) {
+      const aliases: Record<string, string[]> = {};
+      await Promise.all([...this.raw].map(async ([name, raw]) => {
+        const rows: string[] = [];
+        await this.tbx.getLines(raw, 0, 1, { lineCallback: l => { rows.push(l); } }).catch(() => undefined);
+        for (const r of rows) {
+          const c = r.split('\t');
+          if (!/^(region|chromosome|contig|supercontig|scaffold|source)$/i.test(c[2] ?? '')) continue;
+          const a = new Map((c[8] ?? '').split(';').map(kv => { const i = kv.indexOf('='); return [kv.slice(0, i).trim(), dec(kv.slice(i + 1).trim())] as [string, string]; }));
+          const al = [a.get('Name'), a.get('chromosome'), ...(a.get('Alias')?.split(',') ?? [])].filter((x): x is string => !!x && x !== name);
+          if (al.length) aliases[name] = [...new Set(al)];
+        }
+      }));
+      if (Object.keys(aliases).length) this.info.aliases = aliases;
+    }
   }
   /** builds the name index; `onChange` is told as it goes */
   async readNames(file: File, scan: NameScanner, onChange: () => void): Promise<void> {
@@ -394,7 +547,7 @@ class TabixSource implements GeneSource {
   }
   private async lines(chrom: string, start: number, end: number): Promise<string[]> {
     const out: string[] = [];
-    await this.tbx.getLines(chrom, Math.max(0, start), end, { lineCallback: l => { out.push(l); } });
+    await this.tbx.getLines(this.raw.get(chrom) ?? chrom, Math.max(0, start), end, { lineCallback: l => { out.push(l); } });
     return out;
   }
   /** the span a gene's rows cover: those of the rows read (gene and transcript rows give it whole) and the name index's */
@@ -443,7 +596,8 @@ class TabixSource implements GeneSource {
       const genes = await this.overlapping(l.chrom, l.start, l.end);
       // the gene the name stands for: known by it, else the one named as the index says, else the one covering most of it
       const ov = (g: AGene) => Math.min(g.end, l.end) - Math.max(g.start, l.start);
-      const g = genes.find(x => keysOf(x).has(q)) ?? genes.find(x => x.name === l.name) ?? [...genes].sort((a, b) => ov(b) - ov(a))[0];
+      const real = genes.filter(x => !x.trackOnly);
+      const g = real.find(x => keysOf(x).has(q)) ?? real.find(x => x.name === l.name) ?? [...real].sort((a, b) => ov(b) - ov(a))[0];
       if (g && !out.includes(g)) out.push(g);
     }
     return out;
@@ -486,7 +640,7 @@ export class Annotation {
     for (const f of this.files) {
       f.info.unmatched = [];
       for (const c of f.info.contigs) {
-        const r = names?.length ? resolveContig(names, c) : spell ? spell(c) : c;
+        const r = names?.length ? resolveContig(names, c) ?? (f.info.aliases?.[c] ?? []).map(a => resolveContig(names, a)).find(Boolean) ?? null : spell ? spell(c) : c;
         if (r) this.toRef.set(c, r); else f.info.unmatched.push(c);
       }
     }
@@ -504,7 +658,7 @@ export class Annotation {
       let list = await f.byName(q);
       // where the gene is known (a view reopened, a neighbour clicked): its window, whose genes are read whatever the
       // name index (an indexed file's may still be being read)
-      if (!list.length && hint) list = (await Promise.all(this.fileChroms(f, hint.chrom).map(c => f.overlapping(c, hint.start - 1, hint.end)))).flat().filter(g => keysOf(g).has(q));
+      if (!list.length && hint) list = (await Promise.all(this.fileChroms(f, hint.chrom).map(c => f.overlapping(c, hint.start - 1, hint.end)))).flat().filter(g => !g.trackOnly && keysOf(g).has(q));
       if (!list.length) continue;
       let gene = list[0];
       if (hint && list.length > 1) {
@@ -530,7 +684,7 @@ export class Annotation {
       source: 'file', source_label: file.info.file, chrom: this.refChrom(t.chrom), strand: t.strand,
       start: t.exons[0][0] + 1, end: t.exons[n - 1][1],
       exons: t.exons.map(([a, b], i) => ({ start: a + 1, end: b, rank: t.strand > 0 ? i + 1 : n - i })),
-      cds_start: t.cdsStart != null ? t.cdsStart + 1 : null, cds_end: t.cdsEnd,
+      cds_start: t.cdsStart != null ? t.cdsStart + 1 : null, cds_end: t.cdsEnd, ...(t.translTable ? { transl_table: t.translTable } : {}),
     };
   }
 
@@ -546,9 +700,9 @@ export class Annotation {
     return { gene_name: g.name, chrom: this.refChrom(g.chrom), strand: g.strand, source: 'file', source_label: file.info.file, transcripts: models };
   }
 
-  /** every file's genes overlapping [start, end) 0-based of a viewer chromosome, file by file */
-  private async genesIn(chrom: string, start: number, end: number): Promise<AGene[][]> {
-    return Promise.all(this.files.map(async f => (await Promise.all(this.fileChroms(f, chrom).map(c => f.overlapping(c, start, end)))).flat()));
+  /** every file's genes overlapping [start, end) 0-based of a viewer chromosome, file by file (`all`: the track's entities too) */
+  private async genesIn(chrom: string, start: number, end: number, all = false): Promise<AGene[][]> {
+    return Promise.all(this.files.map(async f => (await Promise.all(this.fileChroms(f, chrom).map(c => f.overlapping(c, start, end)))).flat().filter(g => all || !g.trackOnly)));
   }
 
   /** genes overlapping [start, end] 1-based inclusive, with their shown model and the other exons merged */
@@ -588,11 +742,21 @@ export class Annotation {
     return out;
   }
 
+  /** the sequences carried by the files (##FASTA sections), by name, when any: a reference when no FASTA is given */
+  get embeddedSequences(): Map<string, string> | null {
+    if (this.seqs === undefined) {
+      const m = new Map<string, string>();
+      for (const f of this.files) for (const [k, v] of f.sequences ?? []) if (!m.has(k)) m.set(k, v);
+      this.seqs = m.size ? m : null;
+    }
+    return this.seqs;
+  }
+  private seqs: Map<string, string> | null | undefined;
   /** the file names, in order: one track each */
   get trackFiles(): string[] { return this.files.map(f => f.info.file); }
   /** every entity of each file overlapping [start, end) 0-based of a viewer chromosome, file by file (no name merged) */
   async trackItems(chrom: string, start: number, end: number): Promise<TrackData[]> {
-    const per = await this.genesIn(chrom, start, end);
+    const per = await this.genesIn(chrom, start, end, true);
     return this.files.map((f, fi) => ({
       file: f.info.file, format: f.info.format,
       items: per[fi].map((g): TrackItem => {
@@ -600,7 +764,7 @@ export class Annotation {
         return {
           key: g.key, name: g.name, type: g.type ?? (f.info.format === 'bed' ? 'bed' : 'gene'), strand: g.unstranded ? 0 : g.strand,
           start: g.start, end: g.end, color: g.color, score: g.score, attrs: g.attrs, shown: Math.max(0, g.txs.indexOf(picked)),
-          txs: g.txs.map(t => ({ id: t.id, name: t.name, biotype: t.biotype, exons: t.exons.map(e => [e[0], e[1]] as [number, number]), cdsStart: t.cdsStart, cdsEnd: t.cdsEnd })),
+          txs: g.txs.map(t => ({ id: t.id, name: t.name, biotype: t.biotype, strand: t.strand, exons: t.exons.map(e => [e[0], e[1]] as [number, number]), cdsStart: t.cdsStart, cdsEnd: t.cdsEnd })),
         };
       }).sort((a, b) => a.start - b.start),
     }));
@@ -640,7 +804,8 @@ async function loadOne(a: AnnotationInput, scan: NameScanner, onChange: () => vo
     void src.readNames(file, scan, onChange);
     return src;
   }
-  return new FileIndex(info, await parse(format, readLines(file, gz), info));
+  const sequences = new Map<string, string>();
+  return new FileIndex(info, await parse(format, readLines(file, gz), info, format === 'gff3' ? sequences : undefined), sequences);
 }
 
 /**

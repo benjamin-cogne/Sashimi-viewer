@@ -24,6 +24,7 @@ import { fileKind, type ProviderHost, type SampleKind, type SampleProvider } fro
 import type { GenomeBuild, Assembly } from './ensembl';
 import { humanBuild } from './ensembl';
 import type { Annotation, TrackData } from './annotation';
+import { resolveContig } from '../components/sashimi/geometry';
 import { assemblyOfHeader, chromLength, type AssemblyCall } from './assembly';
 import { getAllTranscripts, getProteinDomains, getReference, getRegionGenes, getTranscript, getRegionTranscripts, getDosageScores, getCytobands, getDgvGold, getClinvar } from './ucsc';
 import { parseDgvItem, type PopulationSv } from '../components/sashimi/svPopulation';
@@ -293,10 +294,9 @@ const yieldToUi = (): Promise<void> => {
 };
 
 /** The name a file gives `chrom` among its `names`: as asked, or with the "chr" prefix added or dropped; null when absent. */
+/** A sequence name matched to a file's (FASTA, BAM, CRAM): exact, `chr` added or dropped, M / MT, then ignoring case (resolveContig). */
 export function resolveName(names: string[], chrom: string): string | null {
-  if (names.includes(chrom)) return chrom;
-  const alt = chrom.startsWith('chr') ? chrom.slice(3) : `chr${chrom}`;
-  return names.includes(alt) ? alt : null;
+  return resolveContig(names, chrom);
 }
 
 function tagNumber(v: unknown): number | null {
@@ -395,6 +395,7 @@ export class LocalDataSource implements SashimiDataSource {
         for (const line of (await this.reference.fasta.fai.text()).split('\n')) { const c = line.split('\t'); if (c.length >= 2) add(c[0], +c[1]); }
       } catch { /* unreadable index: the samples' headers */ }
     }
+    if (!out.length) for (const [name, seq] of this.annotation?.embeddedSequences ?? []) add(name, seq.length);
     if (!out.length) for (const s of this.samples.values()) {
       if (s.embedded || this.providers.has(s.id)) continue;
       try {
@@ -412,8 +413,9 @@ export class LocalDataSource implements SashimiDataSource {
   private syncAnnotationNames(): void {
     if (!this.annotation) return;
     const human = this.reference.build !== 'custom';
-    // a human build shows chr-prefixed names whatever the files say; a custom genome the reference's own spelling
-    this.annotation.setReferenceNames(human ? null : this.contigNames(), human ? (c => (/^chr/i.test(c) ? c : `chr${c}`)) : undefined);
+    // a human build shows its chromosomes chr-prefixed whatever the files say (other sequences as written); a custom
+    // genome the reference's own spelling
+    this.annotation.setReferenceNames(human ? null : this.contigNames(), human ? (c => (/^(chr)?([1-9]|1\d|2[0-2]|X|Y|M|MT)$/i.test(c) && !/^chr/i.test(c) ? `chr${c}` : c)) : undefined);
   }
   annotationTrackFiles(): string[] { return this.annotation?.trackFiles ?? []; }
   async getAnnotationTracks(chrom: string, start: number, end: number): Promise<TrackData[]> { return this.annotation ? this.annotation.trackItems(chrom, start, end) : []; }
@@ -508,6 +510,12 @@ export class LocalDataSource implements SashimiDataSource {
           if (s != null) { this.lastReferenceSource = 'fasta'; return s.toUpperCase(); }
         }
       } catch (e) { console.warn('FASTA read failed, falling back to the UCSC / Ensembl APIs:', e); }
+    }
+    // the bases a GFF3 carries after ##FASTA, when no FASTA is given (a plasmid, a bacterium, a virus)
+    const own = !this.reference.fasta ? this.annotation?.embeddedSequences : null;
+    if (own) {
+      const name = resolveContig([...own.keys()], chrom);
+      if (name) { this.lastReferenceSource = 'fasta'; return own.get(name)!.slice(Math.max(0, start), end); }
     }
     const build = humanBuild(this.reference.build);
     if (!build) { this.lastReferenceSource = null; return null; }

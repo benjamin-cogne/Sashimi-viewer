@@ -196,7 +196,7 @@ export async function scanNames(file: Blob, gz: boolean, format: AnnotationForma
         const a = gffAttrMap(line.slice(t[7] + 1));
         const id = a.get('ID') ?? null, chrom = decode(line.slice(0, t[0]));
         const name = a.get('Name') ?? a.get('gene_name') ?? a.get('gene') ?? a.get('locus_tag') ?? id ?? `${chrom}:${s + 1}-${e}`;
-        const f: F = { id, parent: a.get('Parent')?.split(',')[0] ?? null, name, chrom, start: s, end: e, names: [name, id ?? '', a.get('transcript_id') ?? '', a.get('gene_id') ?? ''].filter(Boolean) };
+        const f: F = { id, parent: a.get('Parent')?.split(',')[0] ?? null, name, chrom, start: s, end: e, names: [name, id ?? '', ...['transcript_id', 'gene_id', 'locus_tag', 'gene', 'Alias', 'gene_synonym', 'old_locus_tag'].flatMap(k => (a.get(k) ?? '').split(','))].map(x => x.trim()).filter(Boolean) };
         all.push(f);
         if (id && !byId.has(id)) byId.set(id, f);
       }

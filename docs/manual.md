@@ -511,8 +511,10 @@ Lift-over uses Ensembl's assembly map; only the window's coordinates are sent. G
 ### Custom genome and your own gene models
 
 **Custom** (third choice of the switch) is for any other genome: another organism, another assembly, a construct.
-It is set by itself when the FASTA's sequences (or, without a FASTA, the BAM headers') match no human build and none
-of them is named like a human chromosome; a file whose header names a human build added later sets that build back.
+It is set by itself when the FASTA's sequences (or, without a FASTA, the BAM headers', or the ##FASTA section of a
+GFF3) match no human build, unless they look like a stretch cut from one (every name a human chromosome's, none a whole
+chromosome over 10 Mb: a `chr1` of 40 kb stays GRCh38, a mouse's `chr1` of 195 Mb or a fly's `chr2L` set Custom); a file
+whose header names a human build added later sets that build back.
 - The **FASTA** (`.fa` + `.fai`, bgzipped with `.gzi`) gives the bases (mismatches, CRAM decoding, splice motifs) and
   the sequence names. Coordinates are typed on them as written there: `NC_045512.2:100-2,000`, `contig_1:5,000`, or a
   sequence name alone for its first megabase.
@@ -526,6 +528,22 @@ of them is named like a human chromosome; a file whose header names a human buil
   it), amber when some of its sequence names are not in the reference (exact, then `chr` added or dropped, `M`/`MT`,
   then case). BED files found inside a run folder are not read as genes (they are mostly capture targets): add them on
   their own.
+- **How the models meet the FASTA.** Validated base by base against an independent reading (pysam) of the UCSC
+  annotations of SARS-CoV-2, *Saccharomyces cerevisiae* (sacCer3, 6,600 coding transcripts) and *Drosophila*
+  (dm6, 30,717), as GTF and as GFF3: every CDS identical.
+  - Sequence names are matched exactly, then with `chr` added or dropped, `M`/`MT`, ignoring case, then through the
+    names a GFF3's `region` rows give (`ID=NC_000001.11;Name=1;chromosome=1`), so a NCBI GFF3 meets an Ensembl or UCSC
+    FASTA. GFF3 escapes (`seq%7C1`) are read.
+  - A CDS starting with a phase of 1 or 2 (incomplete at its 5′ end) is read from its first whole codon.
+  - `transl_table=` (GFF3 or GTF) sets the genetic code of the amino acids, NMD and frames (NCBI tables 1–33:
+    mitochondria, Mycoplasma, ciliates…); the standard code otherwise.
+  - Two blocks overlapping in part are kept apart: a programmed ribosomal frameshift (SARS-CoV-2 ORF1ab reads one base
+    twice).
+  - Exons and CDS written without a `Parent` (some tools do) go to the gene holding them, the lines sharing an ID
+    together; where genes overlap on one strand it is a best guess, which the file's chip says. A gene whose children
+    are not transcripts (a TF binding site) is a one-block model; those children show in its track.
+  - A GFF3 carrying its sequence after `##FASTA` (Prokka, Bakta, NCBI) is its own reference when no FASTA is given;
+    genes are also found by `locus_tag`, `gene`, `Alias`, `gene_synonym`.
 - **Large files** (a whole-genome GTF or GFF3: GENCODE, Ensembl, RefSeq, hundreds of MB of text) are best given
   bgzipped with their **tabix index**, the two together:
   ```

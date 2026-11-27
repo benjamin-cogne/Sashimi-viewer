@@ -27,6 +27,8 @@ export interface TxModel {
   modelKind: 'mane' | 'canonical' | 'longest' | 'chosen';
   /** the annotation file the model comes from, when it is the user's (not RefSeq / Ensembl) */
   sourceFile?: string;
+  /** the genetic code of its CDS (NCBI transl_table) when not the standard one */
+  translTable?: number;
   biotype?: string;
   chrom: string;
   strand: 1 | -1;
@@ -51,6 +53,7 @@ export function toTxModel(t: TranscriptData): TxModel {
     isMane: !!t.is_mane_select,
     modelKind: t.model_kind ?? (t.is_mane_select ? 'mane' : 'canonical'),
     sourceFile: t.source === 'file' ? t.source_label ?? 'annotation file' : undefined,
+    translTable: t.transl_table && t.transl_table !== 1 ? t.transl_table : undefined,
     biotype: t.biotype,
     chrom: t.chrom,
     strand: t.strand < 0 ? -1 : 1,
@@ -1316,17 +1319,58 @@ function pseudoExonFrame(pe: { start: number; end: number; upExon: Exon0; downEx
 
 // ======================== Translation of the MANE CDS ========================
 
-const CODON_TABLE: Record<string, string> = (() => {
-  const bases = 'TCAG', aas = 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG';
-  const t: Record<string, string> = {};
-  let i = 0;
-  for (const a of bases) for (const b of bases) for (const c of bases) t[a + b + c] = aas[i++];
+/**
+ * The NCBI genetic codes (transl_table), amino acids of the 64 codons in TCAG order, as NCBI and Biopython 1.84
+ * (Bio/Data/CodonTable.py) give them; codons that are a stop or an amino acid by context (27, 28, 31) read as the stop.
+ */
+const GENETIC_CODES: Record<number, string> = {
+  1: 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  2: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSS**VVVVAAAADDEEGGGG',
+  3: 'FFLLSSSSYY**CCWWTTTTPPPPHHQQRRRRIIMMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  4: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  5: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSSSVVVVAAAADDEEGGGG',
+  6: 'FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  9: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG',
+  10: 'FFLLSSSSYY**CCCWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  11: 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  12: 'FFLLSSSSYY**CC*WLLLSPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  13: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNKKSSGGVVVVAAAADDEEGGGG',
+  14: 'FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNNKSSSSVVVVAAAADDEEGGGG',
+  15: 'FFLLSSSSYY*QCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  16: 'FFLLSSSSYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  21: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIMMTTTTNNNKSSSSVVVVAAAADDEEGGGG',
+  22: 'FFLLSS*SYY*LCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  23: 'FF*LSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  24: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG',
+  25: 'FFLLSSSSYY**CCGWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  26: 'FFLLSSSSYY**CC*WLLLAPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  27: 'FFLLSSSSYYQQCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  28: 'FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  29: 'FFLLSSSSYYYYCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  30: 'FFLLSSSSYYEECC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  31: 'FFLLSSSSYY**CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  32: 'FFLLSSSSYY*WCC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG',
+  33: 'FFLLSSSSYYY*CCWWLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSSKVVVVAAAADDEEGGGG',
+};
+const codonTables = new Map<number, Record<string, string>>();
+function codonTable(id: number): Record<string, string> {
+  let t = codonTables.get(id);
+  if (!t) {
+    const aas = GENETIC_CODES[id] ?? GENETIC_CODES[1], bases = 'TCAG';
+    t = {};
+    let i = 0;
+    for (const a of bases) for (const b of bases) for (const c of bases) t[a + b + c] = aas[i++];
+    codonTables.set(id, t);
+  }
   return t;
-})();
+}
+/** whether a transl_table id is one of the codes above */
+export const isGeneticCode = (id: number | null | undefined): id is number => id != null && id in GENETIC_CODES;
 const COMPLEMENT: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 
-export function translateCodon(codon: string): string {
-  return CODON_TABLE[codon.toUpperCase()] ?? 'X';
+/** the amino acid of a codon under a genetic code (NCBI transl_table, 1 the standard one) */
+export function translateCodon(codon: string, table = 1): string {
+  return codonTable(table)[codon.toUpperCase()] ?? 'X';
 }
 
 export interface CodonBox {
@@ -1390,7 +1434,7 @@ export function codonsInWindow(tx: TxModel, ref: string, refStart: number, from:
       const last = segments[segments.length - 1];
       if (last && last[1] === g) last[1] = g + 1; else segments.push([g, g + 1]);
     }
-    out.push({ index: c + 1, aa: translateCodon(bs.join('')), segments });
+    out.push({ index: c + 1, aa: translateCodon(bs.join(''), tx.translTable), segments });
   }
   return out;
 }

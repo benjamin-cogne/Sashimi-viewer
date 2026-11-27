@@ -135,7 +135,7 @@ export async function transcriptBases(m: TxModel, from: number, to: number, getR
 
 const COMP: Record<string, string> = { A: 'T', C: 'G', G: 'C', T: 'A', N: 'N' };
 const revcomp = (s: string) => { let r = ''; for (let i = s.length - 1; i >= 0; i--) r += COMP[s[i]] ?? 'N'; return r; };
-const translate = (s: string) => { let p = ''; for (let i = 0; i + 3 <= s.length; i += 3) p += translateCodon(s.slice(i, i + 3)); return p; };
+const translate = (s: string, table?: number) => { let p = ''; for (let i = 0; i + 3 <= s.length; i += 3) p += translateCodon(s.slice(i, i + 3), table); return p; };
 
 export interface FusionPeptide {
   /** the 5′ partner's last codons before the junction */
@@ -167,9 +167,9 @@ export async function fusionPeptide(five: FusionEnd, three: FusionEnd, frame: Fu
   if (B.cdsEnd != null) afterBases = Math.max(afterBases, Math.min(150000, B.cdsEnd - tb + 4));
   const bSeq = await transcriptBases(three.model, tb, tb + afterBases - 1, getRef);
   if (aSeq == null || bSeq == null) return null;
-  const before = translate(aSeq.slice(0, 3 * keep));
+  const before = translate(aSeq.slice(0, 3 * keep), five.model.translTable);
   // from the 5′ partner's last whole codon on: the junction codon (when split), then the 3′ partner in that frame
-  const fused = translate(aSeq.slice(3 * keep) + bSeq);
+  const fused = translate(aSeq.slice(3 * keep) + bSeq, five.model.translTable);
   const junction = rest ? fused[0] ?? null : null;
   const stop = fused.indexOf('*');
   const stopAfter = stop >= 0 ? stop + 1 : null;

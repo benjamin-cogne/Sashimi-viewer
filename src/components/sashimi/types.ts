@@ -8,7 +8,10 @@ export interface TranscriptData {
   /** how the displayed model was chosen: MANE Select, RefSeq Select / Ensembl canonical, or the longest CDS / transcript */
   model_kind?: 'mane' | 'canonical' | 'longest' | 'chosen'; biotype?: string; source?: 'refseq' | 'ensembl' | 'file';
   /** the annotation file the model comes from (source 'file') */
-  source_label?: string; chrom: string; strand: number;
+  source_label?: string;
+  /** the genetic code of the CDS (NCBI transl_table), when the annotation file gives one other than the standard */
+  transl_table?: number;
+  chrom: string; strand: number;
   start: number; end: number; exons: { start: number; end: number; rank: number }[];
   /** Genomic CDS bounds (1-based inclusive); null/undefined for non-coding transcripts. */
   cds_start?: number | null; cds_end?: number | null;
